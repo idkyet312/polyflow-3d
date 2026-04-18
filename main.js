@@ -3,6 +3,7 @@ import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -18,6 +19,117 @@ let optimizedTriCount = 0;
 let scanPlane;
 let originalFileSize = 0;
 let optimizedBlobUrl = null;
+
+// Module-level refs so switchEnvironment can update them
+let pedestalMat, ambientLight, hemiLight;
+
+// HDRI texture cache keyed by full URL (1k/2k/4k cached separately)
+const hdriCache = {};
+
+// Track current state for resolution switching
+let currentEnvironment = 'sunny-sky';
+let currentResolution = '1k';
+
+// Environment presets — slugs map to Poly Haven CDN
+const ENVIRONMENTS = {
+    'sunny-sky': {
+        label: '\u2600\ufe0f Sunny Sky',
+        slug: 'kloofendal_48d_partly_cloudy_puresky',
+        blurriness: 0.05,
+        pedestal: { color: 0x111111, roughness: 0.05, metalness: 0.95 },
+        ambient: { color: 0xffffff, intensity: 1.0 },
+        hemi: { sky: 0xffffff, ground: 0x444444, intensity: 1.2 },
+    },
+    'studio': {
+        label: '\ud83c\udfac Studio',
+        slug: 'studio_small_03',
+        blurriness: 0.3,
+        pedestal: { color: 0x1a1a1a, roughness: 0.05, metalness: 0.95 },
+        ambient: { color: 0xffffff, intensity: 1.3 },
+        hemi: { sky: 0xffffff, ground: 0x888888, intensity: 0.8 },
+    },
+    'urban-street': {
+        label: '\ud83c\udfd9\ufe0f Urban Street',
+        slug: 'potsdamer_platz',
+        blurriness: 0.0,
+        pedestal: { color: 0x1c1c1c, roughness: 0.05, metalness: 0.95 },
+        ambient: { color: 0x8899bb, intensity: 0.7 },
+        hemi: { sky: 0x9aaad0, ground: 0x222233, intensity: 1.0 },
+    },
+    'forest-trail': {
+        label: '\ud83c\udf32 Forest Trail',
+        slug: 'forest_slope',
+        blurriness: 0.08,
+        pedestal: { color: 0x2b3d1f, roughness: 0.05, metalness: 0.95 },
+        ambient: { color: 0x88aa66, intensity: 0.9 },
+        hemi: { sky: 0x99cc77, ground: 0x334422, intensity: 1.2 },
+    },
+    'golden-sunset': {
+        label: '\ud83c\udf05 Golden Sunset',
+        slug: 'golden_bay',
+        blurriness: 0.04,
+        pedestal: { color: 0x2a1f0f, roughness: 0.05, metalness: 0.95 },
+        ambient: { color: 0xffbb55, intensity: 1.0 },
+        hemi: { sky: 0xffaa33, ground: 0x441100, intensity: 1.0 },
+    },
+};
+
+// Build the Poly Haven CDN URL for a given slug + resolution
+function getHdriUrl(slug, res) {
+    return `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/${res}/${slug}_${res}.hdr`;
+}
+
+function loadHdriIntoScene(url, blurriness) {
+    if (hdriCache[url]) {
+        scene.environment = hdriCache[url];
+        scene.background = hdriCache[url];
+        //scene.backgroundBlurriness = blurriness;
+        return;
+    }
+    const loader = new RGBELoader();
+    loader.load(url, (texture) => {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        hdriCache[url] = texture;
+        scene.environment = texture;
+        scene.background = texture;
+        //scene.backgroundBlurriness = blurriness;
+    }, undefined, (err) => {
+        console.warn('Failed to load HDRI:', url, err);
+    });
+}
+
+function switchEnvironment(key) {
+    const env = ENVIRONMENTS[key];
+    if (!env) return;
+    currentEnvironment = key;
+
+    // Update pedestal material
+    if (pedestalMat) {
+        //pedestalMat.color.setHex(env.pedestal.color);
+        pedestalMat.roughness = env.pedestal.roughness;
+        pedestalMat.metalness = env.pedestal.metalness;
+        pedestalMat.needsUpdate = true;
+    }
+    // Update lights
+    if (ambientLight) {
+        ambientLight.color.setHex(env.ambient.color);
+        ambientLight.intensity = env.ambient.intensity;
+    }
+    if (hemiLight) {
+        hemiLight.color.setHex(env.hemi.sky);
+        hemiLight.groundColor.setHex(env.hemi.ground);
+        hemiLight.intensity = env.hemi.intensity;
+    }
+    loadHdriIntoScene(getHdriUrl(env.slug, currentResolution), env.blurriness);
+}
+
+function setResolution(res) {
+    currentResolution = res;
+    document.querySelectorAll('.res-btn').forEach(btn => {
+        btn.classList.toggle('res-btn-active', btn.dataset.res === res);
+    });
+    switchEnvironment(currentEnvironment);
+}
 
 const container = document.getElementById('canvas-container');
 const dropZone = document.getElementById('drop-zone');
@@ -35,7 +147,7 @@ async function init() {
         loadSample();
     });
     setupDropHandlers();
-    
+
     // Slider listener
     const slider = document.getElementById('ratio-slider');
     const ratioValue = document.getElementById('ratio-value');
@@ -48,7 +160,7 @@ async function init() {
 
     await MeshoptSimplifier.ready;
     console.log("MeshoptSimplifier ready");
-    
+
     scene = new THREE.Scene();
 
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -58,37 +170,24 @@ async function init() {
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.2;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
 
-    // Load HDR Environment Map
-    const rgbeLoader = new RGBELoader();
-    rgbeLoader.load(import.meta.env.BASE_URL + 'kloofendal_48d_partly_cloudy_puresky_4k.hdr', (texture) => {
-        texture.mapping = THREE.EquirectangularReflectionMapping;
-        scene.environment = texture;
-        scene.background = texture;
-        scene.backgroundRotation.y = Math.PI; // Rotate the seam behind the initial camera view
-        scene.environmentRotation.y = Math.PI;
-        scene.backgroundBlurriness = 0.05; // Adds a DSLR depth of field effect to the sky
-    });
+    // Load initial HDR Environment
+    switchEnvironment('sunny-sky');
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.maxPolarAngle = Math.PI / 2 - 0.05; // Don't allow camera below floor
+    controls.maxPolarAngle = Math.PI / 2 - 0.05;
     controls.minDistance = 1;
     controls.maxDistance = 10;
-    controls.target.set(0, 1, 0); // Look at center of object
+    controls.target.set(0, 1, 0);
 
     // Pedestal
-    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.6, 0.2, 64);
-    const pedestalMat = new THREE.MeshPhysicalMaterial({ 
-        color: 0x111111, 
-        roughness: 0.3, 
-        metalness: 0.8,
-        clearcoat: 1.0,
-        clearcoatRoughness: 0.1
+    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 128);
+    pedestalMat = new THREE.MeshStandardMaterial({
+        color: 0xEEEEEE,
+        roughness: 0.15,
+        metalness: 0.85
     });
     const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
     pedestal.position.y = -0.1;
@@ -97,17 +196,20 @@ async function init() {
 
     // Subtle rim
     const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
-    const rimMat = new THREE.MeshStandardMaterial({ color: 0x7000ff, emissive: 0x300080 });
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0xEEEEEE, emissive: 0xEEEEEE });
     const rim = new THREE.Mesh(rimGeo, rimMat);
     rim.rotation.x = Math.PI / 2;
     rim.position.y = 0;
-    scene.add(rim);
+    //scene.add(rim);
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    ambientLight = new THREE.AmbientLight(0xffffff, 1.0);
     scene.add(ambientLight);
 
-    const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
-    mainLight.position.set(5, 8, 3);
+    hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
+    scene.add(hemiLight);
+
+    const mainLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    mainLight.position.set(5, 10, 5);
     mainLight.castShadow = true;
     mainLight.shadow.mapSize.width = 2048;
     mainLight.shadow.mapSize.height = 2048;
@@ -138,6 +240,18 @@ async function init() {
     scene.add(rimLightRight);
 
     window.addEventListener('resize', onWindowResize);
+
+    // Environment selector
+    const envSelector = document.getElementById('env-selector');
+    if (envSelector) {
+        envSelector.addEventListener('change', (e) => switchEnvironment(e.target.value));
+    }
+
+    // Resolution buttons
+    document.querySelectorAll('.res-btn').forEach(btn => {
+        btn.addEventListener('click', () => setResolution(btn.dataset.res));
+    });
+
     renderer.setAnimationLoop(() => {
         controls.update();
         renderer.renderAsync(scene, camera);
@@ -149,14 +263,14 @@ function loadSample() {
     if (currentMesh) scene.remove(currentMesh);
 
     // Create a very dense Torus Knot to simulate a "heavy" file
-    const geometry = new THREE.TorusKnotGeometry(1, 0.3, 300, 100); 
-    const material = new THREE.MeshStandardMaterial({ 
+    const geometry = new THREE.TorusKnotGeometry(1, 0.3, 300, 100);
+    const material = new THREE.MeshStandardMaterial({
         color: 0x7000ff,
         metalness: 0.8,
         roughness: 0.2,
         emissive: 0x200040
     });
-    
+
     currentMesh = new THREE.Mesh(geometry, material);
     currentMesh.castShadow = true;
     currentMesh.receiveShadow = true;
@@ -165,11 +279,16 @@ function loadSample() {
     // Sit on table
     currentMesh.geometry.computeBoundingBox();
     const box = currentMesh.geometry.boundingBox;
+    const center = box.getCenter(new THREE.Vector3());
+
+    // For the sample, we'll keep the scale as is but center it
+    currentMesh.position.x = -center.x;
+    currentMesh.position.z = -center.z;
     currentMesh.position.y = -box.min.y;
 
     document.getElementById('asset-name').textContent = 'Heavy_Industrial_Part_RAW.glb';
     document.getElementById('tri-count').textContent = 'Counting...';
-    
+
     // Calculate Triangles correctly
     let totalTris = 0;
     if (geometry.index) {
@@ -177,10 +296,10 @@ function loadSample() {
     } else {
         totalTris = geometry.attributes.position.count / 3;
     }
-    
+
     originalTriCount = Math.round(totalTris);
     console.log("Sample loaded. Triangles:", originalTriCount);
-    
+
     // Animate the count-up safely using a proxy object
     const countObj = { val: 0 };
     gsap.to(countObj, {
@@ -191,7 +310,7 @@ function loadSample() {
             document.getElementById('tri-count').textContent = Math.ceil(countObj.val).toLocaleString();
         }
     });
-    
+
     originalFileSize = 5400000; // ~5.4 MB for the sample
     document.getElementById('file-size').textContent = (originalFileSize / (1024 * 1024)).toFixed(1) + ' MB';
     document.getElementById('file-diff').textContent = '';
@@ -211,6 +330,36 @@ function onWindowResize() {
 }
 
 // --- File Handling ---
+
+// Reads all files from a dropped directory entry recursively, returns filename→{file,url} map
+async function readDirectoryFiles(dirEntry) {
+    const fileMap = {};
+    const readEntries = (entry) => new Promise((resolve) => {
+        if (entry.isFile) {
+            entry.file(file => {
+                const url = URL.createObjectURL(file);
+                // Store by lowercase filename so we can match case-insensitively
+                fileMap[file.name.toLowerCase()] = { file, url };
+                resolve();
+            });
+        } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            const readBatch = () => {
+                reader.readEntries(async (entries) => {
+                    if (entries.length === 0) return resolve();
+                    await Promise.all(entries.map(readEntries));
+                    readBatch(); // keep reading until empty batch
+                });
+            };
+            readBatch();
+        } else {
+            resolve();
+        }
+    });
+    await readEntries(dirEntry);
+    return fileMap;
+}
+
 function setupDropHandlers() {
     dropZone.addEventListener('dragover', (e) => {
         e.preventDefault();
@@ -223,34 +372,56 @@ function setupDropHandlers() {
 
     dropZone.addEventListener('drop', async (e) => {
         e.preventDefault();
+        dropZone.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+
+        const items = [...e.dataTransfer.items];
+        const firstEntry = items[0]?.webkitGetAsEntry?.();
+
+        // --- Folder drop ---
+        if (firstEntry?.isDirectory) {
+            processingStep.textContent = 'Reading folder...';
+            processingOverlay.style.display = 'flex';
+            loaderBar.style.width = '10%';
+
+            const fileMap = await readDirectoryFiles(firstEntry);
+            const modelEntry = Object.values(fileMap).find(({ file }) =>
+                /\.(fbx|glb|gltf|obj)$/i.test(file.name)
+            );
+            processingOverlay.style.display = 'none';
+
+            if (!modelEntry) {
+                alert('No supported 3D file found in folder (.glb, .gltf, .obj, .fbx)');
+                return;
+            }
+            loadModel(modelEntry.file, fileMap);
+            return;
+        }
+
+        // --- Single file drop ---
         const file = e.dataTransfer.files[0];
-        if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf') || file.name.endsWith('.obj') || file.name.endsWith('.fbx'))) {
-            loadModel(file);
+        if (file && /\.(glb|gltf|obj|fbx)$/i.test(file.name)) {
+            loadModel(file, {});
         } else {
-            alert('Please drop a .glb, .gltf, .obj, or .fbx file');
+            alert('Please drop a .glb, .gltf, .obj, or .fbx file — or drag a whole folder to load FBX textures.');
         }
     });
 
     const fileInput = document.getElementById('file-input');
-    dropZone.addEventListener('click', () => {
-        fileInput.click();
-    });
+    dropZone.addEventListener('click', () => { fileInput.click(); });
 
     fileInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
-        if (file) {
-            loadModel(file);
-        }
+        if (file) loadModel(file, {});
     });
 }
 
-async function loadModel(file) {
+async function loadModel(file, fileMap = {}) {
     dropZone.classList.add('hidden');
     const url = URL.createObjectURL(file);
-    
+
     document.getElementById('asset-name').textContent = file.name;
     document.getElementById('tri-count').textContent = 'Counting...';
-    
+
     originalFileSize = file.size;
     document.getElementById('file-size').textContent = (originalFileSize / (1024 * 1024)).toFixed(1) + ' MB';
     document.getElementById('file-diff').textContent = '';
@@ -258,49 +429,85 @@ async function loadModel(file) {
 
     const extension = file.name.split('.').pop().toLowerCase();
 
+    // Build a LoadingManager that resolves texture filenames from the uploaded file map
+    const manager = new THREE.LoadingManager();
+    manager.addHandler(/\.tga$/i, new TGALoader(manager));
+    if (Object.keys(fileMap).length > 0) {
+        manager.setURLModifier(originalUrl => {
+            // Extract just the filename (strip path separators, handle both / and \\)
+            const filename = originalUrl.split(/[\/\\]/).pop().toLowerCase();
+            if (fileMap[filename]) {
+                console.log(`[TextureResolver] Resolved: ${filename}`);
+                return fileMap[filename].url;
+            }
+            return originalUrl;
+        });
+    }
+
     const onLoad = (object) => {
         if (currentMesh) scene.remove(currentMesh);
         currentMesh = object.scene || object; // GLTF uses object.scene, OBJ uses object directly
         scene.add(currentMesh);
 
-        // Enable shadows and preserve real materials
+        // Convert materials to MeshStandardMaterial (required for WebGPU renderer)
         currentMesh.traverse((child) => {
             if (child.isMesh) {
                 child.castShadow = true;
                 child.receiveShadow = true;
-                
-                // Ensure normals exist for lighting, and make them smooth!
-                if (!child.geometry.attributes.normal || !child.geometry.index) {
-                    // Merging vertices converts flat "soup" geometry into indexed geometry, allowing for smooth shading
-                    if (!child.geometry.index) {
-                        try {
-                            child.geometry = BufferGeometryUtils.mergeVertices(child.geometry);
-                        } catch(e) {
-                            console.warn("Could not merge vertices", e);
-                        }
-                    }
-                    child.geometry.computeVertexNormals();
-                }
+                child.geometry.computeVertexNormals();
 
-                if (child.material) {
-                    // Maximize texture crispness at glancing angles
-                    if (child.material.map) {
-                        child.material.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
-                    }
-                    if (child.material.normalMap) {
-                        child.material.normalMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
+                const mats = Array.isArray(child.material) ? child.material : [child.material];
+                child.material = mats.map(mat => {
+                    if (!mat) return mat;
+
+                    // If it's already a StandardMaterial (GLB/GLTF), just patch it
+                    if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
+                        mat.side = THREE.DoubleSide;
+                        mat.envMapIntensity = 1.5;
+                        mat.needsUpdate = true;
+                        return mat;
                     }
 
-                    // Make sure the material can reflect the environment if it's a PBR material
-                    if (child.material.envMapIntensity !== undefined) {
-                        child.material.envMapIntensity = 1.0; 
+                    // Convert FBX/OBJ legacy Phong/Lambert → Standard (WebGPU requires this)
+                    const stdMat = new THREE.MeshStandardMaterial({
+                        name: mat.name,
+                        // Preserve exact color — DO NOT override
+                        color: mat.color ? mat.color.clone() : new THREE.Color(0x888888),
+                        // All texture maps
+                        map: mat.map || null,
+                        normalMap: mat.normalMap || null,
+                        emissive: mat.emissive ? mat.emissive.clone() : new THREE.Color(0x000000),
+                        emissiveMap: mat.emissiveMap || null,
+                        emissiveIntensity: mat.emissiveIntensity || 1.0,
+                        alphaMap: mat.alphaMap || null,
+                        bumpMap: mat.bumpMap || null,
+                        bumpScale: mat.bumpScale || 1.0,
+                        roughnessMap: mat.specularMap || null, // specular ≈ inverse roughness
+                        roughness: 0.6,
+                        metalness: 0.1,
+                        // Transparency
+                        transparent: mat.transparent || false,
+                        opacity: mat.opacity !== undefined ? mat.opacity : 1.0,
+                        // Vertex colors
+                        vertexColors: !!child.geometry.attributes.color,
+                        side: THREE.DoubleSide,
+                        envMapIntensity: 1.5,
+                    });
+
+                    // Fix color space on every texture
+                    [stdMat.map, stdMat.emissiveMap, stdMat.alphaMap, stdMat.roughnessMap].forEach(tex => {
+                        if (tex) { tex.colorSpace = THREE.SRGBColorSpace; tex.needsUpdate = true; }
+                    });
+
+                    // Only brighten if pitch black AND no texture at all (invisible geometry)
+                    if (stdMat.color.getHex() === 0x000000 && !stdMat.map && !child.geometry.attributes.color) {
+                        stdMat.color.setHex(0x888888);
                     }
 
-                    // If it was completely black and lacking texture, brighten it slightly
-                    if (child.material.color && child.material.color.getHex() === 0x000000 && !child.material.map) {
-                        child.material.color.setHex(0xaaaaaa);
-                    }
-                }
+                    return stdMat;
+                });
+                // Unwrap single-material arrays
+                if (child.material.length === 1) child.material = child.material[0];
             }
         });
 
@@ -308,19 +515,15 @@ async function loadModel(file) {
         const box = new THREE.Box3().setFromObject(currentMesh);
         const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
-        
-        // Scale the model so its largest dimension is 4.5 (almost filling the diameter 5 pedestal)
+
+        // Scale the model so its largest dimension is 4.0
         const maxDim = Math.max(size.x, size.y, size.z);
-        const targetScale = 4.5 / maxDim;
+        const targetScale = 4.0 / maxDim;
         currentMesh.scale.setScalar(targetScale);
-        
-        // Position the mesh mathematically taking local scale into account.
-        // World Point = Local Point * Scale + Position
-        // We want World Center X/Z to be 0:  Position X = -Local Center X * Scale
+
+        // Position: Center horizontally and place bottom at Y=0
         currentMesh.position.x = -center.x * targetScale;
         currentMesh.position.z = -center.z * targetScale;
-        
-        // We want World Bottom Y to be 0:  Position Y = -Local Bottom Y * Scale
         currentMesh.position.y = -box.min.y * targetScale;
 
         // Calculate Triangles
@@ -337,7 +540,7 @@ async function loadModel(file) {
         });
         originalTriCount = Math.round(totalTris);
         console.log("Model loaded. Triangles:", originalTriCount);
-        
+
         // Animate the count-up safely using a proxy object
         const countObj = { val: 0 };
         gsap.to(countObj, {
@@ -348,7 +551,7 @@ async function loadModel(file) {
                 document.getElementById('tri-count').textContent = Math.ceil(countObj.val).toLocaleString();
             }
         });
-        
+
         // Enable Process Button
         processTrigger.style.opacity = '1';
         processTrigger.style.cursor = 'pointer';
@@ -356,13 +559,13 @@ async function loadModel(file) {
     };
 
     if (extension === 'glb' || extension === 'gltf') {
-        const loader = new GLTFLoader();
+        const loader = new GLTFLoader(manager);
         loader.load(url, onLoad);
     } else if (extension === 'obj') {
-        const loader = new OBJLoader();
+        const loader = new OBJLoader(manager);
         loader.load(url, onLoad);
     } else if (extension === 'fbx') {
-        const loader = new FBXLoader();
+        const loader = new FBXLoader(manager);
         loader.load(url, onLoad);
     } else {
         alert('Unsupported file format');
@@ -372,7 +575,7 @@ async function loadModel(file) {
 // --- Optimization Pipeline ---
 async function runOptimizationPipeline() {
     processingOverlay.style.display = 'flex';
-    
+
     const steps = [
         { label: 'Initializing WebGPU kernels...', progress: 10 },
         { label: 'Analyzing mesh topology...', progress: 30 },
@@ -400,17 +603,17 @@ async function runOptimizationPipeline() {
         // Actual Simplification
         const ratio = parseFloat(document.getElementById('ratio-slider').value);
         simplifyMesh(ratio);
-        
+
         // Export to get real size
         const exporter = new GLTFExporter();
         const gltfData = await new Promise((resolve, reject) => {
             exporter.parse(currentMesh, resolve, reject, { binary: true });
         });
-        
+
         const blob = new Blob([gltfData], { type: 'application/octet-stream' });
         if (optimizedBlobUrl) URL.revokeObjectURL(optimizedBlobUrl);
         optimizedBlobUrl = URL.createObjectURL(blob);
-        
+
         const optimizedSize = blob.size;
         document.getElementById('file-size').textContent = (optimizedSize / (1024 * 1024)).toFixed(1) + ' MB';
         document.getElementById('file-diff').textContent = `(-${Math.round((1 - (optimizedSize / originalFileSize)) * 100)}%)`;
@@ -427,7 +630,7 @@ async function runOptimizationPipeline() {
 
 function simplifyMesh(ratio = 0.12) {
     if (!currentMesh) return;
-    
+
     stopScanEffect();
 
     let totalReducedTris = 0;
@@ -460,7 +663,7 @@ function simplifyMesh(ratio = 0.12) {
 
             geometry.setIndex(new THREE.BufferAttribute(simplifiedIndices, 1));
             child.geometry = geometry;
-            
+
             totalReducedTris += simplifiedIndices.length / 3;
 
             // Visual feedback: briefly show wireframe
@@ -478,14 +681,14 @@ function simplifyMesh(ratio = 0.12) {
 
 function downloadAsset() {
     if (!optimizedBlobUrl) return;
-    
+
     const a = document.createElement('a');
     a.href = optimizedBlobUrl;
-    
+
     let baseName = document.getElementById('asset-name').textContent;
     baseName = baseName.replace(/\.[^/.]+$/, ""); // Remove extension if exists
     a.download = `optimized_${baseName}.glb`;
-    
+
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -503,10 +706,10 @@ function stopScanEffect() {
 
 function startScanEffect() {
     const geometry = new THREE.PlaneGeometry(5, 5);
-    const material = new THREE.MeshBasicMaterial({ 
-        color: 0x00ffaa, 
-        transparent: true, 
-        opacity: 0.5, 
+    const material = new THREE.MeshBasicMaterial({
+        color: 0x00ffaa,
+        transparent: true,
+        opacity: 0.5,
         side: THREE.DoubleSide,
         blending: THREE.AdditiveBlending
     });

@@ -70,8 +70,9 @@
                 <div id="drop-zone" style="cursor: pointer;">
                     <div class="drop-box">
                         <div class="drop-icon">↑</div>
-                        <h2>Drop or Click to upload your 500MB+ file here</h2>
-                        <p style="color: var(--text-dim); margin-top: 0.5rem; margin-bottom: 2rem;">Supports .glb, .gltf, .obj, .fbx (max 1GB)</p>
+                        <h2>Drop a file or folder here</h2>
+                        <p style="color: var(--text-dim); margin-top: 0.5rem; margin-bottom: 0.5rem;">Single file: .glb, .gltf, .obj, .fbx</p>
+                        <p style="color: var(--text-dim); font-size: 0.8rem; margin-bottom: 2rem;">FBX with textures? Drop the whole folder 📁</p>
                         <button class="btn btn-primary" id="load-sample" style="margin: 0 auto; position: relative; z-index: 2;">Load Sample High-Poly</button>
                         <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
                     </div>
@@ -87,6 +88,18 @@
             </div>
 
             <div class="controls">
+                <select id="env-selector" class="btn env-select">
+                    <option value="sunny-sky">☀️ Sunny Sky</option>
+                    <option value="studio">🎬 Studio</option>
+                    <option value="urban-street">🏙️ Urban Street</option>
+                    <option value="forest-trail">🌲 Forest Trail</option>
+                    <option value="golden-sunset">🌅 Golden Sunset</option>
+                </select>
+                <div class="res-group">
+                    <button class="btn res-btn res-btn-active" data-res="1k">1K</button>
+                    <button class="btn res-btn" data-res="2k">2K</button>
+                    <button class="btn res-btn" data-res="4k">4K</button>
+                </div>
                 <button class="btn" id="toggle-wireframe">Wireframe</button>
                 <button class="btn" id="reset-view">Reset View</button>
                 <button class="btn btn-primary" id="download-asset" style="display: none;">Download Optimized .glb</button>
