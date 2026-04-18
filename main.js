@@ -306,21 +306,22 @@ async function loadModel(file) {
 
         // Center and scale model properly
         const box = new THREE.Box3().setFromObject(currentMesh);
+        const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
         
         // Scale the model so its largest dimension is 4.5 (almost filling the diameter 5 pedestal)
         const maxDim = Math.max(size.x, size.y, size.z);
-        currentMesh.scale.multiplyScalar(4.5 / maxDim);
+        const targetScale = 4.5 / maxDim;
+        currentMesh.scale.setScalar(targetScale);
         
-        // Recompute world bounds after scaling to perfectly place it
-        currentMesh.updateMatrixWorld();
-        const box2 = new THREE.Box3().setFromObject(currentMesh);
-        const center2 = box2.getCenter(new THREE.Vector3());
+        // Position the mesh mathematically taking local scale into account.
+        // World Point = Local Point * Scale + Position
+        // We want World Center X/Z to be 0:  Position X = -Local Center X * Scale
+        currentMesh.position.x = -center.x * targetScale;
+        currentMesh.position.z = -center.z * targetScale;
         
-        // Shift position so it is perfectly centered and the bottom edge sits exactly on the table (Y=0)
-        currentMesh.position.x -= center2.x;
-        currentMesh.position.z -= center2.z;
-        currentMesh.position.y -= box2.min.y;
+        // We want World Bottom Y to be 0:  Position Y = -Local Bottom Y * Scale
+        currentMesh.position.y = -box.min.y * targetScale;
 
         // Calculate Triangles
         let totalTris = 0;
