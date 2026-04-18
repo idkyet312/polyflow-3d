@@ -182,7 +182,7 @@ async function init() {
     controls.maxDistance = 10;
     controls.target.set(0, 1, 0);
 
-    // Pedestal
+    // Pedestal.
     const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 128);
     pedestalMat = new THREE.MeshStandardMaterial({
         color: 0xEEEEEE,
