@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
@@ -265,8 +266,16 @@ async function loadModel(file) {
                 child.castShadow = true;
                 child.receiveShadow = true;
                 
-                // Ensure normals exist for lighting
-                if (!child.geometry.attributes.normal) {
+                // Ensure normals exist for lighting, and make them smooth!
+                if (!child.geometry.attributes.normal || !child.geometry.index) {
+                    // Merging vertices converts flat "soup" geometry into indexed geometry, allowing for smooth shading
+                    if (!child.geometry.index) {
+                        try {
+                            child.geometry = BufferGeometryUtils.mergeVertices(child.geometry);
+                        } catch(e) {
+                            console.warn("Could not merge vertices", e);
+                        }
+                    }
                     child.geometry.computeVertexNormals();
                 }
 
