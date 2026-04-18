@@ -60,7 +60,7 @@ async function init() {
 
     // Load Sky Environment Map
     const textureLoader = new THREE.TextureLoader();
-    textureLoader.load('/sky.png', (texture) => {
+    textureLoader.load(import.meta.env.BASE_URL + 'sky.png', (texture) => {
         texture.mapping = THREE.EquirectangularReflectionMapping;
         texture.colorSpace = THREE.SRGBColorSpace;
         scene.background = texture;
