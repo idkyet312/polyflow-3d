@@ -1,13 +1,13 @@
 import * as THREE from 'three';
-import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
-import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
-import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
-import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+import { WebGPURenderer } from 'three/webgpu';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { TGALoader } from 'three/addons/loaders/TGALoader.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
@@ -74,16 +74,20 @@ const ENVIRONMENTS = {
     },
 };
 
-// Build the Poly Haven CDN URL for a given slug + resolution
+// Build the Poly Haven CDN URL or local URL for a given slug + resolution
 function getHdriUrl(slug, res) {
+    if (slug === 'kloofendal_48d_partly_cloudy_puresky' && res === '4k') {
+        return (import.meta.env.BASE_URL || '/') + 'kloofendal_48d_partly_cloudy_puresky_4k.hdr';
+    }
     return `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/${res}/${slug}_${res}.hdr`;
 }
 
 function loadHdriIntoScene(url, blurriness) {
+    console.log(`Loading HDRI: ${url}`);
     if (hdriCache[url]) {
         scene.environment = hdriCache[url];
         scene.background = hdriCache[url];
-        //scene.backgroundBlurriness = blurriness;
+        scene.backgroundBlurriness = blurriness;
         return;
     }
     const loader = new RGBELoader();
@@ -92,9 +96,10 @@ function loadHdriIntoScene(url, blurriness) {
         hdriCache[url] = texture;
         scene.environment = texture;
         scene.background = texture;
-        //scene.backgroundBlurriness = blurriness;
+        scene.backgroundBlurriness = blurriness;
+        console.log(`Successfully loaded HDRI: ${url}`);
     }, undefined, (err) => {
-        console.warn('Failed to load HDRI:', url, err);
+        console.error('Failed to load HDRI:', url, err);
     });
 }
 
@@ -105,7 +110,7 @@ function switchEnvironment(key) {
 
     // Update pedestal material
     if (pedestalMat) {
-        //pedestalMat.color.setHex(env.pedestal.color);
+        pedestalMat.color.setHex(env.pedestal.color);
         pedestalMat.roughness = env.pedestal.roughness;
         pedestalMat.metalness = env.pedestal.metalness;
         pedestalMat.needsUpdate = true;
@@ -156,6 +161,14 @@ async function init() {
             const val = Math.round(e.target.value * 100);
             ratioValue.textContent = `${val}%`;
         });
+    }
+
+    if (!navigator.gpu) {
+        const errorMsg = "WebGPU is not supported in this browser. Please use Chrome/Edge (v113+) or enable it in your flags.";
+        console.error(errorMsg);
+        alert(errorMsg);
+        // We can't continue initialization with WebGPURenderer if it's missing
+        return;
     }
 
     await MeshoptSimplifier.ready;
