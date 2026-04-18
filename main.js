@@ -3,6 +3,7 @@ import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
@@ -56,15 +57,17 @@ async function init() {
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.2;
     container.appendChild(renderer.domElement);
 
-    // Load Sky Environment Map
-    const textureLoader = new THREE.TextureLoader();
-    textureLoader.load(import.meta.env.BASE_URL + 'sky.png', (texture) => {
+    // Load HDR Environment Map
+    const rgbeLoader = new RGBELoader();
+    rgbeLoader.load(import.meta.env.BASE_URL + 'kloofendal_48d_partly_cloudy_puresky_4k.hdr', (texture) => {
         texture.mapping = THREE.EquirectangularReflectionMapping;
-        texture.colorSpace = THREE.SRGBColorSpace;
-        scene.background = texture;
         scene.environment = texture;
+        scene.background = texture;
+        scene.backgroundRotation.y = Math.PI; // Rotate the seam behind the initial camera view
+        scene.environmentRotation.y = Math.PI;
     });
 
     controls = new OrbitControls(camera, renderer.domElement);
@@ -76,10 +79,12 @@ async function init() {
 
     // Pedestal
     const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.6, 0.2, 64);
-    const pedestalMat = new THREE.MeshStandardMaterial({ 
-        color: 0x151515, 
-        roughness: 0.1, 
-        metalness: 0.8 
+    const pedestalMat = new THREE.MeshPhysicalMaterial({ 
+        color: 0x111111, 
+        roughness: 0.3, 
+        metalness: 0.8,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.1
     });
     const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
     pedestal.position.y = -0.1;
@@ -266,13 +271,14 @@ async function loadModel(file) {
                 }
 
                 if (child.material) {
-                    // If it was completely black and lacking texture, brighten it slightly so we can see it
-                    if (child.material.color && child.material.color.getHex() === 0x000000 && !child.material.map) {
-                        child.material.color.setHex(0xaaaaaa);
-                    }
                     // Make sure the material can reflect the environment if it's a PBR material
                     if (child.material.envMapIntensity !== undefined) {
                         child.material.envMapIntensity = 1.0; 
+                    }
+
+                    // If it was completely black and lacking texture, brighten it slightly
+                    if (child.material.color && child.material.color.getHex() === 0x000000 && !child.material.map) {
+                        child.material.color.setHex(0xaaaaaa);
                     }
                 }
             }
