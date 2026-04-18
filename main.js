@@ -59,6 +59,8 @@ async function init() {
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.2;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
 
     // Load HDR Environment Map
@@ -69,6 +71,7 @@ async function init() {
         scene.background = texture;
         scene.backgroundRotation.y = Math.PI; // Rotate the seam behind the initial camera view
         scene.environmentRotation.y = Math.PI;
+        scene.backgroundBlurriness = 0.05; // Adds a DSLR depth of field effect to the sky
     });
 
     controls = new OrbitControls(camera, renderer.domElement);
@@ -280,6 +283,14 @@ async function loadModel(file) {
                 }
 
                 if (child.material) {
+                    // Maximize texture crispness at glancing angles
+                    if (child.material.map) {
+                        child.material.map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+                    }
+                    if (child.material.normalMap) {
+                        child.material.normalMap.anisotropy = renderer.capabilities.getMaxAnisotropy();
+                    }
+
                     // Make sure the material can reflect the environment if it's a PBR material
                     if (child.material.envMapIntensity !== undefined) {
                         child.material.envMapIntensity = 1.0; 
