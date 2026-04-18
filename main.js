@@ -1,6 +1,8 @@
 import * as THREE from 'three';
+import WebGPURenderer from 'three/src/renderers/webgpu/WebGPURenderer.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
@@ -46,33 +48,91 @@ async function init() {
     console.log("MeshoptSimplifier ready");
     
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x050505);
 
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
-    camera.position.set(2, 2, 5);
+    camera.position.set(3, 2, 5);
 
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer = new WebGPURenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.toneMapping = THREE.ReinhardToneMapping;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
     container.appendChild(renderer.domElement);
+
+    // Load Sky Environment Map
+    const textureLoader = new THREE.TextureLoader();
+    textureLoader.load('/sky.png', (texture) => {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+        texture.colorSpace = THREE.SRGBColorSpace;
+        scene.background = texture;
+        scene.environment = texture;
+    });
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.maxPolarAngle = Math.PI / 2 - 0.05; // Don't allow camera below floor
+    controls.minDistance = 1;
+    controls.maxDistance = 10;
+    controls.target.set(0, 1, 0); // Look at center of object
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    // Pedestal
+    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.6, 0.2, 64);
+    const pedestalMat = new THREE.MeshStandardMaterial({ 
+        color: 0x151515, 
+        roughness: 0.1, 
+        metalness: 0.8 
+    });
+    const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
+    pedestal.position.y = -0.1;
+    pedestal.receiveShadow = true;
+    scene.add(pedestal);
+
+    // Subtle rim
+    const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0x7000ff, emissive: 0x300080 });
+    const rim = new THREE.Mesh(rimGeo, rimMat);
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = 0;
+    scene.add(rim);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
-    const mainLight = new THREE.DirectionalLight(0x7000ff, 1.5);
-    mainLight.position.set(5, 5, 5);
+    const mainLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    mainLight.position.set(5, 8, 3);
+    mainLight.castShadow = true;
+    mainLight.shadow.mapSize.width = 2048;
+    mainLight.shadow.mapSize.height = 2048;
+    mainLight.shadow.camera.near = 0.5;
+    mainLight.shadow.camera.far = 15;
+    mainLight.shadow.camera.left = -3;
+    mainLight.shadow.camera.right = 3;
+    mainLight.shadow.camera.top = 3;
+    mainLight.shadow.camera.bottom = -3;
+    mainLight.shadow.bias = -0.001;
     scene.add(mainLight);
 
-    const blueLight = new THREE.PointLight(0x00ffaa, 1, 10);
+    const fillLight = new THREE.DirectionalLight(0x7000ff, 0.8);
+    fillLight.position.set(-5, 3, -5);
+    scene.add(fillLight);
+
+    const blueLight = new THREE.PointLight(0x00ffaa, 1.5, 10);
     blueLight.position.set(-2, 1, 2);
     scene.add(blueLight);
 
+    // Rim lights for extra shine
+    const rimLightLeft = new THREE.DirectionalLight(0xaaccff, 2.5);
+    rimLightLeft.position.set(-3, 3, -5);
+    scene.add(rimLightLeft);
+
+    const rimLightRight = new THREE.DirectionalLight(0xffccaa, 2.0);
+    rimLightRight.position.set(3, 2, -5);
+    scene.add(rimLightRight);
+
     window.addEventListener('resize', onWindowResize);
-    animate();
+    renderer.setAnimationLoop(() => {
+        controls.update();
+        renderer.renderAsync(scene, camera);
+    });
 }
 
 function loadSample() {
@@ -89,7 +149,14 @@ function loadSample() {
     });
     
     currentMesh = new THREE.Mesh(geometry, material);
+    currentMesh.castShadow = true;
+    currentMesh.receiveShadow = true;
     scene.add(currentMesh);
+
+    // Sit on table
+    currentMesh.geometry.computeBoundingBox();
+    const box = currentMesh.geometry.boundingBox;
+    currentMesh.position.y = -box.min.y;
 
     document.getElementById('asset-name').textContent = 'Heavy_Industrial_Part_RAW.glb';
     document.getElementById('tri-count').textContent = 'Counting...';
@@ -126,11 +193,7 @@ function loadSample() {
     processTrigger.onclick = runOptimizationPipeline;
 }
 
-function animate() {
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-}
+// Render loop now handled by setAnimationLoop in init
 
 function onWindowResize() {
     camera.aspect = container.clientWidth / container.clientHeight;
@@ -152,10 +215,10 @@ function setupDropHandlers() {
     dropZone.addEventListener('drop', async (e) => {
         e.preventDefault();
         const file = e.dataTransfer.files[0];
-        if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf') || file.name.endsWith('.obj'))) {
+        if (file && (file.name.endsWith('.glb') || file.name.endsWith('.gltf') || file.name.endsWith('.obj') || file.name.endsWith('.fbx'))) {
             loadModel(file);
         } else {
-            alert('Please drop a .glb, .gltf, or .obj file');
+            alert('Please drop a .glb, .gltf, .obj, or .fbx file');
         }
     });
 
@@ -191,14 +254,45 @@ async function loadModel(file) {
         currentMesh = object.scene || object; // GLTF uses object.scene, OBJ uses object directly
         scene.add(currentMesh);
 
-        // Center model
+        // Enable shadows and preserve real materials
+        currentMesh.traverse((child) => {
+            if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+                
+                // Ensure normals exist for lighting
+                if (!child.geometry.attributes.normal) {
+                    child.geometry.computeVertexNormals();
+                }
+
+                if (child.material) {
+                    // If it was completely black and lacking texture, brighten it slightly so we can see it
+                    if (child.material.color && child.material.color.getHex() === 0x000000 && !child.material.map) {
+                        child.material.color.setHex(0xaaaaaa);
+                    }
+                    // Make sure the material can reflect the environment if it's a PBR material
+                    if (child.material.envMapIntensity !== undefined) {
+                        child.material.envMapIntensity = 1.0; 
+                    }
+                }
+            }
+        });
+
+        // Center and scale model
         const box = new THREE.Box3().setFromObject(currentMesh);
-        const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
-        currentMesh.position.sub(center);
         
         const maxDim = Math.max(size.x, size.y, size.z);
         currentMesh.scale.multiplyScalar(2 / maxDim);
+        
+        // Recompute box after scale to sit on table
+        currentMesh.updateMatrixWorld();
+        const box2 = new THREE.Box3().setFromObject(currentMesh);
+        const center2 = box2.getCenter(new THREE.Vector3());
+        
+        currentMesh.position.x -= center2.x;
+        currentMesh.position.z -= center2.z;
+        currentMesh.position.y -= box2.min.y; // Bottom sits exactly on Y=0
 
         // Calculate Triangles
         let totalTris = 0;
@@ -237,6 +331,9 @@ async function loadModel(file) {
         loader.load(url, onLoad);
     } else if (extension === 'obj') {
         const loader = new OBJLoader();
+        loader.load(url, onLoad);
+    } else if (extension === 'fbx') {
+        const loader = new FBXLoader();
         loader.load(url, onLoad);
     } else {
         alert('Unsupported file format');
@@ -406,8 +503,9 @@ document.getElementById('toggle-wireframe').addEventListener('click', () => {
 });
 
 document.getElementById('reset-view').addEventListener('click', () => {
-    gsap.to(camera.position, { x: 2, y: 2, z: 5, duration: 1 });
-    controls.reset();
+    gsap.to(camera.position, { x: 3, y: 2, z: 5, duration: 1 });
+    gsap.to(controls.target, { x: 0, y: 1, z: 0, duration: 1 });
+    // controls.reset();
 });
 
 init();
