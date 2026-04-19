@@ -14,12 +14,12 @@ import { runWebGPUBenchmark } from './webgpu_utils.js';
 
 // --- Configuration ---
 let scene, camera, renderer, controls, currentMesh;
-let reflectionCamera, reflectionRenderTarget;
 let originalTriCount = 0;
 let optimizedTriCount = 0;
 let scanPlane;
 let originalFileSize = 0;
 let optimizedBlobUrl = null;
+let clipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight;
@@ -178,7 +178,7 @@ async function init() {
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.localClippingEnabled = true; // Enable clipping for the reflection
+    renderer.localClippingEnabled = true; // Essential for the reflection
     container.appendChild(renderer.domElement);
 
     // Load initial HDR Environment
@@ -191,44 +191,20 @@ async function init() {
     controls.maxDistance = 10;
     controls.target.set(0, 1, 0);
 
-    // Pedestal - Split into top (mirror) and glass body
-    const topGeo = new THREE.CircleGeometry(2.5, 64);
+    // Pedestal
+    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 64);
     pedestalMat = new THREE.MeshPhysicalMaterial({
         color: 0xffffff,
         metalness: 0.1,
-        roughness: 0.1,
+        roughness: 0.05,
         transmission: 1,
-        thickness: 0.0,
+        thickness: 0.5,
         ior: 1.5,
         transparent: true
     });
-    const pedestalTop = new THREE.Mesh(topGeo, pedestalMat);
-    pedestalTop.rotation.x = -Math.PI / 2;
-    pedestalTop.position.y = 0;
-    scene.add(pedestalTop);
-
-    const sideGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 64, 1, true);
-    const sideMat = new THREE.MeshPhysicalMaterial({
-        color: 0xffffff,
-        transmission: 1,
-        thickness: 0.5,
-        roughness: 0.05
-    });
-    const pedestalSide = new THREE.Mesh(sideGeo, sideMat);
-    pedestalSide.position.y = -0.05;
-    scene.add(pedestalSide);
-
-    // Reflection System (Planar)
-    reflectionRenderTarget = new THREE.RenderTarget(container.clientWidth * 2, container.clientHeight * 2, {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        format: THREE.RGBAFormat,
-    });
-    reflectionCamera = new THREE.PerspectiveCamera();
-    
-    // Apply reflection texture to the pedestal top
-    pedestalMat.envMap = reflectionRenderTarget.texture;
-    pedestalMat.envMapIntensity = 1.0;
+    const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
+    pedestal.position.y = -0.05;
+    scene.add(pedestal);
 
     // Simple Soft Occlusion Plane
     const shadowGeo = new THREE.CircleGeometry(2.5, 64);
@@ -240,7 +216,7 @@ async function init() {
     });
     const shadowPlane = new THREE.Mesh(shadowGeo, shadowMat);
     shadowPlane.rotation.x = -Math.PI / 2;
-    shadowPlane.position.y = 0.001; 
+    shadowPlane.position.y = 0.001;
     scene.add(shadowPlane);
 
     // Subtle rim
@@ -301,29 +277,9 @@ async function init() {
         btn.addEventListener('click', () => setResolution(btn.dataset.res));
     });
 
-    renderer.setAnimationLoop(async () => {
+    renderer.setAnimationLoop(() => {
         if (controls) controls.update();
-
-        // 1. Reflection Pass
-        if (reflectionCamera && reflectionRenderTarget && pedestalMat && currentMesh) {
-            // Mirror camera across Y=0
-            reflectionCamera.copy(camera);
-            reflectionCamera.position.y *= -1;
-            reflectionCamera.up.set(0, -1, 0); 
-            reflectionCamera.lookAt(controls.target.x, -controls.target.y, controls.target.z);
-            
-            // Hide pedestal for reflection pass
-            pedestalMat.visible = false;
-            
-            renderer.setRenderTarget(reflectionRenderTarget);
-            await renderer.renderAsync(scene, reflectionCamera);
-            
-            pedestalMat.visible = true;
-            renderer.setRenderTarget(null);
-        }
-
-        // 2. Main Pass
-        await renderer.renderAsync(scene, camera);
+        renderer.renderAsync(scene, camera);
     });
 }
 
@@ -344,7 +300,23 @@ function loadSample() {
     object.castShadow = true;
     object.receiveShadow = true;
 
-    currentMesh = object;
+    currentMesh = new THREE.Group();
+    currentMesh.add(object);
+
+    // Create reflection clone
+    const reflection = object.clone();
+    reflection.scale.y = -1;
+    reflection.position.y = -0.002;
+    
+    reflection.traverse((node) => {
+        if (node.isMesh) {
+            node.material = node.material.clone();
+            node.material.transparent = true;
+            node.material.opacity = 0.4;
+            node.material.clippingPlanes = [clipPlane];
+        }
+    });
+    currentMesh.add(reflection);
     scene.add(currentMesh);
 
     // Sit on table
@@ -598,6 +570,31 @@ async function loadModel(file, fileMap = {}) {
         currentMesh.position.y = -box.min.y * targetScale;
 
         // Positioning already done above
+        
+        // --- ADD REFLECTION CLONE ---
+        const reflection = currentMesh.clone();
+        reflection.scale.y *= -1;
+        reflection.position.y = -currentMesh.position.y;
+        
+        reflection.traverse((node) => {
+            if (node.isMesh) {
+                const mats = Array.isArray(node.material) ? node.material : [node.material];
+                node.material = mats.map(m => {
+                    const rm = m.clone();
+                    rm.transparent = true;
+                    rm.opacity = 0.4;
+                    rm.clippingPlanes = [clipPlane];
+                    return rm;
+                });
+                if (node.material.length === 1) node.material = node.material[0];
+            }
+        });
+
+        const group = new THREE.Group();
+        group.add(currentMesh);
+        group.add(reflection);
+        currentMesh = group;
+        scene.add(currentMesh);
 
         // Calculate Triangles
         let totalTris = 0;
