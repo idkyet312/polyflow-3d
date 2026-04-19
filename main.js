@@ -597,6 +597,16 @@ async function runOptimizationPipeline() {
     processingOverlay.style.display = 'flex';
     const isPro = false;
 
+    // --- Analytics Pixel Tracking ---
+    // Simple privacy-first ping to track how many users actually run the pipeline.
+    // Replace with your actual analytics tracking pixel URL (e.g. Plausible, SimpleAnalytics, or custom).
+    try {
+        new Image().src = `https://your-analytics-domain.com/pixel.gif?event=run_pipeline&isPro=${isPro}&ts=${Date.now()}`;
+        console.log('Analytics ping sent: run_pipeline');
+    } catch (e) {
+        /* Ignore analytics errors so it doesn't block the UI */
+    }
+
     const steps = [
         { label: 'Initializing WebGPU kernels...', progress: 10 },
         { label: 'Analyzing mesh topology...', progress: 20 },
