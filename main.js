@@ -250,19 +250,6 @@ async function init() {
     fillLight.position.set(-5, 3, -5);
     scene.add(fillLight);
 
-    const blueLight = new THREE.PointLight(0x00ffaa, 1.5, 10);
-    blueLight.position.set(-2, 1, 2);
-    scene.add(blueLight);
-
-    // Rim lights for extra shine
-    const rimLightLeft = new THREE.DirectionalLight(0xaaccff, 2.5);
-    rimLightLeft.position.set(-3, 3, -5);
-    scene.add(rimLightLeft);
-
-    const rimLightRight = new THREE.DirectionalLight(0xffccaa, 2.0);
-    rimLightRight.position.set(3, 2, -5);
-    scene.add(rimLightRight);
-
     window.addEventListener('resize', onWindowResize);
 
     // Environment selector
