@@ -8,7 +8,6 @@ import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
-import { ContactShadows } from 'three/addons/objects/ContactShadows.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
@@ -207,15 +206,18 @@ async function init() {
     pedestal.receiveShadow = true;
     scene.add(pedestal);
 
-    // Contact Shadows for grounded occlusion
-    const contactShadows = new ContactShadows();
-    contactShadows.opacity = 0.4;
-    contactShadows.blur = 2.5;
-    contactShadows.far = 1;
-    contactShadows.resolution = 512;
-    contactShadows.rotation.x = -Math.PI / 2;
-    contactShadows.position.y = 0.001;
-    scene.add(contactShadows);
+    // Simple Soft Occlusion Plane
+    const shadowGeo = new THREE.CircleGeometry(2.5, 64);
+    const shadowMat = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0.15,
+        side: THREE.DoubleSide
+    });
+    const shadowPlane = new THREE.Mesh(shadowGeo, shadowMat);
+    shadowPlane.rotation.x = -Math.PI / 2;
+    shadowPlane.position.y = 0.001; 
+    scene.add(shadowPlane);
 
     // Subtle rim
     const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
@@ -294,9 +296,28 @@ function loadSample() {
         emissive: 0x200040
     });
 
-    currentMesh = new THREE.Mesh(geometry, material);
-    currentMesh.castShadow = true;
-    currentMesh.receiveShadow = true;
+    const object = new THREE.Mesh(geometry, material);
+    object.castShadow = true;
+    object.receiveShadow = true;
+
+    // Create reflection clone
+    const reflection = object.clone();
+    reflection.scale.y = -1; // Flip it
+    reflection.position.y = -0.002; // Just below the surface
+    
+    // Apply transparent material to reflection
+    reflection.traverse((node) => {
+        if (node.isMesh) {
+            node.material = node.material.clone();
+            node.material.transparent = true;
+            node.material.opacity = 0.4;
+            node.material.side = THREE.FrontSide;
+        }
+    });
+    
+    currentMesh = new THREE.Group();
+    currentMesh.add(object);
+    currentMesh.add(reflection);
     scene.add(currentMesh);
 
     // Sit on table
@@ -548,6 +569,34 @@ async function loadModel(file, fileMap = {}) {
         currentMesh.position.x = -center.x * targetScale;
         currentMesh.position.z = -center.z * targetScale;
         currentMesh.position.y = -box.min.y * targetScale;
+
+        // --- ADD REFLECTION CLONE ---
+        const reflection = currentMesh.clone();
+        reflection.scale.y *= -1; // Flip Y
+        // Since original model is at +Y, the flip needs to be moved to -Y
+        // If currentMesh.position.y is H, reflection needs to be at -H
+        reflection.position.y = -currentMesh.position.y;
+        
+        // Apply transparency to reflection
+        reflection.traverse((node) => {
+            if (node.isMesh) {
+                const mats = Array.isArray(node.material) ? node.material : [node.material];
+                node.material = mats.map(m => {
+                    const rm = m.clone();
+                    rm.transparent = true;
+                    rm.opacity = 0.35;
+                    rm.side = THREE.FrontSide; // Don't render inside
+                    return rm;
+                });
+                if (node.material.length === 1) node.material = node.material[0];
+            }
+        });
+
+        const group = new THREE.Group();
+        scene.add(group);
+        group.add(currentMesh);
+        group.add(reflection);
+        currentMesh = group; // Update reference for removal later
 
         // Calculate Triangles
         let totalTris = 0;
