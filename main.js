@@ -246,10 +246,6 @@ async function init() {
     mainLight.shadow.bias = -0.001;
     scene.add(mainLight);
 
-    const fillLight = new THREE.DirectionalLight(0x7000ff, 0.8);
-    fillLight.position.set(-5, 3, -5);
-    scene.add(fillLight);
-
     window.addEventListener('resize', onWindowResize);
 
     // Environment selector
