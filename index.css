@@ -351,7 +351,7 @@ p.hero-sub {
 
 @media (max-width: 768px) {
   header {
-    padding: 1rem;
+    padding: 1rem 1.5rem;
   }
 
   nav ul li:not(:last-child) {
@@ -360,10 +360,10 @@ p.hero-sub {
 
   main {
     flex-direction: column-reverse; /* Put workspace on top */
-    padding: 0.5rem;
-    gap: 1rem;
+    padding: 1rem 1.5rem 3rem 1.5rem; /* Increased side margins for scrollability */
+    gap: 1.5rem;
     height: auto;
-    overflow-y: auto;
+    overflow-y: visible;
   }
 
   .sidebar {
