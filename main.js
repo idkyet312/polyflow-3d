@@ -141,6 +141,10 @@ const downloadBtn = document.getElementById('download-asset');
 
 // --- Initialization ---
 async function init() {
+    // Mobile Detection
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    if (isMobile) document.body.classList.add('is-mobile');
+
     // Add listeners immediately so UI is responsive even if WASM is loading
     document.getElementById('load-sample').addEventListener('click', (e) => {
         e.stopPropagation(); // Prevent file dialog from opening
@@ -178,6 +182,7 @@ async function init() {
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.localClippingEnabled = true; // Essential for the reflection
     container.appendChild(renderer.domElement);
 
     // Load initial HDR Environment
@@ -190,8 +195,8 @@ async function init() {
     controls.maxDistance = 10;
     controls.target.set(0, 1, 0);
 
-    // Pedestal.
-    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 128);
+    // Pedestal
+    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.02, 64);
     pedestalMat = new THREE.MeshPhysicalMaterial({
         color: 0xffffff,
         metalness: 0.1,
@@ -200,12 +205,13 @@ async function init() {
         thickness: 0,
         ior: 1.0, // IOR 1.0 eliminates double-refraction ghosting from the bottom cap
         transparent: true,
-        opacity: 1
+        opacity: 0.9 // Slightly more opaque for better grounding
     });
     const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
-    pedestal.position.y = -0.1;
-    pedestal.receiveShadow = true;
+    pedestal.position.y = -0.05;
     scene.add(pedestal);
+
+    // Removed shadow plane to eliminate 'double blur' artifacts
 
     // Subtle rim
     const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
@@ -243,7 +249,6 @@ async function init() {
     const rimLightRight = new THREE.DirectionalLight(0xffccaa, 2.0);
     rimLightRight.position.set(3, 2, -5);
     scene.add(rimLightRight);
-
     window.addEventListener('resize', onWindowResize);
 
     // Environment selector
@@ -258,14 +263,23 @@ async function init() {
     });
 
     renderer.setAnimationLoop(() => {
-        controls.update();
+        if (controls) controls.update();
         renderer.renderAsync(scene, camera);
     });
 }
 
 function loadSample() {
     dropZone.classList.add('hidden');
-    if (currentMesh) scene.remove(currentMesh);
+    if (currentMesh) {
+        scene.remove(currentMesh);
+        currentMesh.traverse(child => {
+            if (child.isMesh) {
+                child.geometry.dispose();
+                if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                else child.material.dispose();
+            }
+        });
+    }
 
     // Create a very dense Torus Knot to simulate a "heavy" file
     const geometry = new THREE.TorusKnotGeometry(1, 0.3, 300, 100);
@@ -276,9 +290,11 @@ function loadSample() {
         emissive: 0x200040
     });
 
-    currentMesh = new THREE.Mesh(geometry, material);
-    currentMesh.castShadow = true;
-    currentMesh.receiveShadow = true;
+    const object = new THREE.Mesh(geometry, material);
+    object.castShadow = true;
+    object.receiveShadow = true;
+
+    currentMesh = object;
     scene.add(currentMesh);
 
     // Sit on table
@@ -450,7 +466,16 @@ async function loadModel(file, fileMap = {}) {
     }
 
     const onLoad = (object) => {
-        if (currentMesh) scene.remove(currentMesh);
+        if (currentMesh) {
+            scene.remove(currentMesh);
+            currentMesh.traverse(child => {
+                if (child.isMesh) {
+                    child.geometry.dispose();
+                    if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                    else child.material.dispose();
+                }
+            });
+        }
         currentMesh = object.scene || object; // GLTF uses object.scene, OBJ uses object directly
         scene.add(currentMesh);
 
@@ -498,9 +523,12 @@ async function loadModel(file, fileMap = {}) {
                         emissiveMap: mat.emissiveMap || null,
                         emissiveIntensity: mat.emissiveIntensity || 1.0,
                         alphaMap: mat.alphaMap || null,
+                        aoMap: mat.aoMap || null,
                         bumpMap: mat.bumpMap || null,
                         bumpScale: mat.bumpScale || 1.0,
                         roughnessMap: mat.specularMap || null, // specular ≈ inverse roughness
+                        aoMap: mat.aoMap || null,
+                        aoMapIntensity: 1.0,
                         roughness: 0.6,
                         metalness: 0.1,
                         // Transparency
@@ -515,7 +543,7 @@ async function loadModel(file, fileMap = {}) {
                     });
 
                     // Fix color space on every texture
-                    [stdMat.map, stdMat.emissiveMap, stdMat.alphaMap, stdMat.roughnessMap].forEach(tex => {
+                    [stdMat.map, stdMat.emissiveMap, stdMat.alphaMap, stdMat.roughnessMap, stdMat.aoMap].forEach(tex => {
                         if (tex) { tex.colorSpace = THREE.SRGBColorSpace; tex.needsUpdate = true; }
                     });
 
