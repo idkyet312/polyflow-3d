@@ -14,6 +14,7 @@ import { runWebGPUBenchmark } from './webgpu_utils.js';
 
 // --- Configuration ---
 let scene, camera, renderer, controls, currentMesh;
+let reflectionCamera, reflectionRenderTarget;
 let originalTriCount = 0;
 let optimizedTriCount = 0;
 let scanPlane;
@@ -22,6 +23,7 @@ let optimizedBlobUrl = null;
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight;
+let reflectionCamera, reflectionRenderTarget;
 
 // HDRI texture cache keyed by full URL (1k/2k/4k cached separately)
 const hdriCache = {};
@@ -177,6 +179,7 @@ async function init() {
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.localClippingEnabled = true; // Enable clipping for the reflection
     container.appendChild(renderer.domElement);
 
     // Load initial HDR Environment
@@ -189,22 +192,44 @@ async function init() {
     controls.maxDistance = 10;
     controls.target.set(0, 1, 0);
 
-    // Pedestal.
-    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 128);
+    // Pedestal - Split into top (mirror) and glass body
+    const topGeo = new THREE.CircleGeometry(2.5, 64);
     pedestalMat = new THREE.MeshPhysicalMaterial({
         color: 0xffffff,
-        metalness: 0.95,
-        roughness: 0.05,
+        metalness: 0.1,
+        roughness: 0.1,
+        transmission: 1,
+        thickness: 0.0,
+        ior: 1.5,
+        transparent: true
+    });
+    const pedestalTop = new THREE.Mesh(topGeo, pedestalMat);
+    pedestalTop.rotation.x = -Math.PI / 2;
+    pedestalTop.position.y = 0;
+    scene.add(pedestalTop);
+
+    const sideGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 64, 1, true);
+    const sideMat = new THREE.MeshPhysicalMaterial({
+        color: 0xffffff,
         transmission: 1,
         thickness: 0.5,
-        ior: 1.5,
-        transparent: true,
-        opacity: 1
+        roughness: 0.05
     });
-    const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
-    pedestal.position.y = -0.1;
-    pedestal.receiveShadow = true;
-    scene.add(pedestal);
+    const pedestalSide = new THREE.Mesh(sideGeo, sideMat);
+    pedestalSide.position.y = -0.05;
+    scene.add(pedestalSide);
+
+    // Reflection System (Planar)
+    reflectionRenderTarget = new THREE.RenderTarget(container.clientWidth * 2, container.clientHeight * 2, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        format: THREE.RGBAFormat,
+    });
+    reflectionCamera = new THREE.PerspectiveCamera();
+    
+    // Apply reflection texture to the pedestal top
+    pedestalMat.envMap = reflectionRenderTarget.texture;
+    pedestalMat.envMapIntensity = 1.0;
 
     // Simple Soft Occlusion Plane
     const shadowGeo = new THREE.CircleGeometry(2.5, 64);
@@ -277,9 +302,29 @@ async function init() {
         btn.addEventListener('click', () => setResolution(btn.dataset.res));
     });
 
-    renderer.setAnimationLoop(() => {
-        controls.update();
-        renderer.renderAsync(scene, camera);
+    renderer.setAnimationLoop(async () => {
+        if (controls) controls.update();
+
+        // 1. Reflection Pass
+        if (reflectionCamera && reflectionRenderTarget && pedestalMat && currentMesh) {
+            // Mirror camera across Y=0
+            reflectionCamera.copy(camera);
+            reflectionCamera.position.y *= -1;
+            reflectionCamera.up.set(0, -1, 0); 
+            reflectionCamera.lookAt(controls.target.x, -controls.target.y, controls.target.z);
+            
+            // Hide pedestal for reflection pass
+            pedestalMat.visible = false;
+            
+            renderer.setRenderTarget(reflectionRenderTarget);
+            await renderer.renderAsync(scene, reflectionCamera);
+            
+            pedestalMat.visible = true;
+            renderer.setRenderTarget(null);
+        }
+
+        // 2. Main Pass
+        await renderer.renderAsync(scene, camera);
     });
 }
 
@@ -300,24 +345,7 @@ function loadSample() {
     object.castShadow = true;
     object.receiveShadow = true;
 
-    // Create reflection clone
-    const reflection = object.clone();
-    reflection.scale.y = -1; // Flip it
-    reflection.position.y = -0.002; // Just below the surface
-    
-    // Apply transparent material to reflection
-    reflection.traverse((node) => {
-        if (node.isMesh) {
-            node.material = node.material.clone();
-            node.material.transparent = true;
-            node.material.opacity = 0.4;
-            node.material.side = THREE.FrontSide;
-        }
-    });
-    
-    currentMesh = new THREE.Group();
-    currentMesh.add(object);
-    currentMesh.add(reflection);
+    currentMesh = object;
     scene.add(currentMesh);
 
     // Sit on table
@@ -570,33 +598,7 @@ async function loadModel(file, fileMap = {}) {
         currentMesh.position.z = -center.z * targetScale;
         currentMesh.position.y = -box.min.y * targetScale;
 
-        // --- ADD REFLECTION CLONE ---
-        const reflection = currentMesh.clone();
-        reflection.scale.y *= -1; // Flip Y
-        // Since original model is at +Y, the flip needs to be moved to -Y
-        // If currentMesh.position.y is H, reflection needs to be at -H
-        reflection.position.y = -currentMesh.position.y;
-        
-        // Apply transparency to reflection
-        reflection.traverse((node) => {
-            if (node.isMesh) {
-                const mats = Array.isArray(node.material) ? node.material : [node.material];
-                node.material = mats.map(m => {
-                    const rm = m.clone();
-                    rm.transparent = true;
-                    rm.opacity = 0.35;
-                    rm.side = THREE.FrontSide; // Don't render inside
-                    return rm;
-                });
-                if (node.material.length === 1) node.material = node.material[0];
-            }
-        });
-
-        const group = new THREE.Group();
-        scene.add(group);
-        group.add(currentMesh);
-        group.add(reflection);
-        currentMesh = group; // Update reference for removal later
+        // Positioning already done above
 
         // Calculate Triangles
         let totalTris = 0;
