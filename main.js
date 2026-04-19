@@ -108,13 +108,7 @@ function switchEnvironment(key) {
     if (!env) return;
     currentEnvironment = key;
 
-    // Update pedestal material
-    if (pedestalMat) {
-        pedestalMat.color.setHex(env.pedestal.color);
-        pedestalMat.roughness = env.pedestal.roughness;
-        pedestalMat.metalness = env.pedestal.metalness;
-        pedestalMat.needsUpdate = true;
-    }
+    // Update pedestal material - REMOVED so glass stays consistent
     // Update lights
     if (ambientLight) {
         ambientLight.color.setHex(env.ambient.color);
@@ -197,10 +191,15 @@ async function init() {
 
     // Pedestal.
     const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 128);
-    pedestalMat = new THREE.MeshStandardMaterial({
-        color: 0xFFFFFF,
-        roughness: 0.00,
-        metalness: 1.0
+    pedestalMat = new THREE.MeshPhysicalMaterial({
+        color: 0xffffff,
+        metalness: 0,
+        roughness: 0.05,
+        transmission: 1,
+        thickness: 0.5,
+        ior: 1.5,
+        transparent: true,
+        opacity: 1
     });
     const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
     pedestal.position.y = -0.1;
