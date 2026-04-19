@@ -8,7 +8,7 @@ import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
-import { Reflector } from 'three/addons/objects/Reflector.js';
+import { ContactShadows } from 'three/addons/objects/ContactShadows.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
@@ -207,20 +207,15 @@ async function init() {
     pedestal.receiveShadow = true;
     scene.add(pedestal);
 
-    // Planar Reflection on top of the pedestal
-    const reflectorGeo = new THREE.CircleGeometry(2.5, 64);
-    const reflector = new Reflector(reflectorGeo, {
-        clipBias: 0.003,
-        textureWidth: window.innerWidth * window.devicePixelRatio,
-        textureHeight: window.innerHeight * window.devicePixelRatio,
-        color: 0xcccccc
-    });
-    reflector.rotation.x = -Math.PI / 2;
-    reflector.position.y = 0.001;
-    // Make reflector slightly transparent so we can see the glass material underneath
-    reflector.material.transparent = true;
-    reflector.material.opacity = 0.7;
-    scene.add(reflector);
+    // Contact Shadows for grounded occlusion
+    const contactShadows = new ContactShadows();
+    contactShadows.opacity = 0.4;
+    contactShadows.blur = 2.5;
+    contactShadows.far = 1;
+    contactShadows.resolution = 512;
+    contactShadows.rotation.x = -Math.PI / 2;
+    contactShadows.position.y = 0.001;
+    scene.add(contactShadows);
 
     // Subtle rim
     const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
