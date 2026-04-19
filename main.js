@@ -197,26 +197,16 @@ async function init() {
         metalness: 0.1,
         roughness: 0.05,
         transmission: 1,
-        thickness: 0.5,
+        thickness: 0.0,
         ior: 1.5,
-        transparent: true
+        transparent: true,
+        opacity: 0.9 // Slightly more opaque for better grounding
     });
     const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
     pedestal.position.y = -0.05;
     scene.add(pedestal);
 
-    // Simple Soft Occlusion Plane
-    const shadowGeo = new THREE.CircleGeometry(2.5, 64);
-    const shadowMat = new THREE.MeshBasicMaterial({
-        color: 0x000000,
-        transparent: true,
-        opacity: 0.15,
-        side: THREE.DoubleSide
-    });
-    const shadowPlane = new THREE.Mesh(shadowGeo, shadowMat);
-    shadowPlane.rotation.x = -Math.PI / 2;
-    shadowPlane.position.y = 0.001;
-    scene.add(shadowPlane);
+    // Removed shadow plane to eliminate 'double blur' artifacts
 
     // Subtle rim
     const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
@@ -267,7 +257,16 @@ async function init() {
 
 function loadSample() {
     dropZone.classList.add('hidden');
-    if (currentMesh) scene.remove(currentMesh);
+    if (currentMesh) {
+        scene.remove(currentMesh);
+        currentMesh.traverse(child => {
+            if (child.isMesh) {
+                child.geometry.dispose();
+                if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                else child.material.dispose();
+            }
+        });
+    }
 
     // Create a very dense Torus Knot to simulate a "heavy" file
     const geometry = new THREE.TorusKnotGeometry(1, 0.3, 300, 100);
@@ -454,7 +453,16 @@ async function loadModel(file, fileMap = {}) {
     }
 
     const onLoad = (object) => {
-        if (currentMesh) scene.remove(currentMesh);
+        if (currentMesh) {
+            scene.remove(currentMesh);
+            currentMesh.traverse(child => {
+                if (child.isMesh) {
+                    child.geometry.dispose();
+                    if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+                    else child.material.dispose();
+                }
+            });
+        }
         currentMesh = object.scene || object; // GLTF uses object.scene, OBJ uses object directly
         scene.add(currentMesh);
 
