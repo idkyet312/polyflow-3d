@@ -140,6 +140,10 @@ const downloadBtn = document.getElementById('download-asset');
 
 // --- Initialization ---
 async function init() {
+    // Mobile Detection
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    if (isMobile) document.body.classList.add('is-mobile');
+
     // Add listeners immediately so UI is responsive even if WASM is loading
     document.getElementById('load-sample').addEventListener('click', (e) => {
         e.stopPropagation(); // Prevent file dialog from opening
