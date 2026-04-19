@@ -241,14 +241,6 @@ async function init() {
     mainLight.shadow.bias = -0.001;
     scene.add(mainLight);
 
-    // Rim lights for extra shine
-    const rimLightLeft = new THREE.DirectionalLight(0xaaccff, 2.5);
-    rimLightLeft.position.set(-3, 3, -5);
-    scene.add(rimLightLeft);
-
-    const rimLightRight = new THREE.DirectionalLight(0xffccaa, 2.0);
-    rimLightRight.position.set(3, 2, -5);
-    scene.add(rimLightRight);
     window.addEventListener('resize', onWindowResize);
 
     // Environment selector
@@ -418,6 +410,35 @@ function setupDropHandlers() {
             return;
         }
 
+        // --- Multi-file drop (files dropped directly, no folder) ---
+        if (items.length > 1) {
+            processingStep.textContent = 'Reading files...';
+            processingOverlay.style.display = 'flex';
+            loaderBar.style.width = '10%';
+
+            const fileMap = {};
+            let mainFile = null;
+
+            for (let i = 0; i < e.dataTransfer.files.length; i++) {
+                const file = e.dataTransfer.files[i];
+                const url = URL.createObjectURL(file);
+                fileMap[file.name.toLowerCase()] = { file, url };
+                
+                if (/\.(fbx|glb|gltf|obj)$/i.test(file.name)) {
+                    mainFile = file;
+                }
+            }
+
+            processingOverlay.style.display = 'none';
+
+            if (!mainFile) {
+                alert('No supported 3D file found in dropped files (.glb, .gltf, .obj, .fbx)');
+                return;
+            }
+            loadModel(mainFile, fileMap);
+            return;
+        }
+
         // --- Single file drop ---
         const file = e.dataTransfer.files[0];
         if (file && /\.(glb|gltf|obj|fbx)$/i.test(file.name)) {
@@ -542,9 +563,16 @@ async function loadModel(file, fileMap = {}) {
                         envMapIntensity: 0.6,
                     });
 
-                    // Fix color space on every texture
-                    [stdMat.map, stdMat.emissiveMap, stdMat.alphaMap, stdMat.roughnessMap, stdMat.aoMap].forEach(tex => {
-                        if (tex) { tex.colorSpace = THREE.SRGBColorSpace; tex.needsUpdate = true; }
+                    // Fix color space on textures: only color/emissive maps are sRGB.
+                    // Normal, roughness, metallic, AO should remain Linear (NoColorSpace).
+                    if (stdMat.map) { stdMat.map.colorSpace = THREE.SRGBColorSpace; stdMat.map.needsUpdate = true; }
+                    if (stdMat.emissiveMap) { stdMat.emissiveMap.colorSpace = THREE.SRGBColorSpace; stdMat.emissiveMap.needsUpdate = true; }
+                    
+                    ['normalMap', 'alphaMap', 'roughnessMap', 'aoMap'].forEach(mapName => {
+                        if (stdMat[mapName]) { 
+                            stdMat[mapName].colorSpace = THREE.NoColorSpace || ''; 
+                            stdMat[mapName].needsUpdate = true; 
+                        }
                     });
 
                     // Only brighten if pitch black AND no texture at all (invisible geometry)
