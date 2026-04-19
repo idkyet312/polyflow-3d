@@ -8,6 +8,7 @@ import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { Reflector } from 'three/addons/objects/Reflector.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
@@ -193,7 +194,7 @@ async function init() {
     const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 128);
     pedestalMat = new THREE.MeshPhysicalMaterial({
         color: 0xffffff,
-        metalness: 0,
+        metalness: 0.95,
         roughness: 0.05,
         transmission: 1,
         thickness: 0.5,
@@ -205,6 +206,33 @@ async function init() {
     pedestal.position.y = -0.1;
     pedestal.receiveShadow = true;
     scene.add(pedestal);
+
+    // Planar Reflection on top of the pedestal
+    const reflectorGeo = new THREE.CircleGeometry(2.5, 64);
+    const reflector = new Reflector(reflectorGeo, {
+        clipBias: 0.003,
+        textureWidth: window.innerWidth * window.devicePixelRatio,
+        textureHeight: window.innerHeight * window.devicePixelRatio,
+        color: 0x888888
+    });
+    reflector.rotation.x = -Math.PI / 2;
+    reflector.position.y = 0.001; // Tiny offset to prevent Z-fighting
+    scene.add(reflector);
+
+    // Simple Occlusion (Contact Shadow Fake)
+    // We'll use a blurred circle mesh under the object
+    const shadowGeo = new THREE.CircleGeometry(2.5, 64);
+    const shadowMat = new THREE.MeshBasicMaterial({
+        color: 0x000000,
+        transparent: true,
+        opacity: 0.3,
+        side: THREE.DoubleSide
+    });
+    const shadowPlane = new THREE.Mesh(shadowGeo, shadowMat);
+    shadowPlane.rotation.x = -Math.PI / 2;
+    shadowPlane.position.y = 0.002; // Just above the reflector
+    // shadowPlane.scale.set(0.8, 0.8, 0.8);
+    scene.add(shadowPlane);
 
     // Subtle rim
     const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
