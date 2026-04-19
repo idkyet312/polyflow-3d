@@ -19,7 +19,6 @@ let optimizedTriCount = 0;
 let scanPlane;
 let originalFileSize = 0;
 let optimizedBlobUrl = null;
-let clipPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight;
@@ -192,7 +191,7 @@ async function init() {
     controls.target.set(0, 1, 0);
 
     // Pedestal
-    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 64);
+    const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.02, 64);
     pedestalMat = new THREE.MeshPhysicalMaterial({
         color: 0xffffff,
         metalness: 0.1,
@@ -300,23 +299,7 @@ function loadSample() {
     object.castShadow = true;
     object.receiveShadow = true;
 
-    currentMesh = new THREE.Group();
-    currentMesh.add(object);
-
-    // Create reflection clone
-    const reflection = object.clone();
-    reflection.scale.y = -1;
-    reflection.position.y = -0.002;
-    
-    reflection.traverse((node) => {
-        if (node.isMesh) {
-            node.material = node.material.clone();
-            node.material.transparent = true;
-            node.material.opacity = 0.4;
-            node.material.clippingPlanes = [clipPlane];
-        }
-    });
-    currentMesh.add(reflection);
+    currentMesh = object;
     scene.add(currentMesh);
 
     // Sit on table
@@ -523,9 +506,12 @@ async function loadModel(file, fileMap = {}) {
                         emissiveMap: mat.emissiveMap || null,
                         emissiveIntensity: mat.emissiveIntensity || 1.0,
                         alphaMap: mat.alphaMap || null,
+                        aoMap: mat.aoMap || null,
                         bumpMap: mat.bumpMap || null,
                         bumpScale: mat.bumpScale || 1.0,
                         roughnessMap: mat.specularMap || null, // specular ≈ inverse roughness
+                        aoMap: mat.aoMap || null,
+                        aoMapIntensity: 1.0,
                         roughness: 0.6,
                         metalness: 0.1,
                         // Transparency
@@ -538,7 +524,7 @@ async function loadModel(file, fileMap = {}) {
                     });
 
                     // Fix color space on every texture
-                    [stdMat.map, stdMat.emissiveMap, stdMat.alphaMap, stdMat.roughnessMap].forEach(tex => {
+                    [stdMat.map, stdMat.emissiveMap, stdMat.alphaMap, stdMat.roughnessMap, stdMat.aoMap].forEach(tex => {
                         if (tex) { tex.colorSpace = THREE.SRGBColorSpace; tex.needsUpdate = true; }
                     });
 
@@ -568,33 +554,6 @@ async function loadModel(file, fileMap = {}) {
         currentMesh.position.x = -center.x * targetScale;
         currentMesh.position.z = -center.z * targetScale;
         currentMesh.position.y = -box.min.y * targetScale;
-
-        // Positioning already done above
-        
-        // --- ADD REFLECTION CLONE ---
-        const reflection = currentMesh.clone();
-        reflection.scale.y *= -1;
-        reflection.position.y = -currentMesh.position.y;
-        
-        reflection.traverse((node) => {
-            if (node.isMesh) {
-                const mats = Array.isArray(node.material) ? node.material : [node.material];
-                node.material = mats.map(m => {
-                    const rm = m.clone();
-                    rm.transparent = true;
-                    rm.opacity = 0.4;
-                    rm.clippingPlanes = [clipPlane];
-                    return rm;
-                });
-                if (node.material.length === 1) node.material = node.material[0];
-            }
-        });
-
-        const group = new THREE.Group();
-        group.add(currentMesh);
-        group.add(reflection);
-        currentMesh = group;
-        scene.add(currentMesh);
 
         // Calculate Triangles
         let totalTris = 0;
