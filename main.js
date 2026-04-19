@@ -110,7 +110,7 @@ function switchEnvironment(key) {
 
     // Update pedestal material
     if (pedestalMat) {
-        //pedestalMat.color.setHex(env.pedestal.color);
+        pedestalMat.color.setHex(env.pedestal.color);
         pedestalMat.roughness = env.pedestal.roughness;
         pedestalMat.metalness = env.pedestal.metalness;
         pedestalMat.needsUpdate = true;
