@@ -23,7 +23,6 @@ let optimizedBlobUrl = null;
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight;
-let reflectionCamera, reflectionRenderTarget;
 
 // HDRI texture cache keyed by full URL (1k/2k/4k cached separately)
 const hdriCache = {};
