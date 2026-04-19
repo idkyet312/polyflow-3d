@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { TGALoader } from 'three/addons/loaders/TGALoader.js';
+import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -474,17 +475,46 @@ async function loadModel(file, fileMap = {}) {
     // Build a LoadingManager that resolves texture filenames from the uploaded file map
     const manager = new THREE.LoadingManager();
     manager.addHandler(/\.tga$/i, new TGALoader(manager));
-    if (Object.keys(fileMap).length > 0) {
-        manager.setURLModifier(originalUrl => {
-            // Extract just the filename (strip path separators, handle both / and \\)
-            const filename = originalUrl.split(/[\/\\]/).pop().toLowerCase();
-            if (fileMap[filename]) {
-                console.log(`[TextureResolver] Resolved: ${filename}`);
-                return fileMap[filename].url;
-            }
+    manager.addHandler(/\.dds$/i, new DDSLoader(manager));
+    
+    // Track texture loading for debugging
+    manager.onLoad = () => console.log('[TextureManager] All textures loaded');
+    manager.onError = (url) => console.warn('[TextureManager] Failed to load:', url);
+
+    // URL modifier to resolve textures from the uploaded file map
+    manager.setURLModifier(originalUrl => {
+        // Skip data URLs and blob URLs (already resolved)
+        if (originalUrl.startsWith('data:') || originalUrl.startsWith('blob:')) {
             return originalUrl;
-        });
-    }
+        }
+        
+        // Extract just the filename (strip path separators, handle Windows/Unix paths)
+        // Also strip any URL query params or fragments
+        let filename = originalUrl.split(/[\/\\]/).pop().split('?')[0].split('#')[0].toLowerCase();
+        
+        // Try exact match first
+        if (fileMap[filename]) {
+            console.log(`[TextureResolver] Resolved: ${filename}`);
+            return fileMap[filename].url;
+        }
+        
+        // Try without extension variations (e.g. texture.jpg.png → texture.jpg)
+        const baseName = filename.replace(/\.[^.]+$/, '');
+        const possibleExts = ['.png', '.jpg', '.jpeg', '.tga', '.dds', '.bmp', '.webp'];
+        for (const ext of possibleExts) {
+            const tryName = baseName + ext;
+            if (fileMap[tryName]) {
+                console.log(`[TextureResolver] Resolved ${filename} → ${tryName}`);
+                return fileMap[tryName].url;
+            }
+        }
+        
+        // If no fileMap entries, return original (might be embedded or fail gracefully)
+        if (Object.keys(fileMap).length > 0) {
+            console.warn(`[TextureResolver] Not found: ${filename}`);
+        }
+        return originalUrl;
+    });
 
     const onLoad = (object) => {
         if (currentMesh) {
@@ -533,25 +563,32 @@ async function loadModel(file, fileMap = {}) {
                     }
 
                     // Convert FBX/OBJ legacy Phong/Lambert → Standard (WebGPU requires this)
+                    // FBX shininess (0-1000+) → PBR roughness (1.0-0.0)
+                    const shininess = mat.shininess ?? 30;
+                    const computedRoughness = Math.max(0.04, 1.0 - Math.sqrt(Math.min(shininess, 1000) / 1000));
+                    
+                    // FBX specular color intensity can hint at metalness
+                    const specularIntensity = mat.specular ? (mat.specular.r + mat.specular.g + mat.specular.b) / 3 : 0;
+                    const computedMetalness = Math.min(0.5, specularIntensity * 0.5);
+
                     const stdMat = new THREE.MeshStandardMaterial({
                         name: mat.name,
                         // Preserve exact color — DO NOT override
                         color: mat.color ? mat.color.clone() : new THREE.Color(0x888888),
-                        // All texture maps
+                        // All texture maps, with FBX-specific handling
                         map: mat.map || null,
-                        normalMap: mat.normalMap || null,
+                        normalMap: mat.normalMap || mat.bumpMap || null, // FBX often uses bumpMap for normals
                         emissive: mat.emissive ? mat.emissive.clone() : new THREE.Color(0x000000),
                         emissiveMap: mat.emissiveMap || null,
                         emissiveIntensity: mat.emissiveIntensity || 1.0,
                         alphaMap: mat.alphaMap || null,
-                        aoMap: mat.aoMap || null,
-                        bumpMap: mat.bumpMap || null,
-                        bumpScale: mat.bumpScale || 1.0,
-                        roughnessMap: mat.specularMap || null, // specular ≈ inverse roughness
-                        aoMap: mat.aoMap || null,
+                        aoMap: mat.aoMap || mat.lightMap || null, // FBX sometimes uses lightMap for AO
                         aoMapIntensity: 1.0,
-                        roughness: 0.6,
-                        metalness: 0.1,
+                        // PBR values computed from FBX Phong properties
+                        roughness: mat.specularMap ? 0.5 : computedRoughness, // If specular map exists, use mid-value
+                        roughnessMap: null, // Don't use specular as roughness directly (causes artifacts)
+                        metalness: computedMetalness,
+                        metalnessMap: null,
                         // Transparency
                         transparent: isActuallyTransparent,
                         opacity: mat.opacity !== undefined ? mat.opacity : 1.0,
@@ -562,6 +599,12 @@ async function loadModel(file, fileMap = {}) {
                         side: THREE.FrontSide,
                         envMapIntensity: 0.6,
                     });
+                    
+                    // If bumpMap was used as normalMap, clear the original reference
+                    if (mat.bumpMap && !mat.normalMap) {
+                        stdMat.bumpMap = null;
+                        stdMat.bumpScale = 1.0;
+                    }
 
                     // Fix color space on textures: only color/emissive maps are sRGB.
                     // Normal, roughness, metallic, AO should remain Linear (NoColorSpace).
