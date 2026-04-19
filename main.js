@@ -36,7 +36,7 @@ const ENVIRONMENTS = {
         label: '\u2600\ufe0f Sunny Sky',
         slug: 'kloofendal_48d_partly_cloudy_puresky',
         blurriness: 0.05,
-        pedestal: { color: 0x111111, roughness: 0.05, metalness: 0.95 },
+        pedestal: { color: 0xFFFFFF, roughness: 0.00, metalness: 1.0 },
         ambient: { color: 0xffffff, intensity: 1.0 },
         hemi: { sky: 0xffffff, ground: 0x444444, intensity: 1.2 },
     },
