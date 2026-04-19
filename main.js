@@ -213,26 +213,14 @@ async function init() {
         clipBias: 0.003,
         textureWidth: window.innerWidth * window.devicePixelRatio,
         textureHeight: window.innerHeight * window.devicePixelRatio,
-        color: 0x888888
+        color: 0xcccccc
     });
     reflector.rotation.x = -Math.PI / 2;
-    reflector.position.y = 0.001; // Tiny offset to prevent Z-fighting
+    reflector.position.y = 0.001;
+    // Make reflector slightly transparent so we can see the glass material underneath
+    reflector.material.transparent = true;
+    reflector.material.opacity = 0.7;
     scene.add(reflector);
-
-    // Simple Occlusion (Contact Shadow Fake)
-    // We'll use a blurred circle mesh under the object
-    const shadowGeo = new THREE.CircleGeometry(2.5, 64);
-    const shadowMat = new THREE.MeshBasicMaterial({
-        color: 0x000000,
-        transparent: true,
-        opacity: 0.3,
-        side: THREE.DoubleSide
-    });
-    const shadowPlane = new THREE.Mesh(shadowGeo, shadowMat);
-    shadowPlane.rotation.x = -Math.PI / 2;
-    shadowPlane.position.y = 0.002; // Just above the reflector
-    // shadowPlane.scale.set(0.8, 0.8, 0.8);
-    scene.add(shadowPlane);
 
     // Subtle rim
     const rimGeo = new THREE.TorusGeometry(2.5, 0.02, 16, 100);
