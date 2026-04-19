@@ -110,7 +110,7 @@ function switchEnvironment(key) {
 
     // Update pedestal material
     if (pedestalMat) {
-        pedestalMat.color.setHex(env.pedestal.color);
+        //pedestalMat.color.setHex(env.pedestal.color);
         pedestalMat.roughness = env.pedestal.roughness;
         pedestalMat.metalness = env.pedestal.metalness;
         pedestalMat.needsUpdate = true;
@@ -198,9 +198,9 @@ async function init() {
     // Pedestal.
     const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.1, 128);
     pedestalMat = new THREE.MeshStandardMaterial({
-        color: 0xEEEEEE,
-        roughness: 0.15,
-        metalness: 0.85
+        color: 0xFFFFFF,
+        roughness: 0.00,
+        metalness: 1.0
     });
     const pedestal = new THREE.Mesh(pedestalGeo, pedestalMat);
     pedestal.position.y = -0.1;
