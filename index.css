@@ -350,6 +350,11 @@ p.hero-sub {
 }
 
 @media (max-width: 768px) {
+  html, body {
+    height: auto;
+    overflow-y: auto;
+  }
+
   header {
     padding: 1rem 1.5rem;
   }
@@ -360,10 +365,11 @@ p.hero-sub {
 
   main {
     flex-direction: column-reverse; /* Put workspace on top */
-    padding: 1rem 1.5rem 3rem 1.5rem; /* Increased side margins for scrollability */
-    gap: 1.5rem;
+    padding: 1.5rem 1.5rem 4rem 1.5rem; /* Large side margins for scrolling */
+    gap: 2rem;
     height: auto;
-    overflow-y: visible;
+    min-height: 100vh;
+    background: var(--bg-color);
   }
 
   .sidebar {
