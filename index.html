@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-DCAklIM1.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-BDUd2JBk.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-B3K2TuZy.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-LSP_ID2J.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-C7uZ-pxG.css">
 </head>
 <body>
     <main>
@@ -61,6 +61,16 @@
                             <button class="btn viewer-menu-btn" id="spawn-rigid-sphere">Drop Sphere</button>
                             <button class="btn viewer-menu-btn" id="spawn-rigid-cube">Drop Cube</button>
                         </div>
+                        <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                            <button class="btn btn-primary viewer-menu-btn" id="import-prop-menu">Import Prop</button>
+                            <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="reset-prop-import-default" hidden>Ask Next</button>
+                        </div>
+                        <div class="viewer-inline-note" id="prop-import-default-status">New prop imports ask for a collision mode.</div>
+                        <div class="viewer-prop-library" id="imported-prop-library" hidden>
+                            <div class="viewer-prop-library-label">Imported Props</div>
+                            <div class="viewer-prop-list" id="imported-prop-list"></div>
+                        </div>
+                        <input type="file" id="prop-file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
                     </div>
                 </div>
 
@@ -70,6 +80,23 @@
                         <div class="loader-bar" id="loader-bar"></div>
                     </div>
                     <div class="processing-step" id="processing-step">Initializing WebGPU kernels...</div>
+                </div>
+
+                <div class="viewer-modal" id="prop-collision-prompt" hidden>
+                    <div class="viewer-modal-card" role="dialog" aria-modal="true" aria-labelledby="prop-collision-title">
+                        <div class="viewer-modal-eyebrow">Imported Prop Collision</div>
+                        <h2 class="viewer-modal-title" id="prop-collision-title">Choose a collision mode</h2>
+                        <p class="viewer-modal-copy" id="prop-collision-copy">Pick a collision mode for this imported prop.</p>
+                        <label class="viewer-checkbox-row" for="prop-collision-remember">
+                            <input type="checkbox" id="prop-collision-remember">
+                            <span>Use this mode for this prop and future prop imports this session.</span>
+                        </label>
+                        <div class="viewer-modal-actions">
+                            <button class="btn viewer-menu-btn" id="prop-collision-simple">Simple Collision</button>
+                            <button class="btn btn-primary viewer-menu-btn" id="prop-collision-complex">Complex Collision</button>
+                        </div>
+                        <button class="btn viewer-modal-cancel" id="prop-collision-cancel">Cancel Import</button>
+                    </div>
                 </div>
 
                 <div class="play-hud">
