@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-BDUd2JBk.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-BW-in6zF.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-B3K2TuZy.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-C7uZ-pxG.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-DrK3ZFvJ.css">
 </head>
 <body>
     <main>
@@ -105,6 +105,42 @@
                 </div>
 
                 <div id="crosshair" aria-hidden="true"></div>
+
+                <div class="mobile-ui" aria-label="Mobile controls">
+                    <div class="mobile-topbar">
+                        <button class="btn mobile-chip" id="mobile-menu-toggle" type="button">Menu</button>
+                        <button class="btn mobile-chip" id="mobile-mode-toggle" type="button">Play</button>
+                        <button class="btn mobile-chip" id="mobile-reset-toggle" type="button">Reset</button>
+                    </div>
+
+                    <div class="mobile-dock">
+                        <div class="mobile-pad mobile-move-pad" id="mobile-move-pad" aria-label="Move pad">
+                            <span class="mobile-pad-label">Move</span>
+                            <span class="mobile-thumb" id="mobile-move-thumb" aria-hidden="true"></span>
+                        </div>
+
+                        <div class="mobile-actions-stack">
+                            <div class="mobile-action-group mobile-action-group-showcase" id="mobile-showcase-actions">
+                                <button class="btn mobile-action-btn" id="mobile-speed-down" type="button">Slow</button>
+                                <button class="btn mobile-action-btn" id="mobile-speed-up" type="button">Fast</button>
+                                <button class="btn mobile-action-btn" id="mobile-rise" type="button">Rise</button>
+                                <button class="btn mobile-action-btn" id="mobile-drop" type="button">Drop</button>
+                                <button class="btn btn-primary mobile-action-btn" id="mobile-boost" type="button">Boost</button>
+                            </div>
+
+                            <div class="mobile-action-group mobile-action-group-play" id="mobile-play-actions" hidden>
+                                <button class="btn mobile-action-btn" id="mobile-jump" type="button">Jump</button>
+                                <button class="btn mobile-action-btn" id="mobile-sprint" type="button">Sprint</button>
+                                <button class="btn btn-primary mobile-action-btn" id="mobile-respawn" type="button">Respawn</button>
+                            </div>
+                        </div>
+
+                        <div class="mobile-pad mobile-look-pad" id="mobile-look-pad" aria-label="Look pad">
+                            <span class="mobile-pad-label">Look</span>
+                            <span class="mobile-thumb" id="mobile-look-thumb" aria-hidden="true"></span>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="controls">
