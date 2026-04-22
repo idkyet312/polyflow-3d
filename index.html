@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-BW-in6zF.js"></script>
-  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-B3K2TuZy.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-DrK3ZFvJ.css">
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-D07PyhXP.js"></script>
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-KGJxtnsp.css">
 </head>
 <body>
     <main>
@@ -26,18 +26,6 @@
         <div class="workspace">
             <div id="canvas-container">
                 <div class="viewer-menu" aria-label="Viewer controls">
-                    <div class="viewer-menu-card">
-                        <div class="viewer-menu-label">Optimize</div>
-                        <div class="btn btn-primary viewer-menu-btn" id="process-trigger" style="justify-content: center; opacity: 0.5; cursor: not-allowed;">
-                            Run Pipeline <span class="webgpu-badge">WebGPU</span>
-                        </div>
-                        <div class="viewer-slider-group">
-                            <div class="viewer-slider-label">Simplification Ratio</div>
-                            <input type="range" id="ratio-slider" min="0.01" max="0.99" step="0.01" value="0.12">
-                            <div class="viewer-slider-value">Keeping <span id="ratio-value">12%</span> of original triangles</div>
-                        </div>
-                    </div>
-
                     <div class="viewer-menu-card">
                         <div class="viewer-menu-label">Camera Mode</div>
                         <div class="viewer-toggle-group">
@@ -71,6 +59,25 @@
                             <div class="viewer-prop-list" id="imported-prop-list"></div>
                         </div>
                         <input type="file" id="prop-file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
+                    </div>
+
+                    <div class="viewer-menu-card">
+                        <div class="viewer-menu-label">Mouse Actions</div>
+                        <div class="viewer-inline-note">These snippets run only in Play mode. Left and right mouse buttons each use their own Three.js code.</div>
+                        <label class="viewer-code-field" for="left-mouse-action">
+                            <span class="viewer-code-field-label">Left Mouse Button</span>
+                            <textarea id="left-mouse-action" class="viewer-code-textarea" rows="5" spellcheck="false"></textarea>
+                        </label>
+                        <label class="viewer-code-field" for="right-mouse-action">
+                            <span class="viewer-code-field-label">Right Mouse Button</span>
+                            <textarea id="right-mouse-action" class="viewer-code-textarea" rows="5" spellcheck="false"></textarea>
+                        </label>
+                        <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                            <button class="btn btn-primary viewer-menu-btn" id="apply-mouse-actions">Apply Code</button>
+                            <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="reset-mouse-actions">Reset Defaults</button>
+                        </div>
+                        <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive(), spawnImportedProp()</div>
+                        <div class="viewer-inline-note" id="mouse-action-status">Loading mouse action snippets...</div>
                     </div>
                 </div>
 
