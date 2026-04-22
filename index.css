@@ -780,16 +780,14 @@ body.play-active .play-status {
     right: 0.75rem;
     bottom: calc(4.8rem + env(safe-area-inset-bottom, 0px));
     display: grid;
-    grid-template-columns: minmax(6.7rem, 1fr) minmax(11.5rem, 1.25fr) minmax(6.7rem, 1fr);
+    grid-template-columns: minmax(6.7rem, 1fr) minmax(6.7rem, 1fr);
     gap: 0.65rem;
     align-items: end;
     pointer-events: none;
     z-index: 18;
   }
 
-  .mobile-pad,
-  .mobile-actions-stack,
-  .mobile-action-group {
+  .mobile-pad {
     pointer-events: auto;
   }
 
@@ -839,34 +837,12 @@ body.play-active .play-status {
     transition: transform 0.08s linear;
   }
 
-  .mobile-actions-stack {
-    align-self: stretch;
-    display: flex;
-    align-items: stretch;
-  }
-
-  .mobile-action-group {
-    width: 100%;
-    display: grid;
-    gap: 0.45rem;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-content: end;
-  }
-
-  .mobile-action-group-showcase {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .mobile-action-btn {
     min-width: 0;
     justify-content: center;
     padding: 0.62rem 0.5rem;
     border-radius: 14px;
     background: rgba(255, 255, 255, 0.92);
-  }
-
-  .mobile-action-group-play .mobile-action-btn {
-    min-height: 2.85rem;
   }
 
   .mobile-action-btn.btn-primary {
@@ -1054,7 +1030,7 @@ body.play-active .play-status {
 @media (max-width: 560px) and (orientation: landscape) {
   .mobile-dock {
     bottom: 4rem;
-    grid-template-columns: minmax(6.2rem, 1fr) minmax(10.8rem, 1.15fr) minmax(6.2rem, 1fr);
+    grid-template-columns: minmax(6.2rem, 1fr) minmax(6.2rem, 1fr);
   }
 
   .mobile-jump-fab {
@@ -1065,14 +1041,6 @@ body.play-active .play-status {
 
   .mobile-pad {
     min-height: 8rem;
-  }
-
-  .mobile-action-group-showcase {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .mobile-action-group-showcase .mobile-action-btn:last-child {
-    grid-column: span 2;
   }
 
   .play-hud {

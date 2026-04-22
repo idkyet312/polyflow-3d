@@ -72,8 +72,7 @@ let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBt
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
-let mobileShowcaseActions, mobilePlayActions;
-let mobileJumpBtn, mobileSprintBtn;
+let mobileJumpBtn;
 let lightGridGroup;
 const lightGridTiles = [];
 const IMPORTED_PROP_COLLISION_LABELS = {
@@ -2557,14 +2556,6 @@ function resetMobileLookPad() {
 }
 
 function syncMobileActionVisibility() {
-    if (mobileShowcaseActions) {
-        mobileShowcaseActions.hidden = gameplay.active;
-    }
-
-    if (mobilePlayActions) {
-        mobilePlayActions.hidden = !gameplay.active;
-    }
-
     if (mobileJumpBtn) {
         mobileJumpBtn.hidden = !gameplay.active;
     }
@@ -2649,10 +2640,7 @@ function setupMobileControls() {
     mobileMoveThumb = document.getElementById('mobile-move-thumb');
     mobileLookPad = document.getElementById('mobile-look-pad');
     mobileLookThumb = document.getElementById('mobile-look-thumb');
-    mobileShowcaseActions = document.getElementById('mobile-showcase-actions');
-    mobilePlayActions = document.getElementById('mobile-play-actions');
     mobileJumpBtn = document.getElementById('mobile-jump');
-    mobileSprintBtn = document.getElementById('mobile-sprint');
 
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
     mobileModeToggleBtn?.addEventListener('click', () => setCameraMode(gameplay.active ? 'showcase' : 'play'));
@@ -2663,12 +2651,6 @@ function setupMobileControls() {
         if (gameplay.active) {
             physics.jumpQueued = true;
         }
-    });
-
-    applyMobileHoldButton(mobileSprintBtn, () => {
-        gameplay.input.sprint = true;
-    }, () => {
-        gameplay.input.sprint = false;
     });
 
     bindMobilePad(mobileMovePad, mobileMoveThumb, (event) => {
@@ -3110,6 +3092,12 @@ function setupGameplayEvents() {
     renderer.domElement.addEventListener('click', handleLightGridClick);
     renderer.domElement.addEventListener('pointerdown', (event) => {
         if (event.pointerType === 'mouse') return;
+        if (gameplay.active) {
+            if (runMouseAction('left', event)) {
+                event.preventDefault();
+            }
+            return;
+        }
         if (maybeOpenObjectScriptMenuFromMobileTap(event)) {
             event.preventDefault();
         }
@@ -3418,9 +3406,9 @@ function updateGameplayUI() {
 
     if (playHint) {
         if (mobileActive && gameplay.active) {
-            playHint.textContent = 'Touch left pad to move, right pad to look, Jump and Sprint for play, Respawn to reset, and Menu for assets.';
+            playHint.textContent = 'Touch left pad to move, right pad to look, tap the scene to run play scripts, and use Jump to hop.';
         } else if (mobileActive) {
-            playHint.textContent = 'Touch left pad to move, right pad to look, Slow/Fast to change camera speed, Rise/Drop to move vertically, and Boost for showcase movement.';
+            playHint.textContent = 'Touch left pad to move, right pad to look, double-tap a prop to open its script menu, and use Menu for assets.';
         } else if (!hasAsset && gameplay.active) {
             playHint.textContent = 'WASD move, mouse look, Space jump, Shift sprint, R respawn, Esc exit.';
         } else if (!hasAsset) {
