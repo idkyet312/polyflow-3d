@@ -295,6 +295,42 @@ main {
   min-width: 0;
 }
 
+.viewer-context-menu {
+  position: absolute;
+  z-index: 22;
+  min-width: 220px;
+  padding: 0.4rem;
+  border-radius: 18px;
+  background: rgba(8, 8, 8, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(18px);
+}
+
+.viewer-context-menu[hidden] {
+  display: none;
+}
+
+.viewer-context-menu-item {
+  width: 100%;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text-color);
+  text-align: left;
+  padding: 0.85rem 0.95rem;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.viewer-context-menu-item:hover,
+.viewer-context-menu-item:focus-visible {
+  background: rgba(112, 0, 255, 0.18);
+  color: #fff;
+  outline: none;
+}
+
 .viewer-modal {
   position: absolute;
   inset: 0;
@@ -366,6 +402,37 @@ main {
   width: 100%;
   margin-top: 0.7rem;
   justify-content: center;
+}
+
+.viewer-script-editor-card {
+  width: min(560px, 100%);
+}
+
+.viewer-script-editor-target,
+.viewer-script-editor-mode {
+  margin-top: 0.75rem;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.72rem 0.8rem;
+}
+
+.viewer-script-editor-target {
+  font-size: 0.88rem;
+  color: var(--text-color);
+}
+
+.viewer-script-editor-mode {
+  margin-top: 0.5rem;
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+}
+
+.viewer-script-editor-status {
+  min-height: 2.1em;
 }
 
 /* Processing Overlay */
@@ -919,6 +986,13 @@ body.play-active .play-status {
   .controls .env-select,
   .controls .res-group {
     flex: 0 0 auto;
+  }
+
+  .controls #env-selector,
+  .controls .res-group,
+  .controls #toggle-wireframe,
+  .controls #reset-view {
+    display: none;
   }
 
   .btn {

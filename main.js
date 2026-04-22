@@ -66,10 +66,14 @@ let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browse
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
 let propCollisionPrompt, propCollisionCopy, propCollisionRemember, propCollisionSimpleBtn, propCollisionComplexBtn, propCollisionCancelBtn;
 let leftMouseActionInput, rightMouseActionInput, mouseActionApplyBtn, mouseActionResetBtn, mouseActionStatus;
-let mobileMenuToggleBtn, mobileModeToggleBtn, mobileResetToggleBtn;
+let objectScriptMenu, objectScriptTickActionBtn, objectScriptCollisionActionBtn;
+let objectScriptEditor, objectScriptEditorTitle, objectScriptEditorTarget, objectScriptEditorMode;
+let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBtn, objectScriptEditorClearBtn, objectScriptEditorCancelBtn;
+let objectScriptTickToggleRow, objectScriptTickToggleInput;
+let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
 let mobileShowcaseActions, mobilePlayActions;
-let mobileSpeedDownBtn, mobileSpeedUpBtn, mobileRiseBtn, mobileDropBtn, mobileBoostBtn, mobileJumpBtn, mobileSprintBtn, mobileRespawnBtn;
+let mobileJumpBtn, mobileSprintBtn;
 let lightGridGroup;
 const lightGridTiles = [];
 const IMPORTED_PROP_COLLISION_LABELS = {
@@ -92,6 +96,7 @@ const importedPropState = {
     promptResolver: null,
 };
 const MOUSE_ACTION_STORAGE_KEY = 'polyflow-3d.mouse-actions.v1';
+const OBJECT_SCRIPT_STORAGE_KEY = 'polyflow-3d.object-scripts.v1';
 const DEFAULT_MOUSE_ACTION_SCRIPTS = {
     left: `const sphere = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, -1, 0), 0.5);
 if (sphere) {
@@ -122,6 +127,7 @@ if (cube) {
 }`,
 };
 const MouseActionFunction = Object.getPrototypeOf(async function () {}).constructor;
+const ObjectEventFunction = MouseActionFunction;
 const mouseActionState = {
     leftSource: DEFAULT_MOUSE_ACTION_SCRIPTS.left,
     rightSource: DEFAULT_MOUSE_ACTION_SCRIPTS.right,
@@ -129,6 +135,16 @@ const mouseActionState = {
     rightCompiled: null,
     leftError: '',
     rightError: '',
+};
+const objectScriptState = {
+    nextPropId: 1,
+    drafts: {},
+    menuOpen: false,
+    editorOpen: false,
+    menuScreenX: 0,
+    menuScreenY: 0,
+    targetPropId: '',
+    targetEvent: 'tick',
 };
 
 const clock = new THREE.Clock();
@@ -143,6 +159,7 @@ const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
+const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
 const gameplay = {
     canPlay: true,
@@ -1092,12 +1109,12 @@ function spawnImportedProp(templateId) {
 
     visual.position.copy(spawnPosition);
     scene.add(visual);
-    physics.dynamicBodies.push({
+    physics.dynamicBodies.push(syncPropScriptState({
         body,
         mesh: visual,
         kind: 'imported',
         templateId,
-    });
+    }));
 }
 
 async function importPhysicsProp(file, fileMap = {}) {
@@ -1304,6 +1321,12 @@ function destroyPhysicsBody(body) {
 function destroyDynamicPhysicsProp(prop) {
     if (!prop) return;
 
+    if (objectScriptState.targetPropId && objectScriptState.targetPropId === prop.id) {
+        objectScriptState.targetPropId = '';
+        objectScriptState.menuOpen = false;
+        objectScriptState.editorOpen = false;
+    }
+
     if (prop.mesh) {
         scene?.remove(prop.mesh);
         disposeRenderableObject(prop.mesh);
@@ -1315,6 +1338,8 @@ function destroyDynamicPhysicsProp(prop) {
         destroyPhysicsBody(prop.body);
         prop.body = null;
     }
+
+    removeObjectScriptDraft(prop.id);
 }
 
 function clearDynamicPhysicsProps() {
@@ -1390,6 +1415,9 @@ function spawnDynamicPrimitive(kind, offset, scale) {
         return;
     }
 
+    const defaultScale = kind === 'sphere' ? 0.5 : 0.3;
+    const normalizedScale = Number.isFinite(scale) && scale > 0 ? scale : defaultScale;
+
     const { Jolt } = physics;
     const spawnPosition = tempVectorD;
     const launchImpulse = tempVectorE;
@@ -1403,7 +1431,7 @@ function spawnDynamicPrimitive(kind, offset, scale) {
     let shape;
 
     if (kind === 'sphere') {
-        const radius = scale;
+        const radius = normalizedScale;
         shape = createOwnedShape(new Jolt.SphereShapeSettings(radius));
         mesh = new THREE.Mesh(
             new THREE.SphereGeometry(radius, 28, 20),
@@ -1416,7 +1444,7 @@ function spawnDynamicPrimitive(kind, offset, scale) {
             })
         );
     } else {
-        const halfExtent = scale;
+        const halfExtent = normalizedScale;
         const halfExtentVector = new Jolt.Vec3(halfExtent, halfExtent, halfExtent);
         shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
         Jolt.destroy(halfExtentVector);
@@ -1448,7 +1476,7 @@ function spawnDynamicPrimitive(kind, offset, scale) {
     mesh.position.copy(spawnPosition);
     scene.add(mesh);
 
-    physics.dynamicBodies.push({ body, mesh, kind });
+    physics.dynamicBodies.push(syncPropScriptState({ body, mesh, kind }));
 
     return body;
 }
@@ -1625,6 +1653,555 @@ function stepPhysics(delta) {
     const collisionSteps = delta > 1 / 55 ? 2 : 1;
     physics.jolt.Step(delta, collisionSteps);
     syncDynamicPhysicsBodies();
+    updateDynamicBodyCollisionScripts();
+}
+
+function createDefaultObjectEventState(eventName) {
+    return {
+        source: '',
+        compiled: null,
+        error: '',
+        enabled: false,
+        running: false,
+        eventName,
+    };
+}
+
+function createObjectScriptState(propId = '') {
+    return {
+        propId,
+        tick: createDefaultObjectEventState('tick'),
+        collision: createDefaultObjectEventState('collision'),
+        activeCollisions: new Set(),
+    };
+}
+
+function sanitizeObjectScriptDrafts(rawValue) {
+    if (!rawValue || typeof rawValue !== 'object') {
+        return {};
+    }
+
+    const drafts = {};
+
+    Object.entries(rawValue).forEach(([propId, value]) => {
+        if (!value || typeof value !== 'object') return;
+
+        drafts[propId] = {
+            tick: typeof value.tick === 'string' ? value.tick : '',
+            tickEnabled: value.tickEnabled === true,
+            collision: typeof value.collision === 'string' ? value.collision : '',
+        };
+    });
+
+    return drafts;
+}
+
+function readObjectScriptDrafts() {
+    try {
+        const rawValue = window.localStorage.getItem(OBJECT_SCRIPT_STORAGE_KEY);
+        if (!rawValue) return {};
+
+        return sanitizeObjectScriptDrafts(JSON.parse(rawValue));
+    } catch (error) {
+        console.warn('Failed to load object script drafts.', error);
+        return {};
+    }
+}
+
+function saveObjectScriptDrafts() {
+    try {
+        window.localStorage.setItem(OBJECT_SCRIPT_STORAGE_KEY, JSON.stringify(objectScriptState.drafts));
+    } catch (error) {
+        console.warn('Failed to save object script drafts.', error);
+    }
+}
+
+function ensureObjectScriptDraftEntry(propId) {
+    if (!propId) {
+        return { tick: '', tickEnabled: false, collision: '' };
+    }
+
+    if (!objectScriptState.drafts[propId]) {
+        objectScriptState.drafts[propId] = {
+            tick: '',
+            tickEnabled: false,
+            collision: '',
+        };
+    }
+
+    return objectScriptState.drafts[propId];
+}
+
+function createRuntimePropId() {
+    const propId = `prop-${objectScriptState.nextPropId++}`;
+    ensureObjectScriptDraftEntry(propId);
+    return propId;
+}
+
+function compileObjectEventScript(source) {
+    const normalizedSource = typeof source === 'string' ? source.trim() : '';
+
+    if (!normalizedSource) {
+        return new ObjectEventFunction('api', '"use strict"; return;');
+    }
+
+    return new ObjectEventFunction('api', `
+        "use strict";
+        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, object, body, eventType, deltaTime, collision, spawnDynamicPrimitive, spawnImportedProp } = api;
+        ${normalizedSource}
+    `);
+}
+
+function syncPropScriptState(prop) {
+    if (!prop) return prop;
+
+    const propId = prop.id || createRuntimePropId();
+    prop.id = propId;
+    const drafts = ensureObjectScriptDraftEntry(propId);
+    const scriptState = createObjectScriptState(propId);
+
+    scriptState.tick.source = drafts.tick;
+    scriptState.collision.source = drafts.collision;
+
+    try {
+        scriptState.tick.compiled = compileObjectEventScript(scriptState.tick.source);
+        scriptState.tick.enabled = !!scriptState.tick.source.trim() && drafts.tickEnabled === true;
+    } catch (error) {
+        scriptState.tick.error = error?.message || String(error);
+        scriptState.tick.compiled = null;
+        scriptState.tick.enabled = false;
+    }
+
+    try {
+        scriptState.collision.compiled = compileObjectEventScript(scriptState.collision.source);
+        scriptState.collision.enabled = !!scriptState.collision.source.trim();
+    } catch (error) {
+        scriptState.collision.error = error?.message || String(error);
+        scriptState.collision.compiled = null;
+        scriptState.collision.enabled = false;
+    }
+
+    prop.scripts = scriptState;
+
+    if (prop.mesh?.userData) {
+        prop.mesh.userData.dynamicPropId = propId;
+    }
+
+    return prop;
+}
+
+function removeObjectScriptDraft(propId) {
+    if (!propId || !objectScriptState.drafts[propId]) return;
+
+    delete objectScriptState.drafts[propId];
+    saveObjectScriptDrafts();
+}
+
+function findDynamicPropByMesh(target) {
+    if (!target) return null;
+
+    return physics.dynamicBodies.find((prop) => {
+        let current = target;
+
+        while (current) {
+            if (current === prop.mesh) {
+                return true;
+            }
+
+            current = current.parent;
+        }
+
+        return false;
+    }) || null;
+}
+
+function getObjectScriptEventLabel(eventType) {
+    return eventType === 'collision' ? 'Collision' : 'Tick';
+}
+
+function getDynamicPropDisplayName(prop) {
+    if (!prop) return 'No prop selected';
+
+    if (prop.kind === 'imported') {
+        const template = importedPropState.templates.find((entry) => entry.id === prop.templateId);
+        return template?.displayName || 'Imported Prop';
+    }
+
+    return prop.kind === 'sphere' ? 'Sphere Prop' : 'Cube Prop';
+}
+
+function getDynamicPropById(propId) {
+    return physics.dynamicBodies.find((prop) => prop.id === propId) || null;
+}
+
+function getDynamicPropHitFromEvent(event) {
+    if (!renderer || !camera || !physics.dynamicBodies.length) return null;
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNdc, camera);
+
+    const targets = physics.dynamicBodies
+        .map((prop) => prop.mesh)
+        .filter(Boolean);
+
+    const hits = raycaster.intersectObjects(targets, true);
+    for (const hit of hits) {
+        const prop = findDynamicPropByMesh(hit.object);
+        if (prop) {
+            return { prop, hit };
+        }
+    }
+
+    return null;
+}
+
+function updateObjectScriptEditorStatus(extraMessage = '') {
+    if (!objectScriptEditorStatus) return;
+
+    const prop = getDynamicPropById(objectScriptState.targetPropId);
+    const eventType = objectScriptState.targetEvent;
+    const eventState = prop?.scripts?.[eventType];
+    let baseMessage;
+
+    if (eventState?.error) {
+        baseMessage = `${getObjectScriptEventLabel(eventType)} code error: ${eventState.error}`;
+    } else if (eventType === 'tick' && eventState?.source?.trim() && !eventState.enabled) {
+        baseMessage = 'Tick code is saved but disabled. Turn on the tick toggle to run it in Play mode.';
+    } else {
+        baseMessage = `${getObjectScriptEventLabel(eventType)} code is ${eventState?.enabled ? 'ready' : 'empty'}.`;
+    }
+
+    objectScriptEditorStatus.textContent = extraMessage ? `${baseMessage} ${extraMessage}` : baseMessage;
+}
+
+function syncObjectScriptEditor() {
+    const prop = getDynamicPropById(objectScriptState.targetPropId);
+    const eventType = objectScriptState.targetEvent;
+    const eventState = prop?.scripts?.[eventType];
+
+    if (objectScriptEditorTitle) {
+        objectScriptEditorTitle.textContent = `Attach ${getObjectScriptEventLabel(eventType)} Script`;
+    }
+
+    if (objectScriptEditorTarget) {
+        objectScriptEditorTarget.textContent = `Target: ${getDynamicPropDisplayName(prop)}`;
+    }
+
+    if (objectScriptEditorMode) {
+        objectScriptEditorMode.textContent = `Event: ${getObjectScriptEventLabel(eventType)}`;
+    }
+
+    if (objectScriptTickToggleRow) {
+        objectScriptTickToggleRow.hidden = eventType !== 'tick';
+    }
+
+    if (objectScriptTickToggleInput) {
+        objectScriptTickToggleInput.checked = eventType === 'tick' ? !!eventState?.enabled : false;
+    }
+
+    if (objectScriptEditorInput) {
+        objectScriptEditorInput.value = eventState?.source || '';
+    }
+
+    updateObjectScriptEditorStatus();
+}
+
+function closeObjectScriptMenu() {
+    objectScriptState.menuOpen = false;
+
+    if (objectScriptMenu) {
+        objectScriptMenu.hidden = true;
+    }
+}
+
+function closeObjectScriptEditor() {
+    objectScriptState.editorOpen = false;
+
+    if (objectScriptEditor) {
+        objectScriptEditor.hidden = true;
+    }
+}
+
+function openObjectScriptMenu(event, prop) {
+    if (!objectScriptMenu || !container || !prop) return;
+
+    objectScriptState.targetPropId = prop.id;
+    objectScriptState.menuOpen = true;
+    objectScriptState.menuScreenX = event.clientX;
+    objectScriptState.menuScreenY = event.clientY;
+
+    objectScriptMenu.hidden = false;
+
+    const containerRect = container.getBoundingClientRect();
+    const menuWidth = objectScriptMenu.offsetWidth || 220;
+    const menuHeight = objectScriptMenu.offsetHeight || 120;
+    const left = THREE.MathUtils.clamp(
+        event.clientX - containerRect.left,
+        12,
+        Math.max(12, containerRect.width - menuWidth - 12)
+    );
+    const top = THREE.MathUtils.clamp(
+        event.clientY - containerRect.top,
+        12,
+        Math.max(12, containerRect.height - menuHeight - 12)
+    );
+
+    objectScriptMenu.style.left = `${left}px`;
+    objectScriptMenu.style.top = `${top}px`;
+}
+
+function openObjectScriptEditor(eventType) {
+    const prop = getDynamicPropById(objectScriptState.targetPropId);
+    if (!prop || !objectScriptEditor) return;
+
+    objectScriptState.targetEvent = eventType;
+    objectScriptState.editorOpen = true;
+    closeObjectScriptMenu();
+    syncObjectScriptEditor();
+    objectScriptEditor.hidden = false;
+
+    if (objectScriptEditorInput) {
+        objectScriptEditorInput.focus();
+        objectScriptEditorInput.setSelectionRange(
+            objectScriptEditorInput.value.length,
+            objectScriptEditorInput.value.length
+        );
+    }
+}
+
+function updatePropScriptSource(prop, eventType, source, { persist = true, notify = true } = {}) {
+    if (!prop?.scripts?.[eventType]) return false;
+
+    const normalizedSource = typeof source === 'string' ? source : '';
+    const eventState = prop.scripts[eventType];
+    eventState.source = normalizedSource;
+    eventState.error = '';
+
+    try {
+        eventState.compiled = compileObjectEventScript(normalizedSource);
+        eventState.enabled = eventType === 'tick'
+            ? !!normalizedSource.trim() && !!prop.scripts.tick.enabled
+            : !!normalizedSource.trim();
+    } catch (error) {
+        eventState.error = error?.message || String(error);
+        eventState.compiled = null;
+        eventState.enabled = false;
+        if (notify) {
+            alert(`error: ${eventState.error}`);
+        }
+    }
+
+    const drafts = ensureObjectScriptDraftEntry(prop.id);
+    drafts[eventType] = normalizedSource;
+    if (eventType === 'tick') {
+        drafts.tickEnabled = !!prop.scripts.tick.enabled;
+    }
+
+    if (persist) {
+        saveObjectScriptDrafts();
+    }
+
+    updateObjectScriptEditorStatus(
+        eventState.error
+            ? `${getObjectScriptEventLabel(eventType)} code failed to compile.`
+            : `${getObjectScriptEventLabel(eventType)} code applied.`
+    );
+
+    return !eventState.error;
+}
+
+function clearPropScriptSource(prop, eventType) {
+    return updatePropScriptSource(prop, eventType, '', { persist: true, notify: false });
+}
+
+function setPropTickEventEnabled(prop, isEnabled, { persist = true } = {}) {
+    if (!prop?.scripts?.tick) return;
+
+    const tickState = prop.scripts.tick;
+    tickState.enabled = !!isEnabled && !!tickState.source.trim() && !tickState.error;
+
+    const drafts = ensureObjectScriptDraftEntry(prop.id);
+    drafts.tickEnabled = !!isEnabled;
+
+    if (persist) {
+        saveObjectScriptDrafts();
+    }
+
+    updateObjectScriptEditorStatus(
+        tickState.enabled
+            ? 'Tick event enabled for Play mode.'
+            : 'Tick event disabled.'
+    );
+}
+
+function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null } = {}) {
+    return {
+        THREE,
+        scene,
+        camera,
+        renderer,
+        currentMesh,
+        gameplay,
+        showcase,
+        physics,
+        prop,
+        object: prop?.mesh || null,
+        body: prop?.body || null,
+        eventType,
+        deltaTime,
+        collision,
+        spawnDynamicPrimitive,
+        spawnImportedProp,
+    };
+}
+
+function handleObjectScriptRuntimeError(prop, eventType, error) {
+    const eventState = prop?.scripts?.[eventType];
+    if (!eventState) return;
+
+    const errorMessage = error?.message || String(error);
+    eventState.error = errorMessage;
+    eventState.enabled = false;
+    eventState.running = false;
+    alert(`error: ${errorMessage}`);
+
+    if (objectScriptState.targetPropId === prop.id && objectScriptState.targetEvent === eventType) {
+        updateObjectScriptEditorStatus(`${getObjectScriptEventLabel(eventType)} code failed at runtime.`);
+    }
+}
+
+function runObjectEventScript(prop, eventType, options = {}) {
+    const eventState = prop?.scripts?.[eventType];
+    if (!eventState?.enabled || !eventState.compiled || eventState.running) {
+        return false;
+    }
+
+    eventState.running = true;
+    Promise.resolve(eventState.compiled(buildObjectEventApi(prop, eventType, options)))
+        .then(() => {
+            eventState.running = false;
+            if (objectScriptState.targetPropId === prop.id && objectScriptState.targetEvent === eventType) {
+                updateObjectScriptEditorStatus(`${getObjectScriptEventLabel(eventType)} code ran.`);
+            }
+        })
+        .catch((error) => {
+            handleObjectScriptRuntimeError(prop, eventType, error);
+        });
+
+    return true;
+}
+
+function runObjectTickScripts(delta) {
+    if (!gameplay.active) {
+        return;
+    }
+
+    physics.dynamicBodies.forEach((prop) => {
+        if (!prop?.mesh || !prop.body) return;
+        runObjectEventScript(prop, 'tick', { deltaTime: delta });
+    });
+}
+
+function registerCollisionForProp(contactMap, prop, collisionKey, collision) {
+    if (!prop?.scripts?.collision) return;
+
+    let propContacts = contactMap.get(prop.id);
+    if (!propContacts) {
+        propContacts = new Map();
+        contactMap.set(prop.id, propContacts);
+    }
+
+    propContacts.set(collisionKey, collision);
+}
+
+function updateDynamicBodyCollisionScripts() {
+    if (!physics.dynamicBodies.length) return;
+
+    const entries = physics.dynamicBodies
+        .filter((prop) => prop?.mesh && prop.body)
+        .map((prop) => ({
+            prop,
+            bounds: new THREE.Box3().setFromObject(prop.mesh),
+        }));
+
+    const contactMap = new Map();
+
+    for (let index = 0; index < entries.length; index++) {
+        const current = entries[index];
+        const groundHeight = getGroundHeightAt(current.prop.mesh.position.x, current.prop.mesh.position.z, true);
+
+        if (groundHeight !== null && current.bounds.min.y <= groundHeight + 0.08) {
+            registerCollisionForProp(contactMap, current.prop, `ground:${current.prop.id}`, {
+                type: 'ground',
+                groundHeight,
+                point: current.prop.mesh.position.clone(),
+            });
+        }
+
+        for (let otherIndex = index + 1; otherIndex < entries.length; otherIndex++) {
+            const other = entries[otherIndex];
+            if (!current.bounds.intersectsBox(other.bounds)) continue;
+
+            const collisionKey = [current.prop.id, other.prop.id].sort().join(':');
+            registerCollisionForProp(contactMap, current.prop, collisionKey, {
+                type: 'prop',
+                otherProp: other.prop,
+                otherObject: other.prop.mesh,
+                otherBody: other.prop.body,
+            });
+            registerCollisionForProp(contactMap, other.prop, collisionKey, {
+                type: 'prop',
+                otherProp: current.prop,
+                otherObject: current.prop.mesh,
+                otherBody: current.prop.body,
+            });
+        }
+    }
+
+    physics.dynamicBodies.forEach((prop) => {
+        const eventState = prop?.scripts?.collision;
+        if (!eventState) return;
+
+        const activeCollisions = prop.scripts.activeCollisions || new Set();
+        const nextCollisions = contactMap.get(prop.id) || new Map();
+
+        nextCollisions.forEach((collision, collisionKey) => {
+            if (!activeCollisions.has(collisionKey)) {
+                runObjectEventScript(prop, 'collision', { collision });
+            }
+        });
+
+        prop.scripts.activeCollisions = new Set(nextCollisions.keys());
+    });
+}
+
+function handleObjectScriptGlobalPointerDown(event) {
+    const clickedInsideMenu = objectScriptMenu && !objectScriptMenu.hidden && objectScriptMenu.contains(event.target);
+    const clickedInsideEditor = objectScriptEditor && !objectScriptEditor.hidden && objectScriptEditor.contains(event.target);
+
+    if (!clickedInsideMenu && objectScriptState.menuOpen) {
+        closeObjectScriptMenu();
+    }
+
+    if (!clickedInsideEditor && objectScriptState.editorOpen && event.target !== renderer?.domElement) {
+        closeObjectScriptEditor();
+    }
+}
+
+function handleObjectScriptKeydown(event) {
+    if (event.key !== 'Escape') return;
+
+    if (objectScriptState.menuOpen) {
+        closeObjectScriptMenu();
+    }
+
+    if (objectScriptState.editorOpen) {
+        closeObjectScriptEditor();
+    }
 }
 
 function readMouseActionDrafts() {
@@ -1752,6 +2329,7 @@ function resetMouseActionScripts() {
 }
 
 function initializeMouseActionScripts() {
+    objectScriptState.drafts = readObjectScriptDrafts();
     mouseActionState.leftSource = DEFAULT_MOUSE_ACTION_SCRIPTS.left;
     mouseActionState.rightSource = DEFAULT_MOUSE_ACTION_SCRIPTS.right;
     syncMouseActionInputs();
@@ -1795,6 +2373,8 @@ const downloadBtn = document.getElementById('download-asset');
 
 function setCameraMode(mode) {
     if (mode === 'play') {
+        closeObjectScriptMenu();
+        closeObjectScriptEditor();
         if (!gameplay.active && !gameplay.pointerLocked) {
             enterGameplay();
         }
@@ -1958,9 +2538,6 @@ function syncMobileActionVisibility() {
         mobileModeToggleBtn.classList.toggle('viewer-toggle-btn-active', gameplay.active);
     }
 
-    if (mobileResetToggleBtn) {
-        mobileResetToggleBtn.textContent = gameplay.active ? 'Respawn' : 'Reset';
-    }
 }
 
 function updateMobileButtons() {
@@ -2032,47 +2609,17 @@ function bindMobilePad(padElement, thumbElement, onMove, onRelease) {
 function setupMobileControls() {
     mobileMenuToggleBtn = document.getElementById('mobile-menu-toggle');
     mobileModeToggleBtn = document.getElementById('mobile-mode-toggle');
-    //mobileResetToggleBtn = document.getElementById('mobile-reset-toggle');
     mobileMovePad = document.getElementById('mobile-move-pad');
     mobileMoveThumb = document.getElementById('mobile-move-thumb');
     mobileLookPad = document.getElementById('mobile-look-pad');
     mobileLookThumb = document.getElementById('mobile-look-thumb');
     mobileShowcaseActions = document.getElementById('mobile-showcase-actions');
     mobilePlayActions = document.getElementById('mobile-play-actions');
-    //mobileSpeedDownBtn = document.getElementById('mobile-speed-down');
-    //mobileSpeedUpBtn = document.getElementById('mobile-speed-up');
-    mobileRiseBtn = document.getElementById('mobile-rise');
-    mobileDropBtn = document.getElementById('mobile-drop');
-    mobileBoostBtn = document.getElementById('mobile-boost');
     mobileJumpBtn = document.getElementById('mobile-jump');
     mobileSprintBtn = document.getElementById('mobile-sprint');
-    //mobileRespawnBtn = document.getElementById('mobile-respawn');
 
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
     mobileModeToggleBtn?.addEventListener('click', () => setCameraMode(gameplay.active ? 'showcase' : 'play'));
-    mobileResetToggleBtn?.addEventListener('click', () => {
-        if (gameplay.active) {
-            respawnPlayer(true);
-        } else {
-            resetShowcaseCamera(true);
-        }
-    });
-
-    applyMobileHoldButton(mobileRiseBtn, () => {
-        showcase.input.up = true;
-    }, () => {
-        showcase.input.up = false;
-    });
-    applyMobileHoldButton(mobileDropBtn, () => {
-        showcase.input.down = true;
-    }, () => {
-        showcase.input.down = false;
-    });
-    applyMobileHoldButton(mobileBoostBtn, () => {
-        showcase.input.boost = true;
-    }, () => {
-        showcase.input.boost = false;
-    });
 
     mobileJumpBtn?.addEventListener('click', () => {
         if (gameplay.active) {
@@ -2084,12 +2631,6 @@ function setupMobileControls() {
         gameplay.input.sprint = true;
     }, () => {
         gameplay.input.sprint = false;
-    });
-
-    mobileRespawnBtn?.addEventListener('click', () => {
-        if (gameplay.active) {
-            respawnPlayer(true);
-        }
     });
 
     bindMobilePad(mobileMovePad, mobileMoveThumb, (event) => {
@@ -2152,6 +2693,20 @@ async function init() {
     mouseActionApplyBtn = document.getElementById('apply-mouse-actions');
     mouseActionResetBtn = document.getElementById('reset-mouse-actions');
     mouseActionStatus = document.getElementById('mouse-action-status');
+    objectScriptMenu = document.getElementById('object-script-menu');
+    objectScriptTickActionBtn = document.getElementById('object-script-action-tick');
+    objectScriptCollisionActionBtn = document.getElementById('object-script-action-collision');
+    objectScriptEditor = document.getElementById('object-script-editor');
+    objectScriptEditorTitle = document.getElementById('object-script-editor-title');
+    objectScriptEditorTarget = document.getElementById('object-script-editor-target');
+    objectScriptEditorMode = document.getElementById('object-script-editor-mode');
+    objectScriptTickToggleRow = document.getElementById('object-script-tick-toggle-row');
+    objectScriptTickToggleInput = document.getElementById('object-script-tick-toggle');
+    objectScriptEditorInput = document.getElementById('object-script-editor-input');
+    objectScriptEditorStatus = document.getElementById('object-script-editor-status');
+    objectScriptEditorApplyBtn = document.getElementById('object-script-editor-apply');
+    objectScriptEditorClearBtn = document.getElementById('object-script-editor-clear');
+    objectScriptEditorCancelBtn = document.getElementById('object-script-editor-cancel');
 
     if (browseModelBtn) {
         browseModelBtn.addEventListener('click', () => {
@@ -2209,6 +2764,27 @@ async function init() {
 
     mouseActionApplyBtn?.addEventListener('click', () => applyMouseActionScripts({ persist: true }));
     mouseActionResetBtn?.addEventListener('click', () => resetMouseActionScripts());
+    objectScriptTickActionBtn?.addEventListener('click', () => openObjectScriptEditor('tick'));
+    objectScriptCollisionActionBtn?.addEventListener('click', () => openObjectScriptEditor('collision'));
+    objectScriptEditorApplyBtn?.addEventListener('click', () => {
+        const prop = getDynamicPropById(objectScriptState.targetPropId);
+        if (!prop || !objectScriptEditorInput) return;
+        updatePropScriptSource(prop, objectScriptState.targetEvent, objectScriptEditorInput.value, { persist: true, notify: true });
+    });
+    objectScriptTickToggleInput?.addEventListener('change', () => {
+        const prop = getDynamicPropById(objectScriptState.targetPropId);
+        if (!prop) return;
+        setPropTickEventEnabled(prop, !!objectScriptTickToggleInput.checked, { persist: true });
+    });
+    objectScriptEditorClearBtn?.addEventListener('click', () => {
+        const prop = getDynamicPropById(objectScriptState.targetPropId);
+        if (!prop) return;
+        clearPropScriptSource(prop, objectScriptState.targetEvent);
+        syncObjectScriptEditor();
+    });
+    objectScriptEditorCancelBtn?.addEventListener('click', () => closeObjectScriptEditor());
+    document.addEventListener('pointerdown', handleObjectScriptGlobalPointerDown, true);
+    document.addEventListener('keydown', handleObjectScriptKeydown);
 
     showcaseModeBtn?.addEventListener('click', () => setCameraMode('showcase'));
     playModeBtn?.addEventListener('click', () => setCameraMode('play'));
@@ -2341,6 +2917,7 @@ async function init() {
             updateShowcaseCamera(delta);
         }
         stepPhysics(delta);
+        runObjectTickScripts(delta);
         renderer.renderAsync(scene, camera);
     });
 }
@@ -2637,7 +3214,17 @@ function handleShowcaseMouseButton(event) {
 
     if (event.type === 'mousedown') {
         renderer.domElement.focus();
+        if (event.button === 0 && objectScriptState.menuOpen) {
+            closeObjectScriptMenu();
+        }
         if (event.button !== 2) return;
+
+        const propHit = getDynamicPropHitFromEvent(event);
+        if (propHit?.prop) {
+            showcase.looking = false;
+            event.preventDefault();
+            return;
+        }
 
         showcase.looking = true;
         event.preventDefault();
@@ -2650,7 +3237,20 @@ function handleShowcaseMouseButton(event) {
 }
 
 function handleShowcaseContextMenu(event) {
+    if (gameplay.active || gameplay.pointerLocked || !renderer) {
+        event.preventDefault();
+        return;
+    }
+
+    const propHit = getDynamicPropHitFromEvent(event);
+    if (propHit?.prop) {
+        event.preventDefault();
+        openObjectScriptMenu(event, propHit.prop);
+        return;
+    }
+
     event.preventDefault();
+    closeObjectScriptMenu();
 }
 
 function handleShowcaseWheel(event) {
@@ -2667,6 +3267,8 @@ function handlePointerLockChange() {
         gameplay.pointerLocked = true;
         gameplay.active = true;
         showcase.looking = false;
+        closeObjectScriptMenu();
+        closeObjectScriptEditor();
         updateWorldPresentation();
         updateGameplayUI();
         renderer.domElement.focus();
