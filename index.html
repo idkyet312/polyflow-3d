@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-D07PyhXP.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-DNex8bZb.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-KGJxtnsp.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-CaeyBxar.css">
 </head>
 <body>
     <main>
@@ -106,6 +106,36 @@
                     </div>
                 </div>
 
+                <div class="viewer-context-menu" id="object-script-menu" hidden>
+                    <button class="viewer-context-menu-item" id="object-script-action-tick" type="button">Add Code on Tick</button>
+                    <button class="viewer-context-menu-item" id="object-script-action-collision" type="button">Add Code on Collision</button>
+                </div>
+
+                <div class="viewer-modal" id="object-script-editor" hidden>
+                    <div class="viewer-modal-card viewer-script-editor-card" role="dialog" aria-modal="true" aria-labelledby="object-script-editor-title">
+                        <div class="viewer-modal-eyebrow">Showcase Object Script</div>
+                        <h2 class="viewer-modal-title" id="object-script-editor-title">Attach Script to Prop</h2>
+                        <p class="viewer-modal-copy">Right-clicked physics props in Showcase mode can run per-object Three.js code on tick or on collision.</p>
+                        <div class="viewer-script-editor-target" id="object-script-editor-target">No prop selected</div>
+                        <div class="viewer-script-editor-mode" id="object-script-editor-mode">Event: Tick</div>
+                        <label class="viewer-checkbox-row" id="object-script-tick-toggle-row" for="object-script-tick-toggle" hidden>
+                            <input type="checkbox" id="object-script-tick-toggle">
+                            <span>Enable this object's tick event in Play mode.</span>
+                        </label>
+                        <label class="viewer-code-field" for="object-script-editor-input">
+                            <span class="viewer-code-field-label">Three.js Code</span>
+                            <textarea id="object-script-editor-input" class="viewer-code-textarea" rows="8" spellcheck="false"></textarea>
+                        </label>
+                        <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, object, body, eventType, deltaTime, collision, spawnDynamicPrimitive(), spawnImportedProp()</div>
+                        <div class="viewer-inline-note viewer-script-editor-status" id="object-script-editor-status">Pick a prop in Showcase mode to attach code.</div>
+                        <div class="viewer-modal-actions">
+                            <button class="btn btn-primary viewer-menu-btn" id="object-script-editor-apply" type="button">Apply Code</button>
+                            <button class="btn viewer-menu-btn" id="object-script-editor-clear" type="button">Clear Code</button>
+                        </div>
+                        <button class="btn viewer-modal-cancel" id="object-script-editor-cancel" type="button">Close</button>
+                    </div>
+                </div>
+
                 <div class="play-hud">
                     <div class="play-status" id="gameplay-status">Play mode is ready. Load a model to explore imported assets too.</div>
                     <div class="play-hint" id="play-hint">Play is available immediately. Load a sample or drop a model anytime to explore imported geometry too.</div>
@@ -117,7 +147,6 @@
                     <div class="mobile-topbar">
                         <button class="btn mobile-chip" id="mobile-menu-toggle" type="button">Menu</button>
                         <button class="btn mobile-chip" id="mobile-mode-toggle" type="button">Play</button>
-                        <button class="btn mobile-chip" id="mobile-reset-toggle" type="button">Reset</button>
                     </div>
 
                     <div class="mobile-dock">
@@ -127,18 +156,9 @@
                         </div>
 
                         <div class="mobile-actions-stack">
-                            <div class="mobile-action-group mobile-action-group-showcase" id="mobile-showcase-actions">
-                                <button class="btn mobile-action-btn" id="mobile-speed-down" type="button">Slow</button>
-                                <button class="btn mobile-action-btn" id="mobile-speed-up" type="button">Fast</button>
-                                <button class="btn mobile-action-btn" id="mobile-rise" type="button">Rise</button>
-                                <button class="btn mobile-action-btn" id="mobile-drop" type="button">Drop</button>
-                                <button class="btn btn-primary mobile-action-btn" id="mobile-boost" type="button">Boost</button>
-                            </div>
-
                             <div class="mobile-action-group mobile-action-group-play" id="mobile-play-actions" hidden>
                                 <button class="btn mobile-action-btn" id="mobile-jump" type="button">Jump</button>
                                 <button class="btn mobile-action-btn" id="mobile-sprint" type="button">Sprint</button>
-                                <button class="btn btn-primary mobile-action-btn" id="mobile-respawn" type="button">Respawn</button>
                             </div>
                         </div>
 
