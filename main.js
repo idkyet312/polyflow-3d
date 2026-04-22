@@ -88,6 +88,9 @@ const mobileState = {
     menuOpen: false,
     movePointerId: null,
     lookPointerId: null,
+    lastWorldTapTime: 0,
+    lastWorldTapX: 0,
+    lastWorldTapY: 0,
 };
 const importedPropState = {
     nextId: 1,
@@ -1926,6 +1929,35 @@ function closeObjectScriptEditor() {
     }
 }
 
+function maybeOpenObjectScriptMenuFromMobileTap(event) {
+    if (!mobileState.enabled || gameplay.active || gameplay.pointerLocked || !renderer) {
+        return false;
+    }
+
+    const now = performance.now();
+    const withinTimeWindow = now - mobileState.lastWorldTapTime <= 320;
+    const withinDistanceWindow = Math.hypot(
+        event.clientX - mobileState.lastWorldTapX,
+        event.clientY - mobileState.lastWorldTapY
+    ) <= 28;
+
+    mobileState.lastWorldTapTime = now;
+    mobileState.lastWorldTapX = event.clientX;
+    mobileState.lastWorldTapY = event.clientY;
+
+    if (!withinTimeWindow || !withinDistanceWindow) {
+        return false;
+    }
+
+    const propHit = getDynamicPropHitFromEvent(event);
+    if (!propHit?.prop) {
+        return false;
+    }
+
+    openObjectScriptMenu(event, propHit.prop);
+    return true;
+}
+
 function openObjectScriptMenu(event, prop) {
     if (!objectScriptMenu || !container || !prop) return;
 
@@ -2533,6 +2565,10 @@ function syncMobileActionVisibility() {
         mobilePlayActions.hidden = !gameplay.active;
     }
 
+    if (mobileJumpBtn) {
+        mobileJumpBtn.hidden = !gameplay.active;
+    }
+
     if (mobileModeToggleBtn) {
         mobileModeToggleBtn.textContent = gameplay.active ? 'Showcase' : 'Play';
         mobileModeToggleBtn.classList.toggle('viewer-toggle-btn-active', gameplay.active);
@@ -2621,7 +2657,9 @@ function setupMobileControls() {
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
     mobileModeToggleBtn?.addEventListener('click', () => setCameraMode(gameplay.active ? 'showcase' : 'play'));
 
-    mobileJumpBtn?.addEventListener('click', () => {
+    mobileJumpBtn?.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 && event.pointerType === 'mouse') return;
+        event.preventDefault();
         if (gameplay.active) {
             physics.jumpQueued = true;
         }
@@ -3070,6 +3108,12 @@ function setupGameplayEvents() {
     renderer.domElement.addEventListener('wheel', handleShowcaseWheel, { passive: false });
     renderer.domElement.addEventListener('contextmenu', handleShowcaseContextMenu);
     renderer.domElement.addEventListener('click', handleLightGridClick);
+    renderer.domElement.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse') return;
+        if (maybeOpenObjectScriptMenuFromMobileTap(event)) {
+            event.preventDefault();
+        }
+    }, { passive: false });
 }
 
 function adjustShowcaseSpeed(direction) {
