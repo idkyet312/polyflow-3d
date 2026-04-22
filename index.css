@@ -776,8 +776,8 @@ body.play-active .play-status {
 
   .mobile-dock {
     position: fixed;
-    left: 1rem;
-    right: 1rem;
+    left: 2.2rem;
+    right: 2.2rem;
     bottom: calc(4.15rem + env(safe-area-inset-bottom, 0px));
     display: grid;
     grid-template-columns: minmax(5.35rem, 6.4rem) minmax(5.35rem, 6.4rem);
@@ -1000,6 +1000,8 @@ body.play-active .play-status {
 
 @media (max-width: 560px) and (orientation: landscape) {
   .mobile-dock {
+    left: 1.6rem;
+    right: 1.6rem;
     bottom: 3.7rem;
     grid-template-columns: minmax(4.9rem, 5.9rem) minmax(4.9rem, 5.9rem);
   }
