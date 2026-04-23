@@ -79,6 +79,24 @@
                     </div>
                 </div>
 
+                <div class="debug-stats-overlay" id="debug-stats-overlay" aria-live="polite"></div>
+
+                <div class="debug-console" id="debug-console" hidden>
+                    <div class="debug-console-header">
+                        <div>
+                            <div class="debug-console-eyebrow">Developer Console</div>
+                            <div class="debug-console-title">Runtime Commands</div>
+                        </div>
+                        <div class="debug-console-shortcut">`</div>
+                    </div>
+                    <div class="debug-console-output" id="debug-console-output" role="log" aria-live="polite"></div>
+                    <label class="debug-console-input-row" for="debug-console-input">
+                        <span class="debug-console-prompt">&gt;</span>
+                        <input id="debug-console-input" class="debug-console-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type stat unit, stat physics, or stat gpu">
+                    </label>
+                    <div class="debug-console-footer" id="debug-console-footer">Enter runs the command. Arrow up/down navigates history. ` closes the console.</div>
+                </div>
+
                 <div id="processing-overlay">
                     <h2>Processing Asset</h2>
                     <div class="loader-container">

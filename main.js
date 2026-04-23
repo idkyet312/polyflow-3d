@@ -70,6 +70,7 @@ let objectScriptMenu, objectScriptTickActionBtn, objectScriptCollisionActionBtn;
 let objectScriptEditor, objectScriptEditorTitle, objectScriptEditorTarget, objectScriptEditorMode;
 let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBtn, objectScriptEditorClearBtn, objectScriptEditorCancelBtn;
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
+let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
 let mobileJumpBtn;
@@ -99,6 +100,9 @@ const importedPropState = {
 };
 const MOUSE_ACTION_STORAGE_KEY = 'polyflow-3d.mouse-actions.v1';
 const OBJECT_SCRIPT_STORAGE_KEY = 'polyflow-3d.object-scripts.v1';
+const DEBUG_CONSOLE_LOG_LIMIT = 18;
+const DEBUG_CONSOLE_HISTORY_LIMIT = 24;
+const DEBUG_TIMING_SAMPLE_LIMIT = 30;
 const DEFAULT_MOUSE_ACTION_SCRIPTS = {
     left: `const sphere = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, -1, 0), 0.5);
 if (sphere) {
@@ -120,12 +124,45 @@ if (sphere) {
     physics.bodyInterface.AddImpulse(sphere.GetID(), velocity);
     physics.Jolt.destroy(velocity);
 }`,
-    right: `const cube = spawnDynamicPrimitive('cube', new THREE.Vector3(0, -1, 0), 0.3);
-if (cube) {
-    physics.bodyInterface.SetMotionQuality(
-        cube.GetID(),
-        physics.Jolt.EMotionQuality_LinearCast
-    );
+    right: `const cubesPerSide = 5;
+const totalCubes = 500;
+const cubeHalfExtent = 0.16;
+const spacing = cubeHalfExtent * 2;
+const baseYOffset = -0.8;
+let spawned = 0;
+
+for (let layer = 0; spawned < totalCubes; layer++) {
+    for (let row = 0; row < cubesPerSide && spawned < totalCubes; row++) {
+        for (let col = 0; col < cubesPerSide && spawned < totalCubes; col++) {
+            const xOffset = (col - (cubesPerSide - 1) * 0.5) * spacing;
+            const yOffset = baseYOffset + layer * spacing;
+            const zOffset = (row - (cubesPerSide - 1) * 0.5) * spacing;
+            const cube = spawnDynamicPrimitive(
+                'cube',
+                new THREE.Vector3(xOffset, yOffset, zOffset),
+                cubeHalfExtent,
+                {
+                    skipImpulse: true,
+                    activate: false,
+                    castShadow: false,
+                    receiveShadow: false,
+                    allowSleeping: true,
+                    linearDamping: 0.18,
+                    angularDamping: 0.22,
+                    motionQuality: physics.Jolt.EMotionQuality_Discrete,
+                }
+            );
+
+            if (cube) {
+                physics.bodyInterface.SetMotionQuality(
+                    cube.GetID(),
+                    physics.Jolt.EMotionQuality_Discrete
+                );
+            }
+
+            spawned += 1;
+        }
+    }
 }`,
 };
 const MouseActionFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -147,6 +184,40 @@ const objectScriptState = {
     menuScreenY: 0,
     targetPropId: '',
     targetEvent: 'tick',
+};
+const debugConsoleState = {
+    visible: false,
+    lines: [
+        { prefix: 'sys', text: 'Console ready. Try `stat unit`, `stat physics`, or `stat gpu`.', tone: 'success' },
+    ],
+    history: [],
+    historyIndex: -1,
+    panels: new Set(),
+    panelRefs: new Map(),
+    latest: {
+        frame: 0,
+        update: 0,
+        physics: 0,
+        physicsStep: 0,
+        physicsSync: 0,
+        physicsCollisions: 0,
+        scripts: 0,
+        render: 0,
+        fps: 0,
+        delta: 0,
+        collisionSteps: 0,
+    },
+    samples: {
+        frame: [],
+        update: [],
+        physics: [],
+        physicsStep: [],
+        physicsSync: [],
+        physicsCollisions: [],
+        scripts: [],
+        render: [],
+    },
+    gpuTimingMode: 'approximate',
 };
 
 const clock = new THREE.Clock();
@@ -438,6 +509,29 @@ function createTerrainMesh() {
     terrain.position.y = TERRAIN_Y_OFFSET;
     terrain.receiveShadow = true;
     return terrain;
+}
+
+function sampleTerrainHeightAt(worldX, worldZ) {
+    if (!worldFloor) return null;
+
+    const terrainScaleX = worldFloor.scale.x || 1;
+    const terrainScaleY = worldFloor.scale.y || 1;
+    const terrainScaleZ = worldFloor.scale.z || 1;
+    const localX = (worldX - worldFloor.position.x) / terrainScaleX;
+    const localY = -(worldZ - worldFloor.position.z) / terrainScaleZ;
+    const halfExtent = TERRAIN_SIZE * 0.5;
+
+    if (Math.abs(localX) > halfExtent || Math.abs(localY) > halfExtent) {
+        return null;
+    }
+
+    const radialFalloff = Math.min(1, Math.hypot(localX, localY) / halfExtent);
+    const basin = -0.22 * Math.pow(radialFalloff, 1.7);
+    const rolling = Math.sin(localX * 0.16) * 0.28 + Math.cos(localY * 0.14) * 0.22;
+    const detail = Math.sin((localX + localY) * 0.45) * 0.08;
+    const localHeight = basin + rolling + detail;
+
+    return worldFloor.position.y + localHeight * terrainScaleY;
 }
 
 function buildLightGrid() {
@@ -1351,6 +1445,17 @@ function clearDynamicPhysicsProps() {
     physics.dynamicBodies.length = 0;
 }
 
+function hasEnabledDynamicPropEvent(eventType) {
+    for (let index = 0; index < physics.dynamicBodies.length; index++) {
+        const eventState = physics.dynamicBodies[index]?.scripts?.[eventType];
+        if (eventState?.enabled) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function getDynamicPropSpawn(positionTarget, impulseTarget) {
     const spawnOrigin = gameplay.active && physics.character
         ? copyJoltVector(tempVectorC, physics.character.GetPosition()).addScaledVector(upVector, PLAYER_SETTINGS.eyeHeight * 0.55)
@@ -1393,11 +1498,19 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
     );
     creationSettings.mFriction = options.friction ?? 0.68;
     creationSettings.mRestitution = options.restitution ?? 0.16;
+    creationSettings.mAllowSleeping = options.allowSleeping ?? true;
+    creationSettings.mLinearDamping = options.linearDamping ?? 0.08;
+    creationSettings.mAngularDamping = options.angularDamping ?? 0.1;
+    creationSettings.mMotionQuality = options.motionQuality
+        ?? Jolt.EMotionQuality_Discrete;
 
     const body = bodyInterface.CreateBody(creationSettings);
-    bodyInterface.AddBody(body.GetID(), Jolt.EActivation_Activate);
+    bodyInterface.AddBody(
+        body.GetID(),
+        options.activate === false ? Jolt.EActivation_DontActivate : Jolt.EActivation_Activate
+    );
 
-    if (impulse) {
+    if (impulse && options.skipImpulse !== true) {
         const launchImpulse = new Jolt.Vec3(impulse.x, impulse.y, impulse.z);
         bodyInterface.AddImpulse(body.GetID(), launchImpulse);
         Jolt.destroy(launchImpulse);
@@ -1411,7 +1524,7 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
     return body;
 }
 
-function spawnDynamicPrimitive(kind, offset, scale) {
+function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
     if (!physics.ready || !scene || !camera) {
         console.warn('Jolt physics is not ready yet.');
         return;
@@ -1424,13 +1537,21 @@ function spawnDynamicPrimitive(kind, offset, scale) {
     const spawnPosition = tempVectorD;
     const launchImpulse = tempVectorE;
     getDynamicPropSpawn(spawnPosition, launchImpulse);
+    const impulseScale = Number.isFinite(options.impulseScale) ? options.impulseScale : 1;
 
     if (offset) {
         spawnPosition.add(offset);
     }
 
+    if (options.skipImpulse === true) {
+        launchImpulse.set(0, 0, 0);
+    } else if (impulseScale !== 1) {
+        launchImpulse.multiplyScalar(impulseScale);
+    }
+
     let mesh;
     let shape;
+    let bodyOptions;
 
     if (kind === 'sphere') {
         const radius = normalizedScale;
@@ -1445,6 +1566,11 @@ function spawnDynamicPrimitive(kind, offset, scale) {
                 emissiveIntensity: 0.28,
             })
         );
+        bodyOptions = {
+            restitution: 0.48,
+            friction: 0.58,
+            ...options,
+        };
     } else {
         const halfExtent = normalizedScale;
         const halfExtentVector = new Jolt.Vec3(halfExtent, halfExtent, halfExtent);
@@ -1460,12 +1586,14 @@ function spawnDynamicPrimitive(kind, offset, scale) {
                 emissiveIntensity: 0.2,
             })
         );
+        bodyOptions = {
+            restitution: 0.12,
+            friction: 0.82,
+            ...options,
+        };
     }
 
-    const body = createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, kind === 'sphere'
-        ? { restitution: 0.48, friction: 0.58 }
-        : { restitution: 0.12, friction: 0.82 }
-    );
+    const body = createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, bodyOptions);
 
     if (!body) {
         mesh.geometry.dispose();
@@ -1473,8 +1601,8 @@ function spawnDynamicPrimitive(kind, offset, scale) {
         return;
     }
 
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    mesh.castShadow = options.castShadow ?? true;
+    mesh.receiveShadow = options.receiveShadow ?? true;
     mesh.position.copy(spawnPosition);
     scene.add(mesh);
 
@@ -1650,12 +1778,36 @@ function syncCameraToCharacter() {
 }
 
 function stepPhysics(delta) {
-    if (!physics.ready || !physics.jolt) return;
+    if (!physics.ready || !physics.jolt) {
+        return {
+            total: 0,
+            step: 0,
+            sync: 0,
+            collisions: 0,
+        };
+    }
 
     const collisionSteps = delta > 1 / 55 ? 2 : 1;
+    debugConsoleState.latest.collisionSteps = collisionSteps;
+
+    const stepStart = performance.now();
     physics.jolt.Step(delta, collisionSteps);
+    const stepDuration = performance.now() - stepStart;
+
+    const syncStart = performance.now();
     syncDynamicPhysicsBodies();
+    const syncDuration = performance.now() - syncStart;
+
+    const collisionsStart = performance.now();
     updateDynamicBodyCollisionScripts();
+    const collisionsDuration = performance.now() - collisionsStart;
+
+    return {
+        total: stepDuration + syncDuration + collisionsDuration,
+        step: stepDuration,
+        sync: syncDuration,
+        collisions: collisionsDuration,
+    };
 }
 
 function createDefaultObjectEventState(eventName) {
@@ -2127,18 +2279,19 @@ function runObjectEventScript(prop, eventType, options = {}) {
 }
 
 function runObjectTickScripts(delta) {
-    if (!gameplay.active) {
+    if (!gameplay.active || !hasEnabledDynamicPropEvent('tick')) {
         return;
     }
 
-    physics.dynamicBodies.forEach((prop) => {
-        if (!prop?.mesh || !prop.body) return;
+    for (let index = 0; index < physics.dynamicBodies.length; index++) {
+        const prop = physics.dynamicBodies[index];
+        if (!prop?.mesh || !prop.body) continue;
         runObjectEventScript(prop, 'tick', { deltaTime: delta });
-    });
+    }
 }
 
 function registerCollisionForProp(contactMap, prop, collisionKey, collision) {
-    if (!prop?.scripts?.collision) return;
+    if (!prop?.scripts?.collision?.enabled) return;
 
     let propContacts = contactMap.get(prop.id);
     if (!propContacts) {
@@ -2150,7 +2303,7 @@ function registerCollisionForProp(contactMap, prop, collisionKey, collision) {
 }
 
 function updateDynamicBodyCollisionScripts() {
-    if (!physics.dynamicBodies.length) return;
+    if (!physics.dynamicBodies.length || !hasEnabledDynamicPropEvent('collision')) return;
 
     const entries = physics.dynamicBodies
         .filter((prop) => prop?.mesh && prop.body)
@@ -2195,7 +2348,7 @@ function updateDynamicBodyCollisionScripts() {
 
     physics.dynamicBodies.forEach((prop) => {
         const eventState = prop?.scripts?.collision;
-        if (!eventState) return;
+        if (!eventState?.enabled) return;
 
         const activeCollisions = prop.scripts.activeCollisions || new Set();
         const nextCollisions = contactMap.get(prop.id) || new Map();
@@ -2225,6 +2378,10 @@ function handleObjectScriptGlobalPointerDown(event) {
 
 function handleObjectScriptKeydown(event) {
     if (event.key !== 'Escape') return;
+
+    if (debugConsoleState.visible) {
+        return;
+    }
 
     if (objectScriptState.menuOpen) {
         closeObjectScriptMenu();
@@ -2429,6 +2586,12 @@ function updateCameraModeButtons() {
 }
 
 function resetMobileInputState() {
+    resetMovementInputState();
+    resetMobileMovePad();
+    resetMobileLookPad();
+}
+
+function resetMovementInputState() {
     showcase.input.forward = false;
     showcase.input.back = false;
     showcase.input.left = false;
@@ -2442,8 +2605,382 @@ function resetMobileInputState() {
     gameplay.input.right = false;
     gameplay.input.sprint = false;
     physics.jumpQueued = false;
-    resetMobileMovePad();
-    resetMobileLookPad();
+}
+
+function isEditableElement(target) {
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable) return true;
+    return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+}
+
+function pushTimingSample(metric, value) {
+    const series = debugConsoleState.samples[metric];
+    if (!series) return;
+
+    series.push(value);
+    if (series.length > DEBUG_TIMING_SAMPLE_LIMIT) {
+        series.shift();
+    }
+}
+
+function getAverageTiming(metric) {
+    const series = debugConsoleState.samples[metric];
+    if (!series || !series.length) return 0;
+    return series.reduce((sum, value) => sum + value, 0) / series.length;
+}
+
+function formatTimingMs(value) {
+    return `${value.toFixed(value >= 10 ? 1 : 2)} ms`;
+}
+
+function renderDebugConsoleOutput() {
+    if (!debugConsoleOutput) return;
+
+    const fragment = document.createDocumentFragment();
+    debugConsoleState.lines.forEach((line) => {
+        const row = document.createElement('div');
+        row.className = 'debug-console-line';
+        row.dataset.tone = line.tone || 'info';
+
+        const prefix = document.createElement('span');
+        prefix.className = 'debug-console-prefix';
+        prefix.textContent = line.prefix;
+
+        const text = document.createElement('span');
+        text.className = 'debug-console-text';
+        text.textContent = line.text;
+
+        row.append(prefix, text);
+        fragment.appendChild(row);
+    });
+
+    debugConsoleOutput.replaceChildren(fragment);
+    debugConsoleOutput.scrollTop = debugConsoleOutput.scrollHeight;
+}
+
+function pushDebugConsoleLine(text, tone = 'info', prefix = 'sys') {
+    debugConsoleState.lines.push({ prefix, text, tone });
+    if (debugConsoleState.lines.length > DEBUG_CONSOLE_LOG_LIMIT) {
+        debugConsoleState.lines.shift();
+    }
+    renderDebugConsoleOutput();
+}
+
+function focusDebugConsoleInput() {
+    if (!debugConsoleInput) return;
+    window.requestAnimationFrame(() => {
+        debugConsoleInput.focus();
+        debugConsoleInput.select();
+    });
+}
+
+function setDebugConsoleVisible(isVisible, { focusInput = true } = {}) {
+    debugConsoleState.visible = !!isVisible;
+
+    if (debugConsole) {
+        debugConsole.hidden = !debugConsoleState.visible;
+    }
+
+    document.body.classList.toggle('console-open', debugConsoleState.visible);
+
+    if (debugConsoleState.visible) {
+        closeObjectScriptMenu();
+        closeObjectScriptEditor();
+        resetMovementInputState();
+
+        if (document.pointerLockElement === renderer?.domElement) {
+            document.exitPointerLock?.();
+        }
+
+        if (focusInput) {
+            focusDebugConsoleInput();
+        }
+        return;
+    }
+
+    debugConsoleInput?.blur();
+}
+
+function createDebugStatRow(label) {
+    const row = document.createElement('div');
+    row.className = 'debug-stat-row';
+
+    const title = document.createElement('div');
+    title.className = 'debug-stat-label';
+    title.textContent = label;
+
+    const value = document.createElement('div');
+    value.className = 'debug-stat-value';
+    value.textContent = '--';
+
+    row.append(title, value);
+    return { row, value };
+}
+
+function createDebugStatPanel(name) {
+    if (!debugStatsOverlay) return null;
+
+    const panel = document.createElement('section');
+    panel.className = 'debug-stat-panel';
+    panel.dataset.panel = name;
+
+    const header = document.createElement('div');
+    header.className = 'debug-stat-header';
+
+    const titleWrap = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'debug-stat-title';
+    title.textContent = name === 'unit' ? 'Stat Unit' : name === 'physics' ? 'Stat Physics' : 'Stat GPU';
+
+    const meta = document.createElement('div');
+    meta.className = 'debug-stat-meta';
+    meta.textContent = 'Waiting for frame samples...';
+    titleWrap.append(title, meta);
+    header.appendChild(titleWrap);
+
+    let badge = null;
+    if (name === 'gpu') {
+        badge = document.createElement('div');
+        badge.className = 'debug-stat-badge';
+        badge.textContent = 'Approx';
+        header.appendChild(badge);
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'debug-stat-grid';
+    const rows = {};
+
+    const labels = name === 'unit'
+        ? ['Frame', 'FPS', 'Update', 'Physics', 'Render', 'Scripts']
+        : name === 'physics'
+            ? ['Step', 'Sync', 'Collisions', 'Bodies', 'Passes', 'Delta']
+            : ['GPU', 'Render', 'Frame', 'FPS'];
+
+    labels.forEach((label) => {
+        const key = label.toLowerCase();
+        const rowRef = createDebugStatRow(label);
+        rows[key] = rowRef.value;
+        grid.appendChild(rowRef.row);
+    });
+
+    panel.append(header, grid);
+    debugStatsOverlay.appendChild(panel);
+
+    return { panel, meta, badge, rows };
+}
+
+function syncDebugStatPanels() {
+    if (!debugStatsOverlay) return;
+
+    debugConsoleState.panelRefs.forEach((ref, name) => {
+        if (!debugConsoleState.panels.has(name)) {
+            ref.panel.remove();
+            debugConsoleState.panelRefs.delete(name);
+        }
+    });
+
+    Array.from(debugConsoleState.panels).forEach((name) => {
+        if (debugConsoleState.panelRefs.has(name)) return;
+        const ref = createDebugStatPanel(name);
+        if (ref) {
+            debugConsoleState.panelRefs.set(name, ref);
+        }
+    });
+}
+
+function updateDebugStatPanels() {
+    if (!debugConsoleState.panels.size) return;
+
+    const averageFrame = getAverageTiming('frame');
+    const averageUpdate = getAverageTiming('update');
+    const averagePhysics = getAverageTiming('physics');
+    const averagePhysicsStep = getAverageTiming('physicsStep');
+    const averagePhysicsSync = getAverageTiming('physicsSync');
+    const averagePhysicsCollisions = getAverageTiming('physicsCollisions');
+    const averageScripts = getAverageTiming('scripts');
+    const averageRender = getAverageTiming('render');
+    const averageFps = averageFrame > 0 ? 1000 / averageFrame : 0;
+
+    debugConsoleState.panelRefs.forEach((ref, name) => {
+        if (name === 'unit') {
+            ref.meta.textContent = gameplay.active ? 'Play mode frame timings' : 'Showcase frame timings';
+            ref.rows.frame.textContent = formatTimingMs(averageFrame);
+            ref.rows.fps.textContent = `${averageFps.toFixed(1)} fps`;
+            ref.rows.update.textContent = formatTimingMs(averageUpdate);
+            ref.rows.physics.textContent = formatTimingMs(averagePhysics);
+            ref.rows.render.textContent = formatTimingMs(averageRender);
+            ref.rows.scripts.textContent = formatTimingMs(averageScripts);
+            return;
+        }
+
+        if (name === 'physics') {
+            ref.meta.textContent = physics.ready ? 'Jolt step vs. post-step overhead' : 'Physics still initializing';
+            ref.rows.step.textContent = formatTimingMs(averagePhysicsStep);
+            ref.rows.sync.textContent = formatTimingMs(averagePhysicsSync);
+            ref.rows.collisions.textContent = formatTimingMs(averagePhysicsCollisions);
+            ref.rows.bodies.textContent = `${physics.dynamicBodies.length}`;
+            ref.rows.passes.textContent = `${debugConsoleState.latest.collisionSteps}`;
+            ref.rows.delta.textContent = `${(debugConsoleState.latest.delta * 1000).toFixed(1)} ms`;
+            return;
+        }
+
+        ref.meta.textContent = 'WebGPU render submission timing';
+        if (ref.badge) {
+            ref.badge.textContent = debugConsoleState.gpuTimingMode === 'approximate' ? 'Approx' : 'GPU';
+        }
+        ref.rows.gpu.textContent = formatTimingMs(averageRender);
+        ref.rows.render.textContent = formatTimingMs(averageRender);
+        ref.rows.frame.textContent = formatTimingMs(averageFrame);
+        ref.rows.fps.textContent = `${averageFps.toFixed(1)} fps`;
+    });
+}
+
+function setDebugStatPanel(name, isEnabled) {
+    if (isEnabled) {
+        debugConsoleState.panels.add(name);
+    } else {
+        debugConsoleState.panels.delete(name);
+    }
+
+    syncDebugStatPanels();
+}
+
+function runStatCommand(args) {
+    if (!args.length) {
+        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, none.', 'warn');
+        return;
+    }
+
+    const panel = args[0].toLowerCase();
+    const mode = args[1]?.toLowerCase() || 'on';
+    const disableTokens = new Set(['0', 'false', 'hide', 'none', 'off']);
+
+    if (disableTokens.has(panel) || panel === 'clear') {
+        debugConsoleState.panels.clear();
+        syncDebugStatPanels();
+        pushDebugConsoleLine('All stat panels hidden.', 'success');
+        return;
+    }
+
+    if (!['gpu', 'physics', 'unit'].includes(panel)) {
+        pushDebugConsoleLine(`Unknown stat target: ${panel}.`, 'error');
+        return;
+    }
+
+    const isEnabled = !disableTokens.has(mode);
+    setDebugStatPanel(panel, isEnabled);
+
+    if (panel === 'gpu' && isEnabled) {
+        pushDebugConsoleLine('Stat GPU enabled. This currently reports approximate WebGPU render submission time.', 'warn');
+        return;
+    }
+
+    pushDebugConsoleLine(`Stat ${panel} ${isEnabled ? 'enabled' : 'hidden'}.`, 'success');
+}
+
+const debugCommandRegistry = {
+    stat: runStatCommand,
+};
+
+function executeDebugConsoleCommand(rawCommand) {
+    const commandText = rawCommand.trim();
+    if (!commandText) return;
+
+    debugConsoleState.history.push(commandText);
+    if (debugConsoleState.history.length > DEBUG_CONSOLE_HISTORY_LIMIT) {
+        debugConsoleState.history.shift();
+    }
+    debugConsoleState.historyIndex = debugConsoleState.history.length;
+
+    pushDebugConsoleLine(commandText, 'command', '>');
+
+    const [commandName, ...args] = commandText.split(/\s+/);
+    const handler = debugCommandRegistry[commandName.toLowerCase()];
+
+    if (!handler) {
+        pushDebugConsoleLine(`Unknown command: ${commandName}.`, 'error');
+        return;
+    }
+
+    handler(args);
+}
+
+function handleDebugConsoleInputKeydown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        executeDebugConsoleCommand(debugConsoleInput.value);
+        debugConsoleInput.value = '';
+        return;
+    }
+
+    if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (!debugConsoleState.history.length) return;
+        debugConsoleState.historyIndex = Math.max(0, debugConsoleState.historyIndex - 1);
+        debugConsoleInput.value = debugConsoleState.history[debugConsoleState.historyIndex] || '';
+        return;
+    }
+
+    if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (!debugConsoleState.history.length) return;
+        debugConsoleState.historyIndex = Math.min(debugConsoleState.history.length, debugConsoleState.historyIndex + 1);
+        debugConsoleInput.value = debugConsoleState.history[debugConsoleState.historyIndex] || '';
+        return;
+    }
+
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        setDebugConsoleVisible(false, { focusInput: false });
+    }
+}
+
+function handleDebugConsoleKeydown(event) {
+    if (event.code === 'Backquote' && !event.repeat) {
+        if (!debugConsoleState.visible && isEditableElement(event.target) && event.target !== debugConsoleInput) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        setDebugConsoleVisible(!debugConsoleState.visible);
+        return;
+    }
+
+    if (!debugConsoleState.visible) return;
+
+    if (event.code === 'Escape') {
+        event.preventDefault();
+        setDebugConsoleVisible(false, { focusInput: false });
+        return;
+    }
+
+    if (event.target !== debugConsoleInput) {
+        event.preventDefault();
+        focusDebugConsoleInput();
+    }
+}
+
+function recordDebugFrameMetrics(metrics) {
+    debugConsoleState.latest.frame = metrics.frame;
+    debugConsoleState.latest.update = metrics.update;
+    debugConsoleState.latest.physics = metrics.physics;
+    debugConsoleState.latest.physicsStep = metrics.physicsStep;
+    debugConsoleState.latest.physicsSync = metrics.physicsSync;
+    debugConsoleState.latest.physicsCollisions = metrics.physicsCollisions;
+    debugConsoleState.latest.scripts = metrics.scripts;
+    debugConsoleState.latest.render = metrics.render;
+    debugConsoleState.latest.fps = metrics.frame > 0 ? 1000 / metrics.frame : 0;
+    debugConsoleState.latest.delta = metrics.delta;
+
+    pushTimingSample('frame', metrics.frame);
+    pushTimingSample('update', metrics.update);
+    pushTimingSample('physics', metrics.physics);
+    pushTimingSample('physicsStep', metrics.physicsStep);
+    pushTimingSample('physicsSync', metrics.physicsSync);
+    pushTimingSample('physicsCollisions', metrics.physicsCollisions);
+    pushTimingSample('scripts', metrics.scripts);
+    pushTimingSample('render', metrics.render);
 }
 
 function setMobileMenuOpen(isOpen) {
@@ -2727,6 +3264,14 @@ async function init() {
     objectScriptEditorApplyBtn = document.getElementById('object-script-editor-apply');
     objectScriptEditorClearBtn = document.getElementById('object-script-editor-clear');
     objectScriptEditorCancelBtn = document.getElementById('object-script-editor-cancel');
+    debugConsole = document.getElementById('debug-console');
+    debugConsoleOutput = document.getElementById('debug-console-output');
+    debugConsoleInput = document.getElementById('debug-console-input');
+    debugConsoleFooter = document.getElementById('debug-console-footer');
+    debugStatsOverlay = document.getElementById('debug-stats-overlay');
+
+    renderDebugConsoleOutput();
+    debugConsoleInput?.addEventListener('keydown', handleDebugConsoleInputKeydown);
 
     if (browseModelBtn) {
         browseModelBtn.addEventListener('click', () => {
@@ -2931,14 +3476,36 @@ async function init() {
 
     renderer.setAnimationLoop(() => {
         const delta = Math.min(clock.getDelta(), 0.05);
+
+        const updateStart = performance.now();
         if (gameplay.active) {
             updateGameplay(delta);
         } else {
             updateShowcaseCamera(delta);
         }
-        stepPhysics(delta);
+        const updateDuration = performance.now() - updateStart;
+
+        const physicsMetrics = stepPhysics(delta);
+
+        const scriptStart = performance.now();
         runObjectTickScripts(delta);
+        const scriptDuration = performance.now() - scriptStart;
+
+        const renderStart = performance.now();
         renderer.renderAsync(scene, camera);
+
+        recordDebugFrameMetrics({
+            frame: delta * 1000,
+            update: updateDuration,
+            physics: physicsMetrics.total,
+            physicsStep: physicsMetrics.step,
+            physicsSync: physicsMetrics.sync,
+            physicsCollisions: physicsMetrics.collisions,
+            scripts: scriptDuration,
+            render: performance.now() - renderStart,
+            delta,
+        });
+        updateDebugStatPanels();
     });
 }
 
@@ -3083,6 +3650,7 @@ function refreshGameplayWorld() {
 function setupGameplayEvents() {
     document.addEventListener('pointerlockchange', handlePointerLockChange);
     document.addEventListener('mousemove', handleGameplayMouseMove);
+    document.addEventListener('keydown', handleDebugConsoleKeydown, true);
     document.addEventListener('keydown', handleGameplayKeyEvent);
     document.addEventListener('keyup', handleGameplayKeyEvent);
     renderer.domElement.addEventListener('mousedown', handleShowcaseMouseButton);
@@ -3152,6 +3720,13 @@ function updateShowcaseInput(event, isDown) {
 
 function handleGameplayKeyEvent(event) {
     const isDown = event.type === 'keydown';
+
+    if (debugConsoleState.visible) {
+        if (gameplay.pointerLocked || gameplay.active) {
+            event.preventDefault();
+        }
+        return;
+    }
 
     if (!gameplay.active && !gameplay.pointerLocked) {
         const acceptsShowcaseInput = renderer && (showcase.looking || document.activeElement === renderer.domElement);
@@ -3312,13 +3887,8 @@ function handlePointerLockChange() {
     gameplay.pointerLocked = false;
     gameplay.active = false;
     gameplay.velocity.set(0, 0, 0);
-    physics.jumpQueued = false;
     physics.desiredVelocity.set(0, 0, 0);
-    gameplay.input.forward = false;
-    gameplay.input.back = false;
-    gameplay.input.left = false;
-    gameplay.input.right = false;
-    gameplay.input.sprint = false;
+    resetMovementInputState();
 
     updateWorldPresentation();
     resetShowcaseCamera(false);
@@ -3581,7 +4151,14 @@ function getGroundHitAt(x, z, includeFloor = true) {
     }
 
     if (includeFloor && worldFloor) {
-        hits.push(...raycaster.intersectObject(worldFloor, false));
+        const terrainHeight = sampleTerrainHeightAt(x, z);
+        if (terrainHeight !== null && originY >= terrainHeight) {
+            hits.push({
+                distance: originY - terrainHeight,
+                point: tempVectorB.set(x, terrainHeight, z).clone(),
+                object: worldFloor,
+            });
+        }
     }
 
     hits.sort((a, b) => a.distance - b.distance);
