@@ -1108,6 +1108,20 @@ body.console-open #crosshair {
     box-shadow: 0 10px 18px rgba(0, 0, 0, 0.2);
   }
 
+  .mobile-right-action-fab {
+    position: fixed;
+    right: 0.75rem;
+    top: 42vh;
+    bottom: auto;
+    min-width: 4.65rem;
+    min-height: 2.7rem;
+    padding: 0.58rem 0.82rem;
+    border-radius: 16px;
+    z-index: 19;
+    pointer-events: auto;
+    box-shadow: 0 10px 18px rgba(0, 0, 0, 0.2);
+  }
+
   .mobile-look-pad,
   .mobile-move-pad {
     min-height: clamp(6.2rem, 15vh, 8rem);
@@ -1265,6 +1279,13 @@ body.console-open #crosshair {
   .mobile-jump-fab {
     right: 0.65rem;
     bottom: calc(1.7rem + env(safe-area-inset-bottom, 0px));
+    min-width: 4.35rem;
+  }
+
+  .mobile-right-action-fab {
+    right: 0.65rem;
+    top: 38vh;
+    bottom: auto;
     min-width: 4.35rem;
   }
 

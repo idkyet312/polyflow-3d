@@ -73,7 +73,7 @@ let objectScriptTickToggleRow, objectScriptTickToggleInput;
 let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
-let mobileJumpBtn;
+let mobileJumpBtn, mobileRightActionBtn;
 let lightGridGroup;
 const lightGridTiles = [];
 const IMPORTED_PROP_COLLISION_LABELS = {
@@ -3097,6 +3097,10 @@ function syncMobileActionVisibility() {
         mobileJumpBtn.hidden = !gameplay.active;
     }
 
+    if (mobileRightActionBtn) {
+        mobileRightActionBtn.hidden = !gameplay.active;
+    }
+
     if (mobileModeToggleBtn) {
         mobileModeToggleBtn.textContent = gameplay.active ? 'Showcase' : 'Play';
         mobileModeToggleBtn.classList.toggle('viewer-toggle-btn-active', gameplay.active);
@@ -3177,6 +3181,7 @@ function setupMobileControls() {
     mobileMoveThumb = document.getElementById('mobile-move-thumb');
     mobileLookPad = document.getElementById('mobile-look-pad');
     mobileLookThumb = document.getElementById('mobile-look-thumb');
+    mobileRightActionBtn = document.getElementById('mobile-right-action');
     mobileJumpBtn = document.getElementById('mobile-jump');
 
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
@@ -3188,6 +3193,11 @@ function setupMobileControls() {
         if (gameplay.active) {
             physics.jumpQueued = true;
         }
+    });
+
+    mobileRightActionBtn?.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 && event.pointerType === 'mouse') return;
+        runMouseAction('right', event);
     });
 
     bindMobilePad(mobileMovePad, mobileMoveThumb, (event) => {
