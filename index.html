@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-C0nTRUNB.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-DoGnw7wJ.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-YInywU9Q.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-DLLRxHNd.css">
 </head>
 <body>
     <main>
@@ -79,6 +79,24 @@
                         <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive(), spawnImportedProp()</div>
                         <div class="viewer-inline-note" id="mouse-action-status">Loading mouse action snippets...</div>
                     </div>
+                </div>
+
+                <div class="debug-stats-overlay" id="debug-stats-overlay" aria-live="polite"></div>
+
+                <div class="debug-console" id="debug-console" hidden>
+                    <div class="debug-console-header">
+                        <div>
+                            <div class="debug-console-eyebrow">Developer Console</div>
+                            <div class="debug-console-title">Runtime Commands</div>
+                        </div>
+                        <div class="debug-console-shortcut">`</div>
+                    </div>
+                    <div class="debug-console-output" id="debug-console-output" role="log" aria-live="polite"></div>
+                    <label class="debug-console-input-row" for="debug-console-input">
+                        <span class="debug-console-prompt">&gt;</span>
+                        <input id="debug-console-input" class="debug-console-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type stat unit, stat physics, or stat gpu">
+                    </label>
+                    <div class="debug-console-footer" id="debug-console-footer">Enter runs the command. Arrow up/down navigates history. ` closes the console.</div>
                 </div>
 
                 <div id="processing-overlay">
