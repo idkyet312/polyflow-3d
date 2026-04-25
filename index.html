@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-D1-Vku09.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index--FNf6K9N.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-DRUUMV3W.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-DhUS93xA.css">
 </head>
 <body>
     <main>
@@ -35,49 +35,163 @@
                     </div>
 
                     <div class="viewer-menu-card">
-                        <div class="viewer-menu-label">Load Model</div>
+                        <div class="viewer-menu-label">Actors</div>
                         <div class="viewer-menu-actions">
-                            <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse Files</button>
-                            <button class="btn viewer-menu-btn" id="load-sample">Load Sample</button>
+                            <button class="btn btn-primary viewer-menu-btn" id="open-actor-editor">Add Actor</button>
                         </div>
-                        <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
+                        <div class="viewer-inline-note">Create a new actor fast. Importing props, multiplayer, and input scripting now live under Menu Sections.</div>
                     </div>
 
-                    <div class="viewer-menu-card">
-                        <div class="viewer-menu-label">Physics Props</div>
-                        <div class="viewer-menu-actions">
-                            <button class="btn viewer-menu-btn" id="spawn-rigid-sphere">Drop Sphere</button>
-                            <button class="btn viewer-menu-btn" id="spawn-rigid-cube">Drop Cube</button>
+                    <div class="viewer-modal" id="actor-editor" hidden>
+                        <div class="viewer-modal-card viewer-actor-editor-card" role="dialog" aria-modal="true" aria-labelledby="actor-editor-title">
+                            <div class="viewer-modal-eyebrow">Actor Authoring</div>
+                            <h2 class="viewer-modal-title" id="actor-editor-title">Add Actor</h2>
+                            <p class="viewer-modal-copy">Create a Godot-like actor instance with a node root and explicit render, collision, and script components.</p>
+                            <div class="viewer-script-editor-target" id="actor-editor-summary">Type: Sphere Actor</div>
+                            <div class="viewer-actor-editor-grid">
+                                <label class="viewer-code-field" for="actor-kind-select">
+                                    <span class="viewer-code-field-label">Actor Type</span>
+                                    <select id="actor-kind-select" class="viewer-text-input">
+                                        <option value="sphere">Sphere Actor</option>
+                                        <option value="cube">Cube Actor</option>
+                                        <option value="vehicle">Vehicle Actor</option>
+                                        <option value="imported">Imported Actor</option>
+                                    </select>
+                                </label>
+                                <label class="viewer-code-field" for="actor-label-input">
+                                    <span class="viewer-code-field-label">Display Name</span>
+                                    <input id="actor-label-input" class="viewer-text-input" type="text" spellcheck="false" placeholder="Sandbox Actor">
+                                </label>
+                                <label class="viewer-code-field" for="actor-scale-input">
+                                    <span class="viewer-code-field-label">Scale / Radius</span>
+                                    <input id="actor-scale-input" class="viewer-text-input" type="number" min="0.1" max="6" step="0.1" value="0.5">
+                                </label>
+                                <label class="viewer-code-field" for="actor-imported-template-select">
+                                    <span class="viewer-code-field-label">Imported Source</span>
+                                    <select id="actor-imported-template-select" class="viewer-text-input">
+                                        <option value="">No imported source available</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div class="viewer-actor-components">
+                                <div class="viewer-prop-library-label">Components</div>
+                                <label class="viewer-checkbox-row" for="actor-component-render">
+                                    <input type="checkbox" id="actor-component-render" checked disabled>
+                                    <span>Render Mesh component is required for this first actor editor slice.</span>
+                                </label>
+                                <label class="viewer-checkbox-row" for="actor-component-collision">
+                                    <input type="checkbox" id="actor-component-collision" checked>
+                                    <span>Add a Collision Body component so the actor participates in Jolt physics.</span>
+                                </label>
+                                <label class="viewer-checkbox-row" for="actor-component-scripts">
+                                    <input type="checkbox" id="actor-component-scripts" checked>
+                                    <span>Add a Script Host component so tick and collision code can be authored for this actor.</span>
+                                </label>
+                            </div>
+                            <div class="viewer-inline-note viewer-script-editor-status" id="actor-editor-status">Sphere actors create a render node and collision body by default.</div>
+                            <div class="viewer-modal-actions">
+                                <button class="btn btn-primary viewer-menu-btn" id="actor-editor-create" type="button">Create Actor</button>
+                                <button class="btn viewer-menu-btn" id="actor-editor-open-script" type="button">Create And Edit Script</button>
+                            </div>
+                            <button class="btn viewer-modal-cancel" id="actor-editor-cancel" type="button">Close</button>
                         </div>
-                        <div class="viewer-menu-actions viewer-menu-actions-secondary">
-                            <button class="btn btn-primary viewer-menu-btn" id="import-prop-menu">Import Prop</button>
-                            <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="reset-prop-import-default" hidden>Ask Next</button>
-                        </div>
-                        <div class="viewer-inline-note" id="prop-import-default-status">New prop imports ask for a collision mode.</div>
-                        <div class="viewer-prop-library" id="imported-prop-library" hidden>
-                            <div class="viewer-prop-library-label">Imported Props</div>
-                            <div class="viewer-prop-list" id="imported-prop-list"></div>
-                        </div>
-                        <input type="file" id="prop-file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
                     </div>
 
-                    <div class="viewer-menu-card">
-                        <div class="viewer-menu-label">Mouse Actions</div>
-                        <div class="viewer-inline-note">These snippets run only in Play mode. Left and right mouse buttons each use their own Three.js code.</div>
-                        <label class="viewer-code-field" for="left-mouse-action">
-                            <span class="viewer-code-field-label">Left Mouse Button</span>
-                            <textarea id="left-mouse-action" class="viewer-code-textarea" rows="5" spellcheck="false"></textarea>
-                        </label>
-                        <label class="viewer-code-field" for="right-mouse-action">
-                            <span class="viewer-code-field-label">Right Mouse Button</span>
-                            <textarea id="right-mouse-action" class="viewer-code-textarea" rows="5" spellcheck="false"></textarea>
-                        </label>
-                        <div class="viewer-menu-actions viewer-menu-actions-secondary">
-                            <button class="btn btn-primary viewer-menu-btn" id="apply-mouse-actions">Apply Code</button>
-                            <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="reset-mouse-actions">Reset Defaults</button>
+                    <details class="viewer-menu-card viewer-menu-sections-card">
+                        <summary class="viewer-menu-sections-summary">
+                            <span class="viewer-menu-label viewer-menu-sections-label">Menu Sections</span>
+                            <span class="viewer-menu-sections-value">Open tools</span>
+                        </summary>
+                        <div class="viewer-menu-sections-body">
+                            <div class="viewer-inline-note">Secondary tools stay tucked away here so the main overlay only shows camera actions and actor creation.</div>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Load Model</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse Files</button>
+                                        <button class="btn viewer-menu-btn" id="load-sample">Load Sample</button>
+                                    </div>
+                                    <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Actor Imports</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn viewer-menu-btn" id="import-prop-menu">Import Prop</button>
+                                        <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="reset-prop-import-default" hidden>Ask Next</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="prop-import-default-status">Create actor instances with render, collision, and script components. Imported actor sources still ask for a collision mode.</div>
+                                    <div class="viewer-prop-library" id="imported-prop-library" hidden>
+                                        <div class="viewer-prop-library-label">Imported Actor Sources</div>
+                                        <div class="viewer-prop-list" id="imported-prop-list"></div>
+                                    </div>
+                                    <input type="file" id="prop-file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Multiplayer</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-input-stack">
+                                        <label class="viewer-input-label" for="multiplayer-server-url">Server URL</label>
+                                        <input class="viewer-text-input" id="multiplayer-server-url" type="text" spellcheck="false" placeholder="https://your-server.example">
+                                        <label class="viewer-input-label" for="multiplayer-room">Room</label>
+                                        <input class="viewer-text-input" id="multiplayer-room" type="text" spellcheck="false" placeholder="sandbox">
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                                        <button class="btn btn-primary viewer-menu-btn" id="multiplayer-connect">Connect</button>
+                                        <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="multiplayer-disconnect">Disconnect</button>
+                                    </div>
+                                    <div class="viewer-status-row">
+                                        <span class="viewer-status-item">Status</span>
+                                        <span class="viewer-status-value" id="multiplayer-status">Offline</span>
+                                    </div>
+                                    <div class="viewer-status-row viewer-status-row-secondary">
+                                        <span class="viewer-status-item">Players</span>
+                                        <span class="viewer-status-value" id="multiplayer-player-count">1 local</span>
+                                    </div>
+                                    <div class="viewer-inline-note">First pass syncs player and active vehicle presence only. World edits and props stay local.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Input Actions</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Configure left and right play-mode input scripts in a single minimal editor.</div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                                        <button class="btn viewer-menu-btn" id="open-input-actions">Open</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="mouse-action-status">Loading input actions...</div>
+                                </div>
+                            </details>
                         </div>
-                        <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive(), spawnImportedProp()</div>
-                        <div class="viewer-inline-note" id="mouse-action-status">Loading mouse action snippets...</div>
+                    </details>
+
+                    <div class="viewer-modal" id="input-actions-editor" hidden>
+                        <div class="viewer-modal-card viewer-script-editor-card" role="dialog" aria-modal="true" aria-labelledby="input-actions-title">
+                            <div class="viewer-modal-eyebrow">Input Actions</div>
+                            <h2 class="viewer-modal-title" id="input-actions-title">Edit Input Action</h2>
+                            <p class="viewer-modal-copy">Play mode only. Switch between left and right mouse triggers and edit one action at a time.</p>
+                            <div class="viewer-toggle-group viewer-input-actions-toggle-group">
+                                <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="input-action-left" type="button">Left Mouse</button>
+                                <button class="btn viewer-toggle-btn" id="input-action-right" type="button">Right Mouse</button>
+                            </div>
+                            <div class="viewer-script-editor-mode" id="input-actions-mode">Trigger: Left Mouse Button</div>
+                            <label class="viewer-code-field" for="input-action-editor-input">
+                                <span class="viewer-code-field-label">Action Script</span>
+                                <textarea id="input-action-editor-input" class="viewer-code-textarea" rows="8" spellcheck="false"></textarea>
+                            </label>
+                            <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive(), spawnImportedProp()</div>
+                            <div class="viewer-inline-note viewer-script-editor-status" id="input-actions-editor-status">Input actions are loaded from local draft storage.</div>
+                            <div class="viewer-modal-actions">
+                                <button class="btn btn-primary viewer-menu-btn" id="apply-mouse-actions" type="button">Apply</button>
+                                <button class="btn viewer-menu-btn" id="reset-mouse-actions" type="button">Reset Defaults</button>
+                            </div>
+                            <button class="btn viewer-modal-cancel" id="input-actions-close" type="button">Close</button>
+                        </div>
                     </div>
                 </div>
 
@@ -131,9 +245,9 @@
 
                 <div class="viewer-modal" id="object-script-editor" hidden>
                     <div class="viewer-modal-card viewer-script-editor-card" role="dialog" aria-modal="true" aria-labelledby="object-script-editor-title">
-                        <div class="viewer-modal-eyebrow">Showcase Object Script</div>
-                        <h2 class="viewer-modal-title" id="object-script-editor-title">Attach Script to Prop</h2>
-                        <p class="viewer-modal-copy">Right-clicked physics props in Showcase mode can run per-object Three.js code on tick or on collision.</p>
+                        <div class="viewer-modal-eyebrow">Showcase Actor Script</div>
+                        <h2 class="viewer-modal-title" id="object-script-editor-title">Attach Script to Actor</h2>
+                        <p class="viewer-modal-copy">Right-clicked authored actors in Showcase mode can run per-actor Three.js code on tick or on collision.</p>
                         <div class="viewer-script-editor-target" id="object-script-editor-target">No prop selected</div>
                         <div class="viewer-script-editor-mode" id="object-script-editor-mode">Event: Tick</div>
                         <label class="viewer-checkbox-row" id="object-script-tick-toggle-row" for="object-script-tick-toggle" hidden>
