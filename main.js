@@ -9,6 +9,7 @@ import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
+import { createSocketMultiplayer } from './src/network/socketMultiplayer.js';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
 import { createPhysicsCore } from './src/physics/core.js';
 import { createPhysicsRuntime } from './src/physics/runtime.js';
@@ -31,6 +32,7 @@ let optimizedBlobUrl = null;
 let environmentController;
 let physicsCore;
 let physicsRuntime;
+let multiplayerController;
 const EXPORT_MAX_TEXTURE_SIZE = 1024;
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
@@ -84,6 +86,7 @@ const VEHICLE_SETTINGS = {
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
 let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, spawnRigidSphereBtn, spawnRigidCubeBtn, spawnRigidCarBtn;
+let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
 let propCollisionPrompt, propCollisionCopy, propCollisionRemember, propCollisionSimpleBtn, propCollisionComplexBtn, propCollisionCancelBtn;
 let leftMouseActionInput, rightMouseActionInput, mouseActionApplyBtn, mouseActionResetBtn, mouseActionStatus;
@@ -241,6 +244,9 @@ const debugConsoleState = {
     },
     gpuTimingMode: 'approximate',
 };
+const multiplayerState = {
+    defaultRoom: 'sandbox',
+};
 
 const clock = new THREE.Clock();
 const downVector = new THREE.Vector3(0, -1, 0);
@@ -256,6 +262,7 @@ const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
 const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
+const tempQuaternionB = new THREE.Quaternion();
 const gameplay = {
     canPlay: true,
     active: false,
@@ -382,6 +389,76 @@ function positionLightGrid(anchorTarget) {
 
 function handleLightGridClick(event) {
     lightGridController?.handleClick(event);
+}
+
+function serializeVector3(vector) {
+    return { x: vector.x, y: vector.y, z: vector.z };
+}
+
+function serializeQuaternion(quaternion) {
+    return { x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w };
+}
+
+function getDefaultMultiplayerServerUrl() {
+    const isLocalHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    return isLocalHost ? `${window.location.protocol}//${window.location.hostname}:3001` : '';
+}
+
+function updateMultiplayerUiState({ statusText, playerCount, connected }) {
+    if (multiplayerStatusValue) {
+        multiplayerStatusValue.textContent = statusText || 'Offline';
+    }
+
+    if (multiplayerPlayerCountValue) {
+        multiplayerPlayerCountValue.textContent = `${playerCount || 1} ${playerCount === 1 ? 'player' : 'players'}`;
+    }
+
+    if (multiplayerConnectBtn) {
+        multiplayerConnectBtn.disabled = !!connected;
+    }
+
+    if (multiplayerDisconnectBtn) {
+        multiplayerDisconnectBtn.disabled = !connected;
+    }
+}
+
+function getLocalMultiplayerSnapshot() {
+    if (!camera) return null;
+
+    if (gameplay.active && isDrivingVehicle()) {
+        const vehicle = getActiveVehicleProp();
+        if (!vehicle?.body) return null;
+
+        const bodyId = vehicle.body.GetID();
+        const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(bodyId)).clone();
+        const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(bodyId)).clone();
+
+        return {
+            mode: 'vehicle',
+            position: serializeVector3(vehiclePosition),
+            quaternion: serializeQuaternion(vehicleRotation),
+        };
+    }
+
+    let localPosition;
+    let yaw;
+
+    if (gameplay.active && physics.character) {
+        localPosition = copyJoltVector(tempVectorA, physics.character.GetPosition()).clone();
+        yaw = gameplay.yaw;
+    } else {
+        localPosition = tempVectorA.copy(camera.position).clone();
+        localPosition.y -= 1.05;
+        yaw = showcase.yaw;
+    }
+
+    const localRotation = tempQuaternionB.setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ')).clone();
+
+    return {
+        mode: gameplay.active ? 'player' : 'showcase',
+        position: serializeVector3(localPosition),
+        quaternion: serializeQuaternion(localRotation),
+    };
 }
 
 function copyJoltVector(target, source) {
@@ -2985,6 +3062,12 @@ async function init() {
     spawnRigidSphereBtn = document.getElementById('spawn-rigid-sphere');
     spawnRigidCubeBtn = document.getElementById('spawn-rigid-cube');
     spawnRigidCarBtn = document.getElementById('spawn-rigid-car');
+    multiplayerServerUrlInput = document.getElementById('multiplayer-server-url');
+    multiplayerRoomInput = document.getElementById('multiplayer-room');
+    multiplayerConnectBtn = document.getElementById('multiplayer-connect');
+    multiplayerDisconnectBtn = document.getElementById('multiplayer-disconnect');
+    multiplayerStatusValue = document.getElementById('multiplayer-status');
+    multiplayerPlayerCountValue = document.getElementById('multiplayer-player-count');
     importPropBtn = document.getElementById('import-prop-menu');
     propFileInput = document.getElementById('prop-file-input');
     importedPropList = document.getElementById('imported-prop-list');
@@ -3166,6 +3249,10 @@ async function init() {
         getAnchorTarget: getLightGridAnchorTarget,
         terrainYOffset: TERRAIN_Y_OFFSET,
     });
+    multiplayerController = createSocketMultiplayer({
+        scene,
+        onStateChange: updateMultiplayerUiState,
+    });
 
     // Load initial HDR Environment
     switchEnvironment('sunny-sky');
@@ -3238,6 +3325,26 @@ async function init() {
     playHint = document.getElementById('play-hint');
     gameplayStatus = document.getElementById('gameplay-status');
     resetViewBtn = document.getElementById('reset-view');
+    if (multiplayerServerUrlInput && !multiplayerServerUrlInput.value.trim()) {
+        multiplayerServerUrlInput.value = getDefaultMultiplayerServerUrl();
+    }
+    if (multiplayerRoomInput && !multiplayerRoomInput.value.trim()) {
+        multiplayerRoomInput.value = multiplayerState.defaultRoom;
+    }
+    multiplayerConnectBtn?.addEventListener('click', () => {
+        multiplayerController?.connect({
+            serverUrl: multiplayerServerUrlInput?.value ?? '',
+            room: multiplayerRoomInput?.value ?? multiplayerState.defaultRoom,
+        });
+    });
+    multiplayerDisconnectBtn?.addEventListener('click', () => {
+        multiplayerController?.disconnect('Disconnected');
+    });
+    updateMultiplayerUiState({
+        statusText: 'Offline',
+        playerCount: 1,
+        connected: false,
+    });
     updatePropImportStatus();
     renderImportedPropButtons();
     initializeMouseActionScripts();
@@ -3256,6 +3363,8 @@ async function init() {
         const updateDuration = performance.now() - updateStart;
 
         const physicsMetrics = stepPhysics(delta);
+        multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
+        multiplayerController?.update(delta);
 
         const scriptStart = performance.now();
         runObjectTickScripts(delta);

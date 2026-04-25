@@ -61,6 +61,29 @@
                     </div>
 
                     <div class="viewer-menu-card">
+                        <div class="viewer-menu-label">Multiplayer</div>
+                        <div class="viewer-input-stack">
+                            <label class="viewer-input-label" for="multiplayer-server-url">Server URL</label>
+                            <input class="viewer-text-input" id="multiplayer-server-url" type="text" spellcheck="false" placeholder="https://your-server.example">
+                            <label class="viewer-input-label" for="multiplayer-room">Room</label>
+                            <input class="viewer-text-input" id="multiplayer-room" type="text" spellcheck="false" placeholder="sandbox">
+                        </div>
+                        <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                            <button class="btn btn-primary viewer-menu-btn" id="multiplayer-connect">Connect</button>
+                            <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="multiplayer-disconnect">Disconnect</button>
+                        </div>
+                        <div class="viewer-status-row">
+                            <span class="viewer-status-item">Status</span>
+                            <span class="viewer-status-value" id="multiplayer-status">Offline</span>
+                        </div>
+                        <div class="viewer-status-row viewer-status-row-secondary">
+                            <span class="viewer-status-item">Players</span>
+                            <span class="viewer-status-value" id="multiplayer-player-count">1 local</span>
+                        </div>
+                        <div class="viewer-inline-note">First pass syncs player and active vehicle presence only. World edits and props stay local.</div>
+                    </div>
+
+                    <div class="viewer-menu-card">
                         <div class="viewer-menu-label">Mouse Actions</div>
                         <div class="viewer-inline-note">These snippets run only in Play mode. Left and right mouse buttons each use their own Three.js code.</div>
                         <label class="viewer-code-field" for="left-mouse-action">
