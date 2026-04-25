@@ -5,13 +5,21 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { TGALoader } from 'three/addons/loaders/TGALoader.js';
 import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
-import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
-import initJolt from 'jolt-physics/wasm-compat';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
+import { createPhysicsCore } from './src/physics/core.js';
+import { createPhysicsRuntime } from './src/physics/runtime.js';
+import { createEnvironmentController } from './src/world/environment.js';
+import { createLightGridController } from './src/world/lightGrid.js';
+import {
+    TERRAIN_Y_OFFSET,
+    applyTerrainTextures,
+    createTerrainMesh,
+    sampleTerrainHeightAt as sampleTerrainHeightAtWorldFloor,
+} from './src/world/terrain.js';
 
 // --- Configuration ---
 let scene, camera, renderer, currentMesh;
@@ -20,29 +28,17 @@ let optimizedTriCount = 0;
 let scanPlane;
 let originalFileSize = 0;
 let optimizedBlobUrl = null;
+let environmentController;
+let physicsCore;
+let physicsRuntime;
 const EXPORT_MAX_TEXTURE_SIZE = 1024;
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
 const IMPORTED_PROP_MAX_HULL_POINTS = 480;
 const IMPORTED_PROP_MAX_HULL_PARTS = 18;
 const IMPORTED_PROP_COMPLEX_HULL_RADIUS = 0.01;
-const TERRAIN_SIZE = 180;
-const TERRAIN_SEGMENTS = 180;
-const TERRAIN_Y_OFFSET = -0.28;
-const TERRAIN_TEXTURE_REPEAT = 28;
-const TERRAIN_TEXTURE_PATHS = {
-    color: 'textures/grass004/Grass004_1K-JPG_Color.jpg',
-    normal: 'textures/grass004/Grass004_1K-JPG_NormalGL.jpg',
-    roughness: 'textures/grass004/Grass004_1K-JPG_Roughness.jpg',
-    ao: 'textures/grass004/Grass004_1K-JPG_AmbientOcclusion.jpg',
-};
 const SHOWCASE_CAMERA_POSITION = new THREE.Vector3(6.5, 4.2, 8.5);
 const SHOWCASE_CAMERA_TARGET = new THREE.Vector3(0, 1.4, 0);
-const LIGHT_GRID_DIMENSION = 3;
-const LIGHT_TILE_SIZE = 0.82;
-const LIGHT_TILE_HEIGHT = 0.34;
-const LIGHT_TILE_GAP = 0.26;
-const LIGHT_GRID_OFFSET = new THREE.Vector3(-4.5, 0, 3.5);
 const JOLT_NON_MOVING_LAYER = 0;
 const JOLT_MOVING_LAYER = 1;
 const JOLT_OBJECT_LAYER_COUNT = 2;
@@ -74,8 +70,7 @@ let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, deb
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
 let mobileJumpBtn, mobileRightActionBtn;
-let lightGridGroup;
-const lightGridTiles = [];
+let lightGridController;
 const IMPORTED_PROP_COLLISION_LABELS = {
     simple: 'simple box collision',
     complex: 'tighter convex collision',
@@ -85,6 +80,8 @@ const MOBILE_MOVE_RADIUS_FACTOR = 0.36;
 const MOBILE_LOOK_SENSITIVITY = 0.0045;
 const mobileState = {
     enabled: false,
+    detected: false,
+    forced: false,
     menuOpen: false,
     movePointerId: null,
     lookPointerId: null,
@@ -296,278 +293,50 @@ const physics = {
     jumpQueued: false,
     allowSliding: false,
 };
-
-// HDRI texture cache keyed by full URL (1k/2k/4k cached separately)
-const hdriCache = {};
-
-// Track current state for resolution switching
-let currentEnvironment = 'sunny-sky';
-let currentResolution = '1k';
-
-// Environment presets — slugs map to Poly Haven CDN
-const ENVIRONMENTS = {
-    'sunny-sky': {
-        label: '\u2600\ufe0f Sunny Sky',
-        slug: 'kloofendal_48d_partly_cloudy_puresky',
-        blurriness: 0.05,
-        pedestal: { color: 0xFFFFFF, roughness: 0.00, metalness: 1.0 },
-        ambient: { color: 0xffffff, intensity: 1.0 },
-        hemi: { sky: 0xffffff, ground: 0x444444, intensity: 1.2 },
+physicsCore = createPhysicsCore({
+    physics,
+    playerSettings: PLAYER_SETTINGS,
+    objectLayerCount: JOLT_OBJECT_LAYER_COUNT,
+    broadPhaseLayerCount: JOLT_BROAD_PHASE_LAYER_COUNT,
+    nonMovingLayer: JOLT_NON_MOVING_LAYER,
+    movingLayer: JOLT_MOVING_LAYER,
+    getTerrainRoot: () => worldFloor,
+    getModelRoot: () => currentMesh,
+    onCharacterRefresh: () => ensurePlayerCharacter(),
+});
+physicsRuntime = createPhysicsRuntime({
+    physics,
+    gameplay,
+    playerSettings: PLAYER_SETTINGS,
+    getCamera: () => camera,
+    getWorldFloor: () => worldFloor,
+    copyJoltVector,
+    copyJoltQuaternion,
+    createOwnedShape: (settings) => createOwnedShape(settings),
+    onRemoveDynamicProp: (prop, index) => {
+        destroyDynamicPhysicsProp(prop);
+        physics.dynamicBodies.splice(index, 1);
     },
-    'studio': {
-        label: '\ud83c\udfac Studio',
-        slug: 'studio_small_03',
-        blurriness: 0.3,
-        pedestal: { color: 0x1a1a1a, roughness: 0.05, metalness: 0.95 },
-        ambient: { color: 0xffffff, intensity: 1.3 },
-        hemi: { sky: 0xffffff, ground: 0x888888, intensity: 0.8 },
+    onCollisionScriptsUpdate: () => updateDynamicBodyCollisionScripts(),
+    onCollisionStepsChange: (collisionSteps) => {
+        debugConsoleState.latest.collisionSteps = collisionSteps;
     },
-    'urban-street': {
-        label: '\ud83c\udfd9\ufe0f Urban Street',
-        slug: 'potsdamer_platz',
-        blurriness: 0.0,
-        pedestal: { color: 0x1c1c1c, roughness: 0.05, metalness: 0.95 },
-        ambient: { color: 0x8899bb, intensity: 0.7 },
-        hemi: { sky: 0x9aaad0, ground: 0x222233, intensity: 1.0 },
-    },
-    'forest-trail': {
-        label: '\ud83c\udf32 Forest Trail',
-        slug: 'forest_slope',
-        blurriness: 0.08,
-        pedestal: { color: 0x2b3d1f, roughness: 0.05, metalness: 0.95 },
-        ambient: { color: 0x88aa66, intensity: 0.9 },
-        hemi: { sky: 0x99cc77, ground: 0x334422, intensity: 1.2 },
-    },
-    'golden-sunset': {
-        label: '\ud83c\udf05 Golden Sunset',
-        slug: 'golden_bay',
-        blurriness: 0.04,
-        pedestal: { color: 0x2a1f0f, roughness: 0.05, metalness: 0.95 },
-        ambient: { color: 0xffbb55, intensity: 1.0 },
-        hemi: { sky: 0xffaa33, ground: 0x441100, intensity: 1.0 },
-    },
-};
-
-// Build the Poly Haven CDN URL or local URL for a given slug + resolution
-function getHdriUrl(slug, res) {
-    if (slug === 'kloofendal_48d_partly_cloudy_puresky' && res === '4k') {
-        return (import.meta.env.BASE_URL || '/') + 'kloofendal_48d_partly_cloudy_puresky_4k.hdr';
-    }
-    return `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/${res}/${slug}_${res}.hdr`;
-}
-
-function loadHdriIntoScene(url, blurriness) {
-    console.log(`Loading HDRI: ${url}`);
-    if (hdriCache[url]) {
-        scene.environment = hdriCache[url];
-        scene.background = hdriCache[url];
-        scene.backgroundBlurriness = blurriness;
-        return;
-    }
-    const loader = new RGBELoader();
-    loader.load(url, (texture) => {
-        texture.mapping = THREE.EquirectangularReflectionMapping;
-        hdriCache[url] = texture;
-        scene.environment = texture;
-        scene.background = texture;
-        scene.backgroundBlurriness = blurriness;
-        console.log(`Successfully loaded HDRI: ${url}`);
-    }, undefined, (err) => {
-        console.error('Failed to load HDRI:', url, err);
-    });
-}
+});
 
 function switchEnvironment(key) {
-    const env = ENVIRONMENTS[key];
-    if (!env) return;
-    currentEnvironment = key;
-
-    // Update pedestal material - REMOVED so glass stays consistent
-    // Update lights
-    if (ambientLight) {
-        ambientLight.color.setHex(env.ambient.color);
-        ambientLight.intensity = env.ambient.intensity;
-    }
-    if (hemiLight) {
-        hemiLight.color.setHex(env.hemi.sky);
-        hemiLight.groundColor.setHex(env.hemi.ground);
-        hemiLight.intensity = env.hemi.intensity;
-    }
-    loadHdriIntoScene(getHdriUrl(env.slug, currentResolution), env.blurriness);
+    environmentController?.switchEnvironment(key);
 }
 
 function setResolution(res) {
-    currentResolution = res;
-    document.querySelectorAll('.res-btn').forEach(btn => {
-        btn.classList.toggle('res-btn-active', btn.dataset.res === res);
-    });
-    switchEnvironment(currentEnvironment);
-}
-
-function createGrassTexture() {
-    const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 256;
-    const ctx = canvas.getContext('2d');
-
-    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-    gradient.addColorStop(0, '#4f8e34');
-    gradient.addColorStop(0.45, '#3e7429');
-    gradient.addColorStop(1, '#2f5a1f');
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    for (let i = 0; i < 1800; i++) {
-        const x = Math.random() * canvas.width;
-        const y = Math.random() * canvas.height;
-        const width = 2 + Math.random() * 5;
-        const height = 4 + Math.random() * 10;
-        ctx.fillStyle = `hsla(${95 + Math.random() * 35}, ${40 + Math.random() * 30}%, ${28 + Math.random() * 28}%, ${0.08 + Math.random() * 0.18})`;
-        ctx.fillRect(x, y, width, height);
-    }
-
-    for (let i = 0; i < 650; i++) {
-        ctx.beginPath();
-        ctx.fillStyle = `hsla(${70 + Math.random() * 24}, ${25 + Math.random() * 35}%, ${42 + Math.random() * 18}%, ${0.08 + Math.random() * 0.16})`;
-        ctx.arc(Math.random() * canvas.width, Math.random() * canvas.height, Math.random() * 1.8, 0, Math.PI * 2);
-        ctx.fill();
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(TERRAIN_TEXTURE_REPEAT, TERRAIN_TEXTURE_REPEAT);
-    texture.anisotropy = 8;
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.needsUpdate = true;
-    return texture;
-}
-
-function configureTerrainTexture(texture, colorSpace = THREE.NoColorSpace) {
-    texture.wrapS = THREE.RepeatWrapping;
-    texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(TERRAIN_TEXTURE_REPEAT, TERRAIN_TEXTURE_REPEAT);
-    texture.anisotropy = 8;
-    texture.colorSpace = colorSpace;
-    texture.needsUpdate = true;
-    return texture;
-}
-
-async function applyTerrainTextures(terrain) {
-    if (!terrain?.material) return;
-
-    const loader = new THREE.TextureLoader();
-    const basePath = import.meta.env.BASE_URL || '/';
-    const material = terrain.material;
-
-    try {
-        const [colorMap, normalMap, roughnessMap, aoMap] = await Promise.all([
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.color}`),
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.normal}`),
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.roughness}`),
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.ao}`),
-        ]);
-
-        material.map = configureTerrainTexture(colorMap, THREE.SRGBColorSpace);
-        material.normalMap = configureTerrainTexture(normalMap);
-        material.roughnessMap = configureTerrainTexture(roughnessMap);
-        material.aoMap = configureTerrainTexture(aoMap);
-        material.aoMapIntensity = 0.65;
-        material.normalScale.set(0.7, 0.7);
-        material.needsUpdate = true;
-    } catch (error) {
-        console.warn('Falling back to procedural terrain texture.', error);
-    }
-}
-
-function createTerrainMesh() {
-    const geometry = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
-    const positions = geometry.attributes.position;
-
-    for (let index = 0; index < positions.count; index++) {
-        const x = positions.getX(index);
-        const y = positions.getY(index);
-        const radialFalloff = Math.min(1, Math.hypot(x, y) / (TERRAIN_SIZE * 0.5));
-        const basin = -0.22 * Math.pow(radialFalloff, 1.7);
-        const rolling = Math.sin(x * 0.16) * 0.28 + Math.cos(y * 0.14) * 0.22;
-        const detail = Math.sin((x + y) * 0.45) * 0.08;
-        positions.setZ(index, basin + rolling + detail);
-    }
-
-    geometry.computeVertexNormals();
-    geometry.setAttribute('uv2', new THREE.Float32BufferAttribute(geometry.attributes.uv.array, 2));
-
-    const material = new THREE.MeshStandardMaterial({
-        color: 0x8abc63,
-        map: createGrassTexture(),
-        roughness: 0.97,
-        metalness: 0.02,
-    });
-
-    const terrain = new THREE.Mesh(geometry, material);
-    terrain.rotation.x = -Math.PI / 2;
-    terrain.position.y = TERRAIN_Y_OFFSET;
-    terrain.receiveShadow = true;
-    return terrain;
+    environmentController?.setResolution(res);
 }
 
 function sampleTerrainHeightAt(worldX, worldZ) {
-    if (!worldFloor) return null;
-
-    const terrainScaleX = worldFloor.scale.x || 1;
-    const terrainScaleY = worldFloor.scale.y || 1;
-    const terrainScaleZ = worldFloor.scale.z || 1;
-    const localX = (worldX - worldFloor.position.x) / terrainScaleX;
-    const localY = -(worldZ - worldFloor.position.z) / terrainScaleZ;
-    const halfExtent = TERRAIN_SIZE * 0.5;
-
-    if (Math.abs(localX) > halfExtent || Math.abs(localY) > halfExtent) {
-        return null;
-    }
-
-    const radialFalloff = Math.min(1, Math.hypot(localX, localY) / halfExtent);
-    const basin = -0.22 * Math.pow(radialFalloff, 1.7);
-    const rolling = Math.sin(localX * 0.16) * 0.28 + Math.cos(localY * 0.14) * 0.22;
-    const detail = Math.sin((localX + localY) * 0.45) * 0.08;
-    const localHeight = basin + rolling + detail;
-
-    return worldFloor.position.y + localHeight * terrainScaleY;
+    return sampleTerrainHeightAtWorldFloor(worldFloor, worldX, worldZ);
 }
 
 function buildLightGrid() {
-    lightGridGroup = new THREE.Group();
-    lightGridGroup.name = 'light-grid';
-
-    const tileGeometry = new THREE.BoxGeometry(LIGHT_TILE_SIZE, LIGHT_TILE_HEIGHT, LIGHT_TILE_SIZE);
-    const totalSpan = (LIGHT_GRID_DIMENSION - 1) * (LIGHT_TILE_SIZE + LIGHT_TILE_GAP);
-
-    for (let row = 0; row < LIGHT_GRID_DIMENSION; row++) {
-        for (let col = 0; col < LIGHT_GRID_DIMENSION; col++) {
-            const tileMaterial = new THREE.MeshStandardMaterial({
-                color: 0x16202c,
-                emissive: 0x000000,
-                roughness: 0.24,
-                metalness: 0.18,
-            });
-            const tile = new THREE.Mesh(tileGeometry, tileMaterial);
-            tile.castShadow = true;
-            tile.receiveShadow = true;
-            tile.userData.gridIndex = row * LIGHT_GRID_DIMENSION + col;
-            tile.userData.gridLit = false;
-            tile.userData.baseY = LIGHT_TILE_HEIGHT * 0.5;
-            tile.position.set(
-                col * (LIGHT_TILE_SIZE + LIGHT_TILE_GAP) - totalSpan * 0.5,
-                tile.userData.baseY,
-                row * (LIGHT_TILE_SIZE + LIGHT_TILE_GAP) - totalSpan * 0.5
-            );
-            updateLightTileVisual(tile, false, true);
-            lightGridTiles.push(tile);
-            lightGridGroup.add(tile);
-        }
-    }
-
-    positionLightGrid(getLightGridAnchorTarget());
-    scene.add(lightGridGroup);
+    lightGridController?.build();
 }
 
 function getLightGridAnchorTarget() {
@@ -579,83 +348,11 @@ function getLightGridAnchorTarget() {
 }
 
 function positionLightGrid(anchorTarget) {
-    if (!lightGridGroup) return;
-
-    const anchorX = anchorTarget.x + LIGHT_GRID_OFFSET.x;
-    const anchorZ = anchorTarget.z + LIGHT_GRID_OFFSET.z;
-    const anchorY = getGroundHeightAt(anchorX, anchorZ, true) ?? TERRAIN_Y_OFFSET;
-
-    lightGridGroup.position.set(anchorX, anchorY, anchorZ);
-}
-
-function updateLightTileVisual(tile, isLit, immediate = false) {
-    const material = tile.material;
-    const nextColor = isLit ? 0xf4d35e : 0x16202c;
-    const nextEmissive = isLit ? 0xffc247 : 0x000000;
-    const nextEmissiveIntensity = isLit ? 1.65 : 0;
-    const nextY = tile.userData.baseY + (isLit ? 0.07 : 0);
-    const nextScale = isLit ? 1.08 : 1;
-
-    tile.userData.gridLit = isLit;
-
-    if (immediate) {
-        material.color.setHex(nextColor);
-        material.emissive.setHex(nextEmissive);
-        material.emissiveIntensity = nextEmissiveIntensity;
-        tile.position.y = nextY;
-        tile.scale.setScalar(nextScale);
-        return;
-    }
-
-    gsap.to(material.color, {
-        r: new THREE.Color(nextColor).r,
-        g: new THREE.Color(nextColor).g,
-        b: new THREE.Color(nextColor).b,
-        duration: 0.18,
-        overwrite: true,
-    });
-    gsap.to(material.emissive, {
-        r: new THREE.Color(nextEmissive).r,
-        g: new THREE.Color(nextEmissive).g,
-        b: new THREE.Color(nextEmissive).b,
-        duration: 0.18,
-        overwrite: true,
-    });
-    gsap.to(material, {
-        emissiveIntensity: nextEmissiveIntensity,
-        duration: 0.18,
-        overwrite: true,
-    });
-    gsap.to(tile.position, {
-        y: nextY,
-        duration: 0.18,
-        overwrite: true,
-    });
-    gsap.to(tile.scale, {
-        x: nextScale,
-        y: nextScale,
-        z: nextScale,
-        duration: 0.18,
-        overwrite: true,
-    });
-}
-
-function toggleLightTile(tile) {
-    updateLightTileVisual(tile, !tile.userData.gridLit);
+    lightGridController?.position(anchorTarget);
 }
 
 function handleLightGridClick(event) {
-    if (!renderer || !lightGridTiles.length || gameplay.active || gameplay.pointerLocked) return;
-
-    const rect = renderer.domElement.getBoundingClientRect();
-    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-    raycaster.setFromCamera(pointerNdc, camera);
-    const hit = raycaster.intersectObjects(lightGridTiles, false)[0];
-    if (!hit?.object) return;
-
-    toggleLightTile(hit.object);
+    lightGridController?.handleClick(event);
 }
 
 function copyJoltVector(target, source) {
@@ -669,22 +366,7 @@ function copyJoltQuaternion(target, source) {
 }
 
 function createOwnedShape(settings) {
-    const { Jolt } = physics;
-    const shapeResult = settings.Create();
-
-    if (!shapeResult.IsValid()) {
-        const error = shapeResult.HasError() ? shapeResult.GetError() : 'Unknown Jolt shape creation error';
-        Jolt.destroy(shapeResult);
-        Jolt.destroy(settings);
-        throw new Error(error);
-    }
-
-    const shape = shapeResult.Get();
-    shape.AddRef();
-    shapeResult.Clear();
-    Jolt.destroy(shapeResult);
-    Jolt.destroy(settings);
-    return shape;
+    return physicsCore?.createOwnedShape(settings) ?? null;
 }
 
 function disposeRenderableObject(root) {
@@ -1249,169 +931,19 @@ async function importPhysicsProp(file, fileMap = {}) {
 }
 
 async function initPhysics() {
-    try {
-        const Jolt = await initJolt();
-        const objectLayerPairFilter = new Jolt.ObjectLayerPairFilterTable(JOLT_OBJECT_LAYER_COUNT);
-        objectLayerPairFilter.EnableCollision(JOLT_NON_MOVING_LAYER, JOLT_MOVING_LAYER);
-        objectLayerPairFilter.EnableCollision(JOLT_MOVING_LAYER, JOLT_MOVING_LAYER);
-
-        const nonMovingBroadPhaseLayer = new Jolt.BroadPhaseLayer(0);
-        const movingBroadPhaseLayer = new Jolt.BroadPhaseLayer(1);
-        const broadPhaseInterface = new Jolt.BroadPhaseLayerInterfaceTable(
-            JOLT_OBJECT_LAYER_COUNT,
-            JOLT_BROAD_PHASE_LAYER_COUNT
-        );
-        broadPhaseInterface.MapObjectToBroadPhaseLayer(JOLT_NON_MOVING_LAYER, nonMovingBroadPhaseLayer);
-        broadPhaseInterface.MapObjectToBroadPhaseLayer(JOLT_MOVING_LAYER, movingBroadPhaseLayer);
-        Jolt.destroy(nonMovingBroadPhaseLayer);
-        Jolt.destroy(movingBroadPhaseLayer);
-
-        const objectVsBroadPhaseLayerFilter = new Jolt.ObjectVsBroadPhaseLayerFilterTable(
-            broadPhaseInterface,
-            JOLT_BROAD_PHASE_LAYER_COUNT,
-            objectLayerPairFilter,
-            JOLT_OBJECT_LAYER_COUNT
-        );
-
-        const settings = new Jolt.JoltSettings();
-        settings.mMaxWorkerThreads = Math.max(1, Math.min(3, (navigator.hardwareConcurrency || 4) - 1));
-        settings.mObjectLayerPairFilter = objectLayerPairFilter;
-        settings.mBroadPhaseLayerInterface = broadPhaseInterface;
-        settings.mObjectVsBroadPhaseLayerFilter = objectVsBroadPhaseLayerFilter;
-
-        const jolt = new Jolt.JoltInterface(settings);
-        Jolt.destroy(settings);
-
-        const physicsSystem = jolt.GetPhysicsSystem();
-        const bodyInterface = physicsSystem.GetBodyInterface();
-        const gravity = new Jolt.Vec3(0, -PLAYER_SETTINGS.gravity, 0);
-        physicsSystem.SetGravity(gravity);
-
-        physics.Jolt = Jolt;
-        physics.jolt = jolt;
-        physics.physicsSystem = physicsSystem;
-        physics.bodyInterface = bodyInterface;
-        physics.gravity = gravity;
-        physics.movingBroadPhaseFilter = new Jolt.DefaultBroadPhaseLayerFilter(
-            jolt.GetObjectVsBroadPhaseLayerFilter(),
-            JOLT_MOVING_LAYER
-        );
-        physics.movingLayerFilter = new Jolt.DefaultObjectLayerFilter(
-            jolt.GetObjectLayerPairFilter(),
-            JOLT_MOVING_LAYER
-        );
-        physics.bodyFilter = new Jolt.BodyFilter();
-        physics.shapeFilter = new Jolt.ShapeFilter();
-        physics.updateSettings = new Jolt.ExtendedUpdateSettings();
-        physics.updateSettings.mStickToFloorStepDown = new Jolt.Vec3(0, -0.6, 0);
-        physics.updateSettings.mWalkStairsStepUp = new Jolt.Vec3(0, 0.45, 0);
-        physics.updateSettings.mWalkStairsMinStepForward = 0.02;
-        physics.updateSettings.mWalkStairsStepForwardTest = 0.2;
-        physics.updateSettings.mWalkStairsCosAngleForwardContact = Math.cos(THREE.MathUtils.degToRad(65));
-        physics.updateSettings.mWalkStairsStepDownExtra = new Jolt.Vec3(0, -0.2, 0);
-        physics.ready = true;
-
-        rebuildTerrainPhysicsBody();
-        if (currentMesh) {
-            rebuildModelPhysicsBody();
-            ensurePlayerCharacter();
-        }
-    } catch (error) {
-        physics.failed = true;
-        console.error('Failed to initialize Jolt physics.', error);
-    }
+    return physicsCore?.initPhysics();
 }
 
 function countTrianglesForObject(root) {
-    let totalTriangles = 0;
-
-    root?.traverse((child) => {
-        if (!child.isMesh || !child.geometry?.attributes?.position) return;
-
-        const index = child.geometry.getIndex();
-        totalTriangles += index ? index.count / 3 : child.geometry.attributes.position.count / 3;
-    });
-
-    return totalTriangles;
+    return physicsCore?.countTrianglesForObject(root) ?? 0;
 }
 
 function createStaticMeshBody(root) {
-    if (!physics.ready || !root) return null;
-
-    const { Jolt, bodyInterface } = physics;
-    root.updateWorldMatrix(true, true);
-
-    const totalTriangles = countTrianglesForObject(root);
-    if (!totalTriangles) return null;
-
-    const triangles = new Jolt.TriangleList();
-    triangles.resize(totalTriangles);
-    let triangleIndex = 0;
-
-    root.traverse((child) => {
-        if (!child.isMesh || !child.geometry?.attributes?.position) return;
-
-        const position = child.geometry.getAttribute('position');
-        const index = child.geometry.getIndex();
-        const triangleCount = index ? index.count / 3 : position.count / 3;
-
-        for (let i = 0; i < triangleCount; i++) {
-            const i0 = index ? index.getX(i * 3) : i * 3;
-            const i1 = index ? index.getX(i * 3 + 1) : i * 3 + 1;
-            const i2 = index ? index.getX(i * 3 + 2) : i * 3 + 2;
-
-            tempVectorA.fromBufferAttribute(position, i0).applyMatrix4(child.matrixWorld);
-            tempVectorB.fromBufferAttribute(position, i1).applyMatrix4(child.matrixWorld);
-            tempVectorC.fromBufferAttribute(position, i2).applyMatrix4(child.matrixWorld);
-
-            const triangle = triangles.at(triangleIndex++);
-            const v1 = triangle.get_mV(0);
-            const v2 = triangle.get_mV(1);
-            const v3 = triangle.get_mV(2);
-            v1.x = tempVectorA.x;
-            v1.y = tempVectorA.y;
-            v1.z = tempVectorA.z;
-            v2.x = tempVectorB.x;
-            v2.y = tempVectorB.y;
-            v2.z = tempVectorB.z;
-            v3.x = tempVectorC.x;
-            v3.y = tempVectorC.y;
-            v3.z = tempVectorC.z;
-        }
-    });
-
-    const materials = new Jolt.PhysicsMaterialList();
-    const shape = createOwnedShape(new Jolt.MeshShapeSettings(triangles, materials));
-    const bodyPosition = new Jolt.RVec3(0, 0, 0);
-    const bodyRotation = new Jolt.Quat(0, 0, 0, 1);
-    const creationSettings = new Jolt.BodyCreationSettings(
-        shape,
-        bodyPosition,
-        bodyRotation,
-        Jolt.EMotionType_Static,
-        JOLT_NON_MOVING_LAYER
-    );
-    creationSettings.mFriction = 0.9;
-    const body = bodyInterface.CreateBody(creationSettings);
-    bodyInterface.AddBody(body.GetID(), Jolt.EActivation_DontActivate);
-
-    shape.Release();
-    Jolt.destroy(creationSettings);
-    Jolt.destroy(bodyPosition);
-    Jolt.destroy(bodyRotation);
-    Jolt.destroy(triangles);
-    Jolt.destroy(materials);
-
-    return body;
+    return physicsCore?.createStaticMeshBody(root) ?? null;
 }
 
 function destroyPhysicsBody(body) {
-    if (!physics.ready || !body) return;
-
-    const { bodyInterface } = physics;
-    const bodyId = body.GetID();
-    bodyInterface.RemoveBody(bodyId);
-    bodyInterface.DestroyBody(bodyId);
+    physicsCore?.destroyPhysicsBody(body);
 }
 
 function destroyDynamicPhysicsProp(prop) {
@@ -1612,60 +1144,19 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
 }
 
 function syncDynamicPhysicsBodies() {
-    if (!physics.dynamicBodies.length) return;
-
-    for (let index = physics.dynamicBodies.length - 1; index >= 0; index--) {
-        const prop = physics.dynamicBodies[index];
-        if (!prop?.body || !prop.mesh) continue;
-
-        copyJoltVector(prop.mesh.position, prop.body.GetPosition());
-        copyJoltQuaternion(prop.mesh.quaternion, prop.body.GetRotation());
-
-        if (prop.mesh.position.y < worldFloor.position.y - 40) {
-            destroyDynamicPhysicsProp(prop);
-            physics.dynamicBodies.splice(index, 1);
-        }
-    }
+    physicsRuntime?.syncDynamicPhysicsBodies();
 }
 
 function rebuildTerrainPhysicsBody() {
-    if (!physics.ready || !worldFloor) return;
-
-    if (physics.terrainBody) {
-        destroyPhysicsBody(physics.terrainBody);
-        physics.terrainBody = null;
-    }
-
-    physics.terrainBody = createStaticMeshBody(worldFloor);
+    physicsCore?.rebuildTerrainPhysicsBody();
 }
 
 function rebuildModelPhysicsBody() {
-    if (!physics.ready) return;
-
-    if (physics.modelBody) {
-        destroyPhysicsBody(physics.modelBody);
-        physics.modelBody = null;
-    }
-
-    if (!currentMesh) return;
-    physics.modelBody = createStaticMeshBody(currentMesh);
+    physicsCore?.rebuildModelPhysicsBody();
 }
 
 function destroyPlayerCharacter() {
-    if (!physics.character) return;
-
-    physics.Jolt.destroy(physics.character);
-    physics.character = null;
-
-    if (physics.characterListener) {
-        physics.Jolt.destroy(physics.characterListener);
-        physics.characterListener = null;
-    }
-
-    if (physics.characterShape) {
-        physics.characterShape.Release();
-        physics.characterShape = null;
-    }
+    physicsRuntime?.destroyPlayerCharacter();
 }
 
 function syncGameplaySpawnToCamera() {
@@ -1705,108 +1196,19 @@ function applyShowcaseCameraRotation() {
 }
 
 function ensurePlayerCharacter() {
-    if (!physics.ready) return;
-
-    destroyPlayerCharacter();
-
-    const { Jolt, physicsSystem } = physics;
-    const characterRadius = Math.max(0.3, PLAYER_SETTINGS.collisionRadius * 0.55);
-    const characterHeight = Math.max(0.6, PLAYER_SETTINGS.eyeHeight - characterRadius * 1.2);
-    const shapeOffset = new Jolt.Vec3(0, 0.5 * characterHeight + characterRadius, 0);
-    const shapeRotation = Jolt.Quat.prototype.sIdentity();
-    const shapeSettings = new Jolt.RotatedTranslatedShapeSettings(
-        shapeOffset,
-        shapeRotation,
-        new Jolt.CapsuleShapeSettings(0.5 * characterHeight, characterRadius)
-    );
-    physics.characterShape = createOwnedShape(shapeSettings);
-    Jolt.destroy(shapeOffset);
-
-    const characterSettings = new Jolt.CharacterVirtualSettings();
-    characterSettings.mMass = 80;
-    characterSettings.mMaxStrength = 100;
-    characterSettings.mShape = physics.characterShape;
-    characterSettings.mBackFaceMode = Jolt.EBackFaceMode_CollideWithBackFaces;
-    characterSettings.mPredictiveContactDistance = 0.1;
-    characterSettings.mCharacterPadding = 0.02;
-    characterSettings.mPenetrationRecoverySpeed = 1.0;
-
-    const spawnPosition = new Jolt.RVec3(
-        gameplay.spawnPoint.x,
-        gameplay.spawnPoint.y,
-        gameplay.spawnPoint.z
-    );
-    physics.character = new Jolt.CharacterVirtual(
-        characterSettings,
-        spawnPosition,
-        shapeRotation,
-        physicsSystem
-    );
-    Jolt.destroy(characterSettings);
-    Jolt.destroy(spawnPosition);
-
-    physics.characterListener = new Jolt.CharacterContactListenerJS();
-    physics.characterListener.OnAdjustBodyVelocity = () => {};
-    physics.characterListener.OnContactValidate = () => true;
-    physics.characterListener.OnCharacterContactValidate = () => true;
-    physics.characterListener.OnContactAdded = () => {};
-    physics.characterListener.OnContactPersisted = () => {};
-    physics.characterListener.OnContactRemoved = () => {};
-    physics.characterListener.OnCharacterContactAdded = () => {};
-    physics.characterListener.OnCharacterContactPersisted = () => {};
-    physics.characterListener.OnCharacterContactRemoved = () => {};
-    physics.characterListener.OnCharacterContactSolve = () => {};
-    physics.characterListener.OnContactSolve = (_character, _bodyID2, _subShapeID2, _contactPosition, contactNormal, contactVelocity, _contactMaterial, _characterVelocity, newCharacterVelocity) => {
-        const normal = Jolt.wrapPointer(contactNormal, Jolt.Vec3);
-        const velocity = Jolt.wrapPointer(contactVelocity, Jolt.Vec3);
-        const nextVelocity = Jolt.wrapPointer(newCharacterVelocity, Jolt.Vec3);
-
-        if (!physics.allowSliding && velocity.IsNearZero() && !physics.character.IsSlopeTooSteep(normal)) {
-            nextVelocity.SetX(0);
-            nextVelocity.SetY(0);
-            nextVelocity.SetZ(0);
-        }
-    };
-    physics.character.SetListener(physics.characterListener);
+    physicsRuntime?.ensurePlayerCharacter();
 }
 
 function syncCameraToCharacter() {
-    if (!physics.character) return;
-
-    const position = copyJoltVector(tempVectorA, physics.character.GetPosition());
-    camera.position.set(position.x, position.y + PLAYER_SETTINGS.eyeHeight, position.z);
+    physicsRuntime?.syncCameraToCharacter();
 }
 
 function stepPhysics(delta) {
-    if (!physics.ready || !physics.jolt) {
-        return {
-            total: 0,
-            step: 0,
-            sync: 0,
-            collisions: 0,
-        };
-    }
-
-    const collisionSteps = delta > 1 / 55 ? 2 : 1;
-    debugConsoleState.latest.collisionSteps = collisionSteps;
-
-    const stepStart = performance.now();
-    physics.jolt.Step(delta, collisionSteps);
-    const stepDuration = performance.now() - stepStart;
-
-    const syncStart = performance.now();
-    syncDynamicPhysicsBodies();
-    const syncDuration = performance.now() - syncStart;
-
-    const collisionsStart = performance.now();
-    updateDynamicBodyCollisionScripts();
-    const collisionsDuration = performance.now() - collisionsStart;
-
-    return {
-        total: stepDuration + syncDuration + collisionsDuration,
-        step: stepDuration,
-        sync: syncDuration,
-        collisions: collisionsDuration,
+    return physicsRuntime?.stepPhysics(delta) ?? {
+        total: 0,
+        step: 0,
+        sync: 0,
+        collisions: 0,
     };
 }
 
@@ -2878,8 +2280,62 @@ function runStatCommand(args) {
     pushDebugConsoleLine(`Stat ${panel} ${isEnabled ? 'enabled' : 'hidden'}.`, 'success');
 }
 
+function applyMobileModeState() {
+    const nextEnabled = mobileState.detected || mobileState.forced;
+    const changed = mobileState.enabled !== nextEnabled;
+
+    mobileState.enabled = nextEnabled;
+    document.body.classList.toggle('is-mobile', nextEnabled);
+    document.body.classList.toggle('mobile-ui-preview', mobileState.forced && !mobileState.detected);
+
+    if (changed && nextEnabled && document.pointerLockElement === renderer?.domElement) {
+        document.exitPointerLock?.();
+    }
+
+    resetMobileInputState();
+    updateWorldPresentation();
+    updateGameplayUI();
+    updateMobileButtons();
+}
+
+function runMobileCommand(args) {
+    const action = args[0]?.toLowerCase() || 'toggle';
+
+    if (mobileState.detected) {
+        pushDebugConsoleLine('Mobile UI is already active on this device.', 'warn');
+        return;
+    }
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        mobileState.forced = true;
+        applyMobileModeState();
+        pushDebugConsoleLine('Mobile UI preview enabled. Use `mobile off` to restore desktop mode.', 'success');
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        mobileState.forced = false;
+        applyMobileModeState();
+        pushDebugConsoleLine('Mobile UI preview disabled. Click the scene again if you want desktop pointer lock back.', 'success');
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        mobileState.forced = !mobileState.forced;
+        applyMobileModeState();
+        pushDebugConsoleLine(
+            `Mobile UI preview ${mobileState.forced ? 'enabled' : 'disabled'}.`,
+            'success'
+        );
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: mobile on, mobile off, or mobile toggle.', 'warn');
+}
+
 const debugCommandRegistry = {
     stat: runStatCommand,
+    mobile: runMobileCommand,
 };
 
 function executeDebugConsoleCommand(rawCommand) {
@@ -3229,8 +2685,9 @@ function setupMobileControls() {
 async function init() {
     // Mobile Detection
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.matchMedia('(pointer: coarse)').matches;
-    mobileState.enabled = isMobile;
-    document.body.classList.toggle('is-mobile', isMobile);
+    mobileState.detected = isMobile;
+    mobileState.forced = false;
+    applyMobileModeState();
 
     // Add listeners immediately so UI is responsive even if WASM is loading
     document.getElementById('load-sample').addEventListener('click', (e) => {
@@ -3392,6 +2849,11 @@ async function init() {
     await initPhysics();
 
     scene = new THREE.Scene();
+    environmentController = createEnvironmentController({
+        scene,
+        getAmbientLight: () => ambientLight,
+        getHemiLight: () => hemiLight,
+    });
 
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
     camera.position.copy(SHOWCASE_CAMERA_POSITION);
@@ -3406,6 +2868,18 @@ async function init() {
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
+    lightGridController = createLightGridController({
+        scene,
+        gsap,
+        getRenderer: () => renderer,
+        getCamera: () => camera,
+        gameplay,
+        raycaster,
+        pointerNdc,
+        getGroundHeightAt,
+        getAnchorTarget: getLightGridAnchorTarget,
+        terrainYOffset: TERRAIN_Y_OFFSET,
+    });
 
     // Load initial HDR Environment
     switchEnvironment('sunny-sky');
