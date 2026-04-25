@@ -16,6 +16,15 @@ import { createPhysicsRuntime } from './src/physics/runtime.js';
 import { createEnvironmentController } from './src/world/environment.js';
 import { createLightGridController } from './src/world/lightGrid.js';
 import {
+    createActor,
+    createSceneSystem,
+    ensureActorScriptComponent,
+    getMetadataComponent,
+    getPhysicsBodyComponent,
+    getRenderComponent,
+    getScriptComponent,
+} from './src/runtime/sceneRuntime.js';
+import {
     TERRAIN_Y_OFFSET,
     applyTerrainTextures,
     createTerrainMesh,
@@ -33,6 +42,7 @@ let environmentController;
 let physicsCore;
 let physicsRuntime;
 let multiplayerController;
+let sceneSystem;
 const EXPORT_MAX_TEXTURE_SIZE = 1024;
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
@@ -61,6 +71,8 @@ const VEHICLE_SETTINGS = {
     length: 2.6,
     width: 1.35,
     height: 0.6,
+    wheelBase: 1.72,
+    trackWidth: 1.18,
     spawnDistance: 4.8,
     spawnLift: 0.9,
     interactionRadius: 4.5,
@@ -68,32 +80,52 @@ const VEHICLE_SETTINGS = {
     followDistance: 5.6,
     followHeight: 2.4,
     lookAhead: 2.2,
-    acceleration: 7.8,
-    reverseAcceleration: 5.2,
-    coastDrag: 3.6,
-    lateralGrip: 10.5,
-    brakeGrip: 14.5,
-    steeringRate: 1.95,
-    steeringReturn: 8.5,
-    steeringGrip: 10.5,
-    uprightTorque: 620,
-    maxDriveSpeed: 26,
-    maxReverseSpeed: 11,
-    brakeDamping: 0.72,
-    maxAngularVelocity: 2.4,
+    acceleration: 5.9,
+    reverseAcceleration: 4.1,
+    boostAcceleration: 6.8,
+    coastDrag: 1.55,
+    rollingDrag: 0.22,
+    lowSpeedGrip: 4.9,
+    highSpeedGrip: 2.8,
+    brakeGrip: 8.6,
+    driftGrip: 1.35,
+    partialContactGrip: 0.95,
+    driftBoostThreshold: 0.42,
+    driftSteerBonus: 1.22,
+    steeringRate: 1.35,
+    steeringReturn: 4.6,
+    steeringGrip: 6.1,
+    steeringHighSpeedDamping: 0.45,
+    uprightTorque: 380,
+    rollTorque: 165,
+    pitchTorque: 120,
+    suspensionRideHeight: 1.08,
+    suspensionTravel: 0.9,
+    suspensionSpring: 7.4,
+    suspensionDamping: 1.8,
+    bumpPitchTorque: 420,
+    bumpRollTorque: 340,
+    bumpLaunchBoost: 3.2,
+    airtimeAngularBlend: 0.08,
+    maxDriveSpeed: 27,
+    maxReverseSpeed: 10,
+    brakeDamping: 0.8,
+    maxAngularVelocity: 3.3,
 };
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
-let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, spawnRigidSphereBtn, spawnRigidCubeBtn, spawnRigidCarBtn;
+let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
 let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
 let propCollisionPrompt, propCollisionCopy, propCollisionRemember, propCollisionSimpleBtn, propCollisionComplexBtn, propCollisionCancelBtn;
-let leftMouseActionInput, rightMouseActionInput, mouseActionApplyBtn, mouseActionResetBtn, mouseActionStatus;
+let inputActionsOpenBtn, inputActionsEditor, inputActionLeftBtn, inputActionRightBtn, inputActionMode, inputActionEditorInput, inputActionsEditorStatus, mouseActionApplyBtn, mouseActionResetBtn, inputActionsCloseBtn, mouseActionStatus;
 let objectScriptMenu, objectScriptTickActionBtn, objectScriptCollisionActionBtn;
 let objectScriptEditor, objectScriptEditorTitle, objectScriptEditorTarget, objectScriptEditorMode;
 let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBtn, objectScriptEditorClearBtn, objectScriptEditorCancelBtn;
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
+let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect;
+let actorComponentCollisionInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
 let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
@@ -122,6 +154,9 @@ const importedPropState = {
     templates: [],
     futureCollisionMode: null,
     promptResolver: null,
+};
+const actorEditorState = {
+    open: false,
 };
 const MOUSE_ACTION_STORAGE_KEY = 'polyflow-3d.mouse-actions.v1';
 const OBJECT_SCRIPT_STORAGE_KEY = 'polyflow-3d.object-scripts.v1';
@@ -199,6 +234,7 @@ const mouseActionState = {
     rightCompiled: null,
     leftError: '',
     rightError: '',
+    selectedButton: 'left',
 };
 const objectScriptState = {
     nextPropId: 1,
@@ -740,12 +776,12 @@ function updatePropImportStatus() {
     if (!propImportDefaultStatus || !resetPropImportDefaultBtn) return;
 
     if (importedPropState.futureCollisionMode) {
-        propImportDefaultStatus.textContent = `Future prop imports use ${IMPORTED_PROP_COLLISION_LABELS[importedPropState.futureCollisionMode]}.`;
+        propImportDefaultStatus.textContent = `Create actor instances with render, collision, and script components. Future imported actor sources use ${IMPORTED_PROP_COLLISION_LABELS[importedPropState.futureCollisionMode]}.`;
         resetPropImportDefaultBtn.hidden = false;
         return;
     }
 
-    propImportDefaultStatus.textContent = 'New prop imports ask for a collision mode.';
+    propImportDefaultStatus.textContent = 'Create actor instances with render, collision, and script components. Imported actor sources ask for a collision mode.';
     resetPropImportDefaultBtn.hidden = true;
 }
 
@@ -938,10 +974,12 @@ function renderImportedPropButtons() {
         const button = document.createElement('button');
         button.className = 'btn viewer-menu-btn';
         button.textContent = `${template.displayName} · ${template.collisionMode === 'simple' ? 'Simple' : 'Complex'}`;
-        button.title = `Spawn ${template.displayName} with ${IMPORTED_PROP_COLLISION_LABELS[template.collisionMode]}.`;
-        button.addEventListener('click', () => spawnImportedProp(template.id));
+        button.title = `Open the actor editor for ${template.displayName} with ${IMPORTED_PROP_COLLISION_LABELS[template.collisionMode]}.`;
+        button.addEventListener('click', () => openActorEditor({ kind: 'imported', templateId: template.id, label: template.displayName }));
         importedPropList.appendChild(button);
     });
+
+    syncActorEditorTemplateOptions();
 }
 
 function registerImportedPropTemplate(fileName, root, collisionMode, shape, triangleCount) {
@@ -961,44 +999,52 @@ function registerImportedPropTemplate(fileName, root, collisionMode, shape, tria
     return template;
 }
 
-function spawnImportedProp(templateId) {
+function spawnImportedProp(templateId, options = {}) {
     if (!physics.ready || !scene || !camera) {
         console.warn('Jolt physics is not ready yet.');
-        return;
+        return null;
     }
 
     const template = importedPropState.templates.find((entry) => entry.id === templateId);
-    if (!template?.shape || !template.root) return;
+    if (!template?.root) return null;
 
     const spawnPosition = tempVectorD;
     const launchImpulse = tempVectorE;
     getDynamicPropSpawn(spawnPosition, launchImpulse);
 
     const visual = cloneDisposableObject(template.root);
-    template.shape.AddRef();
+    let body = null;
+    const includeCollisionBody = options.includeCollisionBody !== false;
 
-    const body = createDynamicPrimitiveBody(
-        template.shape,
-        spawnPosition,
-        launchImpulse,
-        template.collisionMode === 'simple'
-            ? { restitution: 0.12, friction: 0.84 }
-            : { restitution: 0.08, friction: 0.76 }
-    );
+    if (includeCollisionBody) {
+        template.shape.AddRef();
 
-    if (!body) {
-        disposeRenderableObject(visual);
-        return;
+        body = createDynamicPrimitiveBody(
+            template.shape,
+            spawnPosition,
+            launchImpulse,
+            template.collisionMode === 'simple'
+                ? { restitution: 0.12, friction: 0.84 }
+                : { restitution: 0.08, friction: 0.76 }
+        );
+
+        if (!body) {
+            disposeRenderableObject(visual);
+            return null;
+        }
     }
 
     visual.position.copy(spawnPosition);
-    scene.add(visual);
-    physics.dynamicBodies.push(syncPropScriptState({
+    const actor = createDynamicPropActor({
         body,
         mesh: visual,
         kind: 'imported',
         templateId,
-    }));
+        userData: options.userData,
+        includeScripts: options.includeScripts !== false,
+    });
+    physics.dynamicBodies.push(actor);
+    return actor;
 }
 
 async function importPhysicsProp(file, fileMap = {}) {
@@ -1066,15 +1112,18 @@ function destroyDynamicPhysicsProp(prop) {
         objectScriptState.editorOpen = false;
     }
 
-    if (prop.mesh) {
-        scene?.remove(prop.mesh);
-        disposeRenderableObject(prop.mesh);
+    sceneSystem?.removeActor(prop);
+
+    const mesh = getActorRenderObject(prop);
+    if (mesh) {
+        disposeRenderableObject(mesh);
 
         prop.mesh = null;
     }
 
-    if (prop.body) {
-        destroyPhysicsBody(prop.body);
+    const body = getActorBody(prop);
+    if (body) {
+        destroyPhysicsBody(body);
         prop.body = null;
     }
 
@@ -1090,7 +1139,7 @@ function clearDynamicPhysicsProps() {
 
 function hasEnabledDynamicPropEvent(eventType) {
     for (let index = 0; index < physics.dynamicBodies.length; index++) {
-        const eventState = physics.dynamicBodies[index]?.scripts?.[eventType];
+        const eventState = getActorScriptState(physics.dynamicBodies[index])?.[eventType];
         if (eventState?.enabled) {
             return true;
         }
@@ -1198,9 +1247,10 @@ function getNearbyVehicle() {
     let closestDistanceSq = VEHICLE_SETTINGS.interactionRadius * VEHICLE_SETTINGS.interactionRadius;
 
     for (const prop of physics.dynamicBodies) {
-        if (!prop?.body || prop.kind !== 'vehicle') continue;
+        const body = getActorBody(prop);
+        if (!body || prop.kind !== 'vehicle') continue;
 
-        const bodyPosition = copyJoltVector(tempVectorB, physics.bodyInterface.GetPosition(prop.body.GetID()));
+        const bodyPosition = copyJoltVector(tempVectorB, physics.bodyInterface.GetPosition(body.GetID()));
         const distanceSq = origin.distanceToSquared(bodyPosition);
         if (distanceSq < closestDistanceSq) {
             closestDistanceSq = distanceSq;
@@ -1212,15 +1262,16 @@ function getNearbyVehicle() {
 }
 
 function enterVehicle(prop = getNearbyVehicle()) {
-    if (!gameplay.active || !prop?.body || prop.kind !== 'vehicle') return false;
+    const propBody = getActorBody(prop);
+    if (!gameplay.active || !propBody || prop.kind !== 'vehicle') return false;
 
     vehicleState.activePropId = prop.id;
     vehicleState.brakeHeld = false;
     physics.jumpQueued = false;
     gameplay.grounded = true;
 
-    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(prop.body.GetID())).clone();
-    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(prop.body.GetID())).clone();
+    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(propBody.GetID())).clone();
+    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(propBody.GetID())).clone();
     positionVehicleCamera(vehiclePosition, vehicleRotation, 1 / 60);
 
     updateGameplayUI();
@@ -1229,13 +1280,14 @@ function enterVehicle(prop = getNearbyVehicle()) {
 
 function exitVehicle() {
     const vehicle = getActiveVehicleProp();
-    if (!vehicle?.body) {
+    const vehicleBody = getActorBody(vehicle);
+    if (!vehicleBody) {
         clearActiveVehicle({ updateUi: true });
         return false;
     }
 
-    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(vehicle.body.GetID()));
-    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(vehicle.body.GetID()));
+    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(vehicleBody.GetID()));
+    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(vehicleBody.GetID()));
     const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
     const exitRight = tempVectorC.set(1, 0, 0).applyQuaternion(vehicleRotation);
     exitRight.y = 0;
@@ -1261,7 +1313,7 @@ function exitVehicle() {
     return true;
 }
 
-function spawnDrivableCar() {
+function spawnDrivableCar(options = {}) {
     if (!physics.ready || !scene || !camera) {
         console.warn('Jolt physics is not ready yet.');
         return null;
@@ -1343,13 +1395,13 @@ function spawnDrivableCar() {
 
     chassis.position.copy(spawnPosition);
     chassis.quaternion.copy(carRotation);
-    scene.add(chassis);
 
-    const vehicle = syncPropScriptState({
+    const vehicle = createDynamicPropActor({
         body,
         mesh: chassis,
         kind: 'vehicle',
-        userData: { label: 'Car' },
+        userData: options.userData ?? { label: 'Car' },
+        includeScripts: options.includeScripts !== false,
     });
     physics.dynamicBodies.push(vehicle);
     updateGameplayUI();
@@ -1417,9 +1469,15 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
     const launchImpulse = tempVectorE;
     getDynamicPropSpawn(spawnPosition, launchImpulse);
     const impulseScale = Number.isFinite(options.impulseScale) ? options.impulseScale : 1;
+    const includeCollisionBody = options.includeCollisionBody !== false;
+    const useLocalPosition = options.local !== false;
 
     if (offset) {
-        spawnPosition.add(offset);
+        if (useLocalPosition) {
+            spawnPosition.add(tempVectorA.copy(offset).applyQuaternion(camera.quaternion));
+        } else {
+            spawnPosition.copy(offset);
+        }
     }
 
     if (options.skipImpulse === true) {
@@ -1434,17 +1492,8 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
 
     if (kind === 'sphere') {
         const radius = normalizedScale;
-        shape = createOwnedShape(new Jolt.SphereShapeSettings(radius));
-        mesh = new THREE.Mesh(
-            new THREE.SphereGeometry(radius, 28, 20),
-            new THREE.MeshStandardMaterial({
-                color: 0xf97316,
-                metalness: 0.14,
-                roughness: 0.34,
-                emissive: 0x331100,
-                emissiveIntensity: 0.28,
-            })
-        );
+        shape = includeCollisionBody ? createOwnedShape(new Jolt.SphereShapeSettings(radius)) : null;
+        mesh = buildPrimitiveActorMesh('sphere', radius);
         bodyOptions = {
             restitution: 0.48,
             friction: 0.58,
@@ -1452,19 +1501,12 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
         };
     } else {
         const halfExtent = normalizedScale;
-        const halfExtentVector = new Jolt.Vec3(halfExtent, halfExtent, halfExtent);
-        shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
-        Jolt.destroy(halfExtentVector);
-        mesh = new THREE.Mesh(
-            new THREE.BoxGeometry(halfExtent * 2, halfExtent * 2, halfExtent * 2),
-            new THREE.MeshStandardMaterial({
-                color: 0x60a5fa,
-                metalness: 0.12,
-                roughness: 0.38,
-                emissive: 0x0b1220,
-                emissiveIntensity: 0.2,
-            })
-        );
+        if (includeCollisionBody) {
+            const halfExtentVector = new Jolt.Vec3(halfExtent, halfExtent, halfExtent);
+            shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
+            Jolt.destroy(halfExtentVector);
+        }
+        mesh = buildPrimitiveActorMesh('cube', halfExtent);
         bodyOptions = {
             restitution: 0.12,
             friction: 0.82,
@@ -1472,22 +1514,30 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
         };
     }
 
-    const body = createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, bodyOptions);
+    const body = includeCollisionBody
+        ? createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, bodyOptions)
+        : null;
 
-    if (!body) {
+    if (includeCollisionBody && !body) {
         mesh.geometry.dispose();
         mesh.material.dispose();
-        return;
+        return null;
     }
 
     mesh.castShadow = options.castShadow ?? true;
     mesh.receiveShadow = options.receiveShadow ?? true;
     mesh.position.copy(spawnPosition);
-    scene.add(mesh);
 
-    physics.dynamicBodies.push(syncPropScriptState({ body, mesh, kind }));
+    const actor = createDynamicPropActor({
+        body,
+        mesh,
+        kind,
+        userData: options.userData,
+        includeScripts: options.includeScripts !== false,
+    });
+    physics.dynamicBodies.push(actor);
 
-    return body;
+    return options.returnActor === true ? actor : body;
 }
 
 function syncDynamicPhysicsBodies() {
@@ -1641,6 +1691,218 @@ function createRuntimePropId() {
     return propId;
 }
 
+function getActorRenderObject(prop) {
+    return getRenderComponent(prop)?.mesh ?? prop?.mesh ?? null;
+}
+
+function getActorBody(prop) {
+    return getPhysicsBodyComponent(prop)?.body ?? prop?.body ?? null;
+}
+
+function getActorScriptState(prop) {
+    return getScriptComponent(prop)?.state ?? prop?.scripts ?? null;
+}
+
+function getActorMetadata(prop) {
+    return getMetadataComponent(prop) ?? null;
+}
+
+function ensureActorIdentity(prop) {
+    if (!prop) return prop;
+
+    const propId = prop.id || createRuntimePropId();
+    prop.id = propId;
+    const mesh = getActorRenderObject(prop);
+    if (mesh?.userData) {
+        mesh.userData.dynamicPropId = propId;
+    }
+
+    return prop;
+}
+
+function ensureActorScriptState(prop) {
+    if (!prop) return null;
+
+    const existingState = getActorScriptState(prop);
+    if (existingState) {
+        return existingState;
+    }
+
+    ensureActorIdentity(prop);
+    const scriptState = createObjectScriptState(prop.id);
+    ensureActorScriptComponent(prop, scriptState);
+    prop.scripts = scriptState;
+    return scriptState;
+}
+
+function buildPrimitiveActorMesh(kind, scale) {
+    if (kind === 'sphere') {
+        return new THREE.Mesh(
+            new THREE.SphereGeometry(scale, 28, 20),
+            new THREE.MeshStandardMaterial({
+                color: 0xf97316,
+                metalness: 0.14,
+                roughness: 0.34,
+                emissive: 0x331100,
+                emissiveIntensity: 0.28,
+            })
+        );
+    }
+
+    return new THREE.Mesh(
+        new THREE.BoxGeometry(scale * 2, scale * 2, scale * 2),
+        new THREE.MeshStandardMaterial({
+            color: 0x60a5fa,
+            metalness: 0.12,
+            roughness: 0.38,
+            emissive: 0x0b1220,
+            emissiveIntensity: 0.2,
+        })
+    );
+}
+
+function syncActorEditorTemplateOptions(selectedTemplateId = '') {
+    if (!actorImportedTemplateSelect) return;
+
+    actorImportedTemplateSelect.innerHTML = '';
+
+    if (!importedPropState.templates.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = 'No imported source available';
+        actorImportedTemplateSelect.appendChild(option);
+        actorImportedTemplateSelect.value = '';
+        return;
+    }
+
+    importedPropState.templates.forEach((template) => {
+        const option = document.createElement('option');
+        option.value = template.id;
+        option.textContent = `${template.displayName} (${template.collisionMode})`;
+        actorImportedTemplateSelect.appendChild(option);
+    });
+
+    actorImportedTemplateSelect.value = selectedTemplateId && importedPropState.templates.some((template) => template.id === selectedTemplateId)
+        ? selectedTemplateId
+        : importedPropState.templates[0].id;
+}
+
+function syncActorEditorUi() {
+    if (!actorKindSelect || !actorEditorSummary || !actorEditorStatus || !actorImportedTemplateSelect || !actorComponentCollisionInput || !actorComponentScriptsInput) {
+        return;
+    }
+
+    const kind = actorKindSelect.value || 'sphere';
+    const isImported = kind === 'imported';
+    const isVehicle = kind === 'vehicle';
+
+    actorImportedTemplateSelect.disabled = !isImported;
+    actorComponentCollisionInput.disabled = isVehicle;
+    if (isVehicle) {
+        actorComponentCollisionInput.checked = true;
+    }
+
+    const typeLabel = kind === 'vehicle'
+        ? 'Vehicle Actor'
+        : kind === 'imported'
+            ? 'Imported Actor'
+            : kind === 'sphere'
+                ? 'Sphere Actor'
+                : 'Cube Actor';
+
+    actorEditorSummary.textContent = `Type: ${typeLabel}`;
+
+    if (isImported && !importedPropState.templates.length) {
+        actorEditorStatus.textContent = 'Import a prop source first, then create an imported actor instance from it.';
+        return;
+    }
+
+    actorEditorStatus.textContent = `${typeLabel} will spawn with a render node${actorComponentCollisionInput.checked ? ', a collision body' : ''}${actorComponentScriptsInput.checked ? ', and a script host' : ''}.`;
+}
+
+function closeActorEditor() {
+    actorEditorState.open = false;
+    if (actorEditor) {
+        actorEditor.hidden = true;
+    }
+}
+
+function openActorEditor({ kind = 'sphere', templateId = '', label = '' } = {}) {
+    if (!actorEditor) return;
+
+    actorEditorState.open = true;
+    if (actorKindSelect) {
+        actorKindSelect.value = kind;
+    }
+    if (actorLabelInput) {
+        actorLabelInput.value = label;
+    }
+    if (actorScaleInput) {
+        actorScaleInput.value = kind === 'cube' ? '0.3' : '0.5';
+    }
+    if (actorComponentCollisionInput) {
+        actorComponentCollisionInput.checked = true;
+    }
+    if (actorComponentScriptsInput) {
+        actorComponentScriptsInput.checked = true;
+    }
+
+    syncActorEditorTemplateOptions(templateId);
+    syncActorEditorUi();
+    actorEditor.hidden = false;
+}
+
+function spawnActorFromEditor({ openScriptEditor = false } = {}) {
+    const kind = actorKindSelect?.value || 'sphere';
+    const includeCollisionBody = kind === 'vehicle' ? true : !!actorComponentCollisionInput?.checked;
+    const includeScripts = !!actorComponentScriptsInput?.checked;
+    const parsedScale = Number.parseFloat(actorScaleInput?.value ?? '0.5');
+    const scale = Number.isFinite(parsedScale) && parsedScale > 0 ? parsedScale : (kind === 'cube' ? 0.3 : 0.5);
+    const displayName = actorLabelInput?.value?.trim() || '';
+    const userData = displayName ? { label: displayName } : undefined;
+    let actor = null;
+
+    if (kind === 'vehicle') {
+        actor = spawnDrivableCar({ includeScripts, userData });
+    } else if (kind === 'imported') {
+        const templateId = actorImportedTemplateSelect?.value || '';
+        if (!templateId) {
+            syncActorEditorUi();
+            return null;
+        }
+
+        actor = spawnImportedProp(templateId, {
+            includeCollisionBody,
+            includeScripts,
+            userData,
+        });
+    } else {
+        actor = spawnDynamicPrimitive(kind, undefined, scale, {
+            includeCollisionBody,
+            includeScripts,
+            userData,
+            returnActor: true,
+        });
+    }
+
+    if (!actor) {
+        if (actorEditorStatus) {
+            actorEditorStatus.textContent = 'Actor creation failed.';
+        }
+        return null;
+    }
+
+    closeActorEditor();
+
+    if (openScriptEditor) {
+        ensureActorScriptState(actor);
+        objectScriptState.targetPropId = actor.id;
+        openObjectScriptEditor('tick');
+    }
+
+    return actor;
+}
+
 function compileObjectEventScript(source) {
     const normalizedSource = typeof source === 'string' ? source.trim() : '';
 
@@ -1650,7 +1912,7 @@ function compileObjectEventScript(source) {
 
     return new ObjectEventFunction('api', `
         "use strict";
-        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, object, body, eventType, deltaTime, collision, spawnDynamicPrimitive, spawnImportedProp } = api;
+        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, spawnDynamicPrimitive, spawnImportedProp } = api;
         ${normalizedSource}
     `);
 }
@@ -1658,8 +1920,8 @@ function compileObjectEventScript(source) {
 function syncPropScriptState(prop) {
     if (!prop) return prop;
 
-    const propId = prop.id || createRuntimePropId();
-    prop.id = propId;
+    ensureActorIdentity(prop);
+    const propId = prop.id;
     const drafts = ensureObjectScriptDraftEntry(propId);
     const scriptState = createObjectScriptState(propId);
 
@@ -1685,12 +1947,35 @@ function syncPropScriptState(prop) {
     }
 
     prop.scripts = scriptState;
+    ensureActorScriptComponent(prop, scriptState);
 
-    if (prop.mesh?.userData) {
-        prop.mesh.userData.dynamicPropId = propId;
+    const mesh = getActorRenderObject(prop);
+    if (mesh?.userData) {
+        mesh.userData.dynamicPropId = propId;
     }
 
     return prop;
+}
+
+function createDynamicPropActor({
+    body,
+    mesh,
+    kind,
+    templateId = '',
+    userData = null,
+    includeScripts = true,
+}) {
+    const actor = createActor({
+        body,
+        mesh,
+        kind,
+        templateId,
+        userData,
+        name: userData?.label || `${kind || 'actor'}-actor`,
+    });
+    sceneSystem?.addActor(actor);
+    ensureActorIdentity(actor);
+    return includeScripts ? syncPropScriptState(actor) : actor;
 }
 
 function removeObjectScriptDraft(propId) {
@@ -1704,10 +1989,11 @@ function findDynamicPropByMesh(target) {
     if (!target) return null;
 
     return physics.dynamicBodies.find((prop) => {
+        const mesh = getActorRenderObject(prop);
         let current = target;
 
         while (current) {
-            if (current === prop.mesh) {
+            if (current === mesh) {
                 return true;
             }
 
@@ -1725,9 +2011,18 @@ function getObjectScriptEventLabel(eventType) {
 function getDynamicPropDisplayName(prop) {
     if (!prop) return 'No prop selected';
 
+    const metadata = getActorMetadata(prop);
+    if (metadata?.userData?.label) {
+        return metadata.userData.label;
+    }
+
     if (prop.kind === 'imported') {
         const template = importedPropState.templates.find((entry) => entry.id === prop.templateId);
         return template?.displayName || 'Imported Prop';
+    }
+
+    if (prop.kind === 'vehicle') {
+        return prop.userData?.label || 'Vehicle Prop';
     }
 
     return prop.kind === 'sphere' ? 'Sphere Prop' : 'Cube Prop';
@@ -1748,7 +2043,7 @@ function getDynamicPropHitFromEvent(event) {
     raycaster.setFromCamera(pointerNdc, camera);
 
     const targets = physics.dynamicBodies
-        .map((prop) => prop.mesh)
+        .map((prop) => getActorRenderObject(prop))
         .filter(Boolean);
 
     const hits = raycaster.intersectObjects(targets, true);
@@ -1767,7 +2062,7 @@ function updateObjectScriptEditorStatus(extraMessage = '') {
 
     const prop = getDynamicPropById(objectScriptState.targetPropId);
     const eventType = objectScriptState.targetEvent;
-    const eventState = prop?.scripts?.[eventType];
+    const eventState = getActorScriptState(prop)?.[eventType];
     let baseMessage;
 
     if (eventState?.error) {
@@ -1784,7 +2079,7 @@ function updateObjectScriptEditorStatus(extraMessage = '') {
 function syncObjectScriptEditor() {
     const prop = getDynamicPropById(objectScriptState.targetPropId);
     const eventType = objectScriptState.targetEvent;
-    const eventState = prop?.scripts?.[eventType];
+    const eventState = getActorScriptState(prop)?.[eventType];
 
     if (objectScriptEditorTitle) {
         objectScriptEditorTitle.textContent = `Attach ${getObjectScriptEventLabel(eventType)} Script`;
@@ -1890,6 +2185,8 @@ function openObjectScriptEditor(eventType) {
     const prop = getDynamicPropById(objectScriptState.targetPropId);
     if (!prop || !objectScriptEditor) return;
 
+    ensureActorScriptState(prop);
+
     objectScriptState.targetEvent = eventType;
     objectScriptState.editorOpen = true;
     closeObjectScriptMenu();
@@ -1906,17 +2203,18 @@ function openObjectScriptEditor(eventType) {
 }
 
 function updatePropScriptSource(prop, eventType, source, { persist = true, notify = true } = {}) {
-    if (!prop?.scripts?.[eventType]) return false;
+    const scriptState = ensureActorScriptState(prop);
+    if (!scriptState?.[eventType]) return false;
 
     const normalizedSource = typeof source === 'string' ? source : '';
-    const eventState = prop.scripts[eventType];
+    const eventState = scriptState[eventType];
     eventState.source = normalizedSource;
     eventState.error = '';
 
     try {
         eventState.compiled = compileObjectEventScript(normalizedSource);
         eventState.enabled = eventType === 'tick'
-            ? !!normalizedSource.trim() && !!prop.scripts.tick.enabled
+            ? !!normalizedSource.trim() && !!scriptState.tick.enabled
             : !!normalizedSource.trim();
     } catch (error) {
         eventState.error = error?.message || String(error);
@@ -1930,7 +2228,7 @@ function updatePropScriptSource(prop, eventType, source, { persist = true, notif
     const drafts = ensureObjectScriptDraftEntry(prop.id);
     drafts[eventType] = normalizedSource;
     if (eventType === 'tick') {
-        drafts.tickEnabled = !!prop.scripts.tick.enabled;
+        drafts.tickEnabled = !!scriptState.tick.enabled;
     }
 
     if (persist) {
@@ -1951,9 +2249,10 @@ function clearPropScriptSource(prop, eventType) {
 }
 
 function setPropTickEventEnabled(prop, isEnabled, { persist = true } = {}) {
-    if (!prop?.scripts?.tick) return;
+    const scriptState = ensureActorScriptState(prop);
+    if (!scriptState?.tick) return;
 
-    const tickState = prop.scripts.tick;
+    const tickState = scriptState.tick;
     tickState.enabled = !!isEnabled && !!tickState.source.trim() && !tickState.error;
 
     const drafts = ensureObjectScriptDraftEntry(prop.id);
@@ -1971,6 +2270,15 @@ function setPropTickEventEnabled(prop, isEnabled, { persist = true } = {}) {
 }
 
 function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null } = {}) {
+    const renderComponent = getRenderComponent(prop);
+    const physicsComponent = getPhysicsBodyComponent(prop);
+    const scriptComponent = getScriptComponent(prop);
+    const metadataComponent = getMetadataComponent(prop);
+    const object = renderComponent?.mesh || null;
+    const body = physicsComponent?.body || null;
+    const localPosition = object?.position?.clone?.() ?? null;
+    const worldPosition = object ? object.getWorldPosition(new THREE.Vector3()) : null;
+
     return {
         THREE,
         scene,
@@ -1981,18 +2289,25 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
         showcase,
         physics,
         prop,
-        object: prop?.mesh || null,
-        body: prop?.body || null,
+        object,
+        body,
+        physicsBody: body,
+        localPosition,
+        worldPosition,
         eventType,
         deltaTime,
         collision,
+        renderComponent,
+        physicsComponent,
+        scriptComponent,
+        metadataComponent,
         spawnDynamicPrimitive,
         spawnImportedProp,
     };
 }
 
 function handleObjectScriptRuntimeError(prop, eventType, error) {
-    const eventState = prop?.scripts?.[eventType];
+    const eventState = getActorScriptState(prop)?.[eventType];
     if (!eventState) return;
 
     const errorMessage = error?.message || String(error);
@@ -2007,7 +2322,7 @@ function handleObjectScriptRuntimeError(prop, eventType, error) {
 }
 
 function runObjectEventScript(prop, eventType, options = {}) {
-    const eventState = prop?.scripts?.[eventType];
+    const eventState = getActorScriptState(prop)?.[eventType];
     if (!eventState?.enabled || !eventState.compiled || eventState.running) {
         return false;
     }
@@ -2034,13 +2349,13 @@ function runObjectTickScripts(delta) {
 
     for (let index = 0; index < physics.dynamicBodies.length; index++) {
         const prop = physics.dynamicBodies[index];
-        if (!prop?.mesh || !prop.body) continue;
+        if (!getActorRenderObject(prop)) continue;
         runObjectEventScript(prop, 'tick', { deltaTime: delta });
     }
 }
 
 function registerCollisionForProp(contactMap, prop, collisionKey, collision) {
-    if (!prop?.scripts?.collision?.enabled) return;
+    if (!getActorScriptState(prop)?.collision?.enabled) return;
 
     let propContacts = contactMap.get(prop.id);
     if (!propContacts) {
@@ -2052,26 +2367,28 @@ function registerCollisionForProp(contactMap, prop, collisionKey, collision) {
 }
 
 function updateDynamicBodyCollisionScripts() {
-    if (!physics.dynamicBodies.length || !hasEnabledDynamicPropEvent('collision')) return;
+    if (!gameplay.active || !physics.dynamicBodies.length || !hasEnabledDynamicPropEvent('collision')) return;
 
     const entries = physics.dynamicBodies
-        .filter((prop) => prop?.mesh && prop.body)
+        .filter((prop) => !!getActorRenderObject(prop))
         .map((prop) => ({
             prop,
-            bounds: new THREE.Box3().setFromObject(prop.mesh),
+            mesh: getActorRenderObject(prop),
+            body: getActorBody(prop),
+            bounds: new THREE.Box3().setFromObject(getActorRenderObject(prop)),
         }));
 
     const contactMap = new Map();
 
     for (let index = 0; index < entries.length; index++) {
         const current = entries[index];
-        const groundHeight = getGroundHeightAt(current.prop.mesh.position.x, current.prop.mesh.position.z, true);
+        const groundHeight = getGroundHeightAt(current.mesh.position.x, current.mesh.position.z, true);
 
         if (groundHeight !== null && current.bounds.min.y <= groundHeight + 0.08) {
             registerCollisionForProp(contactMap, current.prop, `ground:${current.prop.id}`, {
                 type: 'ground',
                 groundHeight,
-                point: current.prop.mesh.position.clone(),
+                point: current.mesh.position.clone(),
             });
         }
 
@@ -2083,23 +2400,24 @@ function updateDynamicBodyCollisionScripts() {
             registerCollisionForProp(contactMap, current.prop, collisionKey, {
                 type: 'prop',
                 otherProp: other.prop,
-                otherObject: other.prop.mesh,
-                otherBody: other.prop.body,
+                otherObject: other.mesh,
+                otherBody: other.body,
             });
             registerCollisionForProp(contactMap, other.prop, collisionKey, {
                 type: 'prop',
                 otherProp: current.prop,
-                otherObject: current.prop.mesh,
-                otherBody: current.prop.body,
+                otherObject: current.mesh,
+                otherBody: current.body,
             });
         }
     }
 
     physics.dynamicBodies.forEach((prop) => {
-        const eventState = prop?.scripts?.collision;
+        const scriptState = getActorScriptState(prop);
+        const eventState = scriptState?.collision;
         if (!eventState?.enabled) return;
 
-        const activeCollisions = prop.scripts.activeCollisions || new Set();
+        const activeCollisions = scriptState.activeCollisions || new Set();
         const nextCollisions = contactMap.get(prop.id) || new Map();
 
         nextCollisions.forEach((collision, collisionKey) => {
@@ -2108,7 +2426,7 @@ function updateDynamicBodyCollisionScripts() {
             }
         });
 
-        prop.scripts.activeCollisions = new Set(nextCollisions.keys());
+        scriptState.activeCollisions = new Set(nextCollisions.keys());
     });
 }
 
@@ -2180,13 +2498,54 @@ function updateMouseActionStatus(extraMessage = '') {
     mouseActionStatus.textContent = extraMessage ? `${getMouseActionMessage()} ${extraMessage}` : getMouseActionMessage();
 }
 
-function syncMouseActionInputs() {
-    if (leftMouseActionInput) {
-        leftMouseActionInput.value = mouseActionState.leftSource;
+function syncInputActionsEditor() {
+    if (inputActionLeftBtn) {
+        inputActionLeftBtn.classList.toggle('viewer-toggle-btn-active', mouseActionState.selectedButton === 'left');
     }
 
-    if (rightMouseActionInput) {
-        rightMouseActionInput.value = mouseActionState.rightSource;
+    if (inputActionRightBtn) {
+        inputActionRightBtn.classList.toggle('viewer-toggle-btn-active', mouseActionState.selectedButton === 'right');
+    }
+
+    if (inputActionMode) {
+        inputActionMode.textContent = `Trigger: ${mouseActionState.selectedButton === 'right' ? 'Right' : 'Left'} Mouse Button`;
+    }
+
+    if (inputActionEditorInput) {
+        inputActionEditorInput.value = mouseActionState.selectedButton === 'right'
+            ? mouseActionState.rightSource
+            : mouseActionState.leftSource;
+    }
+
+    if (inputActionsEditorStatus) {
+        const error = mouseActionState.selectedButton === 'right' ? mouseActionState.rightError : mouseActionState.leftError;
+        inputActionsEditorStatus.textContent = error
+            ? `${getMouseActionLabel(mouseActionState.selectedButton)} mouse action error: ${error}`
+            : `${getMouseActionLabel(mouseActionState.selectedButton)} mouse action ready.`;
+    }
+}
+
+function openInputActionsEditor(button = mouseActionState.selectedButton) {
+    mouseActionState.selectedButton = button === 'right' ? 'right' : 'left';
+    syncInputActionsEditor();
+    if (inputActionsEditor) {
+        inputActionsEditor.hidden = false;
+    }
+}
+
+function closeInputActionsEditor() {
+    if (inputActionsEditor) {
+        inputActionsEditor.hidden = true;
+    }
+}
+
+function updateSelectedMouseActionSource() {
+    if (!inputActionEditorInput) return;
+
+    if (mouseActionState.selectedButton === 'right') {
+        mouseActionState.rightSource = inputActionEditorInput.value;
+    } else {
+        mouseActionState.leftSource = inputActionEditorInput.value;
     }
 }
 
@@ -2223,13 +2582,7 @@ function buildMouseActionApi(event, button) {
 }
 
 function applyMouseActionScripts({ persist = true } = {}) {
-    if (leftMouseActionInput) {
-        mouseActionState.leftSource = leftMouseActionInput.value;
-    }
-
-    if (rightMouseActionInput) {
-        mouseActionState.rightSource = rightMouseActionInput.value;
-    }
+    updateSelectedMouseActionSource();
 
     mouseActionState.leftError = '';
     mouseActionState.rightError = '';
@@ -2254,13 +2607,14 @@ function applyMouseActionScripts({ persist = true } = {}) {
         saveMouseActionDrafts();
     }
 
+    syncInputActionsEditor();
     updateMouseActionStatus(persist ? 'Snippets applied.' : '');
 }
 
 function resetMouseActionScripts() {
     mouseActionState.leftSource = DEFAULT_MOUSE_ACTION_SCRIPTS.left;
     mouseActionState.rightSource = DEFAULT_MOUSE_ACTION_SCRIPTS.right;
-    syncMouseActionInputs();
+    syncInputActionsEditor();
     applyMouseActionScripts({ persist: true });
     updateMouseActionStatus('Defaults restored.');
 }
@@ -2269,7 +2623,7 @@ function initializeMouseActionScripts() {
     objectScriptState.drafts = readObjectScriptDrafts();
     mouseActionState.leftSource = DEFAULT_MOUSE_ACTION_SCRIPTS.left;
     mouseActionState.rightSource = DEFAULT_MOUSE_ACTION_SCRIPTS.right;
-    syncMouseActionInputs();
+    syncInputActionsEditor();
     applyMouseActionScripts({ persist: true });
     updateMouseActionStatus();
 }
@@ -3059,9 +3413,7 @@ async function init() {
     browseModelBtn = document.getElementById('open-model-menu');
     showcaseModeBtn = document.getElementById('camera-showcase');
     playModeBtn = document.getElementById('camera-play');
-    spawnRigidSphereBtn = document.getElementById('spawn-rigid-sphere');
-    spawnRigidCubeBtn = document.getElementById('spawn-rigid-cube');
-    spawnRigidCarBtn = document.getElementById('spawn-rigid-car');
+    openActorEditorBtn = document.getElementById('open-actor-editor');
     multiplayerServerUrlInput = document.getElementById('multiplayer-server-url');
     multiplayerRoomInput = document.getElementById('multiplayer-room');
     multiplayerConnectBtn = document.getElementById('multiplayer-connect');
@@ -3074,16 +3426,34 @@ async function init() {
     importedPropLibrary = document.getElementById('imported-prop-library');
     propImportDefaultStatus = document.getElementById('prop-import-default-status');
     resetPropImportDefaultBtn = document.getElementById('reset-prop-import-default');
+    actorEditor = document.getElementById('actor-editor');
+    actorEditorSummary = document.getElementById('actor-editor-summary');
+    actorEditorStatus = document.getElementById('actor-editor-status');
+    actorKindSelect = document.getElementById('actor-kind-select');
+    actorLabelInput = document.getElementById('actor-label-input');
+    actorScaleInput = document.getElementById('actor-scale-input');
+    actorImportedTemplateSelect = document.getElementById('actor-imported-template-select');
+    actorComponentCollisionInput = document.getElementById('actor-component-collision');
+    actorComponentScriptsInput = document.getElementById('actor-component-scripts');
+    actorEditorCreateBtn = document.getElementById('actor-editor-create');
+    actorEditorOpenScriptBtn = document.getElementById('actor-editor-open-script');
+    actorEditorCancelBtn = document.getElementById('actor-editor-cancel');
     propCollisionPrompt = document.getElementById('prop-collision-prompt');
     propCollisionCopy = document.getElementById('prop-collision-copy');
     propCollisionRemember = document.getElementById('prop-collision-remember');
     propCollisionSimpleBtn = document.getElementById('prop-collision-simple');
     propCollisionComplexBtn = document.getElementById('prop-collision-complex');
     propCollisionCancelBtn = document.getElementById('prop-collision-cancel');
-    leftMouseActionInput = document.getElementById('left-mouse-action');
-    rightMouseActionInput = document.getElementById('right-mouse-action');
+    inputActionsOpenBtn = document.getElementById('open-input-actions');
+    inputActionsEditor = document.getElementById('input-actions-editor');
+    inputActionLeftBtn = document.getElementById('input-action-left');
+    inputActionRightBtn = document.getElementById('input-action-right');
+    inputActionMode = document.getElementById('input-actions-mode');
+    inputActionEditorInput = document.getElementById('input-action-editor-input');
+    inputActionsEditorStatus = document.getElementById('input-actions-editor-status');
     mouseActionApplyBtn = document.getElementById('apply-mouse-actions');
     mouseActionResetBtn = document.getElementById('reset-mouse-actions');
+    inputActionsCloseBtn = document.getElementById('input-actions-close');
     mouseActionStatus = document.getElementById('mouse-action-status');
     objectScriptMenu = document.getElementById('object-script-menu');
     objectScriptTickActionBtn = document.getElementById('object-script-action-tick');
@@ -3149,22 +3519,31 @@ async function init() {
 
     propCollisionCancelBtn?.addEventListener('click', () => resolvePropCollisionPrompt(null));
 
-    spawnRigidSphereBtn?.addEventListener('click', () => spawnDynamicPrimitive('sphere'));
-    spawnRigidCubeBtn?.addEventListener('click', () => spawnDynamicPrimitive('cube'));
-    spawnRigidCarBtn?.addEventListener('click', () => spawnDrivableCar());
-
-    leftMouseActionInput?.addEventListener('input', () => {
-        mouseActionState.leftSource = leftMouseActionInput.value;
-        saveMouseActionDrafts();
+    openActorEditorBtn?.addEventListener('click', () => openActorEditor());
+    actorKindSelect?.addEventListener('change', () => syncActorEditorUi());
+    actorImportedTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
+    actorComponentCollisionInput?.addEventListener('change', () => syncActorEditorUi());
+    actorComponentScriptsInput?.addEventListener('change', () => syncActorEditorUi());
+    actorEditorCreateBtn?.addEventListener('click', () => {
+        spawnActorFromEditor({ openScriptEditor: false });
     });
+    actorEditorOpenScriptBtn?.addEventListener('click', () => {
+        spawnActorFromEditor({ openScriptEditor: true });
+    });
+    actorEditorCancelBtn?.addEventListener('click', () => closeActorEditor());
 
-    rightMouseActionInput?.addEventListener('input', () => {
-        mouseActionState.rightSource = rightMouseActionInput.value;
+    inputActionsOpenBtn?.addEventListener('click', () => openInputActionsEditor());
+    inputActionLeftBtn?.addEventListener('click', () => openInputActionsEditor('left'));
+    inputActionRightBtn?.addEventListener('click', () => openInputActionsEditor('right'));
+    inputActionEditorInput?.addEventListener('input', () => {
+        updateSelectedMouseActionSource();
+        syncInputActionsEditor();
         saveMouseActionDrafts();
     });
 
     mouseActionApplyBtn?.addEventListener('click', () => applyMouseActionScripts({ persist: true }));
     mouseActionResetBtn?.addEventListener('click', () => resetMouseActionScripts());
+    inputActionsCloseBtn?.addEventListener('click', () => closeInputActionsEditor());
     objectScriptTickActionBtn?.addEventListener('click', () => openObjectScriptEditor('tick'));
     objectScriptCollisionActionBtn?.addEventListener('click', () => openObjectScriptEditor('collision'));
     objectScriptEditorApplyBtn?.addEventListener('click', () => {
@@ -3218,6 +3597,7 @@ async function init() {
     await initPhysics();
 
     scene = new THREE.Scene();
+    sceneSystem = createSceneSystem(scene);
     environmentController = createEnvironmentController({
         scene,
         getAmbientLight: () => ambientLight,
@@ -3660,7 +4040,7 @@ function handleGameplayKeyEvent(event) {
             }
             break;
         case 'KeyV':
-            if (isDown && !event.repeat) {
+            if (isDown && !event.repeat && gameplay.active) {
                 spawnDrivableCar();
             }
             break;
@@ -4072,26 +4452,76 @@ function updateVehicleGameplay(delta) {
     const vehicleRotation = copyJoltQuaternion(tempQuaternionA, bodyInterface.GetRotation(bodyId)).clone();
     const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true).clone();
     const vehicleUp = tempVectorC.set(0, 1, 0).applyQuaternion(vehicleRotation).normalize().clone();
+    const vehicleForward = tempVectorA.set(0, 0, -1).applyQuaternion(vehicleRotation).normalize().clone();
+    const vehicleRight = tempVectorB.set(1, 0, 0).applyQuaternion(vehicleRotation).normalize().clone();
     const linearVelocity = copyJoltVector(tempVectorD, bodyInterface.GetLinearVelocity(bodyId)).clone();
     const angularVelocity = copyJoltVector(tempVectorE, bodyInterface.GetAngularVelocity(bodyId)).clone();
-    const flatRight = tempVectorA.crossVectors(flatForward, upVector).normalize().clone();
-    const horizontalVelocity = tempVectorB.copy(linearVelocity).setY(0);
+    const flatRight = tempVectorC.crossVectors(flatForward, upVector).normalize().clone();
+    const horizontalVelocity = tempVectorD.copy(linearVelocity).setY(0);
     const forwardSpeed = horizontalVelocity.dot(flatForward);
     const lateralSpeed = horizontalVelocity.dot(flatRight);
+    const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
+    const driftInput = Math.abs(steer) > 0.1 && speedRatio > VEHICLE_SETTINGS.driftBoostThreshold;
+    const drifting = driftInput && (throttle !== 0 || Math.abs(lateralSpeed) > 1.2);
+    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
+    const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.5;
+    const cornerSamples = [
+        { forward: halfWheelBase, sideways: -halfTrackWidth },
+        { forward: halfWheelBase, sideways: halfTrackWidth },
+        { forward: -halfWheelBase, sideways: -halfTrackWidth },
+        { forward: -halfWheelBase, sideways: halfTrackWidth },
+    ].map((corner) => {
+        const sampleX = vehiclePosition.x + flatForward.x * corner.forward + flatRight.x * corner.sideways;
+        const sampleZ = vehiclePosition.z + flatForward.z * corner.forward + flatRight.z * corner.sideways;
+        const groundHeight = getGroundHeightAt(sampleX, sampleZ, true);
+        const rideHeight = groundHeight === null ? null : vehiclePosition.y - groundHeight;
+        const compression = rideHeight === null
+            ? 0
+            : THREE.MathUtils.clamp(VEHICLE_SETTINGS.suspensionRideHeight - rideHeight, 0, VEHICLE_SETTINGS.suspensionTravel);
+
+        return {
+            ...corner,
+            rideHeight,
+            compression,
+        };
+    });
+    const contactSamples = cornerSamples.filter((corner) => corner.rideHeight !== null && corner.rideHeight <= VEHICLE_SETTINGS.suspensionRideHeight + VEHICLE_SETTINGS.suspensionTravel);
+    const grounded = contactSamples.length > 0;
+    const contactRatio = contactSamples.length / cornerSamples.length;
+    const averageCompression = contactSamples.length
+        ? contactSamples.reduce((sum, corner) => sum + corner.compression, 0) / contactSamples.length
+        : 0;
+    const frontCompression = (cornerSamples[0].compression + cornerSamples[1].compression) * 0.5;
+    const rearCompression = (cornerSamples[2].compression + cornerSamples[3].compression) * 0.5;
+    const leftCompression = (cornerSamples[0].compression + cornerSamples[2].compression) * 0.5;
+    const rightCompression = (cornerSamples[1].compression + cornerSamples[3].compression) * 0.5;
     const targetForwardSpeed = throttle > 0
         ? VEHICLE_SETTINGS.maxDriveSpeed * boostMultiplier
         : throttle < 0
             ? -VEHICLE_SETTINGS.maxReverseSpeed
             : 0;
     const forwardLambda = throttle > 0
-        ? VEHICLE_SETTINGS.acceleration
+        ? (gameplay.input.sprint ? VEHICLE_SETTINGS.boostAcceleration : VEHICLE_SETTINGS.acceleration)
         : throttle < 0
             ? VEHICLE_SETTINGS.reverseAcceleration
             : VEHICLE_SETTINGS.coastDrag;
-    const nextForwardSpeed = THREE.MathUtils.damp(forwardSpeed, targetForwardSpeed, forwardLambda, delta);
-    const gripLambda = vehicleState.brakeHeld ? VEHICLE_SETTINGS.brakeGrip : VEHICLE_SETTINGS.lateralGrip;
-    const nextLateralSpeed = THREE.MathUtils.damp(lateralSpeed, 0, gripLambda, delta);
-    const nextHorizontalVelocity = tempVectorC
+    let nextForwardSpeed = THREE.MathUtils.damp(forwardSpeed, targetForwardSpeed, forwardLambda, delta);
+    nextForwardSpeed *= 1 - (VEHICLE_SETTINGS.rollingDrag * delta);
+    const gripBase = THREE.MathUtils.lerp(
+        VEHICLE_SETTINGS.lowSpeedGrip,
+        VEHICLE_SETTINGS.highSpeedGrip,
+        speedRatio
+    );
+    const gripLambda = vehicleState.brakeHeld
+        ? VEHICLE_SETTINGS.brakeGrip
+        : drifting
+            ? VEHICLE_SETTINGS.driftGrip
+            : gripBase;
+    const contactGrip = grounded
+        ? THREE.MathUtils.lerp(VEHICLE_SETTINGS.partialContactGrip, gripLambda, contactRatio)
+        : VEHICLE_SETTINGS.partialContactGrip;
+    const nextLateralSpeed = THREE.MathUtils.damp(lateralSpeed, 0, contactGrip, delta);
+    const nextHorizontalVelocity = tempVectorE
         .copy(flatForward)
         .multiplyScalar(nextForwardSpeed)
         .addScaledVector(flatRight, nextLateralSpeed);
@@ -4100,18 +4530,39 @@ function updateVehicleGameplay(delta) {
         nextHorizontalVelocity.multiplyScalar(VEHICLE_SETTINGS.brakeDamping);
     }
 
-    const nextVelocity = new Jolt.Vec3(nextHorizontalVelocity.x, linearVelocity.y, nextHorizontalVelocity.z);
+    let nextVerticalVelocity = linearVelocity.y;
+    if (grounded && averageCompression > 0) {
+        const suspensionLift = averageCompression * VEHICLE_SETTINGS.suspensionSpring;
+        const dampingLift = -linearVelocity.y * VEHICLE_SETTINGS.suspensionDamping;
+        nextVerticalVelocity += (suspensionLift + dampingLift) * delta;
+
+        const frontImpact = Math.max(0, frontCompression - rearCompression);
+        const bumpLaunch = frontImpact * speedRatio * VEHICLE_SETTINGS.bumpLaunchBoost;
+        if (bumpLaunch > 1e-4) {
+            nextVerticalVelocity += bumpLaunch;
+        }
+    }
+
+    const nextVelocity = new Jolt.Vec3(nextHorizontalVelocity.x, nextVerticalVelocity, nextHorizontalVelocity.z);
     bodyInterface.SetLinearVelocity(bodyId, nextVelocity);
     Jolt.destroy(nextVelocity);
 
     const steerSpeedFactor = THREE.MathUtils.clamp(Math.abs(nextForwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
     const steeringDirection = nextForwardSpeed >= 0 ? 1 : -0.7;
+    const steeringStrength = THREE.MathUtils.lerp(1, VEHICLE_SETTINGS.steeringHighSpeedDamping, steerSpeedFactor);
+    const driftSteerBonus = drifting ? VEHICLE_SETTINGS.driftSteerBonus : 1;
     const targetYawRate = steer === 0
         ? 0
-        : steer * steeringDirection * VEHICLE_SETTINGS.steeringRate * THREE.MathUtils.lerp(0.2, 1, steerSpeedFactor);
+        : steer * steeringDirection * VEHICLE_SETTINGS.steeringRate * steeringStrength * driftSteerBonus;
     const yawLambda = steer === 0 ? VEHICLE_SETTINGS.steeringReturn : VEHICLE_SETTINGS.steeringGrip;
     const nextYawRate = THREE.MathUtils.damp(angularVelocity.y, targetYawRate, yawLambda, delta);
-    const nextAngular = new Jolt.Vec3(angularVelocity.x * 0.35, nextYawRate, angularVelocity.z * 0.35);
+    const rollTilt = -steer * Math.max(0.16, Math.abs(nextForwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed);
+    const pitchTilt = throttle === 0 ? 0 : -throttle * 0.18;
+    const nextAngular = new Jolt.Vec3(
+        THREE.MathUtils.damp(angularVelocity.x, pitchTilt, grounded ? VEHICLE_SETTINGS.pitchTorque * 0.01 : VEHICLE_SETTINGS.airtimeAngularBlend, delta),
+        nextYawRate,
+        THREE.MathUtils.damp(angularVelocity.z, rollTilt, grounded ? VEHICLE_SETTINGS.rollTorque * 0.01 : VEHICLE_SETTINGS.airtimeAngularBlend, delta)
+    );
     bodyInterface.SetAngularVelocity(bodyId, nextAngular);
     Jolt.destroy(nextAngular);
 
@@ -4119,17 +4570,36 @@ function updateVehicleGameplay(delta) {
         bodyInterface.ActivateBody(bodyId);
     }
 
-    const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque);
+    const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? contactRatio : 0.08));
     if (uprightCorrection.lengthSq() > 1e-6) {
         const uprightTorque = new Jolt.Vec3(uprightCorrection.x, uprightCorrection.y, uprightCorrection.z);
         bodyInterface.AddTorque(bodyId, uprightTorque, Jolt.EActivation_Activate);
         Jolt.destroy(uprightTorque);
     }
 
+    if (grounded) {
+        const bumpPitchTorque = (rearCompression - frontCompression) * VEHICLE_SETTINGS.bumpPitchTorque;
+        const bumpRollTorque = (leftCompression - rightCompression) * VEHICLE_SETTINGS.bumpRollTorque;
+        if (Math.abs(bumpPitchTorque) > 1e-4 || Math.abs(bumpRollTorque) > 1e-4) {
+            const suspensionTorque = new Jolt.Vec3(bumpPitchTorque, 0, bumpRollTorque);
+            bodyInterface.AddTorque(bodyId, suspensionTorque, Jolt.EActivation_Activate);
+            Jolt.destroy(suspensionTorque);
+        }
+    }
+
+    if (grounded && (Math.abs(steer) > 0.05 || Math.abs(throttle) > 0.05)) {
+        const rollForce = tempVectorB.copy(vehicleRight).multiplyScalar(-steer * Math.abs(nextForwardSpeed) * VEHICLE_SETTINGS.rollTorque * 0.022);
+        const pitchForce = tempVectorC.copy(vehicleForward).multiplyScalar(throttle * VEHICLE_SETTINGS.pitchTorque * 0.035);
+        const handlingTorque = rollForce.add(pitchForce);
+        const handlingJolt = new Jolt.Vec3(handlingTorque.x, handlingTorque.y, handlingTorque.z);
+        bodyInterface.AddTorque(bodyId, handlingJolt, Jolt.EActivation_Activate);
+        Jolt.destroy(handlingJolt);
+    }
+
     vehicle.mesh.position.copy(vehiclePosition);
     vehicle.mesh.quaternion.copy(vehicleRotation);
     positionVehicleCamera(vehiclePosition, vehicleRotation, delta);
-    gameplay.grounded = true;
+    gameplay.grounded = grounded;
     physics.jumpQueued = false;
 
     if (vehiclePosition.y < worldFloor.position.y - 24) {

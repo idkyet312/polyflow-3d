@@ -4,6 +4,13 @@ export const TERRAIN_SIZE = 180;
 export const TERRAIN_SEGMENTS = 180;
 export const TERRAIN_Y_OFFSET = -0.28;
 const TERRAIN_TEXTURE_REPEAT = 28;
+const TERRAIN_BASIN_DEPTH = -0.34;
+const TERRAIN_ROLLING_X_FREQUENCY = 0.095;
+const TERRAIN_ROLLING_Z_FREQUENCY = 0.082;
+const TERRAIN_ROLLING_X_AMPLITUDE = 0.62;
+const TERRAIN_ROLLING_Z_AMPLITUDE = 0.48;
+const TERRAIN_DETAIL_FREQUENCY = 0.21;
+const TERRAIN_DETAIL_AMPLITUDE = 0.12;
 const TERRAIN_TEXTURE_PATHS = {
     color: 'textures/grass004/Grass004_1K-JPG_Color.jpg',
     normal: 'textures/grass004/Grass004_1K-JPG_NormalGL.jpg',
@@ -13,9 +20,10 @@ const TERRAIN_TEXTURE_PATHS = {
 
 function getTerrainHeightAtLocalPosition(x, y) {
     const radialFalloff = Math.min(1, Math.hypot(x, y) / (TERRAIN_SIZE * 0.5));
-    const basin = -0.22 * Math.pow(radialFalloff, 1.7);
-    const rolling = Math.sin(x * 0.16) * 0.28 + Math.cos(y * 0.14) * 0.22;
-    const detail = Math.sin((x + y) * 0.45) * 0.08;
+    const basin = TERRAIN_BASIN_DEPTH * Math.pow(radialFalloff, 1.7);
+    const rolling = Math.sin(x * TERRAIN_ROLLING_X_FREQUENCY) * TERRAIN_ROLLING_X_AMPLITUDE
+        + Math.cos(y * TERRAIN_ROLLING_Z_FREQUENCY) * TERRAIN_ROLLING_Z_AMPLITUDE;
+    const detail = Math.sin((x + y) * TERRAIN_DETAIL_FREQUENCY) * TERRAIN_DETAIL_AMPLITUDE;
     return basin + rolling + detail;
 }
 
