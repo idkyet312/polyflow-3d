@@ -55,10 +55,35 @@ const PLAYER_SETTINGS = {
     maxLookPitch: Math.PI / 2 - 0.08,
     floorOffset: 0.04,
 };
+const VEHICLE_SETTINGS = {
+    length: 2.6,
+    width: 1.35,
+    height: 0.6,
+    spawnDistance: 4.8,
+    spawnLift: 0.9,
+    interactionRadius: 4.5,
+    seatHeight: 1.15,
+    followDistance: 5.6,
+    followHeight: 2.4,
+    lookAhead: 2.2,
+    acceleration: 7.8,
+    reverseAcceleration: 5.2,
+    coastDrag: 3.6,
+    lateralGrip: 10.5,
+    brakeGrip: 14.5,
+    steeringRate: 1.95,
+    steeringReturn: 8.5,
+    steeringGrip: 10.5,
+    uprightTorque: 620,
+    maxDriveSpeed: 26,
+    maxReverseSpeed: 11,
+    brakeDamping: 0.72,
+    maxAngularVelocity: 2.4,
+};
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
-let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, spawnRigidSphereBtn, spawnRigidCubeBtn;
+let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, spawnRigidSphereBtn, spawnRigidCubeBtn, spawnRigidCarBtn;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
 let propCollisionPrompt, propCollisionCopy, propCollisionRemember, propCollisionSimpleBtn, propCollisionComplexBtn, propCollisionCancelBtn;
 let leftMouseActionInput, rightMouseActionInput, mouseActionApplyBtn, mouseActionResetBtn, mouseActionStatus;
@@ -249,6 +274,10 @@ const gameplay = {
         right: false,
         sprint: false,
     },
+};
+const vehicleState = {
+    activePropId: '',
+    brakeHeld: false,
 };
 const showcase = {
     looking: false,
@@ -949,6 +978,11 @@ function destroyPhysicsBody(body) {
 function destroyDynamicPhysicsProp(prop) {
     if (!prop) return;
 
+    if (vehicleState.activePropId && vehicleState.activePropId === prop.id) {
+        vehicleState.activePropId = '';
+        vehicleState.brakeHeld = false;
+    }
+
     if (objectScriptState.targetPropId && objectScriptState.targetPropId === prop.id) {
         objectScriptState.targetPropId = '';
         objectScriptState.menuOpen = false;
@@ -1015,12 +1049,248 @@ function getDynamicPropSpawn(positionTarget, impulseTarget) {
         .addScaledVector(upVector, 5.5);
 }
 
+function isDrivingVehicle() {
+    return gameplay.active && !!vehicleState.activePropId;
+}
+
+function getActiveVehicleProp() {
+    if (!vehicleState.activePropId) return null;
+
+    return physics.dynamicBodies.find((prop) => (
+        prop?.id === vehicleState.activePropId && prop.kind === 'vehicle'
+    )) ?? null;
+}
+
+function clearActiveVehicle({ updateUi = false } = {}) {
+    const wasDriving = !!vehicleState.activePropId;
+    vehicleState.activePropId = '';
+    vehicleState.brakeHeld = false;
+
+    if (!wasDriving) return;
+
+    physics.jumpQueued = false;
+    if (updateUi) {
+        updateGameplayUI();
+    }
+}
+
+function getVehicleForward(target, quaternion, flatten = true) {
+    target.set(0, 0, -1).applyQuaternion(quaternion);
+    if (flatten) {
+        target.y = 0;
+        if (target.lengthSq() < 1e-6) {
+            target.set(0, 0, -1);
+        } else {
+            target.normalize();
+        }
+    }
+
+    return target;
+}
+
+function positionVehicleCamera(vehiclePosition, vehicleRotation, delta) {
+    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
+    const chasePosition = tempVectorC
+        .copy(vehiclePosition)
+        .addScaledVector(upVector, VEHICLE_SETTINGS.followHeight)
+        .addScaledVector(flatForward, -VEHICLE_SETTINGS.followDistance);
+    const lookTarget = tempVectorD
+        .copy(vehiclePosition)
+        .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
+        .addScaledVector(flatForward, VEHICLE_SETTINGS.lookAhead);
+    const cameraLerp = 1 - Math.exp(-delta * 8);
+
+    camera.position.lerp(chasePosition, cameraLerp);
+    camera.lookAt(lookTarget);
+
+    tempVectorE.copy(lookTarget).sub(camera.position);
+    const flatDistance = Math.max(0.001, Math.hypot(tempVectorE.x, tempVectorE.z));
+    gameplay.yaw = Math.atan2(tempVectorE.x, tempVectorE.z);
+    gameplay.pitch = THREE.MathUtils.clamp(
+        Math.atan2(-tempVectorE.y, flatDistance),
+        -PLAYER_SETTINGS.maxLookPitch,
+        PLAYER_SETTINGS.maxLookPitch
+    );
+}
+
+function getNearbyVehicle() {
+    const origin = gameplay.active && physics.character
+        ? copyJoltVector(tempVectorA, physics.character.GetPosition())
+        : tempVectorA.copy(camera.position);
+    let closestVehicle = null;
+    let closestDistanceSq = VEHICLE_SETTINGS.interactionRadius * VEHICLE_SETTINGS.interactionRadius;
+
+    for (const prop of physics.dynamicBodies) {
+        if (!prop?.body || prop.kind !== 'vehicle') continue;
+
+        const bodyPosition = copyJoltVector(tempVectorB, physics.bodyInterface.GetPosition(prop.body.GetID()));
+        const distanceSq = origin.distanceToSquared(bodyPosition);
+        if (distanceSq < closestDistanceSq) {
+            closestDistanceSq = distanceSq;
+            closestVehicle = prop;
+        }
+    }
+
+    return closestVehicle;
+}
+
+function enterVehicle(prop = getNearbyVehicle()) {
+    if (!gameplay.active || !prop?.body || prop.kind !== 'vehicle') return false;
+
+    vehicleState.activePropId = prop.id;
+    vehicleState.brakeHeld = false;
+    physics.jumpQueued = false;
+    gameplay.grounded = true;
+
+    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(prop.body.GetID())).clone();
+    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(prop.body.GetID())).clone();
+    positionVehicleCamera(vehiclePosition, vehicleRotation, 1 / 60);
+
+    updateGameplayUI();
+    return true;
+}
+
+function exitVehicle() {
+    const vehicle = getActiveVehicleProp();
+    if (!vehicle?.body) {
+        clearActiveVehicle({ updateUi: true });
+        return false;
+    }
+
+    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(vehicle.body.GetID()));
+    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(vehicle.body.GetID()));
+    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
+    const exitRight = tempVectorC.set(1, 0, 0).applyQuaternion(vehicleRotation);
+    exitRight.y = 0;
+    if (exitRight.lengthSq() < 1e-6) {
+        exitRight.set(1, 0, 0);
+    } else {
+        exitRight.normalize();
+    }
+
+    gameplay.spawnPoint.copy(vehiclePosition)
+        .addScaledVector(exitRight, VEHICLE_SETTINGS.width * 0.95)
+        .addScaledVector(flatForward, -0.45);
+
+    const groundHit = getGroundHitAt(gameplay.spawnPoint.x, gameplay.spawnPoint.z, true);
+    if (groundHit?.point) {
+        gameplay.spawnPoint.y = groundHit.point.y + PLAYER_SETTINGS.floorOffset;
+    }
+
+    gameplay.spawnYaw = Math.atan2(flatForward.x, flatForward.z);
+    gameplay.spawnPitch = -0.08;
+    clearActiveVehicle();
+    respawnPlayer(true);
+    return true;
+}
+
+function spawnDrivableCar() {
+    if (!physics.ready || !scene || !camera) {
+        console.warn('Jolt physics is not ready yet.');
+        return null;
+    }
+
+    const { Jolt, bodyInterface } = physics;
+    const spawnPosition = tempVectorD;
+    const launchImpulse = tempVectorE;
+    getDynamicPropSpawn(spawnPosition, launchImpulse);
+
+    const groundHit = getGroundHitAt(spawnPosition.x, spawnPosition.z, true);
+    if (groundHit?.point) {
+        spawnPosition.y = Math.max(
+            spawnPosition.y,
+            groundHit.point.y + VEHICLE_SETTINGS.height * 0.6 + VEHICLE_SETTINGS.spawnLift
+        );
+    }
+
+    camera.getWorldDirection(tempVectorA);
+    tempVectorA.y = 0;
+    if (tempVectorA.lengthSq() < 1e-6) {
+        tempVectorA.set(0, 0, -1);
+    } else {
+        tempVectorA.normalize();
+    }
+
+    const carRotation = tempQuaternionA.setFromUnitVectors(upVector.clone().set(0, 0, -1), tempVectorA);
+    const halfExtent = new Jolt.Vec3(
+        VEHICLE_SETTINGS.width * 0.5,
+        VEHICLE_SETTINGS.height * 0.5,
+        VEHICLE_SETTINGS.length * 0.5
+    );
+    const shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtent, 0.05));
+    Jolt.destroy(halfExtent);
+
+    const body = createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, {
+        rotation: carRotation,
+        friction: 1.18,
+        restitution: 0.02,
+        linearDamping: 0.18,
+        angularDamping: 0.42,
+        motionQuality: Jolt.EMotionQuality_LinearCast,
+        skipImpulse: true,
+    });
+
+    if (!body) {
+        return null;
+    }
+
+    bodyInterface.SetMaxAngularVelocity(body.GetID(), VEHICLE_SETTINGS.maxAngularVelocity);
+
+    const material = new THREE.MeshStandardMaterial({
+        color: 0xd9463d,
+        metalness: 0.18,
+        roughness: 0.56,
+        emissive: 0x220605,
+        emissiveIntensity: 0.14,
+    });
+    const chassis = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width, VEHICLE_SETTINGS.height, VEHICLE_SETTINGS.length),
+        material
+    );
+    chassis.castShadow = true;
+    chassis.receiveShadow = true;
+
+    const cabin = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.72, VEHICLE_SETTINGS.height * 0.7, VEHICLE_SETTINGS.length * 0.42),
+        new THREE.MeshStandardMaterial({
+            color: 0xf8fafc,
+            metalness: 0.08,
+            roughness: 0.2,
+            transparent: true,
+            opacity: 0.78,
+        })
+    );
+    cabin.position.set(0, VEHICLE_SETTINGS.height * 0.48, -VEHICLE_SETTINGS.length * 0.05);
+    cabin.castShadow = true;
+    chassis.add(cabin);
+
+    chassis.position.copy(spawnPosition);
+    chassis.quaternion.copy(carRotation);
+    scene.add(chassis);
+
+    const vehicle = syncPropScriptState({
+        body,
+        mesh: chassis,
+        kind: 'vehicle',
+        userData: { label: 'Car' },
+    });
+    physics.dynamicBodies.push(vehicle);
+    updateGameplayUI();
+    return vehicle;
+}
+
 function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
     if (!physics.ready) return null;
 
     const { Jolt, bodyInterface } = physics;
     const bodyPosition = new Jolt.RVec3(position.x, position.y, position.z);
-    const bodyRotation = new Jolt.Quat(0, 0, 0, 1);
+    const rotation = options.rotation;
+    const bodyRotation = new Jolt.Quat(
+        rotation?.x ?? 0,
+        rotation?.y ?? 0,
+        rotation?.z ?? 0,
+        rotation?.w ?? 1
+    );
     const creationSettings = new Jolt.BodyCreationSettings(
         shape,
         bodyPosition,
@@ -2569,6 +2839,10 @@ function updateMobileButtons() {
         mobileMenuToggleBtn.classList.toggle('viewer-toggle-btn-active', mobileState.menuOpen);
     }
 
+    if (mobileJumpBtn) {
+        mobileJumpBtn.textContent = isDrivingVehicle() ? 'Brake' : 'Jump';
+    }
+
     syncMobileActionVisibility();
 }
 
@@ -2647,8 +2921,18 @@ function setupMobileControls() {
         if (event.button !== 0 && event.pointerType === 'mouse') return;
         event.preventDefault();
         if (gameplay.active) {
-            physics.jumpQueued = true;
+            if (isDrivingVehicle()) {
+                vehicleState.brakeHeld = true;
+            } else {
+                physics.jumpQueued = true;
+            }
         }
+    });
+    mobileJumpBtn?.addEventListener('pointerup', () => {
+        vehicleState.brakeHeld = false;
+    });
+    mobileJumpBtn?.addEventListener('pointercancel', () => {
+        vehicleState.brakeHeld = false;
     });
 
     mobileRightActionBtn?.addEventListener('pointerdown', (event) => {
@@ -2700,6 +2984,7 @@ async function init() {
     playModeBtn = document.getElementById('camera-play');
     spawnRigidSphereBtn = document.getElementById('spawn-rigid-sphere');
     spawnRigidCubeBtn = document.getElementById('spawn-rigid-cube');
+    spawnRigidCarBtn = document.getElementById('spawn-rigid-car');
     importPropBtn = document.getElementById('import-prop-menu');
     propFileInput = document.getElementById('prop-file-input');
     importedPropList = document.getElementById('imported-prop-list');
@@ -2783,6 +3068,7 @@ async function init() {
 
     spawnRigidSphereBtn?.addEventListener('click', () => spawnDynamicPrimitive('sphere'));
     spawnRigidCubeBtn?.addEventListener('click', () => spawnDynamicPrimitive('cube'));
+    spawnRigidCarBtn?.addEventListener('click', () => spawnDrivableCar());
 
     leftMouseActionInput?.addEventListener('input', () => {
         mouseActionState.leftSource = leftMouseActionInput.value;
@@ -3246,11 +3532,34 @@ function handleGameplayKeyEvent(event) {
         case 'Space':
             if (gameplay.pointerLocked) event.preventDefault();
             if (isDown && !event.repeat && gameplay.active) {
-                physics.jumpQueued = true;
+                if (isDrivingVehicle()) {
+                    vehicleState.brakeHeld = true;
+                } else {
+                    physics.jumpQueued = true;
+                }
+            } else if (!isDown) {
+                vehicleState.brakeHeld = false;
+            }
+            break;
+        case 'KeyE':
+            if (isDown && !event.repeat && gameplay.active) {
+                if (isDrivingVehicle()) {
+                    exitVehicle();
+                } else {
+                    enterVehicle();
+                }
+            }
+            break;
+        case 'KeyV':
+            if (isDown && !event.repeat) {
+                spawnDrivableCar();
             }
             break;
         case 'KeyR':
             if (isDown && gameplay.active) {
+                if (isDrivingVehicle()) {
+                    exitVehicle();
+                }
                 respawnPlayer();
             }
             break;
@@ -3407,6 +3716,7 @@ function exitGameplay() {
 
     gameplay.pointerLocked = false;
     gameplay.active = false;
+    clearActiveVehicle();
     gameplay.velocity.set(0, 0, 0);
     physics.jumpQueued = false;
     physics.desiredVelocity.set(0, 0, 0);
@@ -3435,6 +3745,7 @@ function updateWorldPresentation() {
 function updateGameplayUI() {
     const hasAsset = !!currentMesh;
     const mobileActive = mobileState.enabled;
+    const drivingVehicle = isDrivingVehicle();
 
     if (resetViewBtn) {
         resetViewBtn.textContent = gameplay.active ? 'Respawn' : 'Reset View';
@@ -3443,10 +3754,14 @@ function updateGameplayUI() {
     updateCameraModeButtons();
 
     if (gameplayStatus) {
-        if (mobileActive && gameplay.active) {
+        if (mobileActive && drivingVehicle) {
+            gameplayStatus.textContent = 'Mobile driving active';
+        } else if (mobileActive && gameplay.active) {
             gameplayStatus.textContent = 'Mobile play active';
         } else if (mobileActive) {
             gameplayStatus.textContent = 'Mobile showcase ready';
+        } else if (drivingVehicle) {
+            gameplayStatus.textContent = 'Driving summoned car';
         } else if (!hasAsset && gameplay.active) {
             gameplayStatus.textContent = gameplay.grounded ? 'Exploring terrain' : 'Airborne';
         } else if (!hasAsset) {
@@ -3459,16 +3774,20 @@ function updateGameplayUI() {
     }
 
     if (playHint) {
-        if (mobileActive && gameplay.active) {
+        if (mobileActive && drivingVehicle) {
+            playHint.textContent = 'Touch left pad to drive, right pad to look, hold Brake to slow down, tap the scene for play scripts, and tap E on keyboard to hop out.';
+        } else if (mobileActive && gameplay.active) {
             playHint.textContent = 'Touch left pad to move, right pad to look, tap the scene to run play scripts, and use Jump to hop.';
         } else if (mobileActive) {
             playHint.textContent = 'Touch left pad to move, right pad to look, double-tap a prop to open its script menu, and use Menu for assets.';
+        } else if (drivingVehicle) {
+            playHint.textContent = 'W/S drive, A/D steer, Shift boost, Space brake, E exit car, R respawn, Esc exit play mode.';
         } else if (!hasAsset && gameplay.active) {
-            playHint.textContent = 'WASD move, mouse look, Space jump, Shift sprint, R respawn, Esc exit.';
+            playHint.textContent = 'WASD move, mouse look, Space jump, Shift sprint, E enter nearby car, V summon car, R respawn, Esc exit.';
         } else if (!hasAsset) {
             playHint.textContent = 'Showcase: hold right mouse to look, use WASD to move, Q/E for down/up, Shift to boost, and mouse wheel to change camera speed.';
         } else if (gameplay.active) {
-            playHint.textContent = 'WASD move, mouse look, Space jump, Shift sprint, R respawn, Esc exit.';
+            playHint.textContent = 'WASD move, mouse look, Space jump, Shift sprint, E enter nearby car, V summon car, R respawn, Esc exit.';
         } else {
             playHint.textContent = 'Showcase: hold right mouse to look, use WASD to move, Q/E for down/up, Shift to boost, and mouse wheel to change camera speed. Play mode still uses pointer lock.';
         }
@@ -3576,6 +3895,10 @@ function updateShowcaseCamera(delta) {
 function respawnPlayer(useStoredView = false) {
     if (!gameplay.canPlay) return;
 
+    if (isDrivingVehicle()) {
+        clearActiveVehicle();
+    }
+
     if (!physics.character) {
         ensurePlayerCharacter();
     }
@@ -3622,6 +3945,88 @@ function applyGameplayCameraRotation() {
     camera.rotation.x = gameplay.pitch;
     camera.rotation.y = gameplay.yaw;
     camera.rotation.z = 0;
+}
+
+function updateVehicleGameplay(delta) {
+    const vehicle = getActiveVehicleProp();
+    if (!vehicle?.body) {
+        clearActiveVehicle({ updateUi: true });
+        return;
+    }
+
+    const { Jolt, bodyInterface } = physics;
+    const bodyId = vehicle.body.GetID();
+    const throttle = (gameplay.input.forward ? 1 : 0) - (gameplay.input.back ? 1 : 0);
+    const steer = (gameplay.input.left ? 1 : 0) - (gameplay.input.right ? 1 : 0);
+    const boostMultiplier = gameplay.input.sprint ? 1.35 : 1;
+    const vehiclePosition = copyJoltVector(tempVectorA, bodyInterface.GetPosition(bodyId)).clone();
+    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, bodyInterface.GetRotation(bodyId)).clone();
+    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true).clone();
+    const vehicleUp = tempVectorC.set(0, 1, 0).applyQuaternion(vehicleRotation).normalize().clone();
+    const linearVelocity = copyJoltVector(tempVectorD, bodyInterface.GetLinearVelocity(bodyId)).clone();
+    const angularVelocity = copyJoltVector(tempVectorE, bodyInterface.GetAngularVelocity(bodyId)).clone();
+    const flatRight = tempVectorA.crossVectors(flatForward, upVector).normalize().clone();
+    const horizontalVelocity = tempVectorB.copy(linearVelocity).setY(0);
+    const forwardSpeed = horizontalVelocity.dot(flatForward);
+    const lateralSpeed = horizontalVelocity.dot(flatRight);
+    const targetForwardSpeed = throttle > 0
+        ? VEHICLE_SETTINGS.maxDriveSpeed * boostMultiplier
+        : throttle < 0
+            ? -VEHICLE_SETTINGS.maxReverseSpeed
+            : 0;
+    const forwardLambda = throttle > 0
+        ? VEHICLE_SETTINGS.acceleration
+        : throttle < 0
+            ? VEHICLE_SETTINGS.reverseAcceleration
+            : VEHICLE_SETTINGS.coastDrag;
+    const nextForwardSpeed = THREE.MathUtils.damp(forwardSpeed, targetForwardSpeed, forwardLambda, delta);
+    const gripLambda = vehicleState.brakeHeld ? VEHICLE_SETTINGS.brakeGrip : VEHICLE_SETTINGS.lateralGrip;
+    const nextLateralSpeed = THREE.MathUtils.damp(lateralSpeed, 0, gripLambda, delta);
+    const nextHorizontalVelocity = tempVectorC
+        .copy(flatForward)
+        .multiplyScalar(nextForwardSpeed)
+        .addScaledVector(flatRight, nextLateralSpeed);
+
+    if (vehicleState.brakeHeld) {
+        nextHorizontalVelocity.multiplyScalar(VEHICLE_SETTINGS.brakeDamping);
+    }
+
+    const nextVelocity = new Jolt.Vec3(nextHorizontalVelocity.x, linearVelocity.y, nextHorizontalVelocity.z);
+    bodyInterface.SetLinearVelocity(bodyId, nextVelocity);
+    Jolt.destroy(nextVelocity);
+
+    const steerSpeedFactor = THREE.MathUtils.clamp(Math.abs(nextForwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
+    const steeringDirection = nextForwardSpeed >= 0 ? 1 : -0.7;
+    const targetYawRate = steer === 0
+        ? 0
+        : steer * steeringDirection * VEHICLE_SETTINGS.steeringRate * THREE.MathUtils.lerp(0.2, 1, steerSpeedFactor);
+    const yawLambda = steer === 0 ? VEHICLE_SETTINGS.steeringReturn : VEHICLE_SETTINGS.steeringGrip;
+    const nextYawRate = THREE.MathUtils.damp(angularVelocity.y, targetYawRate, yawLambda, delta);
+    const nextAngular = new Jolt.Vec3(angularVelocity.x * 0.35, nextYawRate, angularVelocity.z * 0.35);
+    bodyInterface.SetAngularVelocity(bodyId, nextAngular);
+    Jolt.destroy(nextAngular);
+
+    if (throttle !== 0 || steer !== 0 || vehicleState.brakeHeld || horizontalVelocity.lengthSq() > 0.01) {
+        bodyInterface.ActivateBody(bodyId);
+    }
+
+    const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque);
+    if (uprightCorrection.lengthSq() > 1e-6) {
+        const uprightTorque = new Jolt.Vec3(uprightCorrection.x, uprightCorrection.y, uprightCorrection.z);
+        bodyInterface.AddTorque(bodyId, uprightTorque, Jolt.EActivation_Activate);
+        Jolt.destroy(uprightTorque);
+    }
+
+    vehicle.mesh.position.copy(vehiclePosition);
+    vehicle.mesh.quaternion.copy(vehicleRotation);
+    positionVehicleCamera(vehiclePosition, vehicleRotation, delta);
+    gameplay.grounded = true;
+    physics.jumpQueued = false;
+
+    if (vehiclePosition.y < worldFloor.position.y - 24) {
+        exitVehicle();
+        respawnPlayer(true);
+    }
 }
 
 function getGroundHitAt(x, z, includeFloor = true) {
@@ -3686,6 +4091,11 @@ function resolveHorizontalMovement(origin, movementDelta) {
 }
 
 function updateGameplay(delta) {
+    if (isDrivingVehicle()) {
+        updateVehicleGameplay(delta);
+        return;
+    }
+
     if (!physics.character) return;
 
     const moveRight = (gameplay.input.right ? 1 : 0) - (gameplay.input.left ? 1 : 0);
