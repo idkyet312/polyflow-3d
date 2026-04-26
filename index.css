@@ -1255,6 +1255,20 @@ body.mobile-ui-preview .mobile-right-action-fab {
   box-shadow: 0 10px 18px rgba(0, 0, 0, 0.2);
 }
 
+body.mobile-ui-preview .mobile-action2-fab {
+  position: fixed;
+  right: 0.75rem;
+  top: calc(3.85rem + env(safe-area-inset-top, 0px));
+  bottom: auto;
+  min-width: 4.65rem;
+  min-height: 2.7rem;
+  padding: 0.58rem 0.82rem;
+  border-radius: 16px;
+  z-index: 19;
+  pointer-events: auto;
+  box-shadow: 0 10px 18px rgba(0, 0, 0, 0.2);
+}
+
 body.mobile-ui-preview .mobile-look-pad,
 body.mobile-ui-preview .mobile-move-pad {
   min-height: clamp(6.2rem, 15vh, 8rem);
@@ -1622,6 +1636,20 @@ body.mobile-ui-preview .viewer-checkbox-row {
     box-shadow: 0 10px 18px rgba(0, 0, 0, 0.2);
   }
 
+  .mobile-action2-fab {
+    position: fixed;
+    right: 0.75rem;
+    top: calc(3.85rem + env(safe-area-inset-top, 0px));
+    bottom: auto;
+    min-width: 4.65rem;
+    min-height: 2.7rem;
+    padding: 0.58rem 0.82rem;
+    border-radius: 16px;
+    z-index: 19;
+    pointer-events: auto;
+    box-shadow: 0 10px 18px rgba(0, 0, 0, 0.2);
+  }
+
   .mobile-look-pad,
   .mobile-move-pad {
     min-height: clamp(6.2rem, 15vh, 8rem);
@@ -1792,4 +1820,32 @@ body.mobile-ui-preview .viewer-checkbox-row {
   .mobile-pad {
     min-height: 5.7rem;
   }
+}
+
+/* Widget Overlay Styles */
+#widget-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1000;
+}
+
+#widget-overlay .widget {
+  pointer-events: auto;
+  user-select: none;
+  font-family: 'Outfit', Arial, sans-serif;
+}
+
+#widget-overlay .widget button {
+  font-family: inherit;
+  border: none;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+#widget-overlay .widget button:hover {
+  filter: brightness(1.2);
 }

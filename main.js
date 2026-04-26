@@ -31,6 +31,580 @@ import {
     sampleTerrainHeightAt as sampleTerrainHeightAtWorldFloor,
 } from './src/world/terrain.js';
 
+// --- Widget System (Unreal Engine Style) ---
+class WidgetManager {
+    constructor(container) {
+        this.container = container;
+        this.widgets = new Map();
+        this.nextId = 1;
+
+        // Create overlay container for UI widgets
+        this.overlay = document.createElement('div');
+        this.overlay.id = 'widget-overlay';
+        this.overlay.style.cssText = `
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1000;
+        `;
+        // Append overlay on top of the canvas (which should be the last child)
+        this.container.appendChild(this.overlay);
+    }
+
+    createWidget(type, config = {}) {
+        const id = this.nextId++;
+        let widget;
+
+        switch (type) {
+            case 'text':
+                widget = new TextWidget(id, config);
+                break;
+            case 'image':
+                widget = new ImageWidget(id, config);
+                break;
+            case 'progress':
+                widget = new ProgressBarWidget(id, config);
+                break;
+            case 'button':
+                widget = new ButtonWidget(id, config);
+                break;
+            default:
+                throw new Error(`Unknown widget type: ${type}`);
+        }
+
+        this.widgets.set(id, widget);
+        this.overlay.appendChild(widget.element);
+        return id;
+    }
+
+    updateWidget(id, updates) {
+        const widget = this.widgets.get(id);
+        if (!widget) return false;
+
+        widget.update(updates);
+        return true;
+    }
+
+    showWidget(id, visible = true) {
+        const widget = this.widgets.get(id);
+        if (!widget) return false;
+
+        widget.element.style.display = visible ? 'block' : 'none';
+        return true;
+    }
+
+    removeWidget(id) {
+        const widget = this.widgets.get(id);
+        if (!widget) return false;
+
+        this.overlay.removeChild(widget.element);
+        widget.dispose();
+        this.widgets.delete(id);
+        return true;
+    }
+
+    setWidgetPosition(id, position, space = 'screen') {
+        const widget = this.widgets.get(id);
+        if (!widget) return false;
+
+        if (space === 'screen') {
+            // Position as percentage of container
+            const x = (position.x * 100) + '%';
+            const y = (position.y * 100) + '%';
+            widget.element.style.left = x;
+            widget.element.style.top = y;
+            widget.element.style.transform = 'translate(-50%, -50%)';
+        } else {
+            // World space positioning would require 3D to screen conversion
+            console.warn('World space positioning not yet implemented for HTML widgets');
+        }
+        return true;
+    }
+
+    setWidgetScale(id, scale) {
+        const widget = this.widgets.get(id);
+        if (!widget) return false;
+
+        const scaleValue = typeof scale === 'number' ? scale : scale.x || 1;
+        widget.element.style.transform = widget.element.style.transform.replace(/scale\([^)]*\)/, '') + ` scale(${scaleValue})`;
+        return true;
+    }
+
+    getWidget(id) {
+        return this.widgets.get(id);
+    }
+
+    getAllWidgets() {
+        return Array.from(this.widgets.values());
+    }
+
+    update(delta) {
+        // Kept to prevent breaking the main render loop
+    }
+
+    dispose() {
+        for (const widget of this.widgets.values()) {
+            widget.dispose();
+        }
+        this.widgets.clear();
+        if (this.overlay && this.overlay.parentNode) {
+            this.overlay.parentNode.removeChild(this.overlay);
+        }
+    }
+}
+
+// Base Widget Class
+class BaseWidget {
+    constructor(id, config = {}) {
+        this.id = id;
+        this.element = document.createElement('div');
+        this.element.className = 'widget';
+        this.element.style.cssText = `
+            position: absolute;
+            pointer-events: auto;
+            user-select: none;
+        `;
+
+        this.config = {
+            position: { x: 0.5, y: 0.5 }, // Normalized screen coordinates (0-1)
+            scale: 1,
+            visible: true,
+            ...config
+        };
+
+        this.updatePosition();
+        this.element.style.display = this.config.visible ? 'block' : 'none';
+    }
+
+    update(updates) {
+        if (updates.position) {
+            this.config.position = updates.position;
+            this.updatePosition();
+        }
+        if (updates.scale !== undefined) {
+            this.config.scale = updates.scale;
+            this.updateScale();
+        }
+        if (updates.visible !== undefined) {
+            this.config.visible = updates.visible;
+            this.element.style.display = updates.visible ? 'block' : 'none';
+        }
+
+        Object.assign(this.config, updates);
+    }
+
+    updatePosition() {
+        const x = (this.config.position.x * 100) + '%';
+        const y = (this.config.position.y * 100) + '%';
+        this.element.style.left = x;
+        this.element.style.top = y;
+        this.element.style.transform = 'translate(-50%, -50%)';
+        this.updateScale();
+    }
+
+    updateScale() {
+        const currentTransform = this.element.style.transform;
+        const translateMatch = currentTransform.match(/translate\([^)]+\)/);
+        const translate = translateMatch ? translateMatch[0] : 'translate(-50%, -50%)';
+        this.element.style.transform = `${translate} scale(${this.config.scale})`;
+    }
+
+    dispose() {
+        if (this.element && this.element.parentNode) {
+            this.element.parentNode.removeChild(this.element);
+        }
+    }
+}
+
+// Text Widget
+class TextWidget extends BaseWidget {
+    constructor(id, config = {}) {
+        super(id, config);
+
+        this.config = {
+            text: 'Hello World',
+            fontSize: 24,
+            color: '#ffffff',
+            fontFamily: 'Arial, sans-serif',
+            textAlign: 'center',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            padding: '8px 16px',
+            borderRadius: '4px',
+            ...this.config
+        };
+
+        this.element.innerHTML = `
+            <div style="
+                font-size: ${this.config.fontSize}px;
+                color: ${this.config.color};
+                font-family: ${this.config.fontFamily};
+                text-align: ${this.config.textAlign};
+                background-color: ${this.config.backgroundColor};
+                padding: ${this.config.padding};
+                border-radius: ${this.config.borderRadius};
+                white-space: nowrap;
+            ">${this.config.text}</div>
+        `;
+    }
+
+    update(updates) {
+        super.update(updates);
+
+        if (updates.text !== undefined) {
+            this.config.text = updates.text;
+            this.element.querySelector('div').textContent = updates.text;
+        }
+        if (updates.fontSize !== undefined) {
+            this.config.fontSize = updates.fontSize;
+            this.element.querySelector('div').style.fontSize = updates.fontSize + 'px';
+        }
+        if (updates.color !== undefined) {
+            this.config.color = updates.color;
+            this.element.querySelector('div').style.color = updates.color;
+        }
+        if (updates.fontFamily !== undefined) {
+            this.config.fontFamily = updates.fontFamily;
+            this.element.querySelector('div').style.fontFamily = updates.fontFamily;
+        }
+        if (updates.textAlign !== undefined) {
+            this.config.textAlign = updates.textAlign;
+            this.element.querySelector('div').style.textAlign = updates.textAlign;
+        }
+        if (updates.backgroundColor !== undefined) {
+            this.config.backgroundColor = updates.backgroundColor;
+            this.element.querySelector('div').style.backgroundColor = updates.backgroundColor;
+        }
+        if (updates.padding !== undefined) {
+            this.config.padding = updates.padding;
+            this.element.querySelector('div').style.padding = updates.padding;
+        }
+        if (updates.borderRadius !== undefined) {
+            this.config.borderRadius = updates.borderRadius;
+            this.element.querySelector('div').style.borderRadius = updates.borderRadius;
+        }
+    }
+}
+
+// Image Widget
+class ImageWidget extends BaseWidget {
+    constructor(id, config = {}) {
+        super(id, config);
+
+        this.config = {
+            imageUrl: null,
+            width: 100,
+            height: 100,
+            ...this.config
+        };
+
+        this.element.innerHTML = `
+            <img style="
+                width: ${this.config.width}px;
+                height: ${this.config.height}px;
+                object-fit: contain;
+                border-radius: 4px;
+            " src="${this.config.imageUrl || ''}" alt="Widget Image">
+        `;
+    }
+
+    update(updates) {
+        super.update(updates);
+
+        if (updates.imageUrl !== undefined) {
+            this.config.imageUrl = updates.imageUrl;
+            this.element.querySelector('img').src = updates.imageUrl;
+        }
+        if (updates.width !== undefined) {
+            this.config.width = updates.width;
+            this.element.querySelector('img').style.width = updates.width + 'px';
+        }
+        if (updates.height !== undefined) {
+            this.config.height = updates.height;
+            this.element.querySelector('img').style.height = updates.height + 'px';
+        }
+    }
+}
+
+// Progress Bar Widget
+class ProgressBarWidget extends BaseWidget {
+    constructor(id, config = {}) {
+        super(id, config);
+
+        this.config = {
+            progress: 0.5,
+            width: 200,
+            height: 20,
+            backgroundColor: '#333333',
+            fillColor: '#00ff00',
+            borderColor: '#ffffff',
+            borderWidth: '2px',
+            borderRadius: '4px',
+            ...this.config
+        };
+
+        this.element.innerHTML = `
+            <div style="
+                width: ${this.config.width}px;
+                height: ${this.config.height}px;
+                background-color: ${this.config.backgroundColor};
+                border: ${this.config.borderWidth} solid ${this.config.borderColor};
+                border-radius: ${this.config.borderRadius};
+                overflow: hidden;
+            ">
+                <div style="
+                    width: ${this.config.progress * 100}%;
+                    height: 100%;
+                    background-color: ${this.config.fillColor};
+                    transition: width 0.3s ease;
+                "></div>
+            </div>
+        `;
+    }
+
+    update(updates) {
+        super.update(updates);
+
+        if (updates.progress !== undefined) {
+            this.config.progress = Math.max(0, Math.min(1, updates.progress));
+            this.element.querySelector('div > div').style.width = (this.config.progress * 100) + '%';
+        }
+        if (updates.width !== undefined) {
+            this.config.width = updates.width;
+            this.element.querySelector('div').style.width = updates.width + 'px';
+        }
+        if (updates.height !== undefined) {
+            this.config.height = updates.height;
+            this.element.querySelector('div').style.height = updates.height + 'px';
+        }
+        if (updates.backgroundColor !== undefined) {
+            this.config.backgroundColor = updates.backgroundColor;
+            this.element.querySelector('div').style.backgroundColor = updates.backgroundColor;
+        }
+        if (updates.fillColor !== undefined) {
+            this.config.fillColor = updates.fillColor;
+            this.element.querySelector('div > div').style.backgroundColor = updates.fillColor;
+        }
+        if (updates.borderColor !== undefined) {
+            this.config.borderColor = updates.borderColor;
+            this.element.querySelector('div').style.borderColor = updates.borderColor;
+        }
+        if (updates.borderWidth !== undefined) {
+            this.config.borderWidth = updates.borderWidth;
+            this.element.querySelector('div').style.borderWidth = updates.borderWidth;
+        }
+        if (updates.borderRadius !== undefined) {
+            this.config.borderRadius = updates.borderRadius;
+            this.element.querySelector('div').style.borderRadius = updates.borderRadius;
+        }
+    }
+}
+
+// Button Widget
+class ButtonWidget extends BaseWidget {
+    constructor(id, config = {}) {
+        super(id, config);
+
+        this.config = {
+            text: 'Button',
+            width: 120,
+            height: 40,
+            backgroundColor: '#444444',
+            hoverColor: '#666666',
+            textColor: '#ffffff',
+            borderRadius: '4px',
+            fontSize: 16,
+            onClick: null,
+            ...this.config
+        };
+
+        this.element.innerHTML = `
+            <button style="
+                width: ${this.config.width}px;
+                height: ${this.config.height}px;
+                background-color: ${this.config.backgroundColor};
+                color: ${this.config.textColor};
+                border: none;
+                border-radius: ${this.config.borderRadius};
+                font-size: ${this.config.fontSize}px;
+                font-family: Arial, sans-serif;
+                cursor: pointer;
+                transition: background-color 0.2s ease;
+            ">${this.config.text}</button>
+        `;
+
+        this.buttonElement = this.element.querySelector('button');
+        this.buttonElement.addEventListener('click', () => {
+            if (this.config.onClick) {
+                this.config.onClick(this.id);
+            }
+        });
+
+        this.buttonElement.addEventListener('mouseenter', () => {
+            this.buttonElement.style.backgroundColor = this.config.hoverColor;
+        });
+
+        this.buttonElement.addEventListener('mouseleave', () => {
+            this.buttonElement.style.backgroundColor = this.config.backgroundColor;
+        });
+    }
+
+    update(updates) {
+        super.update(updates);
+
+        if (updates.text !== undefined) {
+            this.config.text = updates.text;
+            this.buttonElement.textContent = updates.text;
+        }
+        if (updates.width !== undefined) {
+            this.config.width = updates.width;
+            this.buttonElement.style.width = updates.width + 'px';
+        }
+        if (updates.height !== undefined) {
+            this.config.height = updates.height;
+            this.buttonElement.style.height = updates.height + 'px';
+        }
+        if (updates.backgroundColor !== undefined) {
+            this.config.backgroundColor = updates.backgroundColor;
+            this.buttonElement.style.backgroundColor = updates.backgroundColor;
+        }
+        if (updates.hoverColor !== undefined) {
+            this.config.hoverColor = updates.hoverColor;
+        }
+        if (updates.textColor !== undefined) {
+            this.config.textColor = updates.textColor;
+            this.buttonElement.style.color = updates.textColor;
+        }
+        if (updates.borderRadius !== undefined) {
+            this.config.borderRadius = updates.borderRadius;
+            this.buttonElement.style.borderRadius = updates.borderRadius;
+        }
+        if (updates.fontSize !== undefined) {
+            this.config.fontSize = updates.fontSize;
+            this.buttonElement.style.fontSize = updates.fontSize + 'px';
+        }
+        if (updates.onClick !== undefined) {
+            this.config.onClick = updates.onClick;
+        }
+    }
+}
+
+// Global widget manager instance
+let widgetManager;
+
+// Widget API functions (call these from Three.js commands)
+window.WidgetAPI = {
+    createWidget: (type, config) => {
+        if (!widgetManager) return null;
+        return widgetManager.createWidget(type, config);
+    },
+
+    updateWidget: (id, updates) => {
+        if (!widgetManager) return false;
+        return widgetManager.updateWidget(id, updates);
+    },
+
+    showWidget: (id, visible) => {
+        if (!widgetManager) return false;
+        return widgetManager.showWidget(id, visible);
+    },
+
+    removeWidget: (id) => {
+        if (!widgetManager) return false;
+        return widgetManager.removeWidget(id);
+    },
+
+    setWidgetPosition: (id, position, space) => {
+        if (!widgetManager) return false;
+        return widgetManager.setWidgetPosition(id, position, space);
+    },
+
+    setWidgetScale: (id, scale) => {
+        if (!widgetManager) return false;
+        return widgetManager.setWidgetScale(id, scale);
+    },
+
+    getWidget: (id) => {
+        if (!widgetManager) return null;
+        return widgetManager.getWidget(id);
+    },
+
+    getAllWidgets: () => {
+        if (!widgetManager) return [];
+        return widgetManager.getAllWidgets();
+    }
+};
+
+// Example widget creation function
+function createExampleWidgets() {
+    if (!widgetManager) return;
+
+    // Create a score display widget
+    const scoreWidgetId = widgetManager.createWidget('text', {
+        text: 'Score: 0',
+        fontSize: 20,
+        color: '#ffff00',
+        backgroundColor: 'rgba(0, 0, 0, 0.7)',
+        position: { x: 0.05, y: 0.9 }, // Top-left corner
+        visible: true
+    });
+
+    // Create a health bar
+    const healthBarId = widgetManager.createWidget('progress', {
+        progress: 1.0,
+        width: 200,
+        height: 20,
+        fillColor: '#00ff00',
+        backgroundColor: '#333333',
+        position: { x: 0.05, y: 0.8 }, // Below score
+        visible: true
+    });
+
+    // Create a speed display
+    /*const speedWidgetId = widgetManager.createWidget('text', {
+        text: 'Speed: 0 km/h',
+        fontSize: 16,
+        color: '#00ffff',
+        backgroundColor: 'rgba(0, 0, 0, 0.7)',
+        position: { x: 0.05, y: 0.7 }, // Below health bar
+        visible: true
+    });
+
+    // Create a button widget
+    const buttonWidgetId = widgetManager.createWidget('button', {
+        text: 'Boost',
+        width: 80,
+        height: 30,
+        backgroundColor: '#444444',
+        hoverColor: '#666666',
+        position: { x: 0.85, y: 0.9 }, // Top-right corner
+        onClick: (id) => {
+            console.log('Boost button clicked!', id);
+            // Add boost logic here
+        },
+        visible: true
+    });*/
+
+    // Store widget IDs globally for easy access
+    window.exampleWidgets = {
+        score: scoreWidgetId,
+        health: healthBarId,
+        //speed: speedWidgetId,
+        //boost: buttonWidgetId
+    };
+
+    // Initialize score system
+    window.gameScore = 0;
+
+    console.log('Example widgets created:', window.exampleWidgets);
+    console.log('Widget API available at window.WidgetAPI');
+    console.log('Example usage:');
+    console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
+    console.log('  WidgetAPI.updateWidget(widgetId, {text: "Updated text"})');
+}
+
 // --- Configuration ---
 let scene, camera, renderer, currentMesh;
 let originalTriCount = 0;
@@ -80,37 +654,37 @@ const VEHICLE_SETTINGS = {
     followDistance: 5.6,
     followHeight: 2.4,
     lookAhead: 2.2,
-    acceleration: 5.9,
-    reverseAcceleration: 4.1,
-    boostAcceleration: 6.8,
-    coastDrag: 1.55,
-    rollingDrag: 0.22,
-    lowSpeedGrip: 4.9,
-    highSpeedGrip: 2.8,
-    brakeGrip: 8.6,
-    driftGrip: 1.35,
-    partialContactGrip: 0.95,
-    driftBoostThreshold: 0.42,
-    driftSteerBonus: 1.22,
-    steeringRate: 1.35,
-    steeringReturn: 4.6,
-    steeringGrip: 6.1,
-    steeringHighSpeedDamping: 0.45,
-    uprightTorque: 380,
-    rollTorque: 165,
-    pitchTorque: 120,
+    acceleration: 4.2, // More gradual acceleration like Warthog
+    reverseAcceleration: 3.8,
+    boostAcceleration: 5.5,
+    coastDrag: 2.2, // Higher drag for more realistic momentum
+    rollingDrag: 0.35, // More rolling resistance
+    lowSpeedGrip: 6.8, // Better low-speed traction
+    highSpeedGrip: 3.2, // Less grip at high speeds for sliding
+    brakeGrip: 3.5, // Much weaker brakes - takes longer to stop
+    driftGrip: 1.8, // Allows some drifting but recovers well
+    partialContactGrip: 1.2,
+    driftBoostThreshold: 0.35,
+    driftSteerBonus: 1.4,
+    steeringRate: 2.1, // More responsive steering like Warthog
+    steeringReturn: 6.2, // Faster return to center
+    steeringGrip: 8.5, // Better steering control
+    steeringHighSpeedDamping: 0.55, // More stability at high speeds
+    uprightTorque: 520, // Stronger self-righting for stability
+    rollTorque: 220,
+    pitchTorque: 180,
     suspensionRideHeight: 1.08,
     suspensionTravel: 0.9,
-    suspensionSpring: 7.4,
-    suspensionDamping: 1.8,
-    bumpPitchTorque: 420,
-    bumpRollTorque: 340,
-    bumpLaunchBoost: 3.2,
-    airtimeAngularBlend: 0.08,
-    maxDriveSpeed: 27,
-    maxReverseSpeed: 10,
-    brakeDamping: 0.8,
-    maxAngularVelocity: 3.3,
+    suspensionSpring: 9.8, // Bouncier suspension like Warthog
+    suspensionDamping: 2.4, // More damping for realistic feel
+    bumpPitchTorque: 580,
+    bumpRollTorque: 480,
+    bumpLaunchBoost: 4.2, // More launch from bumps
+    airtimeAngularBlend: 0.12,
+    maxDriveSpeed: 32, // Slightly higher top speed
+    maxReverseSpeed: 12,
+    brakeDamping: 0.92, // Much weaker brakes - retains more speed
+    maxAngularVelocity: 4.2, // Allow more rotation for realistic handling
 };
 
 // Module-level refs so switchEnvironment can update them
@@ -129,7 +703,7 @@ let actorComponentCollisionInput, actorComponentScriptsInput, actorEditorCreateB
 let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
-let mobileJumpBtn, mobileRightActionBtn;
+let mobileJumpBtn, mobileRightActionBtn, mobileAction2Btn;
 let lightGridController;
 const IMPORTED_PROP_COLLISION_LABELS = {
     simple: 'simple box collision',
@@ -321,6 +895,7 @@ const gameplay = {
 const vehicleState = {
     activePropId: '',
     brakeHeld: false,
+    tailWhipLastFrame: false,
 };
 const showcase = {
     looking: false,
@@ -1191,6 +1766,7 @@ function clearActiveVehicle({ updateUi = false } = {}) {
     const wasDriving = !!vehicleState.activePropId;
     vehicleState.activePropId = '';
     vehicleState.brakeHeld = false;
+    vehicleState.tailWhipLastFrame = false;
 
     if (!wasDriving) return;
 
@@ -1220,6 +1796,15 @@ function positionVehicleCamera(vehiclePosition, vehicleRotation, delta) {
         .copy(vehiclePosition)
         .addScaledVector(upVector, VEHICLE_SETTINGS.followHeight)
         .addScaledVector(flatForward, -VEHICLE_SETTINGS.followDistance);
+
+    // Add camera shake during tail whip
+    if (vehicleState.tailWhipLastFrame) {
+        const shakeAmount = 0.3;
+        chasePosition.x += (Math.random() - 0.5) * shakeAmount;
+        chasePosition.y += (Math.random() - 0.5) * shakeAmount;
+        chasePosition.z += (Math.random() - 0.5) * shakeAmount;
+    }
+
     const lookTarget = tempVectorD
         .copy(vehiclePosition)
         .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
@@ -1313,6 +1898,253 @@ function exitVehicle() {
     return true;
 }
 
+function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wheelWidth }) {
+    const steeringPivot = new THREE.Group();
+    const spinGroup = new THREE.Group();
+    
+    const wheelMesh = new THREE.Group();
+    wheelMesh.rotation.z = Math.PI * 0.5;
+
+    const tire = new THREE.Mesh(
+        new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 24, 1),
+        tireMaterial
+    );
+    tire.castShadow = true;
+    tire.receiveShadow = true;
+    wheelMesh.add(tire);
+
+    const innerRim = new THREE.Mesh(
+        new THREE.CylinderGeometry(wheelRadius * 0.65, wheelRadius * 0.65, wheelWidth * 1.05, 18, 1),
+        new THREE.MeshStandardMaterial({
+            color: 0x111111,
+            roughness: 0.9,
+            metalness: 0.1
+        })
+    );
+    wheelMesh.add(innerRim);
+
+    const spokeSize = wheelRadius * 1.35;
+    const spoke1 = new THREE.Mesh(
+        new THREE.BoxGeometry(spokeSize, wheelWidth * 1.1, wheelRadius * 0.25),
+        rimMaterial
+    );
+    spoke1.castShadow = true;
+    wheelMesh.add(spoke1);
+
+    const spoke2 = new THREE.Mesh(
+        new THREE.BoxGeometry(wheelRadius * 0.25, wheelWidth * 1.1, spokeSize),
+        rimMaterial
+    );
+    spoke2.castShadow = true;
+    wheelMesh.add(spoke2);
+
+    const hub = new THREE.Mesh(
+        new THREE.CylinderGeometry(wheelRadius * 0.2, wheelRadius * 0.2, wheelWidth * 1.15, 14, 1),
+        rimMaterial
+    );
+    wheelMesh.add(hub);
+
+    spinGroup.add(wheelMesh);
+    steeringPivot.add(spinGroup);
+
+    return { steeringPivot, spinGroup };
+}
+
+function createDrivableCarVisual() {
+    const root = new THREE.Group();
+    // Offset the entire visual model up to perfectly rest on the wheels
+    // physics box half height is 0.3. wheel bottom is at -0.468. difference = 0.168.
+    const visualGroup = new THREE.Group();
+    visualGroup.position.y = VEHICLE_SETTINGS.height * 0.28;
+    root.add(visualGroup);
+    
+    const bodyMaterial = new THREE.MeshStandardMaterial({
+        color: 0xf7f7f5,
+        metalness: 0.18,
+        roughness: 0.34,
+    });
+    const trimMaterial = new THREE.MeshStandardMaterial({
+        color: 0x15171b,
+        metalness: 0.42,
+        roughness: 0.48,
+    });
+    const glassMaterial = new THREE.MeshStandardMaterial({
+        color: 0xdce8f5,
+        metalness: 0.08,
+        roughness: 0.16,
+        transparent: true,
+        opacity: 0.72,
+    });
+    const tireMaterial = new THREE.MeshStandardMaterial({
+        color: 0x17191d,
+        metalness: 0.02,
+        roughness: 0.92,
+    });
+    const rimMaterial = new THREE.MeshStandardMaterial({
+        color: 0xc5ccd6,
+        metalness: 0.86,
+        roughness: 0.24,
+    });
+    const lightMaterial = new THREE.MeshStandardMaterial({
+        color: 0xf8f1d0,
+        emissive: 0x8c6d1f,
+        emissiveIntensity: 0.2,
+        roughness: 0.28,
+        metalness: 0.02,
+    });
+
+    const lowerBody = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.96, VEHICLE_SETTINGS.height * 0.58, VEHICLE_SETTINGS.length * 0.9),
+        bodyMaterial
+    );
+    lowerBody.position.y = -VEHICLE_SETTINGS.height * 0.04;
+    lowerBody.castShadow = true;
+    lowerBody.receiveShadow = true;
+    visualGroup.add(lowerBody);
+
+    const cabin = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.7, VEHICLE_SETTINGS.height * 0.54, VEHICLE_SETTINGS.length * 0.44),
+        glassMaterial
+    );
+    cabin.position.set(0, VEHICLE_SETTINGS.height * 0.36, -VEHICLE_SETTINGS.length * 0.08);
+    cabin.castShadow = true;
+    visualGroup.add(cabin);
+
+    const roof = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.66, VEHICLE_SETTINGS.height * 0.08, VEHICLE_SETTINGS.length * 0.34),
+        bodyMaterial
+    );
+    roof.position.set(0, VEHICLE_SETTINGS.height * 0.64, -VEHICLE_SETTINGS.length * 0.08);
+    roof.castShadow = true;
+    visualGroup.add(roof);
+
+    const hood = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.82, VEHICLE_SETTINGS.height * 0.16, VEHICLE_SETTINGS.length * 0.24),
+        bodyMaterial
+    );
+    hood.position.set(0, VEHICLE_SETTINGS.height * 0.12, VEHICLE_SETTINGS.length * 0.29);
+    hood.rotation.x = -0.12;
+    hood.castShadow = true;
+    hood.receiveShadow = true;
+    visualGroup.add(hood);
+
+    const frontBumper = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.88, VEHICLE_SETTINGS.height * 0.14, VEHICLE_SETTINGS.length * 0.08),
+        trimMaterial
+    );
+    frontBumper.position.set(0, -VEHICLE_SETTINGS.height * 0.16, VEHICLE_SETTINGS.length * 0.47);
+    frontBumper.castShadow = true;
+    visualGroup.add(frontBumper);
+
+    const rearBumper = frontBumper.clone();
+    rearBumper.position.z = -VEHICLE_SETTINGS.length * 0.47;
+    visualGroup.add(rearBumper);
+
+    const grille = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.44, VEHICLE_SETTINGS.height * 0.14, VEHICLE_SETTINGS.length * 0.04),
+        trimMaterial
+    );
+    grille.position.set(0, VEHICLE_SETTINGS.height * 0.02, VEHICLE_SETTINGS.length * 0.48);
+    visualGroup.add(grille);
+
+    const headlightLeft = new THREE.Mesh(
+        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.12, VEHICLE_SETTINGS.height * 0.08, VEHICLE_SETTINGS.length * 0.02),
+        lightMaterial
+    );
+    headlightLeft.position.set(-VEHICLE_SETTINGS.width * 0.28, VEHICLE_SETTINGS.height * 0.06, VEHICLE_SETTINGS.length * 0.48);
+    const headlightRight = headlightLeft.clone();
+    headlightRight.position.x *= -1;
+    visualGroup.add(headlightLeft, headlightRight);
+
+    const wheelRadius = VEHICLE_SETTINGS.height * 0.36;
+    const wheelWidth = VEHICLE_SETTINGS.width * 0.16;
+    const wheelY = -VEHICLE_SETTINGS.height * 0.42;
+    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
+    const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.45;
+    const wheelOffsets = [
+        { x: -halfTrackWidth, z: halfWheelBase, steerable: true },
+        { x: halfTrackWidth, z: halfWheelBase, steerable: true },
+        { x: -halfTrackWidth, z: -halfWheelBase, steerable: false },
+        { x: halfTrackWidth, z: -halfWheelBase, steerable: false },
+    ];
+    const steeringPivots = [];
+    const spinGroups = [];
+
+    wheelOffsets.forEach((offset) => {
+        const wheel = createVehicleWheelAssembly({
+            tireMaterial,
+            rimMaterial,
+            wheelRadius,
+            wheelWidth,
+        });
+        wheel.steeringPivot.position.set(offset.x, wheelY, offset.z);
+        wheel.steeringPivot.userData.steerable = offset.steerable;
+        visualGroup.add(wheel.steeringPivot);
+        steeringPivots.push(wheel.steeringPivot);
+        spinGroups.push(wheel.spinGroup);
+    });
+
+    visualGroup.traverse((object) => {
+        if (!object.isMesh) return;
+        object.castShadow = true;
+        object.receiveShadow = true;
+    });
+
+    root.userData.vehicleVisual = {
+        steeringPivots,
+        spinGroups,
+        wheelRadius,
+        maxSteerAngle: 1.0,
+        steerAngle: 0,
+        spinAngle: 0,
+    };
+
+    return root;
+}
+
+function updateVehicleVisuals(delta) {
+    if (!physics.ready || !physics.dynamicBodies.length) return;
+
+    const { bodyInterface } = physics;
+    for (const prop of physics.dynamicBodies) {
+        if (prop?.kind !== 'vehicle' || !prop.mesh) continue;
+
+        const visualState = prop.mesh.userData?.vehicleVisual;
+        const body = getActorBody(prop);
+        if (!visualState || !body) continue;
+
+        const bodyId = body.GetID();
+        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(prop.mesh.quaternion);
+        flatForward.y = 0;
+        if (flatForward.lengthSq() < 1e-6) {
+            flatForward.set(0, 0, -1);
+        } else {
+            flatForward.normalize();
+        }
+
+        const linearVelocity = copyJoltVector(tempVectorB, bodyInterface.GetLinearVelocity(bodyId));
+        const forwardSpeed = linearVelocity.dot(flatForward);
+
+        // Enhanced wheel spin during tail whip
+        const isActiveVehicle = gameplay.active && vehicleState.activePropId === prop.id;
+        const tailWhipSpinBonus = isActiveVehicle && vehicleState.tailWhipLastFrame ? 3.0 : 1.0;
+        visualState.spinAngle -= (forwardSpeed / visualState.wheelRadius) * delta * tailWhipSpinBonus;
+        const inputSteer = isActiveVehicle
+            ? ((gameplay.input.left ? 1 : 0) - (gameplay.input.right ? 1 : 0))
+            : 0;
+        const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
+        const targetSteerAngle = inputSteer * visualState.maxSteerAngle * THREE.MathUtils.lerp(1, 0.58, speedRatio);
+        visualState.steerAngle = THREE.MathUtils.damp(visualState.steerAngle, targetSteerAngle, 10, delta);
+
+        visualState.steeringPivots.forEach((pivot) => {
+            pivot.rotation.y = pivot.userData.steerable ? visualState.steerAngle : 0;
+        });
+        visualState.spinGroups.forEach((group) => {
+            group.rotation.x = visualState.spinAngle;
+        });
+    }
+}
+
 function spawnDrivableCar(options = {}) {
     if (!physics.ready || !scene || !camera) {
         console.warn('Jolt physics is not ready yet.');
@@ -1351,10 +2183,10 @@ function spawnDrivableCar(options = {}) {
 
     const body = createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, {
         rotation: carRotation,
-        friction: 1.18,
+        friction: 1.35, // Higher friction for better traction
         restitution: 0.02,
-        linearDamping: 0.18,
-        angularDamping: 0.42,
+        linearDamping: 0.25, // More linear damping for heavier feel
+        angularDamping: 0.55, // More angular damping for stability
         motionQuality: Jolt.EMotionQuality_LinearCast,
         skipImpulse: true,
     });
@@ -1364,35 +2196,7 @@ function spawnDrivableCar(options = {}) {
     }
 
     bodyInterface.SetMaxAngularVelocity(body.GetID(), VEHICLE_SETTINGS.maxAngularVelocity);
-
-    const material = new THREE.MeshStandardMaterial({
-        color: 0xd9463d,
-        metalness: 0.18,
-        roughness: 0.56,
-        emissive: 0x220605,
-        emissiveIntensity: 0.14,
-    });
-    const chassis = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width, VEHICLE_SETTINGS.height, VEHICLE_SETTINGS.length),
-        material
-    );
-    chassis.castShadow = true;
-    chassis.receiveShadow = true;
-
-    const cabin = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.72, VEHICLE_SETTINGS.height * 0.7, VEHICLE_SETTINGS.length * 0.42),
-        new THREE.MeshStandardMaterial({
-            color: 0xf8fafc,
-            metalness: 0.08,
-            roughness: 0.2,
-            transparent: true,
-            opacity: 0.78,
-        })
-    );
-    cabin.position.set(0, VEHICLE_SETTINGS.height * 0.48, -VEHICLE_SETTINGS.length * 0.05);
-    cabin.castShadow = true;
-    chassis.add(cabin);
-
+    const chassis = createDrivableCarVisual();
     chassis.position.copy(spawnPosition);
     chassis.quaternion.copy(carRotation);
 
@@ -3258,6 +4062,10 @@ function syncMobileActionVisibility() {
         mobileRightActionBtn.hidden = !gameplay.active;
     }
 
+    if (mobileAction2Btn) {
+        mobileAction2Btn.hidden = !gameplay.active;
+    }
+
     if (mobileModeToggleBtn) {
         mobileModeToggleBtn.textContent = gameplay.active ? 'Showcase' : 'Play';
         mobileModeToggleBtn.classList.toggle('viewer-toggle-btn-active', gameplay.active);
@@ -3272,6 +4080,10 @@ function updateMobileButtons() {
 
     if (mobileJumpBtn) {
         mobileJumpBtn.textContent = isDrivingVehicle() ? 'Brake' : 'Jump';
+    }
+
+    if (mobileAction2Btn) {
+        mobileAction2Btn.textContent = isDrivingVehicle() ? 'Exit' : 'Enter';
     }
 
     syncMobileActionVisibility();
@@ -3343,6 +4155,7 @@ function setupMobileControls() {
     mobileLookPad = document.getElementById('mobile-look-pad');
     mobileLookThumb = document.getElementById('mobile-look-thumb');
     mobileRightActionBtn = document.getElementById('mobile-right-action');
+    mobileAction2Btn = document.getElementById('mobile-action2');
     mobileJumpBtn = document.getElementById('mobile-jump');
 
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
@@ -3369,6 +4182,15 @@ function setupMobileControls() {
     mobileRightActionBtn?.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.pointerType === 'mouse') return;
         runMouseAction('right', event);
+    });
+
+    mobileAction2Btn?.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 && event.pointerType === 'mouse') return;
+        if (isDrivingVehicle()) {
+            exitVehicle();
+        } else {
+            enterVehicle();
+        }
     });
 
     bindMobilePad(mobileMovePad, mobileMoveThumb, (event) => {
@@ -3617,6 +4439,9 @@ async function init() {
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
+
+    // Initialize widget system AFTER renderer is set up
+    widgetManager = new WidgetManager(container);
     lightGridController = createLightGridController({
         scene,
         gsap,
@@ -3689,6 +4514,9 @@ async function init() {
     mainLight.shadow.bias = -0.001;
     scene.add(mainLight);
 
+    // Create example widgets
+    createExampleWidgets();
+
     window.addEventListener('resize', onWindowResize);
 
     // Environment selector
@@ -3743,27 +4571,38 @@ async function init() {
         const updateDuration = performance.now() - updateStart;
 
         const physicsMetrics = stepPhysics(delta);
+        updateVehicleVisuals(delta);
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
         multiplayerController?.update(delta);
 
-        const scriptStart = performance.now();
-        runObjectTickScripts(delta);
-        const scriptDuration = performance.now() - scriptStart;
+        try {
+            // Update widget system
+            if (widgetManager) {
+                widgetManager.update(delta);
+            }
 
-        const renderStart = performance.now();
-        renderer.renderAsync(scene, camera);
+            const scriptStart = performance.now();
+            runObjectTickScripts(delta);
+            const scriptDuration = performance.now() - scriptStart;
 
-        recordDebugFrameMetrics({
-            frame: delta * 1000,
-            update: updateDuration,
-            physics: physicsMetrics.total,
-            physicsStep: physicsMetrics.step,
-            physicsSync: physicsMetrics.sync,
-            physicsCollisions: physicsMetrics.collisions,
-            scripts: scriptDuration,
-            render: performance.now() - renderStart,
-            delta,
-        });
+            const renderStart = performance.now();
+            renderer.renderAsync(scene, camera);
+
+            recordDebugFrameMetrics({
+                frame: delta * 1000,
+                update: updateDuration,
+                physics: physicsMetrics.total,
+                physicsStep: physicsMetrics.step,
+                physicsSync: physicsMetrics.sync,
+                physicsCollisions: physicsMetrics.collisions,
+                scripts: scriptDuration,
+                render: performance.now() - renderStart,
+                delta,
+            });
+        } catch (e) {
+            console.error('Crash in animation loop:', e);
+            throw e;
+        }
         updateDebugStatPanels();
     });
 }
@@ -4495,16 +5334,18 @@ function updateVehicleGameplay(delta) {
     const rearCompression = (cornerSamples[2].compression + cornerSamples[3].compression) * 0.5;
     const leftCompression = (cornerSamples[0].compression + cornerSamples[2].compression) * 0.5;
     const rightCompression = (cornerSamples[1].compression + cornerSamples[3].compression) * 0.5;
-    const targetForwardSpeed = throttle > 0
+    const targetForwardSpeed = grounded && throttle > 0
         ? VEHICLE_SETTINGS.maxDriveSpeed * boostMultiplier
-        : throttle < 0
+        : grounded && throttle < 0
             ? -VEHICLE_SETTINGS.maxReverseSpeed
             : 0;
-    const forwardLambda = throttle > 0
+    const forwardLambda = grounded && throttle > 0
         ? (gameplay.input.sprint ? VEHICLE_SETTINGS.boostAcceleration : VEHICLE_SETTINGS.acceleration)
-        : throttle < 0
+        : grounded && throttle < 0
             ? VEHICLE_SETTINGS.reverseAcceleration
-            : VEHICLE_SETTINGS.coastDrag;
+            : grounded
+                ? VEHICLE_SETTINGS.coastDrag
+                : 0;
     let nextForwardSpeed = THREE.MathUtils.damp(forwardSpeed, targetForwardSpeed, forwardLambda, delta);
     nextForwardSpeed *= 1 - (VEHICLE_SETTINGS.rollingDrag * delta);
     const gripBase = THREE.MathUtils.lerp(
@@ -4512,11 +5353,22 @@ function updateVehicleGameplay(delta) {
         VEHICLE_SETTINGS.highSpeedGrip,
         speedRatio
     );
+
+    // Weight transfer effects for realistic handling
+    const weightTransfer = throttle * 0.3; // Acceleration/braking affects weight distribution
+    const frontGripModifier = vehicleState.brakeHeld ? 1.2 : (throttle > 0 ? 0.9 : 1.0);
+    const rearGripModifier = throttle > 0 ? 1.15 : (vehicleState.brakeHeld ? 0.85 : 1.0);
+
+    // Tail whip detection and mechanics (Halo Warthog style)
+    const tailWhipActive = vehicleState.brakeHeld && Math.abs(steer) > 0.7 && forwardSpeed > 2.0;
+    const tailWhipGrip = tailWhipActive ? 0.3 : 1.0; // Significantly reduce grip during tail whip
+
     const gripLambda = vehicleState.brakeHeld
-        ? VEHICLE_SETTINGS.brakeGrip
+        ? VEHICLE_SETTINGS.brakeGrip * frontGripModifier * tailWhipGrip
         : drifting
             ? VEHICLE_SETTINGS.driftGrip
-            : gripBase;
+            : gripBase * (throttle > 0 ? rearGripModifier : frontGripModifier);
+
     const contactGrip = grounded
         ? THREE.MathUtils.lerp(VEHICLE_SETTINGS.partialContactGrip, gripLambda, contactRatio)
         : VEHICLE_SETTINGS.partialContactGrip;
@@ -4528,13 +5380,26 @@ function updateVehicleGameplay(delta) {
 
     if (vehicleState.brakeHeld) {
         nextHorizontalVelocity.multiplyScalar(VEHICLE_SETTINGS.brakeDamping);
+    } else if (throttle === 0 && forwardSpeed > 0.5) {
+        // Engine braking effect when no throttle applied
+        nextHorizontalVelocity.multiplyScalar(0.96);
     }
+
+    // Tail whip boost effect
+    if (tailWhipActive && !vehicleState.tailWhipLastFrame) {
+        // Initial tail whip activation - add small forward boost
+        const tailWhipBoost = flatForward.clone().multiplyScalar(2.0);
+        nextHorizontalVelocity.add(tailWhipBoost);
+    }
+    vehicleState.tailWhipLastFrame = tailWhipActive;
 
     let nextVerticalVelocity = linearVelocity.y;
     if (grounded && averageCompression > 0) {
         const suspensionLift = averageCompression * VEHICLE_SETTINGS.suspensionSpring;
         const dampingLift = -linearVelocity.y * VEHICLE_SETTINGS.suspensionDamping;
-        nextVerticalVelocity += (suspensionLift + dampingLift) * delta;
+        // Add downforce at high speeds for better stability
+        const downforce = speedRatio * speedRatio * 2.0;
+        nextVerticalVelocity += (suspensionLift + dampingLift - downforce) * delta;
 
         const frontImpact = Math.max(0, frontCompression - rearCompression);
         const bumpLaunch = frontImpact * speedRatio * VEHICLE_SETTINGS.bumpLaunchBoost;
@@ -4551,10 +5416,16 @@ function updateVehicleGameplay(delta) {
     const steeringDirection = nextForwardSpeed >= 0 ? 1 : -0.7;
     const steeringStrength = THREE.MathUtils.lerp(1, VEHICLE_SETTINGS.steeringHighSpeedDamping, steerSpeedFactor);
     const driftSteerBonus = drifting ? VEHICLE_SETTINGS.driftSteerBonus : 1;
+    const tailWhipSteerBonus = tailWhipActive ? 2.8 : 1; // Much higher steering during tail whip
+
     const targetYawRate = steer === 0
         ? 0
-        : steer * steeringDirection * VEHICLE_SETTINGS.steeringRate * steeringStrength * driftSteerBonus;
-    const yawLambda = steer === 0 ? VEHICLE_SETTINGS.steeringReturn : VEHICLE_SETTINGS.steeringGrip;
+        : steer * steeringDirection * VEHICLE_SETTINGS.steeringRate * steeringStrength * driftSteerBonus * tailWhipSteerBonus;
+
+    const yawLambda = tailWhipActive
+        ? VEHICLE_SETTINGS.steeringGrip * 0.4 // Less damping during tail whip for faster rotation
+        : (steer === 0 ? VEHICLE_SETTINGS.steeringReturn : VEHICLE_SETTINGS.steeringGrip);
+
     const nextYawRate = THREE.MathUtils.damp(angularVelocity.y, targetYawRate, yawLambda, delta);
     const rollTilt = -steer * Math.max(0.16, Math.abs(nextForwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed);
     const pitchTilt = throttle === 0 ? 0 : -throttle * 0.18;
@@ -4601,6 +5472,36 @@ function updateVehicleGameplay(delta) {
     positionVehicleCamera(vehiclePosition, vehicleRotation, delta);
     gameplay.grounded = grounded;
     physics.jumpQueued = false;
+
+    // Update example widgets with vehicle data
+    if (window.exampleWidgets && widgetManager) {
+        const speedKmh = Math.round(forwardSpeed * 3.6); // Convert m/s to km/h
+        widgetManager.updateWidget(window.exampleWidgets.speed, {
+            text: `Speed: ${speedKmh} km/h`
+        });
+
+        // Update health bar based on vehicle "health" (using contact ratio as proxy)
+        widgetManager.updateWidget(window.exampleWidgets.health, {
+            progress: Math.max(0.1, contactRatio)
+        });
+
+        // Update score
+        if (window.gameScore !== undefined) {
+            // Add points for driving
+
+            // Bonus points for high speed
+            if (forwardSpeed > 15) {
+            }
+
+            // Bonus points for tail whip
+            if (tailWhipActive && !vehicleState.tailWhipLastFrame) {
+            }
+
+            widgetManager.updateWidget(window.exampleWidgets.score, {
+                text: `Score: ${Math.floor(window.gameScore)}`
+            });
+        }
+    }
 
     if (vehiclePosition.y < worldFloor.position.y - 24) {
         exitVehicle();
