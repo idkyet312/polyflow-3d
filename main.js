@@ -5237,6 +5237,9 @@ function adjustShowcaseSpeed(direction) {
 }
 
 function updateShowcaseInput(event, isDown) {
+    if (!showcase.looking && (event.code === 'KeyE' || event.code === 'KeyQ' || event.code === 'Space' || event.code === 'ControlLeft' || event.code === 'ControlRight')) {
+        return false;
+    }
     switch (event.code) {
         case 'KeyW':
         case 'ArrowUp':
@@ -5283,16 +5286,37 @@ function handleGameplayKeyEvent(event) {
     }
 
     if (!gameplay.active && !gameplay.pointerLocked && isDown) {
-        if (event.code === 'KeyW') {
+        if (event.code === 'Delete') {
+            if (blueprintState.active) {
+                document.getElementById('btn-delete-comp')?.click();
+            } else {
+                deleteSelectedActor();
+            }
+            return;
+        }
+        if (event.ctrlKey || event.metaKey) {
+            if (event.code === 'KeyC') {
+                copySelectedToClipboard();
+                return;
+            } else if (event.code === 'KeyV') {
+                pasteFromClipboard();
+                return;
+            } else if (event.code === 'KeyD') {
+                duplicateSelected();
+                event.preventDefault();
+                return;
+            }
+        }
+        if (!showcase.looking && event.code === 'KeyW') {
             transformControl?.setMode('translate');
             if (blueprintState.active) updateBlueprintTransformUI();
-        } else if (event.code === 'KeyE') {
+        } else if (!showcase.looking && event.code === 'KeyE') {
             transformControl?.setMode('rotate');
             if (blueprintState.active) updateBlueprintTransformUI();
-        } else if (event.code === 'KeyR') {
+        } else if (!showcase.looking && event.code === 'KeyR') {
             transformControl?.setMode('scale');
             if (blueprintState.active) updateBlueprintTransformUI();
-        } else if (event.code === 'Backquote') { // Tilde key for toggling space
+        } else if (!showcase.looking && event.code === 'Backquote') { // Tilde key for toggling space
             if (transformControl) {
                 transformControl.setSpace(transformControl.space === 'local' ? 'world' : 'local');
                 if (blueprintState.active) updateBlueprintTransformUI();
@@ -6705,38 +6729,7 @@ function exportWorldToUmap() {
         actors: []
     };
     
-    function serializeComponentTree(object3D) {
-        if (!object3D) return [];
-        const comps = [];
-        for (const child of object3D.children) {
-            if (child.isMesh || child.isLight) {
-                const entry = {
-                    type: child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
-                    name: child.name,
-                    position: child.position.toArray(),
-                    quaternion: child.quaternion.toArray(),
-                    scale: child.scale.toArray(),
-                    children: serializeComponentTree(child)
-                };
-                if (child.isMesh && child.material) {
-                    entry.material = {
-                        color: '#' + child.material.color.getHexString(),
-                        roughness: child.material.roughness ?? 0.5,
-                        metalness: child.material.metalness ?? 0.0
-                    };
-                }
-                if (child.isPointLight) {
-                    entry.light = {
-                        color: '#' + child.color.getHexString(),
-                        intensity: child.intensity,
-                        distance: child.distance
-                    };
-                }
-                comps.push(entry);
-            }
-        }
-        return comps;
-    }
+    
     
     for (const actor of (sceneSystem?.actors || [])) {
         const mesh = getActorRenderObject(actor);
@@ -6778,38 +6771,7 @@ function exportActorToFile(actor) {
     const mesh = getActorRenderObject(actor);
     if (!mesh) return;
 
-    function serializeComponentTree(object3D) {
-        if (!object3D) return [];
-        const comps = [];
-        for (const child of object3D.children) {
-            if (child.isMesh || child.isLight) {
-                const entry = {
-                    type: child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
-                    name: child.name,
-                    position: child.position.toArray(),
-                    quaternion: child.quaternion.toArray(),
-                    scale: child.scale.toArray(),
-                    children: serializeComponentTree(child)
-                };
-                if (child.isMesh && child.material) {
-                    entry.material = {
-                        color: '#' + child.material.color.getHexString(),
-                        roughness: child.material.roughness ?? 0.5,
-                        metalness: child.material.metalness ?? 0.0
-                    };
-                }
-                if (child.isPointLight) {
-                    entry.light = {
-                        color: '#' + child.color.getHexString(),
-                        intensity: child.intensity,
-                        distance: child.distance
-                    };
-                }
-                comps.push(entry);
-            }
-        }
-        return comps;
-    }
+    
 
     const scripts = objectScriptState.drafts[actor.id] || null;
 
@@ -6915,39 +6877,7 @@ function loadActorFromFile(file) {
                     mesh.quaternion.fromArray(actorData.transform.quaternion);
                     mesh.scale.fromArray(actorData.transform.scale);
 
-                    function deserializeComponentTree(parent, comps) {
-                        if (!comps || !comps.length) return;
-                        for (const compData of comps) {
-                            let comp = null;
-                            if (compData.type === 'PointLight') {
-                                const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
-                                const lightIntensity = compData.light?.intensity ?? 2;
-                                const lightDistance = compData.light?.distance ?? 10;
-                                comp = new THREE.PointLight(lightColor, lightIntensity, lightDistance);
-                                comp.castShadow = true;
-                            } else if (compData.type === 'BoxGeometry') {
-                                comp = buildPrimitiveActorMesh('cube');
-                            } else if (compData.type === 'SphereGeometry') {
-                                comp = buildPrimitiveActorMesh('sphere');
-                            }
-
-                            if (comp) {
-                                comp.name = compData.name;
-                                comp.position.fromArray(compData.position);
-                                comp.quaternion.fromArray(compData.quaternion);
-                                comp.scale.fromArray(compData.scale);
-                                if (comp.isMesh && compData.material) {
-                                    comp.material = new THREE.MeshStandardMaterial({
-                                        color: new THREE.Color(compData.material.color),
-                                        roughness: compData.material.roughness ?? 0.5,
-                                        metalness: compData.material.metalness ?? 0.0
-                                    });
-                                }
-                                parent.add(comp);
-                                deserializeComponentTree(comp, compData.children);
-                            }
-                        }
-                    }
+                    
                     deserializeComponentTree(mesh, actorData.components);
 
                     rebuildActorPhysics(actor);
@@ -7054,40 +6984,7 @@ function loadWorldFromUmap(file) {
                         mesh.quaternion.fromArray(actorData.transform.quaternion);
                         mesh.scale.fromArray(actorData.transform.scale);
                         
-                        function deserializeComponentTree(parent, comps) {
-                            if (!comps || !comps.length) return;
-                            for (const compData of comps) {
-                                let comp = null;
-                                if (compData.type === 'PointLight') {
-                                    comp = new THREE.PointLight(
-                                        compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa,
-                                        compData.light?.intensity ?? 2,
-                                        compData.light?.distance ?? 10
-                                    );
-                                    comp.castShadow = true;
-                                } else if (compData.type === 'BoxGeometry') {
-                                    comp = buildPrimitiveActorMesh('cube');
-                                } else if (compData.type === 'SphereGeometry') {
-                                    comp = buildPrimitiveActorMesh('sphere');
-                                }
-                                
-                                if (comp) {
-                                    comp.name = compData.name;
-                                    comp.position.fromArray(compData.position);
-                                    comp.quaternion.fromArray(compData.quaternion);
-                                    comp.scale.fromArray(compData.scale);
-                                    if (comp.isMesh && compData.material) {
-                                        comp.material = new THREE.MeshStandardMaterial({
-                                            color: new THREE.Color(compData.material.color),
-                                            roughness: compData.material.roughness ?? 0.5,
-                                            metalness: compData.material.metalness ?? 0.0
-                                        });
-                                    }
-                                    parent.add(comp);
-                                    deserializeComponentTree(comp, compData.children);
-                                }
-                            }
-                        }
+                        
                         deserializeComponentTree(mesh, actorData.components);
                         
                         rebuildActorPhysics(actor);
@@ -7638,4 +7535,205 @@ function restoreSceneState() {
     }
     
     pieSceneSnapshot = null;
+}
+
+// === GLOBAL SERIALIZATION HELPER ===
+
+function serializeComponentTree(object3D) {
+    if (!object3D) return [];
+    const comps = [];
+    for (const child of object3D.children) {
+        if (child.isMesh || child.isLight) {
+            const entry = {
+                type: child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
+                name: child.name,
+                position: child.position.toArray(),
+                quaternion: child.quaternion.toArray(),
+                scale: child.scale.toArray(),
+                children: serializeComponentTree(child)
+            };
+            if (child.isMesh && child.material) {
+                entry.material = {
+                    color: '#' + child.material.color.getHexString(),
+                    roughness: child.material.roughness ?? 0.5,
+                    metalness: child.material.metalness ?? 0.0
+                };
+            }
+            if (child.isPointLight) {
+                entry.light = {
+                    color: '#' + child.color.getHexString(),
+                    intensity: child.intensity,
+                    distance: child.distance
+                };
+            }
+            comps.push(entry);
+        }
+    }
+    return comps;
+}
+
+
+function deserializeComponentTree(parent, comps) {
+    if (!comps || !comps.length) return;
+    for (const compData of comps) {
+        let comp = null;
+        if (compData.type === 'PointLight') {
+            const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
+            const lightIntensity = compData.light?.intensity ?? 2;
+            const lightDistance = compData.light?.distance ?? 10;
+            comp = new THREE.PointLight(lightColor, lightIntensity, lightDistance);
+            comp.castShadow = true;
+        } else if (compData.type === 'BoxGeometry') {
+            comp = buildPrimitiveActorMesh('cube');
+        } else if (compData.type === 'SphereGeometry') {
+            comp = buildPrimitiveActorMesh('sphere');
+        }
+
+        if (comp) {
+            comp.name = compData.name;
+            comp.position.fromArray(compData.position);
+            comp.quaternion.fromArray(compData.quaternion);
+            comp.scale.fromArray(compData.scale);
+            if (comp.isMesh && compData.material) {
+                comp.material = new THREE.MeshStandardMaterial({
+                    color: new THREE.Color(compData.material.color),
+                    roughness: compData.material.roughness ?? 0.5,
+                    metalness: compData.material.metalness ?? 0.0
+                });
+            }
+            parent.add(comp);
+            deserializeComponentTree(comp, compData.children);
+        }
+    }
+}
+
+
+let editorClipboard = null;
+
+function serializeActorToJSON(actor) {
+    if (!actor) return null;
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return null;
+    const scripts = objectScriptState.drafts[actor.id] || null;
+    return {
+        kind: actor.kind,
+        name: actor.rootNode?.name || 'Actor',
+        templateId: actor.templateId,
+        userData: actor.entity.getComponent('metadata')?.userData || null,
+        transform: {
+            position: mesh.position.toArray(),
+            quaternion: mesh.quaternion.toArray(),
+            scale: mesh.scale.toArray()
+        },
+        scripts: scripts,
+        components: serializeComponentTree(mesh)
+    };
+}
+
+function spawnActorFromJSON(actorData) {
+    if (actorData.scripts) {
+        const tempId = 'loaded-actor-' + Date.now() + Math.floor(Math.random()*1000);
+        objectScriptState.drafts[tempId] = JSON.parse(JSON.stringify(actorData.scripts));
+        actorData._tempScriptId = tempId;
+    }
+
+    let scale = 1;
+    if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
+        scale = actorData.transform.scale[0];
+    }
+
+    let actor = null;
+    if (actorData.kind === 'vehicle') {
+        actor = spawnDrivableCar({ includeScripts: !!actorData.scripts, userData: actorData.userData });
+    } else if (actorData.kind === 'imported') {
+        if (!actorData.templateId || !importedPropState.templates.some(t => t.id === actorData.templateId)) {
+            alert('Required template not loaded.');
+            return null;
+        }
+        actor = spawnImportedProp(actorData.templateId, { includeScripts: !!actorData.scripts, userData: actorData.userData, includeCollisionBody: true });
+    } else {
+        actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, { includeScripts: !!actorData.scripts, userData: actorData.userData, returnActor: true, includeCollisionBody: true });
+    }
+
+    if (actor) {
+        if (actorData._tempScriptId) {
+            const savedScripts = objectScriptState.drafts[actorData._tempScriptId];
+            delete objectScriptState.drafts[actorData._tempScriptId];
+            if (savedScripts) objectScriptState.drafts[actor.id] = savedScripts;
+        }
+        if (actorData.name) actor.rootNode.name = actorData.name;
+
+        const mesh = getActorRenderObject(actor);
+        if (mesh) {
+            mesh.position.fromArray(actorData.transform.position);
+            mesh.quaternion.fromArray(actorData.transform.quaternion);
+            mesh.scale.fromArray(actorData.transform.scale);
+            deserializeComponentTree(mesh, actorData.components);
+            rebuildActorPhysics(actor);
+        }
+        if (actorData.scripts) syncPropScriptState(actor);
+        saveObjectScriptDrafts();
+        refreshSceneUI();
+        selectShowcaseActor(actor.id);
+    }
+    return actor;
+}
+
+function deleteSelectedActor() {
+    const propId = objectScriptState.targetPropId;
+    if (!propId) return;
+    const prop = getDynamicPropById(propId);
+    if (!prop) return;
+    const body = getActorBody(prop);
+    if (body && physics.bodyInterface) {
+        physics.bodyInterface.RemoveBody(body.GetID());
+        physics.bodyInterface.DestroyBody(body.GetID());
+    }
+    const mesh = getActorRenderObject(prop);
+    if (mesh) scene.remove(mesh);
+    sceneSystem.actors.delete(prop);
+    if (transformControl) transformControl.detach();
+    selectShowcaseActor(null);
+    refreshSceneUI();
+}
+
+function copySelectedToClipboard() {
+    if (blueprintState.active) {
+        const comp = blueprintState.selectedComponent;
+        const rootMesh = getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
+        if (!comp || comp === rootMesh) return;
+        // Mock a root to serialize just the child
+        const mockParent = { children: [comp] };
+        editorClipboard = { type: 'component', data: serializeComponentTree(mockParent)[0] };
+    } else {
+        const propId = objectScriptState.targetPropId;
+        if (!propId) return;
+        const actor = getDynamicPropById(propId);
+        if (!actor) return;
+        editorClipboard = { type: 'actor', data: serializeActorToJSON(actor) };
+    }
+}
+
+function pasteFromClipboard() {
+    if (!editorClipboard) return;
+    if (blueprintState.active && editorClipboard.type === 'component') {
+        const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
+        if (!parent) return;
+        const compData = JSON.parse(JSON.stringify(editorClipboard.data));
+        // Add slight offset so it doesn't overlap exactly
+        compData.position[1] += 0.5;
+        deserializeComponentTree(parent, [compData]);
+        refreshBlueprintComponents();
+    } else if (!blueprintState.active && editorClipboard.type === 'actor') {
+        const actorData = JSON.parse(JSON.stringify(editorClipboard.data));
+        actorData.transform.position[1] += 1;
+        actorData.transform.position[0] += 1;
+        actorData.name += ' (Copy)';
+        spawnActorFromJSON(actorData);
+    }
+}
+
+function duplicateSelected() {
+    copySelectedToClipboard();
+    pasteFromClipboard();
 }
