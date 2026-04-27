@@ -734,6 +734,15 @@ const importedPropState = {
 const actorEditorState = {
     open: false,
 };
+const blueprintState = {
+    active: false,
+    targetActor: null,
+    selectedComponent: null,
+    floorMesh: null,
+    savedCameraPosition: null,
+    savedShowcaseAngles: null,
+    savedBackground: null
+};
 const MOUSE_ACTION_STORAGE_KEY = 'polyflow-3d.mouse-actions.v1';
 const OBJECT_SCRIPT_STORAGE_KEY = 'polyflow-3d.object-scripts.v1';
 const DEBUG_CONSOLE_LOG_LIMIT = 18;
@@ -2110,14 +2119,14 @@ function updateVehicleVisuals(delta) {
 
     const { bodyInterface } = physics;
     for (const prop of physics.dynamicBodies) {
-        if (prop?.kind !== 'vehicle' || !prop.mesh) continue;
+        if (prop?.kind !== 'vehicle' || !getActorRenderObject(prop)) continue;
 
-        const visualState = prop.mesh.userData?.vehicleVisual;
+        const visualState = getActorRenderObject(prop).userData?.vehicleVisual;
         const body = getActorBody(prop);
         if (!visualState || !body) continue;
 
         const bodyId = body.GetID();
-        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(prop.mesh.quaternion);
+        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(getActorRenderObject(prop).quaternion);
         flatForward.y = 0;
         if (flatForward.lengthSq() < 1e-6) {
             flatForward.set(0, 0, -1);
@@ -2531,13 +2540,17 @@ function selectShowcaseActor(actorId) {
     const previousTargetId = objectScriptState.targetPropId;
     objectScriptState.targetPropId = actorId || '';
     
+    if (blueprintState.active && actorId !== blueprintState.targetActor?.id) {
+        exitBlueprintEditor();
+    }
+    
     if (actorId) {
         const prop = getDynamicPropById(actorId);
         if (objectScriptEditorTarget) {
             objectScriptEditorTarget.textContent = prop?.rootNode?.name || actorId || 'Actor';
         }
-        if (transformControl && prop?.mesh) {
-            transformControl.attach(prop.mesh);
+        if (transformControl && getActorRenderObject(prop)) {
+            transformControl.attach(getActorRenderObject(prop));
         }
     } else {
         if (objectScriptEditorTarget) {
@@ -2555,6 +2568,10 @@ function selectShowcaseActor(actorId) {
 
 function syncTransformToPhysics() {
     if (!transformControl || !transformControl.object) return;
+    
+    // In blueprint mode, child components can be moved freely without physics sync
+    if (blueprintState.active) return;
+    
     const prop = findDynamicPropByMesh(transformControl.object);
     if (!prop) return;
 
@@ -2562,6 +2579,8 @@ function syncTransformToPhysics() {
     if (!body || !physics.jolt) return;
 
     const mesh = transformControl.object;
+    if (mesh !== getActorRenderObject(prop)) return;
+
     const pos = mesh.position;
     const rot = mesh.quaternion;
 
@@ -2581,7 +2600,7 @@ function syncTransformToPhysics() {
 }
 
 function rebuildActorPhysics(prop) {
-    if (!prop || !prop.mesh || !physics.ready) return;
+    if (!prop || !getActorRenderObject(prop) || !physics.ready) return;
     
     const { Jolt, bodyInterface } = physics;
     const currentBody = getActorBody(prop);
@@ -2592,39 +2611,98 @@ function rebuildActorPhysics(prop) {
         bodyInterface.DestroyBody(bodyID);
     }
     
-    // Primitive rebuilding based on spawnDynamicPrimitive logic
-    let shape = null;
     let bodyOptions = {
-        rotation: prop.mesh.quaternion,
-        friction: prop.userData?.friction,
-        restitution: prop.userData?.restitution,
+        rotation: getActorRenderObject(prop).quaternion,
+        friction: prop.userData?.friction || 0.5,
+        restitution: prop.userData?.restitution || 0.3,
         allowedDOFs: prop.userData?.allowedDOFs,
         kinematic: prop.userData?.kinematic,
         activate: true
     };
     
-    const scale = prop.mesh.scale;
-    
-    if (prop.kind === 'sphere') {
-        shape = createOwnedShape(new Jolt.SphereShapeSettings(scale.x));
-        bodyOptions.restitution = 0.48;
-        bodyOptions.friction = 0.58;
-    } else if (prop.kind === 'cube') {
-        const halfExtentVector = new Jolt.Vec3(scale.x, scale.y, scale.z);
-        shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
-        Jolt.destroy(halfExtentVector);
-        bodyOptions.restitution = 0.12;
-        bodyOptions.friction = 0.82;
-    } else if (prop.kind === 'capsule') {
-        // Keep capsules uniform for simplicity since radius/height mapping is tricky for non-uniform scaling
-        shape = createOwnedShape(new Jolt.CapsuleShapeSettings(scale.y, scale.x));
-        bodyOptions.restitution = 0.0;
-        bodyOptions.friction = 0.0;
-        bodyOptions.allowedDOFs = Jolt.EAllowedDOFs_TranslationX | Jolt.EAllowedDOFs_TranslationY | Jolt.EAllowedDOFs_TranslationZ;
+    const rootMesh = getActorRenderObject(prop);
+    const subShapes = [];
+    const compoundSettings = new Jolt.MutableCompoundShapeSettings();
+    let hasCompound = false;
+
+    // A helper to traverse and collect collision shapes
+    function traverseAndBuildShapes(node, isRoot) {
+        if (!node.visible) return; // Skip hidden components
+        
+        // Handle only meshes
+        if (node.isMesh) {
+            let shapeSetting = null;
+            const geo = node.geometry;
+            const scale = node.scale;
+            
+            // For primitive meshes created via UI
+            if (geo?.type === 'SphereGeometry') {
+                shapeSetting = new Jolt.SphereShapeSettings(scale.x);
+            } else if (geo?.type === 'BoxGeometry') {
+                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
+                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
+                Jolt.destroy(halfExtents);
+            } else if (geo?.type === 'CapsuleGeometry') {
+                shapeSetting = new Jolt.CapsuleShapeSettings(scale.y, scale.x);
+            } else if (isRoot && prop.kind === 'sphere') {
+                shapeSetting = new Jolt.SphereShapeSettings(scale.x);
+            } else if (isRoot && prop.kind === 'cube') {
+                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
+                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
+                Jolt.destroy(halfExtents);
+            } else if (isRoot && prop.kind === 'capsule') {
+                shapeSetting = new Jolt.CapsuleShapeSettings(scale.y, scale.x);
+            } else if (!isRoot) {
+                // Treat imported nested child geometries as boxes for simplicity if type is unknown
+                const bbox = new THREE.Box3().setFromObject(node, true);
+                if (!bbox.isEmpty()) {
+                    const size = new THREE.Vector3();
+                    bbox.getSize(size);
+                    const halfExtents = new Jolt.Vec3(Math.max(size.x/2, 0.05), Math.max(size.y/2, 0.05), Math.max(size.z/2, 0.05));
+                    shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
+                    Jolt.destroy(halfExtents);
+                }
+            }
+            
+            if (shapeSetting) {
+                const subShape = createOwnedShape(shapeSetting);
+                subShapes.push(subShape);
+                
+                // Calculate relative position/rotation to the root
+                const pos = new Jolt.Vec3(node.position.x, node.position.y, node.position.z);
+                const rot = new Jolt.Quat(node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w);
+                
+                compoundSettings.AddShapeShape(pos, rot, subShape, 0);
+                Jolt.destroy(pos);
+                Jolt.destroy(rot);
+                hasCompound = true;
+            }
+        }
+        
+        for (const child of node.children) {
+            traverseAndBuildShapes(child, false);
+        }
     }
     
-    if (shape) {
-        const newBody = createDynamicPrimitiveBody(shape, prop.mesh.position, null, bodyOptions);
+    traverseAndBuildShapes(rootMesh, true);
+    
+    let finalShape = null;
+    
+    if (hasCompound) {
+        if (subShapes.length === 1 && rootMesh.children.length === 0) {
+            // Optimization: if it's just the root shape and no children, use it directly
+            finalShape = subShapes[0];
+            Jolt.destroy(compoundSettings); // We don't need the compound wrapper
+        } else {
+            // We have multiple components or child transforms
+            finalShape = createOwnedShape(compoundSettings);
+        }
+    } else {
+        Jolt.destroy(compoundSettings);
+    }
+    
+    if (finalShape) {
+        const newBody = createDynamicPrimitiveBody(finalShape, rootMesh.position, null, bodyOptions);
         prop.body = newBody;
     }
 }
@@ -4405,6 +4483,32 @@ function refreshSceneUI() {
         if (objectScriptState.targetPropId === actor.id) {
             item.style.background = 'rgba(255, 255, 255, 0.12)';
             item.style.borderColor = 'rgba(112, 0, 255, 0.45)';
+            
+            if (!blueprintState.active) {
+                const actorBtnRow = document.createElement('div');
+                actorBtnRow.className = 'scene-ui-item-actions';
+
+                const blueprintBtn = document.createElement('button');
+                blueprintBtn.className = 'btn btn-primary scene-ui-action-btn';
+                blueprintBtn.textContent = 'Edit Blueprint';
+                blueprintBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    enterBlueprintEditor();
+                });
+                actorBtnRow.appendChild(blueprintBtn);
+
+                const saveActorBtn = document.createElement('button');
+                saveActorBtn.className = 'btn scene-ui-action-btn scene-ui-save-btn';
+                saveActorBtn.textContent = '⬇ Save';
+                saveActorBtn.title = 'Download this actor as a .actor file';
+                saveActorBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    exportActorToFile(actor);
+                });
+                actorBtnRow.appendChild(saveActorBtn);
+
+                item.appendChild(actorBtnRow);
+            }
         }
 
         const nameEl = document.createElement('div');
@@ -4423,9 +4527,10 @@ function refreshSceneUI() {
         });
 
         item.addEventListener('dblclick', () => {
-            if (!gameplay.active && actor.mesh) {
+            const actorMesh = getActorRenderObject(actor);
+            if (!gameplay.active && actorMesh) {
                 const targetPos = new THREE.Vector3();
-                actor.mesh.getWorldPosition(targetPos);
+                actorMesh.getWorldPosition(targetPos);
                 
                 if (gsap) {
                     gsap.to(camera.position, {
@@ -4680,10 +4785,18 @@ async function init() {
 
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
+    transformControl.setSize(1.5); // Make gizmo hit area larger
+    transformControl.addEventListener('change', () => {
+        if (blueprintState.active) {
+            updateBlueprintDetailsUI();
+        }
+    });
     transformControl.addEventListener('dragging-changed', (event) => {
         showcase.looking = false;
         if (!event.value) {
             syncTransformToPhysics();
+            transformControl.justFinishedDragging = true;
+            setTimeout(() => transformControl.justFinishedDragging = false, 100);
         }
     });
     scene.add(transformControl.getHelper());
@@ -5008,7 +5121,84 @@ function setupGameplayEvents() {
     renderer.domElement.addEventListener('wheel', handleShowcaseWheel, { passive: false });
     renderer.domElement.addEventListener('contextmenu', handleShowcaseContextMenu);
     renderer.domElement.addEventListener('click', handleLightGridClick);
+    // Blueprint mode: click on 3D viewport to select child components
+    renderer.domElement.addEventListener('click', (event) => {
+        if (!blueprintState.active) return;
+        if (event.button !== 0) return;
+        if (typeof transformControl !== 'undefined' && (transformControl.dragging || transformControl.justFinishedDragging || transformControl.axis !== null)) return;
+        
+        const rect = renderer.domElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        
+        pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(pointerNdc, camera);
+        
+        const rootMesh = getActorRenderObject(blueprintState.targetActor);
+        if (!rootMesh) return;
+        
+        // Collect all meshes and lights in the actor tree
+        const allChildren = [];
+        rootMesh.traverse((child) => {
+            if (child.isMesh || child.isLight) allChildren.push(child);
+        });
+        
+        const hits = raycaster.intersectObjects(allChildren, false);
+        if (hits.length > 0) {
+            const hitObj = hits[0].object;
+            blueprintState.selectedComponent = hitObj;
+            if (typeof transformControl !== 'undefined') transformControl.attach(hitObj);
+            refreshBlueprintComponents();
+        }
+    });
+    
     renderer.domElement.addEventListener('dblclick', (event) => {
+        // Blueprint mode: double-click to focus camera on a component
+        if (blueprintState.active) {
+            const rect = renderer.domElement.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return;
+            pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(pointerNdc, camera);
+            
+            const rootMesh = getActorRenderObject(blueprintState.targetActor);
+            if (!rootMesh) return;
+            const allChildren = [];
+            rootMesh.traverse((child) => {
+                if (child.isMesh || child.isLight) allChildren.push(child);
+            });
+            
+            const hits = raycaster.intersectObjects(allChildren, false);
+            if (hits.length > 0) {
+                const hitObj = hits[0].object;
+                blueprintState.selectedComponent = hitObj;
+                if (typeof transformControl !== 'undefined') transformControl.attach(hitObj);
+                refreshBlueprintComponents();
+                
+                // Fly camera to the component
+                const targetPos = new THREE.Vector3();
+                hitObj.getWorldPosition(targetPos);
+                const forward = new THREE.Vector3().subVectors(targetPos, camera.position).normalize();
+                const dist = camera.position.distanceTo(targetPos);
+                const newDist = Math.max(dist * 0.5, 3);
+                
+                if (typeof gsap !== 'undefined') {
+                    gsap.to(camera.position, {
+                        x: targetPos.x - forward.x * newDist,
+                        y: targetPos.y - forward.y * newDist + 1,
+                        z: targetPos.z - forward.z * newDist,
+                        duration: 0.5,
+                        ease: 'power2.out',
+                        onUpdate: () => {
+                            syncShowcaseAnglesFromTarget(targetPos);
+                            applyShowcaseCameraRotation();
+                        }
+                    });
+                }
+            }
+            return;
+        }
+        
         if (gameplay.active) return;
         const propHit = getDynamicPropHitFromEvent(event);
         if (propHit?.prop) {
@@ -5095,10 +5285,18 @@ function handleGameplayKeyEvent(event) {
     if (!gameplay.active && !gameplay.pointerLocked && isDown) {
         if (event.code === 'KeyW') {
             transformControl?.setMode('translate');
+            if (blueprintState.active) updateBlueprintTransformUI();
         } else if (event.code === 'KeyE') {
             transformControl?.setMode('rotate');
+            if (blueprintState.active) updateBlueprintTransformUI();
         } else if (event.code === 'KeyR') {
             transformControl?.setMode('scale');
+            if (blueprintState.active) updateBlueprintTransformUI();
+        } else if (event.code === 'Backquote') { // Tilde key for toggling space
+            if (transformControl) {
+                transformControl.setSpace(transformControl.space === 'local' ? 'world' : 'local');
+                if (blueprintState.active) updateBlueprintTransformUI();
+            }
         }
     }
 
@@ -5204,6 +5402,18 @@ function handleGameplayMouseMove(event) {
 }
 
 function handleShowcaseMouseButton(event) {
+    // In blueprint mode, don't let the normal actor selection logic
+    // intercept clicks — TransformControls needs those events for gizmo drag
+    if (blueprintState.active) {
+        if (event.type === 'mousedown' && event.button === 2) {
+            showcase.looking = true;
+            event.preventDefault();
+        } else if (event.type === 'mouseup' && event.button === 2) {
+            showcase.looking = false;
+        }
+        return;
+    }
+
     if (gameplay.active) {
         if (event.type === 'mousedown') {
             const buttonName = event.button === 2 ? 'right' : event.button === 0 ? 'left' : null;
@@ -5297,6 +5507,7 @@ function handlePointerLockChange() {
     gameplay.velocity.set(0, 0, 0);
     physics.desiredVelocity.set(0, 0, 0);
     resetMovementInputState();
+    restoreSceneState();
 
     updateWorldPresentation();
     resetShowcaseCamera(false);
@@ -5306,6 +5517,7 @@ function handlePointerLockChange() {
 function enterGameplay() {
     if (!gameplay.canPlay) return;
 
+    snapshotSceneState();
     syncGameplaySpawnToCamera();
     respawnPlayer(true);
     gameplay.pointerLocked = false;
@@ -5332,6 +5544,7 @@ function exitGameplay() {
     gameplay.pointerLocked = false;
     gameplay.active = false;
     clearActiveVehicle();
+    restoreSceneState();
     gameplay.velocity.set(0, 0, 0);
     physics.jumpQueued = false;
     physics.desiredVelocity.set(0, 0, 0);
@@ -6492,6 +6705,39 @@ function exportWorldToUmap() {
         actors: []
     };
     
+    function serializeComponentTree(object3D) {
+        if (!object3D) return [];
+        const comps = [];
+        for (const child of object3D.children) {
+            if (child.isMesh || child.isLight) {
+                const entry = {
+                    type: child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
+                    name: child.name,
+                    position: child.position.toArray(),
+                    quaternion: child.quaternion.toArray(),
+                    scale: child.scale.toArray(),
+                    children: serializeComponentTree(child)
+                };
+                if (child.isMesh && child.material) {
+                    entry.material = {
+                        color: '#' + child.material.color.getHexString(),
+                        roughness: child.material.roughness ?? 0.5,
+                        metalness: child.material.metalness ?? 0.0
+                    };
+                }
+                if (child.isPointLight) {
+                    entry.light = {
+                        color: '#' + child.color.getHexString(),
+                        intensity: child.intensity,
+                        distance: child.distance
+                    };
+                }
+                comps.push(entry);
+            }
+        }
+        return comps;
+    }
+    
     for (const actor of (sceneSystem?.actors || [])) {
         const mesh = getActorRenderObject(actor);
         if (!mesh) continue;
@@ -6509,7 +6755,8 @@ function exportWorldToUmap() {
                 quaternion: mesh.quaternion.toArray(),
                 scale: mesh.scale.toArray()
             },
-            scripts: scripts
+            scripts: scripts,
+            components: serializeComponentTree(mesh)
         });
     }
     
@@ -6522,6 +6769,206 @@ function exportWorldToUmap() {
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+// === ACTOR EXPORT / IMPORT ===
+function exportActorToFile(actor) {
+    if (!actor) return;
+
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return;
+
+    function serializeComponentTree(object3D) {
+        if (!object3D) return [];
+        const comps = [];
+        for (const child of object3D.children) {
+            if (child.isMesh || child.isLight) {
+                const entry = {
+                    type: child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
+                    name: child.name,
+                    position: child.position.toArray(),
+                    quaternion: child.quaternion.toArray(),
+                    scale: child.scale.toArray(),
+                    children: serializeComponentTree(child)
+                };
+                if (child.isMesh && child.material) {
+                    entry.material = {
+                        color: '#' + child.material.color.getHexString(),
+                        roughness: child.material.roughness ?? 0.5,
+                        metalness: child.material.metalness ?? 0.0
+                    };
+                }
+                if (child.isPointLight) {
+                    entry.light = {
+                        color: '#' + child.color.getHexString(),
+                        intensity: child.intensity,
+                        distance: child.distance
+                    };
+                }
+                comps.push(entry);
+            }
+        }
+        return comps;
+    }
+
+    const scripts = objectScriptState.drafts[actor.id] || null;
+
+    const actorData = {
+        version: 1,
+        type: 'polyflow-actor',
+        actor: {
+            kind: actor.kind,
+            name: actor.rootNode?.name || 'Actor',
+            templateId: actor.templateId,
+            userData: actor.entity.getComponent('metadata')?.userData || null,
+            transform: {
+                position: mesh.position.toArray(),
+                quaternion: mesh.quaternion.toArray(),
+                scale: mesh.scale.toArray()
+            },
+            scripts: scripts,
+            components: serializeComponentTree(mesh)
+        }
+    };
+
+    const displayName = getDynamicPropDisplayName(actor)
+        .replace(/[^a-zA-Z0-9_\- ]/g, '')
+        .replace(/\s+/g, '_')
+        .toLowerCase() || 'actor';
+    const blob = new Blob([JSON.stringify(actorData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${displayName}.actor`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+function loadActorFromFile(file) {
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const data = JSON.parse(e.target.result);
+            if (data.type !== 'polyflow-actor' || !data.actor) {
+                alert('This file is not a valid PolyFlow actor file.');
+                return;
+            }
+
+            const actorData = data.actor;
+            if (actorData.scripts) {
+                const tempId = `loaded-actor-${Date.now()}`;
+                objectScriptState.drafts[tempId] = actorData.scripts;
+                actorData._tempScriptId = tempId;
+            }
+
+            let scale = 1;
+            if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
+                scale = actorData.transform.scale[0];
+            }
+
+            let actor = null;
+            if (actorData.kind === 'vehicle') {
+                actor = spawnDrivableCar({
+                    includeScripts: !!actorData.scripts,
+                    userData: actorData.userData
+                });
+            } else if (actorData.kind === 'imported') {
+                if (!actorData.templateId || !importedPropState.templates.some(t => t.id === actorData.templateId)) {
+                    alert('This actor requires an imported prop source (template) that is not currently loaded. Import the matching prop file first, then try loading this actor again.');
+                    return;
+                }
+                actor = spawnImportedProp(actorData.templateId, {
+                    includeScripts: !!actorData.scripts,
+                    userData: actorData.userData,
+                    includeCollisionBody: true
+                });
+            } else {
+                actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, {
+                    includeScripts: !!actorData.scripts,
+                    userData: actorData.userData,
+                    returnActor: true,
+                    includeCollisionBody: true
+                });
+            }
+
+            if (actor) {
+                // Migrate scripts from temp ID to the actor's real ID
+                if (actorData._tempScriptId) {
+                    const savedScripts = objectScriptState.drafts[actorData._tempScriptId];
+                    delete objectScriptState.drafts[actorData._tempScriptId];
+                    if (savedScripts) {
+                        objectScriptState.drafts[actor.id] = savedScripts;
+                    }
+                }
+
+                if (actorData.name) {
+                    actor.rootNode.name = actorData.name;
+                }
+
+                const mesh = getActorRenderObject(actor);
+                if (mesh) {
+                    mesh.position.fromArray(actorData.transform.position);
+                    mesh.quaternion.fromArray(actorData.transform.quaternion);
+                    mesh.scale.fromArray(actorData.transform.scale);
+
+                    function deserializeComponentTree(parent, comps) {
+                        if (!comps || !comps.length) return;
+                        for (const compData of comps) {
+                            let comp = null;
+                            if (compData.type === 'PointLight') {
+                                const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
+                                const lightIntensity = compData.light?.intensity ?? 2;
+                                const lightDistance = compData.light?.distance ?? 10;
+                                comp = new THREE.PointLight(lightColor, lightIntensity, lightDistance);
+                                comp.castShadow = true;
+                            } else if (compData.type === 'BoxGeometry') {
+                                comp = buildPrimitiveActorMesh('cube');
+                            } else if (compData.type === 'SphereGeometry') {
+                                comp = buildPrimitiveActorMesh('sphere');
+                            }
+
+                            if (comp) {
+                                comp.name = compData.name;
+                                comp.position.fromArray(compData.position);
+                                comp.quaternion.fromArray(compData.quaternion);
+                                comp.scale.fromArray(compData.scale);
+                                if (comp.isMesh && compData.material) {
+                                    comp.material = new THREE.MeshStandardMaterial({
+                                        color: new THREE.Color(compData.material.color),
+                                        roughness: compData.material.roughness ?? 0.5,
+                                        metalness: compData.material.metalness ?? 0.0
+                                    });
+                                }
+                                parent.add(comp);
+                                deserializeComponentTree(comp, compData.children);
+                            }
+                        }
+                    }
+                    deserializeComponentTree(mesh, actorData.components);
+
+                    rebuildActorPhysics(actor);
+                }
+
+                if (actorData.scripts) {
+                    syncPropScriptState(actor);
+                }
+
+                saveObjectScriptDrafts();
+                refreshSceneUI();
+                selectShowcaseActor(actor.id);
+            } else {
+                alert('Failed to spawn the loaded actor. Physics may not be ready yet.');
+            }
+        } catch (err) {
+            console.error('Error loading actor file', err);
+            alert('Failed to load actor file. It may be corrupt or in an unsupported format.');
+        }
+    };
+    reader.readAsText(file);
 }
 
 function clearSceneActors() {
@@ -6607,6 +7054,42 @@ function loadWorldFromUmap(file) {
                         mesh.quaternion.fromArray(actorData.transform.quaternion);
                         mesh.scale.fromArray(actorData.transform.scale);
                         
+                        function deserializeComponentTree(parent, comps) {
+                            if (!comps || !comps.length) return;
+                            for (const compData of comps) {
+                                let comp = null;
+                                if (compData.type === 'PointLight') {
+                                    comp = new THREE.PointLight(
+                                        compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa,
+                                        compData.light?.intensity ?? 2,
+                                        compData.light?.distance ?? 10
+                                    );
+                                    comp.castShadow = true;
+                                } else if (compData.type === 'BoxGeometry') {
+                                    comp = buildPrimitiveActorMesh('cube');
+                                } else if (compData.type === 'SphereGeometry') {
+                                    comp = buildPrimitiveActorMesh('sphere');
+                                }
+                                
+                                if (comp) {
+                                    comp.name = compData.name;
+                                    comp.position.fromArray(compData.position);
+                                    comp.quaternion.fromArray(compData.quaternion);
+                                    comp.scale.fromArray(compData.scale);
+                                    if (comp.isMesh && compData.material) {
+                                        comp.material = new THREE.MeshStandardMaterial({
+                                            color: new THREE.Color(compData.material.color),
+                                            roughness: compData.material.roughness ?? 0.5,
+                                            metalness: compData.material.metalness ?? 0.0
+                                        });
+                                    }
+                                    parent.add(comp);
+                                    deserializeComponentTree(comp, compData.children);
+                                }
+                            }
+                        }
+                        deserializeComponentTree(mesh, actorData.components);
+                        
                         rebuildActorPhysics(actor);
                     }
                     
@@ -6639,6 +7122,17 @@ document.getElementById('scene-file-input')?.addEventListener('change', (e) => {
     }
 });
 
+document.getElementById('load-actor-btn')?.addEventListener('click', () => {
+    document.getElementById('actor-file-input')?.click();
+});
+document.getElementById('actor-file-input')?.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        loadActorFromFile(file);
+        e.target.value = '';
+    }
+});
+
 document.getElementById('reset-view').addEventListener('click', () => {
     if (gameplay.active) {
         respawnPlayer();
@@ -6648,4 +7142,500 @@ document.getElementById('reset-view').addEventListener('click', () => {
     resetShowcaseCamera(true);
 });
 
+// === BLUEPRINT COMPONENT EDITOR ===
+function enterBlueprintEditor() {
+    const actorId = objectScriptState.targetPropId;
+    if (!actorId) return;
+    const prop = getDynamicPropById(actorId);
+    if (!prop || !getActorRenderObject(prop)) return;
+
+    blueprintState.active = true;
+    if (typeof transformControl !== 'undefined') {
+        transformControl.setSpace('local');
+        transformControl.setMode('translate');
+    }
+    if (typeof updateBlueprintTransformUI === 'function') updateBlueprintTransformUI();
+    blueprintState.targetActor = prop;
+    blueprintState.selectedComponent = getActorRenderObject(prop);
+    
+    blueprintState.savedCameraPosition = camera.position.clone();
+    blueprintState.savedShowcaseAngles = { yaw: showcase.yaw, pitch: showcase.pitch };
+    blueprintState.savedBackground = scene.background;
+    scene.background = new THREE.Color(0x1a1a1a);
+    
+    for (const actor of sceneSystem.actors) {
+        if (actor !== prop) {
+            const mesh = getActorRenderObject(actor);
+            if (mesh) mesh.visible = false;
+        }
+    }
+    
+    // Clean up previous blueprint objects
+    if (blueprintState.floorMesh) {
+        scene.remove(blueprintState.floorMesh);
+    }
+    if (blueprintState.gridHelper) {
+        scene.remove(blueprintState.gridHelper);
+    }
+    if (blueprintState.editorLights) {
+        blueprintState.editorLights.forEach(l => scene.remove(l));
+    }
+    
+    const targetPos = getActorRenderObject(prop).position.clone();
+    const floorY = targetPos.y - 1;
+    
+    // Floor plane
+    const floorGeo = new THREE.PlaneGeometry(50, 50);
+    const floorMat = new THREE.MeshStandardMaterial({ 
+        color: 0x2a2a2a, 
+        roughness: 0.95,
+        metalness: 0.0
+    });
+    const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+    floorMesh.rotation.x = -Math.PI / 2;
+    floorMesh.position.set(targetPos.x, floorY, targetPos.z);
+    floorMesh.receiveShadow = true;
+    scene.add(floorMesh);
+    blueprintState.floorMesh = floorMesh;
+    
+    // Grid helper (added directly to scene, not as child of rotated plane)
+    const gridHelper = new THREE.GridHelper(50, 50, 0x555555, 0x333333);
+    gridHelper.position.set(targetPos.x, floorY + 0.01, targetPos.z);
+    scene.add(gridHelper);
+    blueprintState.gridHelper = gridHelper;
+    
+    // Blueprint editor lights (so the actor is visible against the dark background)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    dirLight.position.set(targetPos.x + 5, targetPos.y + 8, targetPos.z + 5);
+    dirLight.target.position.copy(targetPos);
+    scene.add(dirLight.target);
+    scene.add(ambientLight);
+    scene.add(dirLight);
+    blueprintState.editorLights = [ambientLight, dirLight, dirLight.target];
+    
+    // Snap camera to look at the actor
+    const camTarget = targetPos.clone();
+    camera.position.set(camTarget.x + 4, camTarget.y + 3, camTarget.z + 4);
+    
+    // Compute yaw/pitch from camera position to target
+    // The showcase camera uses: rotation.y = yaw, rotation.x = pitch (YXZ order)
+    // Forward direction = target - camera
+    const forward = new THREE.Vector3().subVectors(camTarget, camera.position).normalize();
+    showcase.yaw = Math.atan2(-forward.x, -forward.z);
+    showcase.pitch = Math.asin(forward.y);
+    applyShowcaseCameraRotation();
+
+    const panel = document.getElementById('blueprint-editor-panel');
+    const menuSections = document.querySelector('.viewer-menu-sections-card');
+    const actorsMenu = document.querySelector('.viewer-menu-card:nth-child(2)');
+    const cameraMenu = document.querySelector('.viewer-menu-card:first-child');
+    const sceneUi = document.getElementById('scene-ui-panel');
+    
+    if (panel) {
+        document.getElementById('blueprint-actor-name').textContent = prop.rootNode.name || actorId;
+        panel.style.display = 'block';
+        if (menuSections) menuSections.style.display = 'none';
+        if (actorsMenu) actorsMenu.style.display = 'none';
+        if (cameraMenu) cameraMenu.style.display = 'none';
+        if (sceneUi) sceneUi.style.display = 'none';
+        refreshBlueprintComponents();
+    }
+    
+    refreshSceneUI();
+}
+
+function exitBlueprintEditor() {
+    blueprintState.active = false;
+    blueprintState.targetActor = null;
+    blueprintState.selectedComponent = null;
+    
+    if (typeof sceneSystem !== 'undefined') {
+        for (const actor of sceneSystem.actors) {
+            const mesh = getActorRenderObject(actor);
+            if (mesh) mesh.visible = true;
+        }
+    }
+    
+    if (blueprintState.floorMesh) {
+        scene.remove(blueprintState.floorMesh);
+        blueprintState.floorMesh = null;
+    }
+    if (blueprintState.gridHelper) {
+        scene.remove(blueprintState.gridHelper);
+        blueprintState.gridHelper = null;
+    }
+    if (blueprintState.editorLights) {
+        blueprintState.editorLights.forEach(l => scene.remove(l));
+        blueprintState.editorLights = null;
+    }
+    
+    if (blueprintState.savedCameraPosition && typeof gsap !== 'undefined') {
+        gsap.to(camera.position, {
+            x: blueprintState.savedCameraPosition.x,
+            y: blueprintState.savedCameraPosition.y,
+            z: blueprintState.savedCameraPosition.z,
+            duration: 0.5
+        });
+        showcase.yaw = blueprintState.savedShowcaseAngles.yaw;
+        showcase.pitch = blueprintState.savedShowcaseAngles.pitch;
+        applyShowcaseCameraRotation();
+    }
+    
+    if (blueprintState.savedBackground) {
+        scene.background = blueprintState.savedBackground;
+    }
+
+    const panel = document.getElementById('blueprint-editor-panel');
+    const menuSections = document.querySelector('.viewer-menu-sections-card');
+    const actorsMenu = document.querySelector('.viewer-menu-card:nth-child(2)');
+    const cameraMenu = document.querySelector('.viewer-menu-card:first-child');
+    const sceneUi = document.getElementById('scene-ui-panel');
+    
+    if (panel) {
+        panel.style.display = 'none';
+        if (menuSections) menuSections.style.display = 'block';
+        if (actorsMenu) actorsMenu.style.display = 'block';
+        if (cameraMenu) cameraMenu.style.display = 'block';
+        if (sceneUi) sceneUi.style.display = 'flex';
+    }
+    
+    const propId = objectScriptState.targetPropId;
+    if (propId) {
+        const prop = getDynamicPropById(propId);
+        if (typeof transformControl !== 'undefined' && prop && getActorRenderObject(prop)) {
+            transformControl.attach(getActorRenderObject(prop));
+        }
+        rebuildActorPhysics(prop);
+    }
+    
+    refreshSceneUI();
+}
+
+function refreshBlueprintComponents() {
+    updateBlueprintDetailsUI();
+    const container = document.getElementById('selected-actor-components');
+    if (!container) return;
+    container.innerHTML = '';
+    
+    const propId = objectScriptState.targetPropId;
+    if (!propId) return;
+    
+    const prop = getDynamicPropById(propId);
+    const rootMesh = getActorRenderObject(prop);
+    if (!rootMesh) return;
+    
+    function renderComponentItem(object3D, depth, isRoot) {
+        const item = document.createElement('div');
+        item.style.padding = `4px 4px 4px ${4 + depth * 12}px`;
+        item.style.cursor = 'pointer';
+        item.style.borderRadius = '4px';
+        item.style.display = 'flex';
+        item.style.alignItems = 'center';
+        item.style.justifyContent = 'space-between';
+        item.style.background = blueprintState.selectedComponent === object3D ? 'rgba(112, 0, 255, 0.4)' : 'rgba(255,255,255,0.05)';
+        item.style.border = blueprintState.selectedComponent === object3D ? '1px solid rgba(112, 0, 255, 0.8)' : '1px solid transparent';
+        
+        const label = document.createElement('span');
+        let typeName = 'Mesh';
+        if (isRoot) typeName = 'Root Mesh';
+        else if (object3D.isPointLight) typeName = 'Point Light';
+        else if (object3D.geometry?.type === 'BoxGeometry') typeName = 'Cube Component';
+        else if (object3D.geometry?.type === 'SphereGeometry') typeName = 'Sphere Component';
+        
+        label.textContent = object3D.name || typeName;
+        label.style.fontSize = '13px';
+        item.appendChild(label);
+        
+        item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            blueprintState.selectedComponent = object3D;
+            if (typeof transformControl !== 'undefined') transformControl.attach(object3D);
+            refreshBlueprintComponents();
+        });
+        
+        container.appendChild(item);
+        
+        for (const child of object3D.children) {
+            if (child.isMesh || child.isLight) {
+                renderComponentItem(child, depth + 1, false);
+            }
+        }
+    }
+    
+    renderComponentItem(rootMesh, 0, true);
+}
+
+document.getElementById('btn-exit-blueprint')?.addEventListener('click', () => {
+    exitBlueprintEditor();
+});
+
+document.getElementById('btn-edit-actor-script')?.addEventListener('click', () => {
+    openObjectScriptEditor('tick');
+});
+
+document.getElementById('btn-add-comp-cube')?.addEventListener('click', () => {
+    const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
+    if (!parent) return;
+    
+    const mesh = buildPrimitiveActorMesh('cube');
+    mesh.scale.set(0.3, 0.3, 0.3);
+    mesh.position.set(2, 0.5, 0);
+    mesh.material = new THREE.MeshStandardMaterial({ color: 0xff6600, roughness: 0.4, metalness: 0.2 });
+    mesh.name = 'Cube Component';
+    parent.add(mesh);
+    blueprintState.selectedComponent = mesh;
+    if (typeof transformControl !== 'undefined') transformControl.attach(mesh);
+    refreshBlueprintComponents();
+});
+
+document.getElementById('btn-add-comp-sphere')?.addEventListener('click', () => {
+    const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
+    if (!parent) return;
+    
+    const mesh = buildPrimitiveActorMesh('sphere');
+    mesh.scale.set(0.3, 0.3, 0.3);
+    mesh.position.set(0, 0.5, 2);
+    mesh.material = new THREE.MeshStandardMaterial({ color: 0x00cc66, roughness: 0.4, metalness: 0.2 });
+    mesh.name = 'Sphere Component';
+    parent.add(mesh);
+    blueprintState.selectedComponent = mesh;
+    if (typeof transformControl !== 'undefined') transformControl.attach(mesh);
+    refreshBlueprintComponents();
+});
+
+document.getElementById('btn-add-comp-light')?.addEventListener('click', () => {
+    const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
+    if (!parent) return;
+    
+    const light = new THREE.PointLight(0xffddaa, 2, 10);
+    light.position.set(0, 2, 0);
+    light.castShadow = true;
+    light.name = 'Point Light';
+    parent.add(light);
+    blueprintState.selectedComponent = light;
+    if (typeof transformControl !== 'undefined') transformControl.attach(light);
+    refreshBlueprintComponents();
+});
+
+document.getElementById('btn-delete-comp')?.addEventListener('click', () => {
+    const prop = getDynamicPropById(objectScriptState.targetPropId);
+    const rootMesh = getActorRenderObject(prop);
+    const selected = blueprintState.selectedComponent;
+    
+    if (!selected || selected === rootMesh) {
+        alert("Cannot delete the root component!");
+        return;
+    }
+    
+    if (selected.parent) {
+        selected.parent.remove(selected);
+        if (selected.geometry) selected.geometry.dispose();
+        if (selected.material) selected.material.dispose();
+        
+        blueprintState.selectedComponent = rootMesh;
+        if (typeof transformControl !== 'undefined') transformControl.attach(rootMesh);
+        refreshBlueprintComponents();
+    }
+});
+
 init();
+
+// Blueprint Transform Controls
+function updateBlueprintTransformUI() {
+    if (!transformControl) return;
+    
+    const mode = transformControl.getMode();
+    const space = transformControl.space;
+    
+    const btnTranslate = document.getElementById('btn-bp-translate');
+    const btnRotate = document.getElementById('btn-bp-rotate');
+    const btnScale = document.getElementById('btn-bp-scale');
+    const btnLocal = document.getElementById('btn-bp-space-local');
+    const btnWorld = document.getElementById('btn-bp-space-world');
+    
+    if (btnTranslate) btnTranslate.style.background = mode === 'translate' ? 'rgba(112,0,255,0.4)' : '';
+    if (btnRotate) btnRotate.style.background = mode === 'rotate' ? 'rgba(112,0,255,0.4)' : '';
+    if (btnScale) btnScale.style.background = mode === 'scale' ? 'rgba(112,0,255,0.4)' : '';
+    
+    if (btnLocal) btnLocal.style.background = space === 'local' ? 'rgba(112,0,255,0.4)' : '';
+    if (btnWorld) btnWorld.style.background = space === 'world' ? 'rgba(112,0,255,0.4)' : '';
+}
+
+document.getElementById('btn-bp-translate')?.addEventListener('click', () => {
+    if (typeof transformControl !== 'undefined') {
+        transformControl.setMode('translate');
+        updateBlueprintTransformUI();
+    }
+});
+document.getElementById('btn-bp-rotate')?.addEventListener('click', () => {
+    if (typeof transformControl !== 'undefined') {
+        transformControl.setMode('rotate');
+        updateBlueprintTransformUI();
+    }
+});
+document.getElementById('btn-bp-scale')?.addEventListener('click', () => {
+    if (typeof transformControl !== 'undefined') {
+        transformControl.setMode('scale');
+        updateBlueprintTransformUI();
+    }
+});
+document.getElementById('btn-bp-space-local')?.addEventListener('click', () => {
+    if (typeof transformControl !== 'undefined') {
+        transformControl.setSpace('local');
+        updateBlueprintTransformUI();
+    }
+});
+document.getElementById('btn-bp-space-world')?.addEventListener('click', () => {
+    if (typeof transformControl !== 'undefined') {
+        transformControl.setSpace('world');
+        updateBlueprintTransformUI();
+    }
+});
+
+// Update UI initially if needed, we'll hook it up when blueprint mode opens
+
+// Details Panel Sync
+function updateBlueprintDetailsUI() {
+    if (!blueprintState.active || !blueprintState.selectedComponent) return;
+    const comp = blueprintState.selectedComponent;
+    
+    document.getElementById('bp-loc-x').value = comp.position.x.toFixed(3);
+    document.getElementById('bp-loc-y').value = comp.position.y.toFixed(3);
+    document.getElementById('bp-loc-z').value = comp.position.z.toFixed(3);
+    
+    document.getElementById('bp-rot-x').value = THREE.MathUtils.radToDeg(comp.rotation.x).toFixed(1);
+    document.getElementById('bp-rot-y').value = THREE.MathUtils.radToDeg(comp.rotation.y).toFixed(1);
+    document.getElementById('bp-rot-z').value = THREE.MathUtils.radToDeg(comp.rotation.z).toFixed(1);
+    
+    document.getElementById('bp-scl-x').value = comp.scale.x.toFixed(3);
+    document.getElementById('bp-scl-y').value = comp.scale.y.toFixed(3);
+    document.getElementById('bp-scl-z').value = comp.scale.z.toFixed(3);
+}
+
+function applyBlueprintDetailsFromUI() {
+    if (!blueprintState.active || !blueprintState.selectedComponent) return;
+    const comp = blueprintState.selectedComponent;
+    
+    comp.position.x = parseFloat(document.getElementById('bp-loc-x').value) || 0;
+    comp.position.y = parseFloat(document.getElementById('bp-loc-y').value) || 0;
+    comp.position.z = parseFloat(document.getElementById('bp-loc-z').value) || 0;
+    
+    comp.rotation.x = THREE.MathUtils.degToRad(parseFloat(document.getElementById('bp-rot-x').value) || 0);
+    comp.rotation.y = THREE.MathUtils.degToRad(parseFloat(document.getElementById('bp-rot-y').value) || 0);
+    comp.rotation.z = THREE.MathUtils.degToRad(parseFloat(document.getElementById('bp-rot-z').value) || 0);
+    
+    comp.scale.x = parseFloat(document.getElementById('bp-scl-x').value) || 1;
+    comp.scale.y = parseFloat(document.getElementById('bp-scl-y').value) || 1;
+    comp.scale.z = parseFloat(document.getElementById('bp-scl-z').value) || 1;
+}
+
+['bp-loc-x', 'bp-loc-y', 'bp-loc-z', 'bp-rot-x', 'bp-rot-y', 'bp-rot-z', 'bp-scl-x', 'bp-scl-y', 'bp-scl-z'].forEach(id => {
+    document.getElementById(id)?.addEventListener('change', applyBlueprintDetailsFromUI);
+});
+
+// Blueprint panel: Save/Load Actor buttons
+document.getElementById('btn-bp-save-actor')?.addEventListener('click', () => {
+    if (blueprintState.targetActor) {
+        exportActorToFile(blueprintState.targetActor);
+    }
+});
+document.getElementById('btn-bp-load-actor')?.addEventListener('click', () => {
+    document.getElementById('bp-actor-file-input')?.click();
+});
+document.getElementById('bp-actor-file-input')?.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        // Exit blueprint mode first, then load
+        exitBlueprintEditor();
+        loadActorFromFile(file);
+        e.target.value = '';
+    }
+});
+
+// === PIE (Play In Editor) Scene State Snapshot ===
+let pieSceneSnapshot = null;
+
+function snapshotSceneState() {
+    if (!sceneSystem) return;
+    const snapshot = [];
+    for (const actor of sceneSystem.actors) {
+        const mesh = getActorRenderObject(actor);
+        if (!mesh) continue;
+        
+        const actorSnap = {
+            id: actor.id,
+            position: mesh.position.toArray(),
+            quaternion: mesh.quaternion.toArray(),
+            scale: mesh.scale.toArray(),
+            children: []
+        };
+        
+        // Snapshot child component transforms recursively
+        function snapChildren(parent, arr) {
+            for (const child of parent.children) {
+                if (child.isMesh || child.isLight) {
+                    const childSnap = {
+                        uuid: child.uuid,
+                        position: child.position.toArray(),
+                        quaternion: child.quaternion.toArray(),
+                        scale: child.scale.toArray(),
+                        children: []
+                    };
+                    snapChildren(child, childSnap.children);
+                    arr.push(childSnap);
+                }
+            }
+        }
+        snapChildren(mesh, actorSnap.children);
+        snapshot.push(actorSnap);
+    }
+    pieSceneSnapshot = snapshot;
+}
+
+function restoreSceneState() {
+    if (!pieSceneSnapshot || !sceneSystem) return;
+    
+    for (const actorSnap of pieSceneSnapshot) {
+        const actor = getDynamicPropById(actorSnap.id);
+        if (!actor) continue;
+        
+        const mesh = getActorRenderObject(actor);
+        if (!mesh) continue;
+        
+        mesh.position.fromArray(actorSnap.position);
+        mesh.quaternion.fromArray(actorSnap.quaternion);
+        mesh.scale.fromArray(actorSnap.scale);
+        
+        // Restore child component transforms
+        function restoreChildren(parent, snapArr) {
+            for (const childSnap of snapArr) {
+                const child = parent.children.find(c => c.uuid === childSnap.uuid);
+                if (child) {
+                    child.position.fromArray(childSnap.position);
+                    child.quaternion.fromArray(childSnap.quaternion);
+                    child.scale.fromArray(childSnap.scale);
+                    restoreChildren(child, childSnap.children);
+                }
+            }
+        }
+        restoreChildren(mesh, actorSnap.children);
+        
+        // Sync physics body to restored position
+        const body = getActorBody(actor);
+        if (body && physics.bodyInterface && physics.Jolt) {
+            const { Jolt, bodyInterface } = physics;
+            const pos = mesh.position;
+            const rot = mesh.quaternion;
+            const joltPos = new Jolt.Vec3(pos.x, pos.y, pos.z);
+            const joltRot = new Jolt.Quat(rot.x, rot.y, rot.z, rot.w);
+            bodyInterface.SetPositionAndRotation(body.GetID(), joltPos, joltRot, Jolt.EActivation_Activate);
+            bodyInterface.SetLinearVelocity(body.GetID(), new Jolt.Vec3(0, 0, 0));
+            bodyInterface.SetAngularVelocity(body.GetID(), new Jolt.Vec3(0, 0, 0));
+            Jolt.destroy(joltPos);
+            Jolt.destroy(joltRot);
+        }
+    }
+    
+    pieSceneSnapshot = null;
+}
