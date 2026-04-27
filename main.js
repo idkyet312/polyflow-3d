@@ -24,6 +24,8 @@ import {
     getPhysicsBodyComponent,
     getRenderComponent,
     getScriptComponent,
+    PhysicsComponent,
+    TransformComponent,
 } from './src/runtime/sceneRuntime.js';
 import {
     TERRAIN_Y_OFFSET,
@@ -2933,7 +2935,7 @@ function compileObjectEventScript(source) {
 
     return new ObjectEventFunction('api', `
         "use strict";
-        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, spawnDynamicPrimitive, spawnImportedProp } = api;
+        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp } = api;
         ${normalizedSource}
     `);
 }
@@ -2994,6 +2996,17 @@ function createDynamicPropActor({
         userData,
         name: userData?.label || `${kind || 'actor'}-actor`,
     });
+    // Auto-attach UE-style components so GetComponent() works on every actor.
+    if (!actor.hasComponent(TransformComponent)) {
+        actor.addComponent(new TransformComponent());
+    }
+    if (!actor.hasComponent(PhysicsComponent)) {
+        const phys = new PhysicsComponent();
+        phys.setPhysicsContext(physics);
+        if (body) phys.setBody(body);
+        actor.addComponent(phys);
+    }
+
     sceneSystem?.addActor(actor);
     ensureActorIdentity(actor);
     return includeScripts ? syncPropScriptState(actor) : actor;
@@ -3349,6 +3362,9 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
         physicsComponent,
         scriptComponent,
         metadataComponent,
+        PhysicsComponent,
+        TransformComponent,
+        actor: prop,
         spawnDynamicPrimitive,
         spawnImportedProp,
     };

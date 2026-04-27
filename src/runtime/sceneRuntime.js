@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+import { ActorComponent } from './components/ActorComponent.js';
+import { PhysicsComponent } from './components/PhysicsComponent.js';
+import { TransformComponent } from './components/TransformComponent.js';
 
 export const RUNTIME_COMPONENT_KEYS = {
     render: 'render',
@@ -157,6 +160,13 @@ export class Actor {
         this.rootNode = new SceneNode(name, mesh);
         this.sceneSystem = null;
 
+        /**
+         * UE-style component map.
+         * Key = ComponentClass.componentKey, Value = ActorComponent instance.
+         * @type {Map<string, ActorComponent>}
+         */
+        this._components = new Map();
+
         this.entity.setComponent(RUNTIME_COMPONENT_KEYS.render, createRenderComponent(mesh));
         this.entity.setComponent(RUNTIME_COMPONENT_KEYS.physicsBody, createPhysicsBodyComponent(body));
         this.entity.setComponent(RUNTIME_COMPONENT_KEYS.scripts, createScriptComponent(scripts));
@@ -274,6 +284,10 @@ export class Actor {
     }
 
     getComponent(key) {
+        // If called with a class (UE-style), delegate to getComponentByClass.
+        if (typeof key === 'function' && key.componentKey) {
+            return this.getComponentByClass(key);
+        }
         return this.entity.getComponent(key);
     }
 
@@ -283,9 +297,148 @@ export class Actor {
     }
 
     removeComponent(key) {
+        // If called with a class (UE-style), delegate.
+        if (typeof key === 'function' && key.componentKey) {
+            return this.removeComponentByClass(key);
+        }
         this.entity.removeComponent(key);
         return this;
     }
+
+    // ═══════════════════════════════════════════════════════
+    //  UE-STYLE COMPONENT HELPERS
+    // ═══════════════════════════════════════════════════════
+
+    /**
+     * Add an ActorComponent instance to this actor.
+     * Equivalent to UE's CreateDefaultSubobject / AddComponent.
+     *
+     *   const phys = actor.addComponent(new PhysicsComponent());
+     *   phys.addForce(new THREE.Vector3(0, 1000, 0));
+     *
+     * @template {ActorComponent} T
+     * @param {T} component  Instance of an ActorComponent subclass.
+     * @returns {T}  The same instance, for chaining.
+     */
+    addComponent(component) {
+        if (!(component instanceof ActorComponent)) {
+            console.warn('[Actor] addComponent expects an ActorComponent instance.');
+            return component;
+        }
+        const key = component.constructor.componentKey;
+        if (this._components.has(key)) {
+            console.warn(`[Actor] Component "${key}" already exists. Remove it first or use replaceComponent.`);
+            return this._components.get(key);
+        }
+        component.owner = this;
+        this._components.set(key, component);
+        component.beginPlay();
+        return component;
+    }
+
+    /**
+     * Get a component by its class.
+     * Mirrors UE's GetComponentByClass<T>().
+     *
+     *   const phys = actor.getComponentByClass(PhysicsComponent);
+     *
+     * @template {typeof ActorComponent} T
+     * @param {T} ComponentClass
+     * @returns {InstanceType<T> | null}
+     */
+    getComponentByClass(ComponentClass) {
+        return this._components.get(ComponentClass.componentKey) ?? null;
+    }
+
+    /**
+     * Check if the actor has a component of the given class.
+     * @param {typeof ActorComponent} ComponentClass
+     * @returns {boolean}
+     */
+    hasComponent(ComponentClass) {
+        return this._components.has(ComponentClass.componentKey);
+    }
+
+    /**
+     * Remove a component by its class and call endPlay.
+     * @param {typeof ActorComponent} ComponentClass
+     * @returns {this}
+     */
+    removeComponentByClass(ComponentClass) {
+        const key = ComponentClass.componentKey;
+        const existing = this._components.get(key);
+        if (existing) {
+            existing.endPlay();
+            existing.owner = null;
+            this._components.delete(key);
+        }
+        return this;
+    }
+
+    /**
+     * Replace (or add) a component of the same class.
+     * @template {ActorComponent} T
+     * @param {T} component
+     * @returns {T}
+     */
+    replaceComponent(component) {
+        const key = component.constructor.componentKey;
+        if (this._components.has(key)) {
+            this.removeComponentByClass(component.constructor);
+        }
+        return this.addComponent(component);
+    }
+
+    /**
+     * Get all attached components.
+     * @returns {ActorComponent[]}
+     */
+    getComponentsByClass() {
+        return Array.from(this._components.values());
+    }
+
+    /**
+     * Alias: same as getComponentByClass (UE uses both interchangeably).
+     */
+    findComponentByClass(ComponentClass) {
+        return this.getComponentByClass(ComponentClass);
+    }
+
+    /**
+     * Tick all active components. Call once per frame from your game loop.
+     * @param {number} deltaTime
+     */
+    tickComponents(deltaTime) {
+        for (const comp of this._components.values()) {
+            if (comp._active) comp.tick(deltaTime);
+        }
+    }
+
+    /**
+     * Destroy all components (endPlay + remove). Call on actor teardown.
+     */
+    destroyAllComponents() {
+        for (const comp of this._components.values()) {
+            comp.endPlay();
+            comp.owner = null;
+        }
+        this._components.clear();
+    }
+
+    // ── PascalCase aliases (UE naming convention) ──────────
+
+    /** @see addComponent */
+    AddComponent(component) { return this.addComponent(component); }
+    /** @see getComponentByClass */
+    GetComponent(ComponentClass) { return this.getComponentByClass(ComponentClass); }
+    /** @see hasComponent */
+    HasComponent(ComponentClass) { return this.hasComponent(ComponentClass); }
+    /** @see removeComponentByClass */
+    RemoveComponent(ComponentClass) { return this.removeComponentByClass(ComponentClass); }
+    /** @see findComponentByClass */
+    FindComponentByClass(ComponentClass) { return this.findComponentByClass(ComponentClass); }
+    /** @see getComponentsByClass */
+    GetComponents() { return this.getComponentsByClass(); }
 }
 
 export function ensureActorScriptComponent(actor, state = null) {
@@ -362,3 +515,35 @@ export function createActor(options = {}) {
 export function createSceneSystem(scene) {
     return new SceneSystem(scene);
 }
+
+// ─── Re-export built-in components for convenience ───
+export { ActorComponent } from './components/ActorComponent.js';
+export { PhysicsComponent } from './components/PhysicsComponent.js';
+export { TransformComponent } from './components/TransformComponent.js';
+
+/**
+ * Convenience factory: create an Actor with a PhysicsComponent already attached.
+ *
+ *   import { createPhysicsActor, PhysicsComponent } from './runtime/sceneRuntime.js';
+ *
+ *   const actor = createPhysicsActor({ name: 'Crate', mesh, body }, physicsCtx);
+ *   actor.GetComponent(PhysicsComponent).addForce(new THREE.Vector3(0, 500, 0));
+ *
+ * @param {object}  options     Same options as createActor.
+ * @param {object}  physicsCtx  The shared physics context ({ Jolt, bodyInterface, ready, ... }).
+ * @returns {Actor}
+ */
+export function createPhysicsActor(options = {}, physicsCtx = null) {
+    const actor = new Actor(options);
+
+    // Attach transform component.
+    actor.addComponent(new TransformComponent());
+
+    // Attach physics component.
+    const phys = new PhysicsComponent();
+    if (physicsCtx) phys.setPhysicsContext(physicsCtx);
+    if (options.body) phys.setBody(options.body);
+    actor.addComponent(phys);
+
+    return actor;
+}
