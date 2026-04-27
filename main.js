@@ -4796,6 +4796,7 @@ async function init() {
         if (!event.value) {
             syncTransformToPhysics();
             transformControl.justFinishedDragging = true;
+            editorHistory.captureState();
             setTimeout(() => transformControl.justFinishedDragging = false, 100);
         }
     });
@@ -5288,6 +5289,7 @@ function handleGameplayKeyEvent(event) {
     if (!gameplay.active && !gameplay.pointerLocked && isDown) {
         if (event.code === 'Delete') {
             if (blueprintState.active) {
+                editorHistory.captureState();
                 document.getElementById('btn-delete-comp')?.click();
             } else {
                 deleteSelectedActor();
@@ -5300,6 +5302,16 @@ function handleGameplayKeyEvent(event) {
                 return;
             } else if (event.code === 'KeyV') {
                 pasteFromClipboard();
+                return;
+            } else if (event.code === 'KeyZ') {
+                if (event.shiftKey) {
+                    editorHistory.redo();
+                } else {
+                    editorHistory.undo();
+                }
+                return;
+            } else if (event.code === 'KeyY') {
+                editorHistory.redo();
                 return;
             } else if (event.code === 'KeyD') {
                 duplicateSelected();
@@ -6724,35 +6736,7 @@ document.getElementById('reset-view').addEventListener('click', () => {
 
 // === UMAP SCENE EXPORT / IMPORT ===
 function exportWorldToUmap() {
-    const umap = {
-        version: 1,
-        actors: []
-    };
-    
-    
-    
-    for (const actor of (sceneSystem?.actors || [])) {
-        const mesh = getActorRenderObject(actor);
-        if (!mesh) continue;
-        
-        const scripts = objectScriptState.drafts[actor.id] || null;
-        
-        umap.actors.push({
-            id: actor.id,
-            kind: actor.kind,
-            name: actor.rootNode?.name || 'Actor',
-            templateId: actor.templateId,
-            userData: actor.entity.getComponent('metadata')?.userData || null,
-            transform: {
-                position: mesh.position.toArray(),
-                quaternion: mesh.quaternion.toArray(),
-                scale: mesh.scale.toArray()
-            },
-            scripts: scripts,
-            components: serializeComponentTree(mesh)
-        });
-    }
-    
+    const umap = exportWorldToJSON();
     const blob = new Blob([JSON.stringify(umap, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -6930,78 +6914,11 @@ function loadWorldFromUmap(file) {
     reader.onload = (e) => {
         try {
             const umap = JSON.parse(e.target.result);
-            if (umap.version !== 1) {
-                console.warn('Unknown umap version', umap.version);
-            }
-            
-            clearSceneActors();
-            
-            for (const actorData of umap.actors) {
-                if (actorData.scripts) {
-                    objectScriptState.drafts[actorData.id] = actorData.scripts;
-                }
-                
-                let scale = 1;
-                if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
-                    scale = actorData.transform.scale[0]; 
-                }
-                
-                let actor = null;
-                if (actorData.kind === 'vehicle') {
-                    actor = spawnDrivableCar({
-                        includeScripts: !!actorData.scripts,
-                        userData: actorData.userData
-                    });
-                } else if (actorData.kind === 'imported') {
-                    actor = spawnImportedProp(actorData.templateId, {
-                        includeScripts: !!actorData.scripts,
-                        userData: actorData.userData,
-                        includeCollisionBody: true 
-                    });
-                } else {
-                    actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, {
-                        includeScripts: !!actorData.scripts,
-                        userData: actorData.userData,
-                        returnActor: true,
-                        includeCollisionBody: true
-                    });
-                }
-                
-                if (actor) {
-                    const oldId = actor.id;
-                    actor.id = actorData.id;
-                    if (objectScriptState.drafts[oldId]) {
-                        delete objectScriptState.drafts[oldId];
-                    }
-                    if (actorData.name) {
-                        actor.rootNode.name = actorData.name;
-                    }
-                    
-                    const mesh = getActorRenderObject(actor);
-                    if (mesh) {
-                        mesh.userData.dynamicPropId = actor.id;
-                        mesh.position.fromArray(actorData.transform.position);
-                        mesh.quaternion.fromArray(actorData.transform.quaternion);
-                        mesh.scale.fromArray(actorData.transform.scale);
-                        
-                        
-                        deserializeComponentTree(mesh, actorData.components);
-                        
-                        rebuildActorPhysics(actor);
-                    }
-                    
-                    if (actorData.scripts) {
-                       syncPropScriptState(actor);
-                    }
-                }
-            }
-            
-            saveObjectScriptDrafts();
-            refreshSceneUI();
-            
-        } catch(err) {
-            console.error('Error loading UMAP', err);
-            alert('Failed to load scene file. It might be corrupt or missing templates.');
+            editorHistory.captureState();
+            loadWorldFromJSON(umap);
+        } catch (err) {
+            console.error('Error loading scene file', err);
+            alert('Failed to load scene file.');
         }
     };
     reader.readAsText(file);
@@ -7272,6 +7189,7 @@ document.getElementById('btn-edit-actor-script')?.addEventListener('click', () =
 });
 
 document.getElementById('btn-add-comp-cube')?.addEventListener('click', () => {
+    editorHistory.captureState();
     const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
     if (!parent) return;
     
@@ -7287,6 +7205,7 @@ document.getElementById('btn-add-comp-cube')?.addEventListener('click', () => {
 });
 
 document.getElementById('btn-add-comp-sphere')?.addEventListener('click', () => {
+    editorHistory.captureState();
     const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
     if (!parent) return;
     
@@ -7302,6 +7221,7 @@ document.getElementById('btn-add-comp-sphere')?.addEventListener('click', () => 
 });
 
 document.getElementById('btn-add-comp-light')?.addEventListener('click', () => {
+    editorHistory.captureState();
     const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
     if (!parent) return;
     
@@ -7316,6 +7236,7 @@ document.getElementById('btn-add-comp-light')?.addEventListener('click', () => {
 });
 
 document.getElementById('btn-delete-comp')?.addEventListener('click', () => {
+    editorHistory.captureState();
     const prop = getDynamicPropById(objectScriptState.targetPropId);
     const rootMesh = getActorRenderObject(prop);
     const selected = blueprintState.selectedComponent;
@@ -7680,6 +7601,7 @@ function spawnActorFromJSON(actorData) {
 }
 
 function deleteSelectedActor() {
+    editorHistory.captureState();
     const propId = objectScriptState.targetPropId;
     if (!propId) return;
     const prop = getDynamicPropById(propId);
@@ -7715,6 +7637,7 @@ function copySelectedToClipboard() {
 }
 
 function pasteFromClipboard() {
+    editorHistory.captureState();
     if (!editorClipboard) return;
     if (blueprintState.active && editorClipboard.type === 'component') {
         const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
@@ -7735,5 +7658,142 @@ function pasteFromClipboard() {
 
 function duplicateSelected() {
     copySelectedToClipboard();
+    editorHistory.captureState();
     pasteFromClipboard();
+}
+
+// === UNDO / REDO HISTORY SYSTEM ===
+const editorHistory = {
+    undoStack: [],
+    redoStack: [],
+    maxStates: 50,
+    isRestoring: false,
+
+    captureState() {
+        if (this.isRestoring || (typeof gameplay !== 'undefined' && gameplay.active)) return;
+        const state = {
+            activeActorId: objectScriptState.targetPropId,
+            blueprintActive: blueprintState.active,
+            blueprintComponentUuid: blueprintState.selectedComponent?.uuid,
+            scene: exportWorldToJSON()
+        };
+        this.undoStack.push(state);
+        if (this.undoStack.length > this.maxStates) {
+            this.undoStack.shift();
+        }
+        this.redoStack = [];
+    },
+
+    undo() {
+        if (this.undoStack.length === 0 || (typeof gameplay !== 'undefined' && gameplay.active)) return;
+        this.isRestoring = true;
+        
+        const currentState = {
+            activeActorId: objectScriptState.targetPropId,
+            blueprintActive: blueprintState.active,
+            blueprintComponentUuid: blueprintState.selectedComponent?.uuid,
+            scene: exportWorldToJSON()
+        };
+        this.redoStack.push(currentState);
+        
+        const state = this.undoStack.pop();
+        this.restoreState(state);
+        this.isRestoring = false;
+    },
+
+    redo() {
+        if (this.redoStack.length === 0 || (typeof gameplay !== 'undefined' && gameplay.active)) return;
+        this.isRestoring = true;
+
+        const currentState = {
+            activeActorId: objectScriptState.targetPropId,
+            blueprintActive: blueprintState.active,
+            blueprintComponentUuid: blueprintState.selectedComponent?.uuid,
+            scene: exportWorldToJSON()
+        };
+        this.undoStack.push(currentState);
+        
+        const state = this.redoStack.pop();
+        this.restoreState(state);
+        this.isRestoring = false;
+    },
+
+    restoreState(state) {
+        if (typeof transformControl !== 'undefined' && transformControl) transformControl.detach();
+        loadWorldFromJSON(state.scene);
+        
+        if (state.activeActorId) {
+            selectShowcaseActor(state.activeActorId);
+            if (state.blueprintActive) {
+                enterBlueprintEditor();
+            } else {
+                exitBlueprintEditor();
+            }
+        } else {
+            selectShowcaseActor(null);
+            exitBlueprintEditor();
+        }
+    }
+};
+
+function exportWorldToJSON() {
+    const umap = { version: 1, actors: [] };
+    for (const actor of (sceneSystem?.actors || [])) {
+        const mesh = getActorRenderObject(actor);
+        if (!mesh) continue;
+        const scripts = objectScriptState.drafts[actor.id] || null;
+        umap.actors.push({
+            id: actor.id,
+            kind: actor.kind,
+            name: actor.rootNode?.name || 'Actor',
+            templateId: actor.templateId,
+            userData: actor.entity.getComponent('metadata')?.userData || null,
+            transform: {
+                position: mesh.position.toArray(),
+                quaternion: mesh.quaternion.toArray(),
+                scale: mesh.scale.toArray()
+            },
+            scripts: scripts,
+            components: serializeComponentTree(mesh)
+        });
+    }
+    return umap;
+}
+
+function loadWorldFromJSON(umap) {
+    if (umap.version !== 1) console.warn('Unknown umap version', umap.version);
+    clearSceneActors();
+    for (const actorData of umap.actors) {
+        if (actorData.scripts) objectScriptState.drafts[actorData.id] = JSON.parse(JSON.stringify(actorData.scripts));
+        let scale = 1;
+        if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
+            scale = actorData.transform.scale[0]; 
+        }
+        let actor = null;
+        if (actorData.kind === 'vehicle') {
+            actor = spawnDrivableCar({ includeScripts: !!actorData.scripts, userData: actorData.userData });
+        } else if (actorData.kind === 'imported') {
+            actor = spawnImportedProp(actorData.templateId, { includeScripts: !!actorData.scripts, userData: actorData.userData, includeCollisionBody: true });
+        } else {
+            actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, { includeScripts: !!actorData.scripts, userData: actorData.userData, returnActor: true, includeCollisionBody: true });
+        }
+        if (actor) {
+            const oldId = actor.id;
+            actor.id = actorData.id;
+            if (objectScriptState.drafts[oldId]) delete objectScriptState.drafts[oldId];
+            if (actorData.name) actor.rootNode.name = actorData.name;
+            const mesh = getActorRenderObject(actor);
+            if (mesh) {
+                mesh.userData.dynamicPropId = actor.id;
+                mesh.position.fromArray(actorData.transform.position);
+                mesh.quaternion.fromArray(actorData.transform.quaternion);
+                mesh.scale.fromArray(actorData.transform.scale);
+                deserializeComponentTree(mesh, actorData.components);
+                rebuildActorPhysics(actor);
+            }
+            if (actorData.scripts) syncPropScriptState(actor);
+        }
+    }
+    saveObjectScriptDrafts();
+    refreshSceneUI();
 }
