@@ -546,4 +546,4 @@ export function createPhysicsActor(options = {}, physicsCtx = null) {
     actor.addComponent(phys);
 
     return actor;
-}
+}
