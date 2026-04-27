@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-DVaHiXfV.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-DF9Bly-G.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-gI-1tHuq.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-CoDQgVRq.css">
 </head>
 <body>
     <main>
@@ -47,8 +47,10 @@
                         <div class="viewer-menu-label">Actors</div>
                         <div class="viewer-menu-actions">
                             <button class="btn btn-primary viewer-menu-btn" id="open-actor-editor">Add Actor</button>
+                            <button class="btn viewer-menu-btn" id="load-actor-btn">⬆ Load Actor</button>
                         </div>
-                        <div class="viewer-inline-note">Create a new actor fast. Importing props, multiplayer, and input scripting now live under Menu Sections.</div>
+                        <div class="viewer-inline-note">Create a new actor or load a saved .actor file. Importing props, multiplayer, and input scripting now live under Menu Sections.</div>
+                        <input type="file" id="actor-file-input" accept=".actor,.json" style="display: none;">
                     </div>
 
                     <div class="viewer-modal" id="actor-editor" hidden>
@@ -104,6 +106,69 @@
                                 <button class="btn viewer-menu-btn" id="actor-editor-open-script" type="button">Create And Edit Script</button>
                             </div>
                             <button class="btn viewer-modal-cancel" id="actor-editor-cancel" type="button">Close</button>
+                        </div>
+                    </div>
+
+                    <div class="viewer-menu-card" id="blueprint-editor-panel" style="display: none;">
+                        <div class="viewer-menu-actions" style="margin-bottom: 12px;">
+                            <button class="btn viewer-menu-btn" id="btn-exit-blueprint" style="background: rgba(255,255,255,0.1);">← Back to Level</button>
+                        </div>
+                        <div class="viewer-menu-label" id="blueprint-actor-name" style="margin-bottom: 12px; color: #fff;">Blueprint Actor</div>
+                        <div class="viewer-menu-actions" style="margin-bottom: 12px;">
+                            <button class="btn btn-primary viewer-menu-btn" id="btn-edit-actor-script">Edit Scripts (Tick/Collision)</button>
+                        </div>
+                        
+                        <div class="viewer-menu-label" style="font-size: 11px;">Components</div>
+                        <div id="selected-actor-components" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px;">
+                            <!-- Components injected here -->
+                        </div>
+                        
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Transform:</div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 4px; margin-bottom: 4px;">
+                            <button class="btn viewer-menu-btn" id="btn-bp-translate" style="padding: 4px 8px; flex: 1; font-size: 11px; background: rgba(112,0,255,0.4);">Move (W)</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-rotate" style="padding: 4px 8px; flex: 1; font-size: 11px;">Rotate (E)</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-scale" style="padding: 4px 8px; flex: 1; font-size: 11px;">Scale (R)</button>
+                        </div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 4px; margin-bottom: 12px;">
+                            <button class="btn viewer-menu-btn" id="btn-bp-space-local" style="padding: 4px 8px; flex: 1; font-size: 11px; background: rgba(112,0,255,0.4);">Local</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-space-world" style="padding: 4px 8px; flex: 1; font-size: 11px;">World</button>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Details (Local Transform):</div>
+                        <div id="bp-transform-details" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; background: rgba(0,0,0,0.2); padding: 6px; border-radius: 4px;">
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Loc</span>
+                                <input type="number" id="bp-loc-x" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-loc-y" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-loc-z" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Rot</span>
+                                <input type="number" id="bp-rot-x" class="ui-input" step="5" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-rot-y" class="ui-input" step="5" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-rot-z" class="ui-input" step="5" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Scale</span>
+                                <input type="number" id="bp-scl-x" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-scl-y" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-scl-z" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-bottom: 8px;">Add Child Components:</div>
+                        <div class="viewer-menu-actions" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-cube" style="padding: 6px;">Add Cube</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-sphere" style="padding: 6px;">Add Sphere</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-light" style="padding: 6px;">Add Point Light</button>
+                            <button class="btn viewer-menu-btn" id="btn-delete-comp" style="padding: 6px; border-color: rgba(255,50,50,0.3);">Delete Selected</button>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-top: 12px; margin-bottom: 4px;">Actor File:</div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 8px;">
+                            <button class="btn btn-primary viewer-menu-btn" id="btn-bp-save-actor" style="padding: 6px; flex: 1;">⬇ Save Actor</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-load-actor" style="padding: 6px; flex: 1;">⬆ Load Actor</button>
+                            <input type="file" id="bp-actor-file-input" accept=".actor,.json" style="display: none;">
                         </div>
                     </div>
 
