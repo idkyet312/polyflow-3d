@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { TGALoader } from 'three/addons/loaders/TGALoader.js';
@@ -606,7 +607,7 @@ function createExampleWidgets() {
 }
 
 // --- Configuration ---
-let scene, camera, renderer, currentMesh;
+let scene, camera, renderer, currentMesh, transformControl;
 let originalTriCount = 0;
 let optimizedTriCount = 0;
 let scanPlane;
@@ -662,7 +663,7 @@ const VEHICLE_SETTINGS = {
     lowSpeedGrip: 6.8, // Better low-speed traction
     highSpeedGrip: 3.2, // Less grip at high speeds for sliding
     brakeGrip: 3.5, // Much weaker brakes - takes longer to stop
-    driftGrip: 1.8, // Allows some drifting but recovers well
+    driftGrip: 1.2, // Allows some drifting but recovers well
     partialContactGrip: 1.2,
     driftBoostThreshold: 0.35,
     driftSteerBonus: 1.4,
@@ -701,6 +702,7 @@ let objectScriptTickToggleRow, objectScriptTickToggleInput;
 let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect;
 let actorComponentCollisionInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
 let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
+let sceneUiPanel, sceneUiCount, sceneUiList;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
 let mobileJumpBtn, mobileRightActionBtn, mobileAction2Btn;
@@ -983,7 +985,7 @@ function sampleTerrainHeightAt(worldX, worldZ) {
 }
 
 function buildLightGrid() {
-    lightGridController?.build();
+    //lightGridController?.build();
 }
 
 function getLightGridAnchorTarget() {
@@ -1683,6 +1685,7 @@ function destroyDynamicPhysicsProp(prop) {
 
     if (objectScriptState.targetPropId && objectScriptState.targetPropId === prop.id) {
         objectScriptState.targetPropId = '';
+        transformControl?.detach();
         objectScriptState.menuOpen = false;
         objectScriptState.editorOpen = false;
     }
@@ -2239,6 +2242,10 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
     creationSettings.mMotionQuality = options.motionQuality
         ?? Jolt.EMotionQuality_Discrete;
 
+    if (options.allowedDOFs !== undefined) {
+        creationSettings.mAllowedDOFs = options.allowedDOFs;
+    }
+
     const body = bodyInterface.CreateBody(creationSettings);
     bodyInterface.AddBody(
         body.GetID(),
@@ -2297,23 +2304,38 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
     if (kind === 'sphere') {
         const radius = normalizedScale;
         shape = includeCollisionBody ? createOwnedShape(new Jolt.SphereShapeSettings(radius)) : null;
-        mesh = buildPrimitiveActorMesh('sphere', radius);
+        mesh = buildPrimitiveActorMesh('sphere');
+        mesh.scale.set(radius, radius, radius);
         bodyOptions = {
             restitution: 0.48,
             friction: 0.58,
             ...options,
         };
-    } else {
+    } else if (kind === 'cube') {
         const halfExtent = normalizedScale;
         if (includeCollisionBody) {
             const halfExtentVector = new Jolt.Vec3(halfExtent, halfExtent, halfExtent);
             shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
             Jolt.destroy(halfExtentVector);
         }
-        mesh = buildPrimitiveActorMesh('cube', halfExtent);
+        mesh = buildPrimitiveActorMesh('cube');
+        mesh.scale.set(halfExtent, halfExtent, halfExtent);
         bodyOptions = {
             restitution: 0.12,
             friction: 0.82,
+            ...options,
+        };
+    } else if (kind === 'capsule') {
+        const halfExtent = normalizedScale;
+        if (includeCollisionBody) {
+            shape = createOwnedShape(new Jolt.CapsuleShapeSettings(halfExtent, halfExtent));
+        }
+        mesh = buildPrimitiveActorMesh('capsule');
+        mesh.scale.set(halfExtent, halfExtent, halfExtent);
+        bodyOptions = {
+            restitution: 0.0,
+            friction: 0.0,
+            allowedDOFs: Jolt.EAllowedDOFs_TranslationX | Jolt.EAllowedDOFs_TranslationY | Jolt.EAllowedDOFs_TranslationZ,
             ...options,
         };
     }
@@ -2498,9 +2520,113 @@ function createRuntimePropId() {
 function getActorRenderObject(prop) {
     return getRenderComponent(prop)?.mesh ?? prop?.mesh ?? null;
 }
-
 function getActorBody(prop) {
-    return getPhysicsBodyComponent(prop)?.body ?? prop?.body ?? null;
+    if (!prop) return null;
+    return prop.body || getPhysicsBodyComponent(prop)?.body || null;
+}
+
+function selectShowcaseActor(actorId) {
+    if (gameplay.active) return; // Only allow selection in Showcase mode
+    
+    const previousTargetId = objectScriptState.targetPropId;
+    objectScriptState.targetPropId = actorId || '';
+    
+    if (actorId) {
+        const prop = getDynamicPropById(actorId);
+        if (objectScriptEditorTarget) {
+            objectScriptEditorTarget.textContent = prop?.rootNode?.name || actorId || 'Actor';
+        }
+        if (transformControl && prop?.mesh) {
+            transformControl.attach(prop.mesh);
+        }
+    } else {
+        if (objectScriptEditorTarget) {
+            objectScriptEditorTarget.textContent = 'None';
+        }
+        if (transformControl) {
+            transformControl.detach();
+        }
+    }
+    
+    if (previousTargetId !== objectScriptState.targetPropId) {
+        refreshSceneUI();
+    }
+}
+
+function syncTransformToPhysics() {
+    if (!transformControl || !transformControl.object) return;
+    const prop = findDynamicPropByMesh(transformControl.object);
+    if (!prop) return;
+
+    const body = getActorBody(prop);
+    if (!body || !physics.jolt) return;
+
+    const mesh = transformControl.object;
+    const pos = mesh.position;
+    const rot = mesh.quaternion;
+
+    const { bodyInterface, Jolt } = physics;
+    
+    // Position and Rotation sync
+    const joltPos = new Jolt.Vec3(pos.x, pos.y, pos.z);
+    const joltRot = new Jolt.Quat(rot.x, rot.y, rot.z, rot.w);
+    bodyInterface.SetPositionAndRotation(body.GetID(), joltPos, joltRot, Jolt.EActivation_Activate);
+    Jolt.destroy(joltPos);
+    Jolt.destroy(joltRot);
+    
+    // Scale sync (requires rebuilding the body for primitives)
+    if (transformControl.getMode() === 'scale') {
+        rebuildActorPhysics(prop);
+    }
+}
+
+function rebuildActorPhysics(prop) {
+    if (!prop || !prop.mesh || !physics.ready) return;
+    
+    const { Jolt, bodyInterface } = physics;
+    const currentBody = getActorBody(prop);
+    const bodyID = currentBody?.GetID();
+    
+    if (bodyID) {
+        bodyInterface.RemoveBody(bodyID);
+        bodyInterface.DestroyBody(bodyID);
+    }
+    
+    // Primitive rebuilding based on spawnDynamicPrimitive logic
+    let shape = null;
+    let bodyOptions = {
+        rotation: prop.mesh.quaternion,
+        friction: prop.userData?.friction,
+        restitution: prop.userData?.restitution,
+        allowedDOFs: prop.userData?.allowedDOFs,
+        kinematic: prop.userData?.kinematic,
+        activate: true
+    };
+    
+    const scale = prop.mesh.scale;
+    
+    if (prop.kind === 'sphere') {
+        shape = createOwnedShape(new Jolt.SphereShapeSettings(scale.x));
+        bodyOptions.restitution = 0.48;
+        bodyOptions.friction = 0.58;
+    } else if (prop.kind === 'cube') {
+        const halfExtentVector = new Jolt.Vec3(scale.x, scale.y, scale.z);
+        shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
+        Jolt.destroy(halfExtentVector);
+        bodyOptions.restitution = 0.12;
+        bodyOptions.friction = 0.82;
+    } else if (prop.kind === 'capsule') {
+        // Keep capsules uniform for simplicity since radius/height mapping is tricky for non-uniform scaling
+        shape = createOwnedShape(new Jolt.CapsuleShapeSettings(scale.y, scale.x));
+        bodyOptions.restitution = 0.0;
+        bodyOptions.friction = 0.0;
+        bodyOptions.allowedDOFs = Jolt.EAllowedDOFs_TranslationX | Jolt.EAllowedDOFs_TranslationY | Jolt.EAllowedDOFs_TranslationZ;
+    }
+    
+    if (shape) {
+        const newBody = createDynamicPrimitiveBody(shape, prop.mesh.position, null, bodyOptions);
+        prop.body = newBody;
+    }
 }
 
 function getActorScriptState(prop) {
@@ -2539,10 +2665,10 @@ function ensureActorScriptState(prop) {
     return scriptState;
 }
 
-function buildPrimitiveActorMesh(kind, scale) {
+function buildPrimitiveActorMesh(kind) {
     if (kind === 'sphere') {
         return new THREE.Mesh(
-            new THREE.SphereGeometry(scale, 28, 20),
+            new THREE.SphereGeometry(1, 28, 20),
             new THREE.MeshStandardMaterial({
                 color: 0xf97316,
                 metalness: 0.14,
@@ -2552,9 +2678,9 @@ function buildPrimitiveActorMesh(kind, scale) {
             })
         );
     }
-
+    if (kind === 'cube') {
     return new THREE.Mesh(
-        new THREE.BoxGeometry(scale * 2, scale * 2, scale * 2),
+        new THREE.BoxGeometry(2, 2, 2),
         new THREE.MeshStandardMaterial({
             color: 0x60a5fa,
             metalness: 0.12,
@@ -2563,6 +2689,19 @@ function buildPrimitiveActorMesh(kind, scale) {
             emissiveIntensity: 0.2,
         })
     );
+}
+    if (kind === 'capsule') {
+        return new THREE.Mesh(
+            new THREE.CapsuleGeometry(1, 2, 8, 16),
+            new THREE.MeshStandardMaterial({
+                color: 0x16a34a,
+                metalness: 0.1,
+                roughness: 0.4,
+                emissive: 0x052d12,
+                emissiveIntensity: 0.22,
+            })
+        );
+    }
 }
 
 function syncActorEditorTemplateOptions(selectedTemplateId = '') {
@@ -2631,7 +2770,7 @@ function closeActorEditor() {
     }
 }
 
-function openActorEditor({ kind = 'sphere', templateId = '', label = '' } = {}) {
+function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
     if (!actorEditor) return;
 
     actorEditorState.open = true;
@@ -2642,7 +2781,7 @@ function openActorEditor({ kind = 'sphere', templateId = '', label = '' } = {}) 
         actorLabelInput.value = label;
     }
     if (actorScaleInput) {
-        actorScaleInput.value = kind === 'cube' ? '0.3' : '0.5';
+        actorScaleInput.value = kind === 'cube' ? '2.0' : '0.5';
     }
     if (actorComponentCollisionInput) {
         actorComponentCollisionInput.checked = true;
@@ -2700,7 +2839,7 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
 
     if (openScriptEditor) {
         ensureActorScriptState(actor);
-        objectScriptState.targetPropId = actor.id;
+        selectShowcaseActor(actor.id);
         openObjectScriptEditor('tick');
     }
 
@@ -2792,6 +2931,17 @@ function removeObjectScriptDraft(propId) {
 function findDynamicPropByMesh(target) {
     if (!target) return null;
 
+    if (sceneSystem) {
+        for (const actor of sceneSystem.actors) {
+            const mesh = getActorRenderObject(actor);
+            let current = target;
+            while (current) {
+                if (current === mesh) return actor;
+                current = current.parent;
+            }
+        }
+    }
+
     return physics.dynamicBodies.find((prop) => {
         const mesh = getActorRenderObject(prop);
         let current = target;
@@ -2833,11 +2983,17 @@ function getDynamicPropDisplayName(prop) {
 }
 
 function getDynamicPropById(propId) {
+    if (sceneSystem) {
+        for (const actor of sceneSystem.actors) {
+            if (actor.id === propId) return actor;
+        }
+    }
     return physics.dynamicBodies.find((prop) => prop.id === propId) || null;
 }
 
 function getDynamicPropHitFromEvent(event) {
-    if (!renderer || !camera || !physics.dynamicBodies.length) return null;
+    const hasActors = (sceneSystem && sceneSystem.actors.size > 0) || physics.dynamicBodies.length > 0;
+    if (!renderer || !camera || !hasActors) return null;
 
     const rect = renderer.domElement.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
@@ -2846,9 +3002,19 @@ function getDynamicPropHitFromEvent(event) {
     pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointerNdc, camera);
 
-    const targets = physics.dynamicBodies
-        .map((prop) => getActorRenderObject(prop))
-        .filter(Boolean);
+    const targets = [];
+    if (sceneSystem) {
+        for (const actor of sceneSystem.actors) {
+            const mesh = getActorRenderObject(actor);
+            if (mesh) targets.push(mesh);
+        }
+    }
+    physics.dynamicBodies.forEach((prop) => {
+        const mesh = getActorRenderObject(prop);
+        if (mesh && !targets.includes(mesh)) targets.push(mesh);
+    });
+
+    if (targets.length === 0) return null;
 
     const hits = raycaster.intersectObjects(targets, true);
     for (const hit of hits) {
@@ -2960,7 +3126,7 @@ function maybeOpenObjectScriptMenuFromMobileTap(event) {
 function openObjectScriptMenu(event, prop) {
     if (!objectScriptMenu || !container || !prop) return;
 
-    objectScriptState.targetPropId = prop.id;
+    selectShowcaseActor(prop.id);
     objectScriptState.menuOpen = true;
     objectScriptState.menuScreenX = event.clientX;
     objectScriptState.menuScreenY = event.clientY;
@@ -4218,6 +4384,73 @@ function setupMobileControls() {
     updateMobileButtons();
 }
 
+function refreshSceneUI() {
+    if (!sceneUiList || !sceneUiCount) return;
+
+    sceneUiList.innerHTML = '';
+
+    if (!sceneSystem || sceneSystem.actors.size === 0) {
+        sceneUiCount.textContent = '0 Actors';
+        return;
+    }
+
+    const actors = Array.from(sceneSystem.actors);
+    sceneUiCount.textContent = `${actors.length} Actor${actors.length !== 1 ? 's' : ''}`;
+
+    actors.forEach(actor => {
+        const item = document.createElement('div');
+        item.className = 'scene-ui-item';
+        item.dataset.id = actor.id;
+
+        if (objectScriptState.targetPropId === actor.id) {
+            item.style.background = 'rgba(255, 255, 255, 0.12)';
+            item.style.borderColor = 'rgba(112, 0, 255, 0.45)';
+        }
+
+        const nameEl = document.createElement('div');
+        nameEl.className = 'scene-ui-item-name';
+        nameEl.textContent = actor.rootNode.name || actor.id || 'Actor';
+
+        const typeEl = document.createElement('div');
+        typeEl.className = 'scene-ui-item-type';
+        typeEl.textContent = actor.kind || 'Actor';
+
+        item.appendChild(nameEl);
+        item.appendChild(typeEl);
+
+        item.addEventListener('click', () => {
+            selectShowcaseActor(actor.id);
+        });
+
+        item.addEventListener('dblclick', () => {
+            if (!gameplay.active && actor.mesh) {
+                const targetPos = new THREE.Vector3();
+                actor.mesh.getWorldPosition(targetPos);
+                
+                if (gsap) {
+                    gsap.to(camera.position, {
+                        x: targetPos.x + 2.5,
+                        y: targetPos.y + 2.5,
+                        z: targetPos.z + 2.5,
+                        duration: 0.6,
+                        ease: 'power2.out',
+                        onUpdate: () => {
+                            syncShowcaseAnglesFromTarget(targetPos);
+                            applyShowcaseCameraRotation();
+                        }
+                    });
+                } else {
+                    camera.position.set(targetPos.x + 2.5, targetPos.y + 2.5, targetPos.z + 2.5);
+                    syncShowcaseAnglesFromTarget(targetPos);
+                    applyShowcaseCameraRotation();
+                }
+            }
+        });
+
+        sceneUiList.appendChild(item);
+    });
+}
+
 // --- Initialization ---
 async function init() {
     // Mobile Detection
@@ -4233,6 +4466,9 @@ async function init() {
     });
 
     browseModelBtn = document.getElementById('open-model-menu');
+    sceneUiPanel = document.getElementById('scene-ui-panel');
+    sceneUiCount = document.getElementById('scene-ui-count');
+    sceneUiList = document.getElementById('scene-ui-list');
     showcaseModeBtn = document.getElementById('camera-showcase');
     playModeBtn = document.getElementById('camera-play');
     openActorEditorBtn = document.getElementById('open-actor-editor');
@@ -4420,6 +4656,8 @@ async function init() {
 
     scene = new THREE.Scene();
     sceneSystem = createSceneSystem(scene);
+    sceneSystem.onActorsChanged = refreshSceneUI;
+    
     environmentController = createEnvironmentController({
         scene,
         getAmbientLight: () => ambientLight,
@@ -4439,6 +4677,16 @@ async function init() {
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
+
+    // Initialize TransformControls for gizmo manipulation
+    transformControl = new TransformControls(camera, renderer.domElement);
+    transformControl.addEventListener('dragging-changed', (event) => {
+        showcase.looking = false;
+        if (!event.value) {
+            syncTransformToPhysics();
+        }
+    });
+    scene.add(transformControl.getHelper());
 
     // Initialize widget system AFTER renderer is set up
     widgetManager = new WidgetManager(container);
@@ -4570,8 +4818,12 @@ async function init() {
         }
         const updateDuration = performance.now() - updateStart;
 
-        const physicsMetrics = stepPhysics(delta);
-        updateVehicleVisuals(delta);
+        let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
+        if (gameplay.active) {
+            physicsMetrics = stepPhysics(delta);
+            updateVehicleVisuals(delta);
+        }
+        
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
         multiplayerController?.update(delta);
 
@@ -4756,6 +5008,20 @@ function setupGameplayEvents() {
     renderer.domElement.addEventListener('wheel', handleShowcaseWheel, { passive: false });
     renderer.domElement.addEventListener('contextmenu', handleShowcaseContextMenu);
     renderer.domElement.addEventListener('click', handleLightGridClick);
+    renderer.domElement.addEventListener('dblclick', (event) => {
+        if (gameplay.active) return;
+        const propHit = getDynamicPropHitFromEvent(event);
+        if (propHit?.prop) {
+            selectShowcaseActor(propHit.prop.id);
+            
+            if (sceneUiList) {
+                const activeItem = sceneUiList.querySelector(`[data-id="${propHit.prop.id}"]`);
+                if (activeItem) {
+                    activeItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }
+        }
+    });
     renderer.domElement.addEventListener('pointerdown', (event) => {
         if (event.pointerType === 'mouse') return;
         if (gameplay.active) {
@@ -4824,6 +5090,16 @@ function handleGameplayKeyEvent(event) {
             event.preventDefault();
         }
         return;
+    }
+
+    if (!gameplay.active && !gameplay.pointerLocked && isDown) {
+        if (event.code === 'KeyW') {
+            transformControl?.setMode('translate');
+        } else if (event.code === 'KeyE') {
+            transformControl?.setMode('rotate');
+        } else if (event.code === 'KeyR') {
+            transformControl?.setMode('scale');
+        }
     }
 
     if (!gameplay.active && !gameplay.pointerLocked) {
@@ -4944,6 +5220,17 @@ function handleShowcaseMouseButton(event) {
         renderer.domElement.focus();
         if (event.button === 0 && objectScriptState.menuOpen) {
             closeObjectScriptMenu();
+        }
+        // Left-click: select actor and attach gizmo
+        if (event.button === 0) {
+            const propHit = getDynamicPropHitFromEvent(event);
+            if (propHit?.prop) {
+                selectShowcaseActor(propHit.prop.id);
+            } else {
+                // Clicked empty space — deselect
+                selectShowcaseActor(null);
+            }
+            return;
         }
         if (event.button !== 2) return;
 
@@ -6192,6 +6479,164 @@ document.getElementById('toggle-wireframe').addEventListener('click', () => {
     currentMesh.traverse(child => {
         if (child.isMesh) child.material.wireframe = !child.material.wireframe;
     });
+});
+
+document.getElementById('reset-view').addEventListener('click', () => {
+    resetShowcaseCamera();
+});
+
+// === UMAP SCENE EXPORT / IMPORT ===
+function exportWorldToUmap() {
+    const umap = {
+        version: 1,
+        actors: []
+    };
+    
+    for (const actor of (sceneSystem?.actors || [])) {
+        const mesh = getActorRenderObject(actor);
+        if (!mesh) continue;
+        
+        const scripts = objectScriptState.drafts[actor.id] || null;
+        
+        umap.actors.push({
+            id: actor.id,
+            kind: actor.kind,
+            name: actor.rootNode?.name || 'Actor',
+            templateId: actor.templateId,
+            userData: actor.entity.getComponent('metadata')?.userData || null,
+            transform: {
+                position: mesh.position.toArray(),
+                quaternion: mesh.quaternion.toArray(),
+                scale: mesh.scale.toArray()
+            },
+            scripts: scripts
+        });
+    }
+    
+    const blob = new Blob([JSON.stringify(umap, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'scene.umap';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 100);
+}
+
+function clearSceneActors() {
+    if (!sceneSystem) return;
+    const actorsToDestroy = Array.from(sceneSystem.actors);
+    for (const actor of actorsToDestroy) {
+        const body = getActorBody(actor);
+        if (body && physics.bodyInterface) {
+            physics.bodyInterface.RemoveBody(body.GetID());
+            physics.bodyInterface.DestroyBody(body.GetID());
+        }
+        
+        const mesh = getActorRenderObject(actor);
+        if (mesh && mesh.parent) {
+            mesh.parent.remove(mesh);
+            mesh.geometry?.dispose();
+            mesh.material?.dispose();
+        }
+        
+        sceneSystem.removeActor(actor);
+    }
+    
+    physics.dynamicBodies = [];
+    selectShowcaseActor(null);
+}
+
+function loadWorldFromUmap(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const umap = JSON.parse(e.target.result);
+            if (umap.version !== 1) {
+                console.warn('Unknown umap version', umap.version);
+            }
+            
+            clearSceneActors();
+            
+            for (const actorData of umap.actors) {
+                if (actorData.scripts) {
+                    objectScriptState.drafts[actorData.id] = actorData.scripts;
+                }
+                
+                let scale = 1;
+                if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
+                    scale = actorData.transform.scale[0]; 
+                }
+                
+                let actor = null;
+                if (actorData.kind === 'vehicle') {
+                    actor = spawnDrivableCar({
+                        includeScripts: !!actorData.scripts,
+                        userData: actorData.userData
+                    });
+                } else if (actorData.kind === 'imported') {
+                    actor = spawnImportedProp(actorData.templateId, {
+                        includeScripts: !!actorData.scripts,
+                        userData: actorData.userData,
+                        includeCollisionBody: true 
+                    });
+                } else {
+                    actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, {
+                        includeScripts: !!actorData.scripts,
+                        userData: actorData.userData,
+                        returnActor: true,
+                        includeCollisionBody: true
+                    });
+                }
+                
+                if (actor) {
+                    const oldId = actor.id;
+                    actor.id = actorData.id;
+                    if (objectScriptState.drafts[oldId]) {
+                        delete objectScriptState.drafts[oldId];
+                    }
+                    if (actorData.name) {
+                        actor.rootNode.name = actorData.name;
+                    }
+                    
+                    const mesh = getActorRenderObject(actor);
+                    if (mesh) {
+                        mesh.userData.dynamicPropId = actor.id;
+                        mesh.position.fromArray(actorData.transform.position);
+                        mesh.quaternion.fromArray(actorData.transform.quaternion);
+                        mesh.scale.fromArray(actorData.transform.scale);
+                        
+                        rebuildActorPhysics(actor);
+                    }
+                    
+                    if (actorData.scripts) {
+                       syncPropScriptState(actor);
+                    }
+                }
+            }
+            
+            saveObjectScriptDrafts();
+            refreshSceneUI();
+            
+        } catch(err) {
+            console.error('Error loading UMAP', err);
+            alert('Failed to load scene file. It might be corrupt or missing templates.');
+        }
+    };
+    reader.readAsText(file);
+}
+
+document.getElementById('save-scene-btn')?.addEventListener('click', exportWorldToUmap);
+document.getElementById('load-scene-btn')?.addEventListener('click', () => {
+    document.getElementById('scene-file-input')?.click();
+});
+document.getElementById('scene-file-input')?.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        loadWorldFromUmap(file);
+        e.target.value = '';
+    }
 });
 
 document.getElementById('reset-view').addEventListener('click', () => {

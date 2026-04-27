@@ -304,6 +304,7 @@ export class SceneSystem {
     constructor(scene) {
         this.scene = scene;
         this.actors = new Set();
+        this.onActorsChanged = null;
     }
 
     addActor(actor) {
@@ -312,6 +313,7 @@ export class SceneSystem {
         this.actors.add(actor);
         actor.sceneSystem = this;
         this.attachActorRoot(actor);
+        if (this.onActorsChanged) this.onActorsChanged();
         return actor;
     }
 
@@ -325,6 +327,7 @@ export class SceneSystem {
 
         actor.sceneSystem = null;
         this.actors.delete(actor);
+        if (this.onActorsChanged) this.onActorsChanged();
         return actor;
     }
 
