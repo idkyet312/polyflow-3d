@@ -8,9 +8,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-DSamZDpu.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-DVaHiXfV.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-CjxCMxkx.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-gI-1tHuq.css">
 </head>
 <body>
     <main>
@@ -24,6 +24,15 @@
         </div>
 
         <div class="workspace">
+            <aside id="scene-ui-panel" class="scene-ui-panel" aria-label="Scene Graph">
+                <div class="scene-ui-header">
+                    <div class="scene-ui-title">Scene Hierarchy</div>
+                    <div class="scene-ui-subtitle" id="scene-ui-count">0 Actors</div>
+                </div>
+                <div id="scene-ui-list" class="scene-ui-list">
+                    <!-- Actor items will be injected here -->
+                </div>
+            </aside>
             <div id="canvas-container">
                 <div class="viewer-menu" aria-label="Viewer controls">
                     <div class="viewer-menu-card">
@@ -56,6 +65,7 @@
                                         <option value="cube">Cube Actor</option>
                                         <option value="vehicle">Vehicle Actor</option>
                                         <option value="imported">Imported Actor</option>
+                                        <option value="capsule">Simple AI Actor</option>
                                     </select>
                                 </label>
                                 <label class="viewer-code-field" for="actor-label-input">
@@ -113,6 +123,18 @@
                                         <button class="btn viewer-menu-btn" id="load-sample">Load Sample</button>
                                     </div>
                                     <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx" style="display: none;">
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Scenes</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn btn-primary viewer-menu-btn" id="save-scene-btn">Save Scene (.umap)</button>
+                                        <button class="btn viewer-menu-btn" id="load-scene-btn">Load Scene</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Save your placed actors, physics bodies, and scripts to a .umap file to load later.</div>
+                                    <input type="file" id="scene-file-input" accept=".umap,.json" style="display: none;">
                                 </div>
                             </details>
 
