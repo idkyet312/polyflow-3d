@@ -655,46 +655,47 @@ const VEHICLE_SETTINGS = {
     length: 2.6,
     width: 1.35,
     height: 0.6,
+    mass: 1200,
     wheelBase: 1.72,
     trackWidth: 1.18,
     spawnDistance: 4.8,
-    spawnLift: 0.9,
+    spawnLift: 0.15,
     interactionRadius: 4.5,
     seatHeight: 1.15,
     followDistance: 5.6,
     followHeight: 2.4,
     lookAhead: 2.2,
-    acceleration: 4.2, // More gradual acceleration like Warthog
-    reverseAcceleration: 3.8,
-    boostAcceleration: 5.5,
-    coastDrag: 2.2, // Higher drag for more realistic momentum
-    rollingDrag: 0.35, // More rolling resistance
-    lowSpeedGrip: 6.8, // Better low-speed traction
-    highSpeedGrip: 3.2, // Less grip at high speeds for sliding
-    brakeGrip: 3.5, // Much weaker brakes - takes longer to stop
-    driftGrip: 1.2, // Allows some drifting but recovers well
-    partialContactGrip: 1.2,
-    driftBoostThreshold: 0.35,
-    driftSteerBonus: 1.4,
-    steeringRate: 2.1, // More responsive steering like Warthog
-    steeringReturn: 6.2, // Faster return to center
-    steeringGrip: 8.5, // Better steering control
-    steeringHighSpeedDamping: 0.55, // More stability at high speeds
-    uprightTorque: 180,
-    rollTorque: 120,
-    pitchTorque: 100,
-    suspensionRideHeight: 0.92,
-    suspensionTravel: 0.48,
-    suspensionSpring: 1.15,
-    suspensionDamping: 7.4,
+    acceleration: 3.0,
+    reverseAcceleration: 2.0,
+    boostAcceleration: 4.5,
+    coastDrag: 0.8,
+    rollingDrag: 0.05,
+    lowSpeedGrip: 8.0,
+    highSpeedGrip: 5.5,
+    brakeGrip: 10.0,
+    driftGrip: 2.0,
+    partialContactGrip: 1.5,
+    driftBoostThreshold: 0.4,
+    driftSteerBonus: 1.2,
+    steeringRate: 2.8,
+    steeringReturn: 5.0,
+    steeringGrip: 6.0,
+    steeringHighSpeedDamping: 0.35,
+    uprightTorque: 40,
+    rollTorque: 15,
+    pitchTorque: 10,
+    suspensionRideHeight: 0.55,
+    suspensionTravel: 0.25,
+    suspensionSpring: 2.8,
+    suspensionDamping: 12.0,
     bumpPitchTorque: 0,
     bumpRollTorque: 0,
     bumpLaunchBoost: 0,
-    airtimeAngularBlend: 0.05,
-    maxDriveSpeed: 32, // Slightly higher top speed
-    maxReverseSpeed: 12,
-    brakeDamping: 0.92, // Much weaker brakes - retains more speed
-    maxAngularVelocity: 4.2, // Allow more rotation for realistic handling
+    airtimeAngularBlend: 0.03,
+    maxDriveSpeed: 28,
+    maxReverseSpeed: 8,
+    brakeDamping: 0.85,
+    maxAngularVelocity: 3.0,
 };
 const PHYSICS_COLLISION_STEPS = 2;
 
@@ -1921,14 +1922,6 @@ function positionVehicleCamera(vehiclePosition, vehicleRotation, delta) {
         .addScaledVector(upVector, VEHICLE_SETTINGS.followHeight)
         .addScaledVector(flatForward, -VEHICLE_SETTINGS.followDistance);
 
-    // Add camera shake during tail whip
-    if (vehicleState.tailWhipLastFrame) {
-        const shakeAmount = 0.3;
-        chasePosition.x += (Math.random() - 0.5) * shakeAmount;
-        chasePosition.y += (Math.random() - 0.5) * shakeAmount;
-        chasePosition.z += (Math.random() - 0.5) * shakeAmount;
-    }
-
     const lookTarget = tempVectorD
         .copy(vehiclePosition)
         .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
@@ -2267,10 +2260,8 @@ function updateVehicleVisuals(delta) {
         const linearVelocity = copyJoltVector(tempVectorB, bodyInterface.GetLinearVelocity(bodyId));
         const forwardSpeed = linearVelocity.dot(flatForward);
 
-        // Enhanced wheel spin during tail whip
+        visualState.spinAngle -= (forwardSpeed / visualState.wheelRadius) * delta;
         const isActiveVehicle = gameplay.active && vehicleState.activePropId === prop.id;
-        const tailWhipSpinBonus = isActiveVehicle && vehicleState.tailWhipLastFrame ? 3.0 : 1.0;
-        visualState.spinAngle -= (forwardSpeed / visualState.wheelRadius) * delta * tailWhipSpinBonus;
         const inputSteer = isActiveVehicle
             ? ((gameplay.input.left ? 1 : 0) - (gameplay.input.right ? 1 : 0))
             : 0;
@@ -2325,10 +2316,10 @@ function spawnDrivableCar(options = {}) {
 
     const body = createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, {
         rotation: carRotation,
-        friction: 1.35, // Higher friction for better traction
-        restitution: 0.02,
-        linearDamping: 0.25, // More linear damping for heavier feel
-        angularDamping: 0.55, // More angular damping for stability
+        friction: 0.8,
+        restitution: 0.05,
+        linearDamping: 0.12,
+        angularDamping: 0.3,
         motionQuality: Jolt.EMotionQuality_LinearCast,
         skipImpulse: true,
         enhancedInternalEdgeRemoval: true,
@@ -3107,6 +3098,20 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
     actorEditor.hidden = false;
 }
 
+function setActorColor(actor, hexColor) {
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return;
+    const color = new THREE.Color(hexColor);
+    mesh.traverse((child) => {
+        if (child.isMesh && child.material) {
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            for (const mat of mats) {
+                if (mat.color) mat.color.copy(color);
+            }
+        }
+    });
+}
+
 function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     const kind = actorKindSelect?.value || 'sphere';
     const includeCollisionBody = kind === 'vehicle' ? true : !!actorComponentCollisionInput?.checked;
@@ -3148,6 +3153,11 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
             actorEditorStatus.textContent = 'Actor creation failed.';
         }
         return null;
+    }
+
+    const actorColorInput = document.getElementById('actor-color-input');
+    if (actorColorInput) {
+        setActorColor(actor, actorColorInput.value);
     }
 
     closeActorEditor();
@@ -6786,21 +6796,17 @@ function updateVehicleGameplay(delta) {
     ].map((corner, index) => {
         const sampleX = vehiclePosition.x + flatForward.x * corner.forward + flatRight.x * corner.sideways;
         const sampleZ = vehiclePosition.z + flatForward.z * corner.forward + flatRight.z * corner.sideways;
+        const sampleAnchorY = vehiclePosition.y
+            + vehicleForward.y * corner.forward
+            + vehicleRight.y * corner.sideways;
         const groundHeight = getGroundHeightAt(sampleX, sampleZ, true, {
+            ignoreActor: vehicle,
             minSurfaceUpDot: 0.35,
-            surfaceStepTolerance: 0.65,
+            surfaceStepTolerance: 0,
+            cullBackFaces: true,
+            maxHitY: sampleAnchorY + 0.05,
         });
-        const rawRideHeight = groundHeight === null ? null : vehiclePosition.y - groundHeight;
-        const previousRideHeight = rideState.sampleRideHeights[index];
-        let rideHeight = rawRideHeight;
-
-        if (rawRideHeight === null && previousRideHeight !== null) {
-            rideHeight = Math.min(
-                previousRideHeight + delta * 6,
-                VEHICLE_SETTINGS.suspensionRideHeight + VEHICLE_SETTINGS.suspensionTravel + 0.18,
-            );
-        }
-
+        const rideHeight = groundHeight === null ? null : vehiclePosition.y - groundHeight;
         rideState.sampleRideHeights[index] = rideHeight;
         const compression = rideHeight === null
             ? 0
@@ -6816,15 +6822,15 @@ function updateVehicleGameplay(delta) {
     const grounded = contactSamples.length > 0;
     const contactRatio = contactSamples.length / cornerSamples.length;
     const averageCompression = contactSamples.length
-        ? contactSamples.reduce((sum, corner) => sum + corner.compression, 0) / contactSamples.length
+        ? Math.max(...contactSamples.map((corner) => corner.compression))
         : 0;
     const averageGroundHeight = contactSamples.length
-        ? contactSamples.reduce((sum, corner) => sum + (vehiclePosition.y - corner.rideHeight), 0) / contactSamples.length
+        ? Math.max(...contactSamples.map((corner) => vehiclePosition.y - corner.rideHeight))
         : null;
-    const frontCompression = (cornerSamples[0].compression + cornerSamples[1].compression) * 0.5;
-    const rearCompression = (cornerSamples[2].compression + cornerSamples[3].compression) * 0.5;
-    const leftCompression = (cornerSamples[0].compression + cornerSamples[2].compression) * 0.5;
-    const rightCompression = (cornerSamples[1].compression + cornerSamples[3].compression) * 0.5;
+    const frontCompression = Math.max(cornerSamples[0].compression, cornerSamples[1].compression);
+    const rearCompression = Math.max(cornerSamples[2].compression, cornerSamples[3].compression);
+    const leftCompression = Math.max(cornerSamples[0].compression, cornerSamples[2].compression);
+    const rightCompression = Math.max(cornerSamples[1].compression, cornerSamples[3].compression);
     rideState.compression = averageCompression;
     rideState.contactRatio = contactRatio;
     rideState.frontCompression = frontCompression;
@@ -6853,29 +6859,18 @@ function updateVehicleGameplay(delta) {
                 : 0;
     let nextForwardSpeed = THREE.MathUtils.damp(forwardSpeed, targetForwardSpeed, forwardLambda, delta);
     nextForwardSpeed *= 1 - (VEHICLE_SETTINGS.rollingDrag * delta);
-    const gripBase = THREE.MathUtils.lerp(
-        VEHICLE_SETTINGS.lowSpeedGrip,
-        VEHICLE_SETTINGS.highSpeedGrip,
-        speedRatio
-    );
-
-    // Weight transfer effects for realistic handling
-    const weightTransfer = throttle * 0.3; // Acceleration/braking affects weight distribution
-    const frontGripModifier = vehicleState.brakeHeld ? 1.2 : (throttle > 0 ? 0.9 : 1.0);
-    const rearGripModifier = throttle > 0 ? 1.15 : (vehicleState.brakeHeld ? 0.85 : 1.0);
-
-    // Tail whip detection and mechanics (Halo Warthog style)
-    const tailWhipActive = vehicleState.brakeHeld && Math.abs(steer) > 0.7 && forwardSpeed > 2.0;
-    const tailWhipGrip = tailWhipActive ? 0.3 : 1.0; // Significantly reduce grip during tail whip
+    const gripBase = speedRatio >= 0.5
+        ? VEHICLE_SETTINGS.highSpeedGrip
+        : VEHICLE_SETTINGS.lowSpeedGrip;
 
     const gripLambda = vehicleState.brakeHeld
-        ? VEHICLE_SETTINGS.brakeGrip * frontGripModifier * tailWhipGrip
+        ? VEHICLE_SETTINGS.brakeGrip
         : drifting
             ? VEHICLE_SETTINGS.driftGrip
-            : gripBase * (throttle > 0 ? rearGripModifier : frontGripModifier);
+            : gripBase;
 
     const contactGrip = grounded
-        ? THREE.MathUtils.lerp(VEHICLE_SETTINGS.partialContactGrip, gripLambda, smoothedContactRatio)
+        ? gripLambda
         : VEHICLE_SETTINGS.partialContactGrip;
     const nextLateralSpeed = THREE.MathUtils.damp(lateralSpeed, 0, contactGrip, delta);
     const nextHorizontalVelocity = tempVectorE
@@ -6885,25 +6880,14 @@ function updateVehicleGameplay(delta) {
 
     if (vehicleState.brakeHeld) {
         nextHorizontalVelocity.multiplyScalar(VEHICLE_SETTINGS.brakeDamping);
-    } else if (throttle === 0 && forwardSpeed > 0.5) {
-        // Engine braking effect when no throttle applied
-        nextHorizontalVelocity.multiplyScalar(0.96);
     }
-
-    // Tail whip boost effect
-    if (tailWhipActive && !vehicleState.tailWhipLastFrame) {
-        // Initial tail whip activation - add small forward boost
-        const tailWhipBoost = flatForward.clone().multiplyScalar(2.0);
-        nextHorizontalVelocity.add(tailWhipBoost);
-    }
-    vehicleState.tailWhipLastFrame = tailWhipActive;
 
     let nextVerticalVelocity = linearVelocity.y;
     if (grounded && filteredGroundHeight !== null) {
-        const targetBodyHeight = filteredGroundHeight + VEHICLE_SETTINGS.suspensionRideHeight - VEHICLE_SETTINGS.suspensionTravel * 0.42;
+        const targetBodyHeight = filteredGroundHeight + VEHICLE_SETTINGS.suspensionRideHeight - VEHICLE_SETTINGS.suspensionTravel * 0.5;
         const heightError = targetBodyHeight - vehiclePosition.y;
-        const springForce = heightError * VEHICLE_SETTINGS.suspensionSpring * 18;
-        const damperForce = -linearVelocity.y * VEHICLE_SETTINGS.suspensionDamping * 0.8;
+        const springForce = heightError * VEHICLE_SETTINGS.suspensionSpring * 9.81;
+        const damperForce = -linearVelocity.y * VEHICLE_SETTINGS.suspensionDamping;
         nextVerticalVelocity = linearVelocity.y + (springForce + damperForce) * delta;
     }
 
@@ -6913,21 +6897,20 @@ function updateVehicleGameplay(delta) {
 
     const steerSpeedFactor = THREE.MathUtils.clamp(Math.abs(nextForwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
     const steeringDirection = nextForwardSpeed >= 0 ? 1 : -0.7;
-    const steeringStrength = THREE.MathUtils.lerp(1, VEHICLE_SETTINGS.steeringHighSpeedDamping, steerSpeedFactor);
+    const steeringStrength = steerSpeedFactor >= 0.5
+        ? VEHICLE_SETTINGS.steeringHighSpeedDamping
+        : 1;
     const driftSteerBonus = drifting ? VEHICLE_SETTINGS.driftSteerBonus : 1;
-    const tailWhipSteerBonus = tailWhipActive ? 2.8 : 1; // Much higher steering during tail whip
 
     const targetYawRate = steer === 0
         ? 0
-        : steer * steeringDirection * VEHICLE_SETTINGS.steeringRate * steeringStrength * driftSteerBonus * tailWhipSteerBonus;
+        : steer * steeringDirection * VEHICLE_SETTINGS.steeringRate * steeringStrength * driftSteerBonus;
 
-    const yawLambda = tailWhipActive
-        ? VEHICLE_SETTINGS.steeringGrip * 0.4 // Less damping during tail whip for faster rotation
-        : (steer === 0 ? VEHICLE_SETTINGS.steeringReturn : VEHICLE_SETTINGS.steeringGrip);
+    const yawLambda = steer === 0 ? VEHICLE_SETTINGS.steeringReturn : VEHICLE_SETTINGS.steeringGrip;
 
     const nextYawRate = THREE.MathUtils.damp(angularVelocity.y, targetYawRate, yawLambda, delta);
-    const rollTilt = -steer * Math.max(0.16, Math.abs(nextForwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed);
-    const pitchTilt = throttle === 0 ? 0 : -throttle * 0.18;
+    const rollTilt = -steer * Math.max(0.08, Math.abs(nextForwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed) * 0.5;
+    const pitchTilt = throttle === 0 ? 0 : -throttle * 0.08;
     const nextAngular = new Jolt.Vec3(
         THREE.MathUtils.damp(angularVelocity.x, pitchTilt, grounded ? VEHICLE_SETTINGS.pitchTorque * 0.01 : VEHICLE_SETTINGS.airtimeAngularBlend, delta),
         nextYawRate,
@@ -6940,22 +6923,11 @@ function updateVehicleGameplay(delta) {
         bodyInterface.ActivateBody(bodyId);
     }
 
-    const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? smoothedContactRatio * 0.6 : 0.08));
+    const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? 1 : 0.05));
     if (uprightCorrection.lengthSq() > 1e-6) {
         const uprightTorque = new Jolt.Vec3(uprightCorrection.x, uprightCorrection.y, uprightCorrection.z);
         bodyInterface.AddTorque(bodyId, uprightTorque, Jolt.EActivation_Activate);
         Jolt.destroy(uprightTorque);
-    }
-
-    if (grounded && (Math.abs(steer) > 0.05 || Math.abs(throttle) > 0.05)) {
-        const bumpRollFilter = THREE.MathUtils.clamp(1 - Math.abs(smoothedLeftCompression - smoothedRightCompression) * 2.4, 0.2, 1);
-        const bumpPitchFilter = THREE.MathUtils.clamp(1 - Math.abs(smoothedFrontCompression - smoothedRearCompression) * 2.4, 0.2, 1);
-        const rollForce = tempVectorB.copy(vehicleRight).multiplyScalar(-steer * Math.abs(nextForwardSpeed) * VEHICLE_SETTINGS.rollTorque * 0.022 * bumpRollFilter);
-        const pitchForce = tempVectorC.copy(vehicleForward).multiplyScalar(throttle * VEHICLE_SETTINGS.pitchTorque * 0.035 * bumpPitchFilter);
-        const handlingTorque = rollForce.add(pitchForce);
-        const handlingJolt = new Jolt.Vec3(handlingTorque.x, handlingTorque.y, handlingTorque.z);
-        bodyInterface.AddTorque(bodyId, handlingJolt, Jolt.EActivation_Activate);
-        Jolt.destroy(handlingJolt);
     }
 
     vehicle.mesh.position.copy(vehiclePosition);
@@ -6984,10 +6956,6 @@ function updateVehicleGameplay(delta) {
             if (forwardSpeed > 15) {
             }
 
-            // Bonus points for tail whip
-            if (tailWhipActive && !vehicleState.tailWhipLastFrame) {
-            }
-
             widgetManager.updateWidget(window.exampleWidgets.score, {
                 text: `Score: ${Math.floor(window.gameScore)}`
             });
@@ -7007,6 +6975,7 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
         minSurfaceUpDot = Number.NEGATIVE_INFINITY,
         surfaceStepTolerance = 0,
         cullBackFaces = false,
+        maxHitY = Number.POSITIVE_INFINITY,
     } = options;
     const originY = Math.max(PLAYER_SETTINGS.probeHeight, gameplayBounds.max.y + PLAYER_SETTINGS.probeHeight);
     const hits = [];
@@ -7063,8 +7032,12 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
         })
         : hits;
 
+    const heightFilteredHits = Number.isFinite(maxHitY)
+        ? backFaceCulledHits.filter((hit) => (hit?.point?.y ?? Number.NEGATIVE_INFINITY) <= maxHitY)
+        : backFaceCulledHits;
+
     const filteredHits = minSurfaceUpDot > Number.NEGATIVE_INFINITY
-        ? backFaceCulledHits.filter((hit) => {
+        ? heightFilteredHits.filter((hit) => {
             if (!hit?.face || !hit.object?.matrixWorld) {
                 return true;
             }
@@ -7072,11 +7045,11 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
             const hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
             return hitNormal.y >= minSurfaceUpDot;
         })
-        : backFaceCulledHits;
+        : heightFilteredHits;
 
     const resolvedHits = filteredHits.length > 0
         ? filteredHits
-        : (cullBackFaces ? backFaceCulledHits : hits);
+        : (cullBackFaces ? heightFilteredHits : hits);
 
     resolvedHits.sort((a, b) => a.distance - b.distance);
     let resolvedHit = resolvedHits[0] || null;
@@ -8285,8 +8258,19 @@ function exitBlueprintEditor() {
     refreshSceneUI();
 }
 
+function syncBlueprintColorPicker() {
+    const picker = document.getElementById('bp-color-picker');
+    if (!picker) return;
+    const comp = blueprintState.selectedComponent;
+    if (comp?.isMesh && comp.material) {
+        const mat = Array.isArray(comp.material) ? comp.material[0] : comp.material;
+        if (mat?.color) picker.value = '#' + mat.color.getHexString();
+    }
+}
+
 function refreshBlueprintComponents() {
     updateBlueprintDetailsUI();
+    syncBlueprintColorPicker();
     const container = document.getElementById('selected-actor-components');
     if (!container) return;
     container.innerHTML = '';
@@ -8512,6 +8496,14 @@ function applyBlueprintDetailsFromUI() {
 });
 
 // Blueprint panel: Save/Load Actor buttons
+document.getElementById('btn-bp-apply-color')?.addEventListener('click', () => {
+    const prop = getDynamicPropById(objectScriptState.targetPropId);
+    if (!prop) return;
+    const picker = document.getElementById('bp-color-picker');
+    if (!picker) return;
+    setActorColor(prop, picker.value);
+});
+
 document.getElementById('btn-bp-save-actor')?.addEventListener('click', () => {
     if (blueprintState.targetActor) {
         exportActorToFile(blueprintState.targetActor);
@@ -8572,7 +8564,14 @@ function snapshotSceneState() {
 
 function restoreSceneState() {
     if (!pieSceneSnapshot || !sceneSystem) return;
-    
+
+    const snapshotIds = new Set(pieSceneSnapshot.map(s => s.id));
+    for (const actor of Array.from(sceneSystem.actors)) {
+        if (!snapshotIds.has(actor.id)) {
+            destroyDynamicPhysicsProp(actor);
+        }
+    }
+
     for (const actorSnap of pieSceneSnapshot) {
         const actor = getDynamicPropById(actorSnap.id);
         if (!actor) continue;

@@ -84,6 +84,11 @@
                                     <input id="actor-scale-input" class="viewer-text-input" type="number" min="0.1"
                                         max="6" step="0.1" value="0.5">
                                 </label>
+                                <label class="viewer-code-field" for="actor-color-input">
+                                    <span class="viewer-code-field-label">Color</span>
+                                    <input id="actor-color-input" class="viewer-text-input" type="color" value="#888888"
+                                        style="height: 32px; padding: 2px; cursor: pointer;">
+                                </label>
                                 <label class="viewer-code-field" for="actor-imported-template-select">
                                     <span class="viewer-code-field-label">Imported Source</span>
                                     <select id="actor-imported-template-select" class="viewer-text-input">
@@ -99,8 +104,11 @@
                                 </label>
                                 <label class="viewer-checkbox-row" for="actor-component-collision">
                                     <input type="checkbox" id="actor-component-collision" checked>
-                                    <span>Add a Collision Body component so the actor participates in Jolt
-                                        physics.</span>
+                                    <span>Add collision so the actor blocks traces and gameplay like a static world object.</span>
+                                </label>
+                                <label class="viewer-checkbox-row" for="actor-component-physics">
+                                    <input type="checkbox" id="actor-component-physics" checked>
+                                    <span>Enable simulated physics so the actor becomes a movable rigid body.</span>
                                 </label>
                                 <label class="viewer-checkbox-row" for="actor-component-scripts">
                                     <input type="checkbox" id="actor-component-scripts" checked>
@@ -186,6 +194,14 @@
                                 <input type="number" id="bp-scl-z" class="ui-input" step="0.1"
                                     style="flex:1; font-size: 10px; padding: 2px;">
                             </div>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Material Color:</div>
+                        <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
+                            <input type="color" id="bp-color-picker" value="#888888"
+                                style="width: 48px; height: 28px; padding: 1px; cursor: pointer; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; background: transparent;">
+                            <button class="btn viewer-menu-btn" id="btn-bp-apply-color"
+                                style="padding: 4px 10px; font-size: 11px; flex: 1;">Apply to All Materials</button>
                         </div>
 
                         <div class="viewer-inline-note" style="margin-bottom: 8px;">Add Child Components:</div>
@@ -479,24 +495,6 @@
                 </div>
             </div>
 
-            <div class="controls">
-                <select id="env-selector" class="btn env-select">
-                    <option value="sunny-sky">☀️ Sunny Sky</option>
-                    <option value="studio">🎬 Studio</option>
-                    <option value="urban-street">🏙️ Urban Street</option>
-                    <option value="forest-trail">🌲 Forest Trail</option>
-                    <option value="golden-sunset">🌅 Golden Sunset</option>
-                </select>
-                <div class="res-group">
-                    <button class="btn res-btn res-btn-active" data-res="1k">1K</button>
-                    <button class="btn res-btn" data-res="2k">2K</button>
-                    <button class="btn res-btn" data-res="4k">4K</button>
-                </div>
-                <button class="btn" id="toggle-wireframe">Wireframe</button>
-                <button class="btn" id="reset-view">Reset View</button>
-                <button class="btn btn-primary" id="download-asset" style="display: none;">Download Optimized
-                    .glb</button>
-            </div>
         </div>
     </main>
 

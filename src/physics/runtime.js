@@ -4,6 +4,7 @@ export function createPhysicsRuntime({
     physics,
     gameplay,
     playerSettings,
+    collisionSteps = 2,
     getCamera,
     getWorldFloor,
     copyJoltVector,
@@ -135,11 +136,11 @@ export function createPhysicsRuntime({
             };
         }
 
-        const collisionSteps = delta > 1 / 55 ? 2 : 1;
-        onCollisionStepsChange?.(collisionSteps);
+        const resolvedCollisionSteps = Math.max(1, Math.floor(collisionSteps || 1));
+        onCollisionStepsChange?.(resolvedCollisionSteps);
 
         const stepStart = performance.now();
-        physics.jolt.Step(delta, collisionSteps);
+        physics.jolt.Step(delta, resolvedCollisionSteps);
         const stepDuration = performance.now() - stepStart;
 
         const syncStart = performance.now();

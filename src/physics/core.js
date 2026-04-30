@@ -15,6 +15,19 @@ export function createPhysicsCore({
     const tempVectorA = new THREE.Vector3();
     const tempVectorB = new THREE.Vector3();
     const tempVectorC = new THREE.Vector3();
+    let backFaceCulledBodyIds = null;
+
+    function registerBackFaceCulledBody(body) {
+        if (!body || !backFaceCulledBodyIds) return;
+        const id = body.GetID().GetIndexAndSequenceNumber();
+        backFaceCulledBodyIds.add(id);
+    }
+
+    function unregisterBackFaceCulledBody(body) {
+        if (!body || !backFaceCulledBodyIds) return;
+        const id = body.GetID().GetIndexAndSequenceNumber();
+        backFaceCulledBodyIds.delete(id);
+    }
 
     function createOwnedShape(settings) {
         const { Jolt } = physics;
@@ -94,7 +107,18 @@ export function createPhysicsCore({
         });
 
         const materials = new Jolt.PhysicsMaterialList();
-        const shape = createOwnedShape(new Jolt.MeshShapeSettings(triangles, materials));
+        const meshSettings = new Jolt.MeshShapeSettings(triangles, materials);
+        // Aggressive internal-edge suppression: edges between triangles whose
+        // normals differ by less than ~50° are marked inactive at build time,
+        // so dynamic bodies sliding across track seams don't get a contact
+        // normal kicked into the seam. Default is cos(5°) ≈ 0.9962, far too
+        // tight for stitched road segments that include slight bevels and
+        // joints between near-coplanar triangles.
+        if ('set_mActiveEdgeCosThresholdAngle' in meshSettings
+            || 'mActiveEdgeCosThresholdAngle' in meshSettings) {
+            meshSettings.mActiveEdgeCosThresholdAngle = Math.cos(50 * Math.PI / 180);
+        }
+        const shape = createOwnedShape(meshSettings);
         const bodyPosition = new Jolt.RVec3(0, 0, 0);
         const bodyRotation = new Jolt.Quat(0, 0, 0, 1);
         const creationSettings = new Jolt.BodyCreationSettings(
@@ -206,6 +230,60 @@ export function createPhysicsCore({
             );
             physics.bodyFilter = new Jolt.BodyFilter();
             physics.shapeFilter = new Jolt.ShapeFilter();
+
+            // Back-face culling for the car's collisions with the static track.
+            // Jolt's MeshShape is two-sided by default — a car that ends up in
+            // a slight overlap between two stitched track segments can register
+            // a contact against the *underside* of a road triangle and get
+            // launched. The OnContactValidate hook below rejects those contacts
+            // by looking at the penetration axis (Jolt convention: "direction
+            // to move shape 2 to escape body 1"). The filter is scoped to a
+            // registered set of body IDs so it only affects the car — other
+            // dynamic props keep their natural two-sided behavior, and ceilings
+            // / overhangs still register for the player and stacked objects.
+            backFaceCulledBodyIds = new Set();
+            const BACKFACE_Y_THRESHOLD = 0.25;
+            const contactListener = new Jolt.ContactListenerJS();
+
+            contactListener.OnContactValidate = (body1Ptr, body2Ptr, _baseOffsetPtr, collideShapeResultPtr) => {
+                const body1 = Jolt.wrapPointer(body1Ptr, Jolt.Body);
+                const body2 = Jolt.wrapPointer(body2Ptr, Jolt.Body);
+                const id1 = body1.GetID().GetIndexAndSequenceNumber();
+                const id2 = body2.GetID().GetIndexAndSequenceNumber();
+                const culled1 = backFaceCulledBodyIds.has(id1);
+                const culled2 = backFaceCulledBodyIds.has(id2);
+                if (!culled1 && !culled2) return Jolt.ValidateResult_AcceptAllContactsForThisBodyPair;
+
+                const body1Static = body1.IsStatic();
+                const body2Static = body2.IsStatic();
+                if (body1Static === body2Static) return Jolt.ValidateResult_AcceptAllContactsForThisBodyPair;
+
+                const result = Jolt.wrapPointer(collideShapeResultPtr, Jolt.CollideShapeResult);
+                const axis = result.mPenetrationAxis;
+                const ax = axis.GetX();
+                const ay = axis.GetY();
+                const az = axis.GetZ();
+                const lengthSquared = ax * ax + ay * ay + az * az;
+                if (lengthSquared < 1e-10) return Jolt.ValidateResult_AcceptAllContactsForThisBodyPair;
+
+                const normalizedY = ay / Math.sqrt(lengthSquared);
+
+                if (culled1 && body2Static && normalizedY > BACKFACE_Y_THRESHOLD) {
+                    return Jolt.ValidateResult_RejectContact;
+                }
+
+                if (culled2 && body1Static && normalizedY < -BACKFACE_Y_THRESHOLD) {
+                    return Jolt.ValidateResult_RejectContact;
+                }
+
+                return Jolt.ValidateResult_AcceptAllContactsForThisBodyPair;
+            };
+            contactListener.OnContactAdded = () => {};
+            contactListener.OnContactPersisted = () => {};
+            contactListener.OnContactRemoved = () => {};
+            physicsSystem.SetContactListener(contactListener);
+            physics.contactListener = contactListener;
+
             physics.updateSettings = new Jolt.ExtendedUpdateSettings();
             physics.updateSettings.mStickToFloorStepDown = new Jolt.Vec3(0, -0.6, 0);
             physics.updateSettings.mWalkStairsStepUp = new Jolt.Vec3(0, 0.45, 0);
@@ -227,6 +305,128 @@ export function createPhysicsCore({
         }
     }
 
+    /**
+     * Single closest-hit ray cast against the Jolt world.
+     *
+     * @param {{x:number,y:number,z:number}} origin     World-space ray start.
+     * @param {{x:number,y:number,z:number}} direction  Unit direction vector.
+     * @param {number|object} [maxDistanceOrOptions=1000]
+     * @returns {{hit:boolean, point:{x,y,z}, normal:{x,y,z}, distance:number, fraction:number, bodyId:number}|{hit:false}}
+     */
+    function castRay(origin, direction, maxDistanceOrOptions = 1000) {
+        if (!physics.ready) return { hit: false };
+
+        const rayOptions = typeof maxDistanceOrOptions === 'object' && maxDistanceOrOptions !== null
+            ? maxDistanceOrOptions
+            : { maxDistance: maxDistanceOrOptions };
+
+        const ox = Number(origin?.x);
+        const oy = Number(origin?.y);
+        const oz = Number(origin?.z);
+        const dx = Number(direction?.x);
+        const dy = Number(direction?.y);
+        const dz = Number(direction?.z);
+        const distanceLimit = Number(rayOptions.maxDistance);
+        const ignoreBackFaces = rayOptions.ignoreBackFaces !== false;
+
+        if (![ox, oy, oz, dx, dy, dz, distanceLimit].every(Number.isFinite)) {
+            return { hit: false };
+        }
+
+        const directionLengthSq = dx * dx + dy * dy + dz * dz;
+        if (directionLengthSq <= 1e-12 || distanceLimit <= 0) {
+            return { hit: false };
+        }
+
+        const { Jolt, physicsSystem } = physics;
+        const ray = new Jolt.RRayCast();
+        const o = new Jolt.RVec3(ox, oy, oz);
+        const d = new Jolt.Vec3(dx * distanceLimit, dy * distanceLimit, dz * distanceLimit);
+        ray.mOrigin = o;
+        ray.mDirection = d;
+
+        const settings = new Jolt.RayCastSettings();
+        if (typeof Jolt.EBackFaceMode_IgnoreBackFaces !== 'undefined' && ignoreBackFaces) {
+            settings.mBackFaceModeTriangles = Jolt.EBackFaceMode_IgnoreBackFaces;
+        }
+        const collector = new Jolt.CastRayClosestHitCollisionCollector();
+
+        try {
+            physicsSystem.GetNarrowPhaseQuery().CastRay(
+                ray,
+                settings,
+                collector,
+                physics.movingBroadPhaseFilter,
+                physics.movingLayerFilter,
+                physics.bodyFilter,
+                physics.shapeFilter,
+            );
+        } catch (err) {
+            // Fallback: try the simpler 3-arg form.
+            try {
+                physicsSystem.GetNarrowPhaseQuery().CastRay(ray, settings, collector);
+            } catch (_) {
+                Jolt.destroy(o); Jolt.destroy(d); Jolt.destroy(settings); Jolt.destroy(collector);
+                return { hit: false };
+            }
+        }
+
+        if (!collector.HadHit?.()) {
+            Jolt.destroy(o); Jolt.destroy(d); Jolt.destroy(settings); Jolt.destroy(collector);
+            return { hit: false };
+        }
+
+        const hit = typeof collector.get_mHit === 'function' ? collector.get_mHit() : collector.mHit;
+        const fraction = typeof hit?.get_mFraction === 'function' ? hit.get_mFraction() : hit?.mFraction;
+        if (!Number.isFinite(fraction)) {
+            Jolt.destroy(o); Jolt.destroy(d); Jolt.destroy(settings); Jolt.destroy(collector);
+            return { hit: false };
+        }
+
+        const distance = fraction * distanceLimit;
+        const point = {
+            x: ox + dx * distance,
+            y: oy + dy * distance,
+            z: oz + dz * distance,
+        };
+
+        // Normal extraction is optional. Guard every embind boundary because
+        // older compat builds can surface opaque "undefined at 0" errors when
+        // SubShapeID/body accessors are missing.
+        let normal = { x: 0, y: 1, z: 0 };
+        let bodyId = -1;
+        try {
+            const id = typeof hit?.get_mBodyID === 'function' ? hit.get_mBodyID() : hit?.mBodyID;
+            bodyId = id?.GetIndexAndSequenceNumber?.() ?? -1;
+
+            if (id && bodyId >= 0) {
+                const body = physics.bodyInterface?.TryGetBody?.(id) ?? null;
+                const subShapeId = typeof hit?.get_mSubShapeID2 === 'function'
+                    ? hit.get_mSubShapeID2()
+                    : hit?.mSubShapeID2;
+
+                if (body && subShapeId) {
+                    const jPoint = new Jolt.RVec3(point.x, point.y, point.z);
+                    try {
+                        const n = body.GetWorldSpaceSurfaceNormal(subShapeId, jPoint);
+                        if (n) {
+                            normal = { x: n.GetX(), y: n.GetY(), z: n.GetZ() };
+                        }
+                    } finally {
+                        Jolt.destroy(jPoint);
+                    }
+                }
+            }
+        } catch (_) { /* keep default normal */ }
+
+        Jolt.destroy(o);
+        Jolt.destroy(d);
+        Jolt.destroy(settings);
+        Jolt.destroy(collector);
+
+        return { hit: true, point, normal, distance, fraction, bodyId };
+    }
+
     return {
         initPhysics,
         createOwnedShape,
@@ -235,5 +435,8 @@ export function createPhysicsCore({
         destroyPhysicsBody,
         rebuildTerrainPhysicsBody,
         rebuildModelPhysicsBody,
+        castRay,
+        registerBackFaceCulledBody,
+        unregisterBackFaceCulledBody,
     };
 }
