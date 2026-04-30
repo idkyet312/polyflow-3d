@@ -840,6 +840,7 @@ const objectScriptState = {
     menuScreenX: 0,
     menuScreenY: 0,
     targetPropId: '',
+    targetObjectUuid: '',
     targetEvent: 'tick',
 };
 const debugConsoleState = {
@@ -2679,8 +2680,24 @@ function ensureObjectScriptDraftEntry(propId) {
     return objectScriptState.drafts[propId];
 }
 
+function syncRuntimePropIdCounter(propId) {
+    if (typeof propId !== 'string') return;
+
+    const match = /^prop-(\d+)$/.exec(propId);
+    if (!match) return;
+
+    const nextId = Number.parseInt(match[1], 10) + 1;
+    if (Number.isFinite(nextId)) {
+        objectScriptState.nextPropId = Math.max(objectScriptState.nextPropId, nextId);
+    }
+}
+
 function createRuntimePropId() {
-    const propId = `prop-${objectScriptState.nextPropId++}`;
+    let propId = '';
+    do {
+        propId = `prop-${objectScriptState.nextPropId++}`;
+    } while (getDynamicPropById(propId));
+
     ensureObjectScriptDraftEntry(propId);
     return propId;
 }
@@ -2693,11 +2710,39 @@ function getActorBody(prop) {
     return prop.body || getPhysicsBodyComponent(prop)?.body || null;
 }
 
-function selectShowcaseActor(actorId) {
+function isObjectWithinRoot(object, root) {
+    let current = object;
+    while (current) {
+        if (current === root) return true;
+        current = current.parent;
+    }
+    return false;
+}
+
+function getActorSelectionObject(prop, preferredObject = null) {
+    const root = getActorRenderObject(prop);
+    if (!root) return null;
+
+    if (preferredObject && isObjectWithinRoot(preferredObject, root)) {
+        return preferredObject;
+    }
+
+    if (objectScriptState.targetObjectUuid) {
+        const selectedObject = root.getObjectByProperty?.('uuid', objectScriptState.targetObjectUuid) ?? null;
+        if (selectedObject) {
+            return selectedObject;
+        }
+    }
+
+    return root;
+}
+
+function selectShowcaseActor(actorId, selectionObject = null) {
     if (gameplay.active) return; // Only allow selection in Showcase mode
     
     const previousTargetId = objectScriptState.targetPropId;
     objectScriptState.targetPropId = actorId || '';
+    objectScriptState.targetObjectUuid = '';
     
     if (blueprintState.active && actorId !== blueprintState.targetActor?.id) {
         exitBlueprintEditor();
@@ -2705,11 +2750,13 @@ function selectShowcaseActor(actorId) {
     
     if (actorId) {
         const prop = getDynamicPropById(actorId);
+        const targetObject = getActorSelectionObject(prop, selectionObject);
+        objectScriptState.targetObjectUuid = targetObject?.uuid || '';
         if (objectScriptEditorTarget) {
             objectScriptEditorTarget.textContent = prop?.rootNode?.name || actorId || 'Actor';
         }
-        if (transformControl && getActorRenderObject(prop)) {
-            transformControl.attach(getActorRenderObject(prop));
+        if (transformControl && targetObject) {
+            transformControl.attach(targetObject);
         }
     } else {
         if (objectScriptEditorTarget) {
@@ -2747,7 +2794,7 @@ function syncTransformControlState() {
     }
 
     const selectedActor = getDynamicPropById(objectScriptState.targetPropId);
-    const selectedMesh = getActorRenderObject(selectedActor);
+    const selectedMesh = getActorSelectionObject(selectedActor);
     if (selectedMesh) {
         transformControl.attach(selectedMesh);
         if (helper) helper.visible = true;
@@ -2767,7 +2814,11 @@ function syncTransformToPhysics() {
     if (!body || !physics.jolt) return;
 
     const mesh = transformControl.object;
-    if (mesh !== getActorRenderObject(prop)) return;
+    const rootMesh = getActorRenderObject(prop);
+    if (mesh !== rootMesh) {
+        rebuildActorPhysics(prop);
+        return;
+    }
 
     const pos = mesh.position;
     const rot = mesh.quaternion;
@@ -2937,6 +2988,7 @@ function ensureActorIdentity(prop) {
 
     const propId = prop.id || createRuntimePropId();
     prop.id = propId;
+    syncRuntimePropIdCounter(propId);
     const mesh = getActorRenderObject(prop);
     if (mesh?.userData) {
         mesh.userData.dynamicPropId = propId;
@@ -3113,6 +3165,87 @@ function setActorColor(actor, hexColor) {
                 if (mat.color) mat.color.copy(color);
             }
         }
+    });
+}
+
+function serializeObjectMaterialState(object3D) {
+    if (!object3D?.isMesh || !object3D.material) return null;
+
+    const materials = Array.isArray(object3D.material) ? object3D.material : [object3D.material];
+    const firstColorableMaterial = materials.find((material) => material?.color);
+    if (!firstColorableMaterial) return null;
+
+    return {
+        color: `#${firstColorableMaterial.color.getHexString()}`,
+        roughness: firstColorableMaterial.roughness ?? 0.5,
+        metalness: firstColorableMaterial.metalness ?? 0.0,
+    };
+}
+
+function applyObjectMaterialState(object3D, materialState) {
+    if (!object3D?.isMesh || !object3D.material || !materialState) return;
+
+    const color = materialState.color ? new THREE.Color(materialState.color) : null;
+    const materials = Array.isArray(object3D.material) ? object3D.material : [object3D.material];
+
+    for (const material of materials) {
+        if (!material) continue;
+        if (color && material.color) {
+            material.color.copy(color);
+        }
+        if ('roughness' in material && materialState.roughness !== undefined) {
+            material.roughness = materialState.roughness;
+        }
+        if ('metalness' in material && materialState.metalness !== undefined) {
+            material.metalness = materialState.metalness;
+        }
+        material.needsUpdate = true;
+    }
+}
+
+function serializeObjectMaterialOverrides(rootObject) {
+    if (!rootObject) return [];
+
+    const overrides = [];
+
+    function visit(node, path) {
+        const materialState = serializeObjectMaterialState(node);
+        if (materialState) {
+            overrides.push({
+                path,
+                material: materialState,
+            });
+        }
+
+        node.children.forEach((child, index) => {
+            visit(child, [...path, index]);
+        });
+    }
+
+    visit(rootObject, []);
+    return overrides;
+}
+
+function getObjectByHierarchyPath(rootObject, path = []) {
+    let current = rootObject;
+
+    for (const childIndex of path) {
+        if (!current?.children?.[childIndex]) {
+            return null;
+        }
+        current = current.children[childIndex];
+    }
+
+    return current;
+}
+
+function applyObjectMaterialOverrides(rootObject, overrides = []) {
+    if (!rootObject || !Array.isArray(overrides)) return;
+
+    overrides.forEach((entry) => {
+        const target = getObjectByHierarchyPath(rootObject, entry.path);
+        if (!target) return;
+        applyObjectMaterialState(target, entry.material);
     });
 }
 
@@ -6413,7 +6546,7 @@ function handleShowcaseMouseButton(event) {
             }
             const propHit = getDynamicPropHitFromEvent(event);
             if (propHit?.prop) {
-                selectShowcaseActor(propHit.prop.id);
+                selectShowcaseActor(propHit.prop.id, propHit.hit?.object ?? null);
             } else {
                 // Clicked empty space — deselect
                 selectShowcaseActor(null);
@@ -6421,14 +6554,7 @@ function handleShowcaseMouseButton(event) {
             return;
         }
         if (event.button !== 2) return;
-
-        const propHit = getDynamicPropHitFromEvent(event);
-        if (propHit?.prop) {
-            showcase.looking = false;
-            event.preventDefault();
-            return;
-        }
-
+        closeObjectScriptMenu();
         showcase.looking = true;
         event.preventDefault();
         return;
@@ -6447,13 +6573,6 @@ function handleShowcaseContextMenu(event) {
 
     if (isTransformControlSphereHit(event)) {
         event.preventDefault();
-        return;
-    }
-
-    const propHit = getDynamicPropHitFromEvent(event);
-    if (propHit?.prop) {
-        event.preventDefault();
-        openObjectScriptMenu(event, propHit.prop);
         return;
     }
 
@@ -7874,6 +7993,8 @@ function serializeActorData(actor) {
             quaternion: mesh.quaternion.toArray(),
             scale: mesh.scale.toArray(),
         },
+        material: serializeObjectMaterialState(mesh),
+        materialOverrides: serializeObjectMaterialOverrides(mesh),
         scripts: objectScriptState.drafts[actor.id] || null,
         componentFlags: getActorComponentFlags(actor),
         components: serializeComponentTree(mesh),
@@ -7940,6 +8061,7 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
     const previousId = actor.id;
     if (preserveId && actorData.id) {
         actor.id = actorData.id;
+        syncRuntimePropIdCounter(actor.id);
     }
 
     setActorComponentFlags(actor, componentFlags);
@@ -7967,6 +8089,11 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
         mesh.quaternion.fromArray(actorData.transform.quaternion);
         mesh.scale.fromArray(actorData.transform.scale);
         deserializeComponentTree(mesh, actorData.components);
+        if (Array.isArray(actorData.materialOverrides) && actorData.materialOverrides.length > 0) {
+            applyObjectMaterialOverrides(mesh, actorData.materialOverrides);
+        } else {
+            applyObjectMaterialState(mesh, actorData.material);
+        }
         rebuildActorPhysics(actor);
     }
 
@@ -8542,81 +8669,24 @@ let pieSceneSnapshot = null;
 
 function snapshotSceneState() {
     if (!sceneSystem) return;
-    const snapshot = [];
-    for (const actor of sceneSystem.actors) {
-        const mesh = getActorRenderObject(actor);
-        if (!mesh) continue;
-        
-        const actorSnap = {
-            id: actor.id,
-            position: mesh.position.toArray(),
-            quaternion: mesh.quaternion.toArray(),
-            scale: mesh.scale.toArray(),
-            children: []
-        };
-        
-        // Snapshot child component transforms recursively
-        function snapChildren(parent, arr) {
-            for (const child of parent.children) {
-                if (child.isMesh || child.isLight) {
-                    const childSnap = {
-                        uuid: child.uuid,
-                        position: child.position.toArray(),
-                        quaternion: child.quaternion.toArray(),
-                        scale: child.scale.toArray(),
-                        children: []
-                    };
-                    snapChildren(child, childSnap.children);
-                    arr.push(childSnap);
-                }
-            }
-        }
-        snapChildren(mesh, actorSnap.children);
-        snapshot.push(actorSnap);
-    }
-    pieSceneSnapshot = snapshot;
+
+    pieSceneSnapshot = {
+        activeActorId: objectScriptState.targetPropId || '',
+        scene: exportWorldToJSON(),
+    };
 }
 
 function restoreSceneState() {
     if (!pieSceneSnapshot || !sceneSystem) return;
 
-    const snapshotIds = new Set(pieSceneSnapshot.map(s => s.id));
-    for (const actor of Array.from(sceneSystem.actors)) {
-        if (!snapshotIds.has(actor.id)) {
-            destroyDynamicPhysicsProp(actor);
-        }
+    loadWorldFromJSON(pieSceneSnapshot.scene);
+
+    if (pieSceneSnapshot.activeActorId) {
+        selectShowcaseActor(pieSceneSnapshot.activeActorId);
+    } else {
+        selectShowcaseActor(null);
     }
 
-    for (const actorSnap of pieSceneSnapshot) {
-        const actor = getDynamicPropById(actorSnap.id);
-        if (!actor) continue;
-        
-        const mesh = getActorRenderObject(actor);
-        if (!mesh) continue;
-        
-        mesh.position.fromArray(actorSnap.position);
-        mesh.quaternion.fromArray(actorSnap.quaternion);
-        mesh.scale.fromArray(actorSnap.scale);
-        
-        // Restore child component transforms
-        function restoreChildren(parent, snapArr) {
-            for (const childSnap of snapArr) {
-                const child = parent.children.find(c => c.uuid === childSnap.uuid);
-                if (child) {
-                    child.position.fromArray(childSnap.position);
-                    child.quaternion.fromArray(childSnap.quaternion);
-                    child.scale.fromArray(childSnap.scale);
-                    restoreChildren(child, childSnap.children);
-                }
-            }
-        }
-        restoreChildren(mesh, actorSnap.children);
-
-        // Rebuild collision from the restored mesh state so static collision bodies
-        // reset with the level instead of staying behind at their previous pose.
-        rebuildActorPhysics(actor);
-    }
-    
     pieSceneSnapshot = null;
 }
 
