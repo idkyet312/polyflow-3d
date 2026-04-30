@@ -431,7 +431,13 @@
                         <p class="viewer-modal-copy">Right-clicked authored actors in Showcase mode can run per-actor
                             Three.js code on tick or on collision.</p>
                         <div class="viewer-script-editor-target" id="object-script-editor-target">No prop selected</div>
-                        <div class="viewer-script-editor-mode" id="object-script-editor-mode">Event: Tick</div>
+                        <label class="viewer-script-editor-mode" for="object-script-editor-mode">
+                            <span class="viewer-script-editor-mode-label">Script Event</span>
+                            <select id="object-script-editor-mode" class="viewer-script-event-select">
+                                <option value="tick">Tick</option>
+                                <option value="collision">Collision</option>
+                            </select>
+                        </label>
                         <label class="viewer-checkbox-row" id="object-script-tick-toggle-row"
                             for="object-script-tick-toggle" hidden>
                             <input type="checkbox" id="object-script-tick-toggle">

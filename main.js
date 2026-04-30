@@ -3598,7 +3598,7 @@ function syncObjectScriptEditor() {
     }
 
     if (objectScriptEditorMode) {
-        objectScriptEditorMode.textContent = `Event: ${getObjectScriptEventLabel(eventType)}`;
+        objectScriptEditorMode.value = eventType === 'collision' ? 'collision' : 'tick';
     }
 
     if (objectScriptTickToggleRow) {
@@ -4446,47 +4446,117 @@ function registerCollisionForProp(contactMap, prop, collisionKey, collision) {
 
 function updateDynamicBodyCollisionScripts() {
     if (!gameplay.active || !physics.dynamicBodies.length || !hasEnabledDynamicPropEvent('collision')) return;
+    const COLLISION_SPEED_THRESHOLD = 0.1;
+
+    const isBodyAwake = (prop, body) => {
+        if (!body) return true;
+
+        const physicsComponent = getPhysicsBodyComponent(prop);
+        return physicsComponent?.isAwake?.()
+            ?? (typeof physics.bodyInterface?.IsActive === 'function'
+                ? physics.bodyInterface.IsActive(body.GetID())
+                : true);
+    };
+
+    const wakeBody = (prop, body) => {
+        if (!body || isBodyAwake(prop, body)) return;
+
+        const physicsComponent = getPhysicsBodyComponent(prop);
+        physicsComponent?.activate?.();
+        if (!physicsComponent?.activate && typeof physics.bodyInterface?.ActivateBody === 'function') {
+            physics.bodyInterface.ActivateBody(body.GetID());
+        }
+    };
+
+    const getBodySpeed = (body) => {
+        if (!body) return Number.POSITIVE_INFINITY;
+        const velocity = copyJoltVector(tempVectorA, physics.bodyInterface.GetLinearVelocity(body.GetID()));
+        return velocity.length();
+    };
+
+    const targetEntries = physics.dynamicBodies
+        .flatMap((prop) => {
+            const mesh = getActorRenderObject(prop);
+            if (!mesh) return [];
+
+            return [{
+                prop,
+                mesh,
+                body: getActorBody(prop),
+                bounds: new THREE.Box3().setFromObject(mesh),
+            }];
+        });
 
     const entries = physics.dynamicBodies
-        .filter((prop) => !!getActorRenderObject(prop))
-        .map((prop) => ({
-            prop,
-            mesh: getActorRenderObject(prop),
-            body: getActorBody(prop),
-            bounds: new THREE.Box3().setFromObject(getActorRenderObject(prop)),
-        }));
+        .flatMap((prop) => {
+            const scriptState = getActorScriptState(prop);
+            if (!scriptState?.collision?.enabled) return [];
+
+            const mesh = getActorRenderObject(prop);
+            if (!mesh) return [];
+
+            const body = getActorBody(prop);
+            if (!isBodyAwake(prop, body)) return [];
+
+            const speed = getBodySpeed(body);
+            if (speed <= COLLISION_SPEED_THRESHOLD) return [];
+
+            const bounds = new THREE.Box3().setFromObject(mesh);
+            const wakeBounds = bounds.clone();
+            if (prop.kind === 'vehicle') {
+                const wakePadding = THREE.MathUtils.clamp(speed * 0.05, 0.18, 0.75);
+                wakeBounds.expandByScalar(wakePadding);
+            }
+
+            return [{
+                prop,
+                mesh,
+                body,
+                bounds,
+                wakeBounds,
+            }];
+        });
 
     const contactMap = new Map();
+    const processedPairs = new Set();
 
     for (let index = 0; index < entries.length; index++) {
         const current = entries[index];
-        const groundHeight = getGroundHeightAt(current.mesh.position.x, current.mesh.position.z, true);
 
-        if (groundHeight !== null && current.bounds.min.y <= groundHeight + 0.08) {
-            registerCollisionForProp(contactMap, current.prop, `ground:${current.prop.id}`, {
-                type: 'ground',
-                groundHeight,
-                point: current.mesh.position.clone(),
-            });
-        }
+        for (let otherIndex = 0; otherIndex < targetEntries.length; otherIndex++) {
+            const other = targetEntries[otherIndex];
+            if (other.prop.id === current.prop.id) continue;
 
-        for (let otherIndex = index + 1; otherIndex < entries.length; otherIndex++) {
-            const other = entries[otherIndex];
-            if (!current.bounds.intersectsBox(other.bounds)) continue;
+            const directHit = current.bounds.intersectsBox(other.bounds);
+            const nearWakeHit = !directHit && current.wakeBounds?.intersectsBox(other.bounds);
+            if (!directHit && !nearWakeHit) continue;
+
+            if (nearWakeHit) {
+                wakeBody(other.prop, other.body);
+                continue;
+            }
 
             const collisionKey = [current.prop.id, other.prop.id].sort().join(':');
+            if (processedPairs.has(collisionKey)) continue;
+            processedPairs.add(collisionKey);
+
+            wakeBody(other.prop, other.body);
+
             registerCollisionForProp(contactMap, current.prop, collisionKey, {
                 type: 'prop',
                 otherProp: other.prop,
                 otherObject: other.mesh,
                 otherBody: other.body,
             });
-            registerCollisionForProp(contactMap, other.prop, collisionKey, {
-                type: 'prop',
-                otherProp: current.prop,
-                otherObject: current.mesh,
-                otherBody: current.body,
-            });
+
+            if (getActorScriptState(other.prop)?.collision?.enabled) {
+                registerCollisionForProp(contactMap, other.prop, collisionKey, {
+                    type: 'prop',
+                    otherProp: current.prop,
+                    otherObject: current.mesh,
+                    otherBody: current.body,
+                });
+            }
         }
     }
 
@@ -5770,6 +5840,10 @@ async function init() {
     inputActionsCloseBtn?.addEventListener('click', () => closeInputActionsEditor());
     objectScriptTickActionBtn?.addEventListener('click', () => openObjectScriptEditor('tick'));
     objectScriptCollisionActionBtn?.addEventListener('click', () => openObjectScriptEditor('collision'));
+    objectScriptEditorMode?.addEventListener('change', () => {
+        objectScriptState.targetEvent = objectScriptEditorMode.value === 'collision' ? 'collision' : 'tick';
+        syncObjectScriptEditor();
+    });
     objectScriptEditorApplyBtn?.addEventListener('click', () => {
         const prop = getDynamicPropById(objectScriptState.targetPropId);
         if (!prop || !objectScriptEditorInput) return;

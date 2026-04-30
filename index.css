@@ -714,11 +714,35 @@ main {
 
 .viewer-script-editor-mode {
   margin-top: 0.5rem;
+  display: block;
+}
+
+.viewer-script-editor-mode-label {
+  display: block;
   font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--accent-color);
+}
+
+.viewer-script-event-select {
+  width: 100%;
+  margin-top: 0.45rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(11, 13, 16, 0.92);
+  color: var(--text-color);
+  padding: 0.78rem 0.9rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  appearance: none;
+}
+
+.viewer-script-event-select:focus {
+  outline: 2px solid rgba(112, 0, 255, 0.45);
+  outline-offset: 2px;
 }
 
 .viewer-script-editor-status {
