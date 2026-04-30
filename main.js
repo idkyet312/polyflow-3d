@@ -1036,6 +1036,10 @@ function positionLightGrid(anchorTarget) {
 }
 
 function handleLightGridClick(event) {
+    if (isTransformControlSphereHit(event)) {
+        return;
+    }
+
     lightGridController?.handleClick(event);
 }
 
@@ -3379,8 +3383,14 @@ function isTransformControlSphereHit(event, { mode = null } = {}) {
     const gizmoCenter = tempVectorA;
     transformControl.object.getWorldPosition(gizmoCenter);
 
+    const activeMode = transformControl.getMode?.() ?? 'translate';
     const cameraDistance = camera.position.distanceTo(gizmoCenter);
-    const sphereRadius = Math.max(0.55, cameraDistance * 0.085 * (transformControl.size || 1));
+    const modeScale = activeMode === 'scale'
+        ? 1.15
+        : activeMode === 'rotate'
+            ? 1.35
+            : 1.5;
+    const sphereRadius = Math.max(0.8, cameraDistance * 0.085 * (transformControl.size || 1) * modeScale);
     const distanceToRay = Math.sqrt(raycaster.ray.distanceSqToPoint(gizmoCenter));
 
     return distanceToRay <= sphereRadius;
@@ -6048,7 +6058,7 @@ function setupGameplayEvents() {
         if (!blueprintState.active) return;
         if (event.button !== 0) return;
         if (typeof transformControl !== 'undefined' && (transformControl.dragging || transformControl.justFinishedDragging || transformControl.axis !== null)) return;
-        if (isTransformControlSphereHit(event, { mode: 'scale' })) return;
+        if (isTransformControlSphereHit(event)) return;
         
         const rect = renderer.domElement.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) return;
@@ -6397,7 +6407,7 @@ function handleShowcaseMouseButton(event) {
         }
         // Left-click: select actor and attach gizmo
         if (event.button === 0) {
-            if (isTransformControlSphereHit(event, { mode: 'scale' })) {
+            if (isTransformControlSphereHit(event)) {
                 event.preventDefault();
                 return;
             }
@@ -6431,6 +6441,11 @@ function handleShowcaseMouseButton(event) {
 
 function handleShowcaseContextMenu(event) {
     if (gameplay.active || gameplay.pointerLocked || !renderer) {
+        event.preventDefault();
+        return;
+    }
+
+    if (isTransformControlSphereHit(event)) {
         event.preventDefault();
         return;
     }
