@@ -33,6 +33,13 @@ import {
     createTerrainMesh,
     sampleTerrainHeightAt as sampleTerrainHeightAtWorldFloor,
 } from './src/world/terrain.js';
+import {
+    installUePrototypeMethods,
+    buildUeContext,
+    detectsUeLifecycle,
+} from './src/scripting/ueApi.js';
+
+installUePrototypeMethods();
 
 // --- Widget System (Unreal Engine Style) ---
 class WidgetManager {
@@ -673,22 +680,23 @@ const VEHICLE_SETTINGS = {
     steeringReturn: 6.2, // Faster return to center
     steeringGrip: 8.5, // Better steering control
     steeringHighSpeedDamping: 0.55, // More stability at high speeds
-    uprightTorque: 520, // Stronger self-righting for stability
-    rollTorque: 220,
-    pitchTorque: 180,
-    suspensionRideHeight: 1.08,
-    suspensionTravel: 0.9,
-    suspensionSpring: 9.8, // Bouncier suspension like Warthog
-    suspensionDamping: 2.4, // More damping for realistic feel
-    bumpPitchTorque: 580,
-    bumpRollTorque: 480,
-    bumpLaunchBoost: 4.2, // More launch from bumps
-    airtimeAngularBlend: 0.12,
+    uprightTorque: 180,
+    rollTorque: 120,
+    pitchTorque: 100,
+    suspensionRideHeight: 0.92,
+    suspensionTravel: 0.48,
+    suspensionSpring: 1.15,
+    suspensionDamping: 7.4,
+    bumpPitchTorque: 0,
+    bumpRollTorque: 0,
+    bumpLaunchBoost: 0,
+    airtimeAngularBlend: 0.05,
     maxDriveSpeed: 32, // Slightly higher top speed
     maxReverseSpeed: 12,
     brakeDamping: 0.92, // Much weaker brakes - retains more speed
     maxAngularVelocity: 4.2, // Allow more rotation for realistic handling
 };
+const PHYSICS_COLLISION_STEPS = 2;
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
@@ -702,7 +710,7 @@ let objectScriptEditor, objectScriptEditorTitle, objectScriptEditorTarget, objec
 let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBtn, objectScriptEditorClearBtn, objectScriptEditorCancelBtn;
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
 let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect;
-let actorComponentCollisionInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
+let actorComponentCollisionInput, actorComponentPhysicsInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
 let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
 let sceneUiPanel, sceneUiCount, sceneUiList;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
@@ -772,7 +780,7 @@ if (sphere) {
     physics.Jolt.destroy(velocity);
 }`,
     right: `const cubesPerSide = 5;
-const totalCubes = 500;
+const totalCubes = 50;
 const cubeHalfExtent = 0.16;
 const spacing = cubeHalfExtent * 2;
 const baseYOffset = -0.8;
@@ -886,6 +894,19 @@ const tempVectorE = new THREE.Vector3();
 const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
+const raycastDebugState = {
+    enabled: false,
+    helper: null,
+    hitMarker: null,
+    points: [new THREE.Vector3(), new THREE.Vector3()],
+    expiresAt: 0,
+    lastConsoleHitKey: '',
+    timeoutMs: Number.POSITIVE_INFINITY,
+};
+const collisionDebugState = {
+    enabled: false,
+    overlays: [],
+};
 const gameplay = {
     canPlay: true,
     active: false,
@@ -949,6 +970,7 @@ const physics = {
     terrainBody: null,
     modelBody: null,
     dynamicBodies: [],
+    staticBodies: [],
     desiredVelocity: new THREE.Vector3(),
     jumpQueued: false,
     allowSliding: false,
@@ -968,6 +990,7 @@ physicsRuntime = createPhysicsRuntime({
     physics,
     gameplay,
     playerSettings: PLAYER_SETTINGS,
+    collisionSteps: PHYSICS_COLLISION_STEPS,
     getCamera: () => camera,
     getWorldFloor: () => worldFloor,
     copyJoltVector,
@@ -1428,6 +1451,67 @@ function createImportedSimpleShape(root) {
     return shape;
 }
 
+function createExactMeshShape(root) {
+    if (!physics.ready || !root) return null;
+
+    const { Jolt } = physics;
+    root.updateWorldMatrix(true, true);
+
+    const totalTriangles = countTrianglesForObject(root);
+    if (!totalTriangles) {
+        throw new Error('Imported prop has no usable mesh geometry for exact collision.');
+    }
+
+    const triangles = new Jolt.TriangleList();
+    const materials = new Jolt.PhysicsMaterialList();
+    const rootInverse = new THREE.Matrix4().copy(root.matrixWorld).invert();
+    const childToRoot = new THREE.Matrix4();
+
+    triangles.resize(totalTriangles);
+    let triangleIndex = 0;
+
+    try {
+        root.traverse((child) => {
+            if (!child.isMesh || !child.geometry?.attributes?.position) return;
+
+            const position = child.geometry.getAttribute('position');
+            const index = child.geometry.getIndex();
+            const triangleCount = index ? index.count / 3 : position.count / 3;
+
+            childToRoot.multiplyMatrices(rootInverse, child.matrixWorld);
+
+            for (let triangleOffset = 0; triangleOffset < triangleCount; triangleOffset++) {
+                const i0 = index ? index.getX(triangleOffset * 3) : triangleOffset * 3;
+                const i1 = index ? index.getX(triangleOffset * 3 + 1) : triangleOffset * 3 + 1;
+                const i2 = index ? index.getX(triangleOffset * 3 + 2) : triangleOffset * 3 + 2;
+
+                tempVectorA.fromBufferAttribute(position, i0).applyMatrix4(childToRoot);
+                tempVectorB.fromBufferAttribute(position, i1).applyMatrix4(childToRoot);
+                tempVectorC.fromBufferAttribute(position, i2).applyMatrix4(childToRoot);
+
+                const triangle = triangles.at(triangleIndex++);
+                const v1 = triangle.get_mV(0);
+                const v2 = triangle.get_mV(1);
+                const v3 = triangle.get_mV(2);
+                v1.x = tempVectorA.x;
+                v1.y = tempVectorA.y;
+                v1.z = tempVectorA.z;
+                v2.x = tempVectorB.x;
+                v2.y = tempVectorB.y;
+                v2.z = tempVectorB.z;
+                v3.x = tempVectorC.x;
+                v3.y = tempVectorC.y;
+                v3.z = tempVectorC.z;
+            }
+        });
+
+        return createOwnedShape(new Jolt.MeshShapeSettings(triangles, materials));
+    } finally {
+        Jolt.destroy(triangles);
+        Jolt.destroy(materials);
+    }
+}
+
 function createImportedConvexHullShape(points) {
     const { Jolt } = physics;
     const settings = new Jolt.ConvexHullShapeSettings();
@@ -1479,63 +1563,7 @@ function collectImportedComplexHullParts(root) {
 }
 
 function createImportedComplexShape(root) {
-    const { Jolt } = physics;
-    root.updateWorldMatrix(true, true);
-    const hullParts = collectImportedComplexHullParts(root);
-
-    if (!hullParts.length) {
-        throw new Error('Not enough sampled points for a complex collision shape.');
-    }
-
-    const buildHullShape = (part) => {
-        const points = new Jolt.ArrayVec3();
-
-        try {
-            part.points.forEach((pointData) => {
-                const point = new Jolt.Vec3(pointData.x, pointData.y, pointData.z);
-                points.push_back(point);
-                Jolt.destroy(point);
-            });
-
-            if (points.size() < 4) {
-                throw new Error('Not enough sampled points for a complex collision shape.');
-            }
-
-            return createImportedConvexHullShape(points);
-        } finally {
-            Jolt.destroy(points);
-        }
-    };
-
-    if (hullParts.length === 1) {
-        return buildHullShape(hullParts[0]);
-    }
-
-    const compoundSettings = new Jolt.MutableCompoundShapeSettings();
-    const identityPosition = new Jolt.Vec3(0, 0, 0);
-    const identityRotation = new Jolt.Quat(0, 0, 0, 1);
-    const subShapes = [];
-    let compoundSubmitted = false;
-
-    try {
-        hullParts.forEach((part) => {
-            const subShape = buildHullShape(part);
-            subShapes.push(subShape);
-            compoundSettings.AddShapeShape(identityPosition, identityRotation, subShape, 0);
-        });
-
-        compoundSubmitted = true;
-        return createOwnedShape(compoundSettings);
-    } catch (error) {
-        if (!compoundSubmitted) {
-            Jolt.destroy(compoundSettings);
-        }
-        throw error;
-    } finally {
-        subShapes.forEach((shape) => shape.Release());
-        Jolt.destroy(identityPosition);
-        Jolt.destroy(identityRotation);
-    }
+    return createExactMeshShape(root);
 }
 
 function createImportedCollisionShape(root, mode) {
@@ -1571,10 +1599,11 @@ function renderImportedPropButtons() {
 }
 
 function registerImportedPropTemplate(fileName, root, collisionMode, shape, triangleCount) {
+    const displayName = formatImportedPropName(fileName);
     const template = {
         id: `imported-prop-${importedPropState.nextId++}`,
         fileName,
-        displayName: formatImportedPropName(fileName),
+        displayName,
         root,
         shape,
         collisionMode,
@@ -1585,6 +1614,58 @@ function registerImportedPropTemplate(fileName, root, collisionMode, shape, tria
     renderImportedPropButtons();
     updatePropImportStatus();
     return template;
+}
+
+function registerImportedPropTemplateFromSerializedData(templateData) {
+    if (!templateData?.rootJson) return null;
+
+    const existingTemplate = importedPropState.templates.find((entry) => entry.id === templateData.id);
+    if (existingTemplate) {
+        return existingTemplate;
+    }
+
+    const objectLoader = new THREE.ObjectLoader();
+    const root = objectLoader.parse(templateData.rootJson);
+    convertLoadedObjectMaterials(root);
+    normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+
+    const triangleCount = Number.isFinite(templateData.triangleCount)
+        ? templateData.triangleCount
+        : Math.round(countTrianglesForObject(root));
+    const collision = createImportedCollisionShape(root, templateData.collisionMode || 'simple');
+    const template = {
+        id: templateData.id || `imported-prop-${importedPropState.nextId++}`,
+        fileName: templateData.fileName || 'Imported Prop',
+        displayName: templateData.displayName || formatImportedPropName(templateData.fileName || 'Imported Prop'),
+        root,
+        shape: collision.shape,
+        collisionMode: collision.mode,
+        triangleCount,
+    };
+
+    importedPropState.templates.push(template);
+
+    const matchedId = /imported-prop-(\d+)$/.exec(template.id || '');
+    if (matchedId) {
+        importedPropState.nextId = Math.max(importedPropState.nextId, Number(matchedId[1]) + 1);
+    }
+
+    renderImportedPropButtons();
+    updatePropImportStatus();
+    return template;
+}
+
+function serializeImportedPropTemplate(template) {
+    if (!template?.root) return null;
+
+    return {
+        id: template.id,
+        fileName: template.fileName,
+        displayName: template.displayName,
+        collisionMode: template.collisionMode,
+        triangleCount: template.triangleCount,
+        rootJson: template.root.toJSON(),
+    };
 }
 
 function spawnImportedProp(templateId, options = {}) {
@@ -1603,18 +1684,34 @@ function spawnImportedProp(templateId, options = {}) {
     const visual = cloneDisposableObject(template.root);
     let body = null;
     const includeCollisionBody = options.includeCollisionBody !== false;
+    const requestedSimulatePhysics = includeCollisionBody && options.simulatePhysics !== false;
+    const useExactMeshCollision = template.collisionMode === 'complex';
+    const simulatePhysics = requestedSimulatePhysics && !useExactMeshCollision;
+
+    if (includeCollisionBody && useExactMeshCollision && requestedSimulatePhysics) {
+        console.warn('Exact triangle mesh collision is static-only; spawning imported prop without simulated physics.');
+    }
+
+    visual.position.copy(spawnPosition);
 
     if (includeCollisionBody) {
-        template.shape.AddRef();
+        if (useExactMeshCollision) {
+            body = createStaticMeshBody(visual);
+        } else {
+            template.shape.AddRef();
 
-        body = createDynamicPrimitiveBody(
-            template.shape,
-            spawnPosition,
-            launchImpulse,
-            template.collisionMode === 'simple'
-                ? { restitution: 0.12, friction: 0.84 }
-                : { restitution: 0.08, friction: 0.76 }
-        );
+            body = createDynamicPrimitiveBody(
+                template.shape,
+                spawnPosition,
+                launchImpulse,
+                {
+                    ...(template.collisionMode === 'simple'
+                        ? { restitution: 0.12, friction: 0.84 }
+                        : { restitution: 0.08, friction: 0.76 }),
+                    simulatePhysics,
+                }
+            );
+        }
 
         if (!body) {
             disposeRenderableObject(visual);
@@ -1622,7 +1719,6 @@ function spawnImportedProp(templateId, options = {}) {
         }
     }
 
-    visual.position.copy(spawnPosition);
     const actor = createDynamicPropActor({
         body,
         mesh: visual,
@@ -1631,7 +1727,18 @@ function spawnImportedProp(templateId, options = {}) {
         userData: options.userData,
         includeScripts: options.includeScripts !== false,
     });
-    physics.dynamicBodies.push(actor);
+    setActorComponentFlags(actor, {
+        collision: !!body,
+        physics: !!body && simulatePhysics,
+        scripts: options.includeScripts !== false,
+    });
+    if (body) {
+        if (simulatePhysics) {
+            physics.dynamicBodies.push(actor);
+        } else {
+            physics.staticBodies.push(actor);
+        }
+    }
     return actor;
 }
 
@@ -1712,6 +1819,7 @@ function destroyDynamicPhysicsProp(prop) {
 
     const body = getActorBody(prop);
     if (body) {
+        physicsCore?.unregisterBackFaceCulledBody?.(body);
         destroyPhysicsBody(body);
         prop.body = null;
     }
@@ -1720,10 +1828,12 @@ function destroyDynamicPhysicsProp(prop) {
 }
 
 function clearDynamicPhysicsProps() {
-    if (!physics.dynamicBodies.length) return;
+    if (!physics.dynamicBodies.length && !physics.staticBodies.length) return;
 
     physics.dynamicBodies.forEach((prop) => destroyDynamicPhysicsProp(prop));
+    physics.staticBodies.forEach((prop) => destroyDynamicPhysicsProp(prop));
     physics.dynamicBodies.length = 0;
+    physics.staticBodies.length = 0;
 }
 
 function hasEnabledDynamicPropEvent(eventType) {
@@ -1966,113 +2076,131 @@ function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wh
 
 function createDrivableCarVisual() {
     const root = new THREE.Group();
-    // Offset the entire visual model up to perfectly rest on the wheels
-    // physics box half height is 0.3. wheel bottom is at -0.468. difference = 0.168.
+    const W = VEHICLE_SETTINGS.width;
+    const L = VEHICLE_SETTINGS.length;
+    const H = VEHICLE_SETTINGS.height;
+
     const visualGroup = new THREE.Group();
-    visualGroup.position.y = VEHICLE_SETTINGS.height * 0.28;
+    visualGroup.position.y = H * 0.28;
+    visualGroup.rotation.y = Math.PI;
     root.add(visualGroup);
-    
+
     const bodyMaterial = new THREE.MeshStandardMaterial({
-        color: 0xf7f7f5,
-        metalness: 0.18,
-        roughness: 0.34,
+        color: 0xf7f7f5, metalness: 0.18, roughness: 0.34,
     });
     const trimMaterial = new THREE.MeshStandardMaterial({
-        color: 0x15171b,
-        metalness: 0.42,
-        roughness: 0.48,
+        color: 0x15171b, metalness: 0.42, roughness: 0.48,
     });
     const glassMaterial = new THREE.MeshStandardMaterial({
-        color: 0xdce8f5,
-        metalness: 0.08,
-        roughness: 0.16,
-        transparent: true,
-        opacity: 0.72,
+        color: 0xdce8f5, metalness: 0.08, roughness: 0.16, transparent: true, opacity: 0.72,
     });
     const tireMaterial = new THREE.MeshStandardMaterial({
-        color: 0x17191d,
-        metalness: 0.02,
-        roughness: 0.92,
+        color: 0x17191d, metalness: 0.02, roughness: 0.92,
     });
     const rimMaterial = new THREE.MeshStandardMaterial({
-        color: 0xc5ccd6,
-        metalness: 0.86,
-        roughness: 0.24,
+        color: 0xc5ccd6, metalness: 0.86, roughness: 0.24,
     });
     const lightMaterial = new THREE.MeshStandardMaterial({
-        color: 0xf8f1d0,
-        emissive: 0x8c6d1f,
-        emissiveIntensity: 0.2,
-        roughness: 0.28,
-        metalness: 0.02,
+        color: 0xf8f1d0, emissive: 0x8c6d1f, emissiveIntensity: 0.2, roughness: 0.28, metalness: 0.02,
     });
 
     const lowerBody = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.96, VEHICLE_SETTINGS.height * 0.58, VEHICLE_SETTINGS.length * 0.9),
+        new THREE.BoxGeometry(W * 0.96, H * 0.38, L * 0.94),
         bodyMaterial
     );
-    lowerBody.position.y = -VEHICLE_SETTINGS.height * 0.04;
+    lowerBody.position.y = -H * 0.08;
     lowerBody.castShadow = true;
     lowerBody.receiveShadow = true;
     visualGroup.add(lowerBody);
 
     const cabin = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.7, VEHICLE_SETTINGS.height * 0.54, VEHICLE_SETTINGS.length * 0.44),
+        new THREE.BoxGeometry(W * 0.72, H * 0.32, L * 0.38),
         glassMaterial
     );
-    cabin.position.set(0, VEHICLE_SETTINGS.height * 0.36, -VEHICLE_SETTINGS.length * 0.08);
+    cabin.position.set(0, H * 0.22, -L * 0.06);
     cabin.castShadow = true;
     visualGroup.add(cabin);
 
     const roof = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.66, VEHICLE_SETTINGS.height * 0.08, VEHICLE_SETTINGS.length * 0.34),
+        new THREE.BoxGeometry(W * 0.68, H * 0.06, L * 0.32),
         bodyMaterial
     );
-    roof.position.set(0, VEHICLE_SETTINGS.height * 0.64, -VEHICLE_SETTINGS.length * 0.08);
+    roof.position.set(0, H * 0.39, -L * 0.06);
     roof.castShadow = true;
     visualGroup.add(roof);
 
     const hood = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.82, VEHICLE_SETTINGS.height * 0.16, VEHICLE_SETTINGS.length * 0.24),
+        new THREE.BoxGeometry(W * 0.88, H * 0.1, L * 0.28),
         bodyMaterial
     );
-    hood.position.set(0, VEHICLE_SETTINGS.height * 0.12, VEHICLE_SETTINGS.length * 0.29);
-    hood.rotation.x = -0.12;
+    hood.position.set(0, H * 0.06, L * 0.30);
+    hood.rotation.x = -0.06;
     hood.castShadow = true;
     hood.receiveShadow = true;
     visualGroup.add(hood);
 
+    const trunk = new THREE.Mesh(
+        new THREE.BoxGeometry(W * 0.84, H * 0.1, L * 0.18),
+        bodyMaterial
+    );
+    trunk.position.set(0, H * 0.06, -L * 0.36);
+    trunk.rotation.x = 0.04;
+    trunk.castShadow = true;
+    visualGroup.add(trunk);
+
     const frontBumper = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.88, VEHICLE_SETTINGS.height * 0.14, VEHICLE_SETTINGS.length * 0.08),
+        new THREE.BoxGeometry(W * 0.92, H * 0.12, L * 0.06),
         trimMaterial
     );
-    frontBumper.position.set(0, -VEHICLE_SETTINGS.height * 0.16, VEHICLE_SETTINGS.length * 0.47);
+    frontBumper.position.set(0, -H * 0.16, L * 0.48);
     frontBumper.castShadow = true;
     visualGroup.add(frontBumper);
 
     const rearBumper = frontBumper.clone();
-    rearBumper.position.z = -VEHICLE_SETTINGS.length * 0.47;
+    rearBumper.position.z = -L * 0.48;
     visualGroup.add(rearBumper);
 
-    const grille = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.44, VEHICLE_SETTINGS.height * 0.14, VEHICLE_SETTINGS.length * 0.04),
+    const skirtLeft = new THREE.Mesh(
+        new THREE.BoxGeometry(W * 0.04, H * 0.1, L * 0.7),
         trimMaterial
     );
-    grille.position.set(0, VEHICLE_SETTINGS.height * 0.02, VEHICLE_SETTINGS.length * 0.48);
+    skirtLeft.position.set(-W * 0.48, -H * 0.2, 0);
+    visualGroup.add(skirtLeft);
+    const skirtRight = skirtLeft.clone();
+    skirtRight.position.x *= -1;
+    visualGroup.add(skirtRight);
+
+    const grille = new THREE.Mesh(
+        new THREE.BoxGeometry(W * 0.5, H * 0.1, L * 0.03),
+        trimMaterial
+    );
+    grille.position.set(0, -H * 0.02, L * 0.49);
     visualGroup.add(grille);
 
     const headlightLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(VEHICLE_SETTINGS.width * 0.12, VEHICLE_SETTINGS.height * 0.08, VEHICLE_SETTINGS.length * 0.02),
+        new THREE.BoxGeometry(W * 0.14, H * 0.06, L * 0.02),
         lightMaterial
     );
-    headlightLeft.position.set(-VEHICLE_SETTINGS.width * 0.28, VEHICLE_SETTINGS.height * 0.06, VEHICLE_SETTINGS.length * 0.48);
+    headlightLeft.position.set(-W * 0.32, H * 0.02, L * 0.49);
     const headlightRight = headlightLeft.clone();
     headlightRight.position.x *= -1;
     visualGroup.add(headlightLeft, headlightRight);
 
-    const wheelRadius = VEHICLE_SETTINGS.height * 0.36;
-    const wheelWidth = VEHICLE_SETTINGS.width * 0.16;
-    const wheelY = -VEHICLE_SETTINGS.height * 0.42;
+    const taillightMat = new THREE.MeshStandardMaterial({
+        color: 0xff2222, emissive: 0x991111, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.02,
+    });
+    const taillightLeft = new THREE.Mesh(
+        new THREE.BoxGeometry(W * 0.12, H * 0.05, L * 0.02),
+        taillightMat
+    );
+    taillightLeft.position.set(-W * 0.34, H * 0.02, -L * 0.49);
+    const taillightRight = taillightLeft.clone();
+    taillightRight.position.x *= -1;
+    visualGroup.add(taillightLeft, taillightRight);
+
+    const wheelRadius = H * 0.36;
+    const wheelWidth = W * 0.16;
+    const wheelY = -H * 0.42;
     const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
     const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.45;
     const wheelOffsets = [
@@ -2170,7 +2298,7 @@ function spawnDrivableCar(options = {}) {
     const launchImpulse = tempVectorE;
     getDynamicPropSpawn(spawnPosition, launchImpulse);
 
-    const groundHit = getGroundHitAt(spawnPosition.x, spawnPosition.z, true);
+    const groundHit = getGroundHitAt(spawnPosition.x, spawnPosition.z, true, { cullBackFaces: true });
     if (groundHit?.point) {
         spawnPosition.y = Math.max(
             spawnPosition.y,
@@ -2203,6 +2331,7 @@ function spawnDrivableCar(options = {}) {
         angularDamping: 0.55, // More angular damping for stability
         motionQuality: Jolt.EMotionQuality_LinearCast,
         skipImpulse: true,
+        enhancedInternalEdgeRemoval: true,
     });
 
     if (!body) {
@@ -2221,7 +2350,13 @@ function spawnDrivableCar(options = {}) {
         userData: options.userData ?? { label: 'Car' },
         includeScripts: options.includeScripts !== false,
     });
+    setActorComponentFlags(vehicle, {
+        collision: true,
+        physics: true,
+        scripts: options.includeScripts !== false,
+    });
     physics.dynamicBodies.push(vehicle);
+    physicsCore?.registerBackFaceCulledBody?.(body);
     updateGameplayUI();
     return vehicle;
 }
@@ -2230,6 +2365,7 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
     if (!physics.ready) return null;
 
     const { Jolt, bodyInterface } = physics;
+    const simulatePhysics = options.simulatePhysics !== false;
     const bodyPosition = new Jolt.RVec3(position.x, position.y, position.z);
     const rotation = options.rotation;
     const bodyRotation = new Jolt.Quat(
@@ -2242,8 +2378,8 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
         shape,
         bodyPosition,
         bodyRotation,
-        Jolt.EMotionType_Dynamic,
-        JOLT_MOVING_LAYER
+        simulatePhysics ? Jolt.EMotionType_Dynamic : Jolt.EMotionType_Static,
+        simulatePhysics ? JOLT_MOVING_LAYER : JOLT_NON_MOVING_LAYER
     );
     creationSettings.mFriction = options.friction ?? 0.68;
     creationSettings.mRestitution = options.restitution ?? 0.16;
@@ -2257,13 +2393,21 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
         creationSettings.mAllowedDOFs = options.allowedDOFs;
     }
 
+    // Enhanced internal edge removal eliminates ghost collisions where a body
+    // crosses a seam between coplanar triangles in a static MeshShape and the
+    // contact normal flips into the edge — the symptom is a vehicle hitting an
+    // invisible wall and flipping at track segment joints.
+    if (options.enhancedInternalEdgeRemoval === true) {
+        creationSettings.mEnhancedInternalEdgeRemoval = true;
+    }
+
     const body = bodyInterface.CreateBody(creationSettings);
     bodyInterface.AddBody(
         body.GetID(),
-        options.activate === false ? Jolt.EActivation_DontActivate : Jolt.EActivation_Activate
+        !simulatePhysics || options.activate === false ? Jolt.EActivation_DontActivate : Jolt.EActivation_Activate
     );
 
-    if (impulse && options.skipImpulse !== true) {
+    if (simulatePhysics && impulse && options.skipImpulse !== true) {
         const launchImpulse = new Jolt.Vec3(impulse.x, impulse.y, impulse.z);
         bodyInterface.AddImpulse(body.GetID(), launchImpulse);
         Jolt.destroy(launchImpulse);
@@ -2292,6 +2436,7 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
     getDynamicPropSpawn(spawnPosition, launchImpulse);
     const impulseScale = Number.isFinite(options.impulseScale) ? options.impulseScale : 1;
     const includeCollisionBody = options.includeCollisionBody !== false;
+    const simulatePhysics = includeCollisionBody && options.simulatePhysics !== false;
     const useLocalPosition = options.local !== false;
 
     if (offset) {
@@ -2352,7 +2497,10 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
     }
 
     const body = includeCollisionBody
-        ? createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, bodyOptions)
+        ? createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, {
+            ...bodyOptions,
+            simulatePhysics,
+        })
         : null;
 
     if (includeCollisionBody && !body) {
@@ -2372,7 +2520,18 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
         userData: options.userData,
         includeScripts: options.includeScripts !== false,
     });
-    physics.dynamicBodies.push(actor);
+    setActorComponentFlags(actor, {
+        collision: !!body,
+        physics: !!body && simulatePhysics,
+        scripts: options.includeScripts !== false,
+    });
+    if (body) {
+        if (simulatePhysics) {
+            physics.dynamicBodies.push(actor);
+        } else {
+            physics.staticBodies.push(actor);
+        }
+    }
 
     return options.returnActor === true ? actor : body;
 }
@@ -2454,6 +2613,9 @@ function createDefaultObjectEventState(eventName) {
         enabled: false,
         running: false,
         eventName,
+        // UE lifecycle bookkeeping — populated lazily on first run.
+        handles: null,
+        beganPlay: false,
     };
 }
 
@@ -2568,6 +2730,35 @@ function selectShowcaseActor(actorId) {
     }
 }
 
+function syncTransformControlState() {
+    if (!transformControl) return;
+
+    const helper = transformControl.getHelper?.() ?? null;
+    const shouldEnable = !gameplay.active && !gameplay.pointerLocked;
+
+    transformControl.enabled = shouldEnable;
+    if (helper) {
+        helper.visible = shouldEnable && !!transformControl.object;
+    }
+
+    if (!shouldEnable) {
+        transformControl.detach();
+        return;
+    }
+
+    if (transformControl.object || blueprintState.active) {
+        if (helper) helper.visible = !!transformControl.object;
+        return;
+    }
+
+    const selectedActor = getDynamicPropById(objectScriptState.targetPropId);
+    const selectedMesh = getActorRenderObject(selectedActor);
+    if (selectedMesh) {
+        transformControl.attach(selectedMesh);
+        if (helper) helper.visible = true;
+    }
+}
+
 function syncTransformToPhysics() {
     if (!transformControl || !transformControl.object) return;
     
@@ -2605,6 +2796,7 @@ function rebuildActorPhysics(prop) {
     if (!prop || !getActorRenderObject(prop) || !physics.ready) return;
     
     const { Jolt, bodyInterface } = physics;
+    const componentFlags = getActorComponentFlags(prop);
     const currentBody = getActorBody(prop);
     const bodyID = currentBody?.GetID();
     
@@ -2612,17 +2804,40 @@ function rebuildActorPhysics(prop) {
         bodyInterface.RemoveBody(bodyID);
         bodyInterface.DestroyBody(bodyID);
     }
+
+    if (!componentFlags.collision) {
+        prop.body = null;
+        return;
+    }
     
+    const importedTemplate = prop.kind === 'imported'
+        ? importedPropState.templates.find((entry) => entry.id === prop.templateId)
+        : null;
+    const useExactMeshCollision = importedTemplate?.collisionMode === 'complex';
+
     let bodyOptions = {
         rotation: getActorRenderObject(prop).quaternion,
         friction: prop.userData?.friction || 0.5,
         restitution: prop.userData?.restitution || 0.3,
         allowedDOFs: prop.userData?.allowedDOFs,
         kinematic: prop.userData?.kinematic,
+        simulatePhysics: useExactMeshCollision ? false : componentFlags.physics,
         activate: true
     };
     
     const rootMesh = getActorRenderObject(prop);
+
+    if (useExactMeshCollision) {
+        const newBody = createStaticMeshBody(rootMesh);
+        prop.body = newBody;
+        setActorComponentFlags(prop, {
+            ...componentFlags,
+            collision: !!newBody,
+            physics: false,
+        });
+        return;
+    }
+
     const subShapes = [];
     const compoundSettings = new Jolt.MutableCompoundShapeSettings();
     let hasCompound = false;
@@ -2706,6 +2921,11 @@ function rebuildActorPhysics(prop) {
     if (finalShape) {
         const newBody = createDynamicPrimitiveBody(finalShape, rootMesh.position, null, bodyOptions);
         prop.body = newBody;
+        setActorComponentFlags(prop, {
+            ...componentFlags,
+            collision: !!newBody,
+            physics: !!newBody && componentFlags.physics,
+        });
     }
 }
 
@@ -2811,7 +3031,7 @@ function syncActorEditorTemplateOptions(selectedTemplateId = '') {
 }
 
 function syncActorEditorUi() {
-    if (!actorKindSelect || !actorEditorSummary || !actorEditorStatus || !actorImportedTemplateSelect || !actorComponentCollisionInput || !actorComponentScriptsInput) {
+    if (!actorKindSelect || !actorEditorSummary || !actorEditorStatus || !actorImportedTemplateSelect || !actorComponentCollisionInput || !actorComponentPhysicsInput || !actorComponentScriptsInput) {
         return;
     }
 
@@ -2821,8 +3041,12 @@ function syncActorEditorUi() {
 
     actorImportedTemplateSelect.disabled = !isImported;
     actorComponentCollisionInput.disabled = isVehicle;
+    actorComponentPhysicsInput.disabled = isVehicle || !actorComponentCollisionInput.checked;
     if (isVehicle) {
         actorComponentCollisionInput.checked = true;
+        actorComponentPhysicsInput.checked = true;
+    } else if (!actorComponentCollisionInput.checked) {
+        actorComponentPhysicsInput.checked = false;
     }
 
     const typeLabel = kind === 'vehicle'
@@ -2840,7 +3064,12 @@ function syncActorEditorUi() {
         return;
     }
 
-    actorEditorStatus.textContent = `${typeLabel} will spawn with a render node${actorComponentCollisionInput.checked ? ', a collision body' : ''}${actorComponentScriptsInput.checked ? ', and a script host' : ''}.`;
+    const bodyDescription = !actorComponentCollisionInput.checked
+        ? ''
+        : actorComponentPhysicsInput.checked
+            ? ', simulated collision + physics'
+            : ', static collision only';
+    actorEditorStatus.textContent = `${typeLabel} will spawn with a render node${bodyDescription}${actorComponentScriptsInput.checked ? ', and a script host' : ''}.`;
 }
 
 function closeActorEditor() {
@@ -2866,6 +3095,9 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
     if (actorComponentCollisionInput) {
         actorComponentCollisionInput.checked = true;
     }
+    if (actorComponentPhysicsInput) {
+        actorComponentPhysicsInput.checked = true;
+    }
     if (actorComponentScriptsInput) {
         actorComponentScriptsInput.checked = true;
     }
@@ -2878,6 +3110,7 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
 function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     const kind = actorKindSelect?.value || 'sphere';
     const includeCollisionBody = kind === 'vehicle' ? true : !!actorComponentCollisionInput?.checked;
+    const simulatePhysics = kind === 'vehicle' ? true : !!actorComponentPhysicsInput?.checked;
     const includeScripts = !!actorComponentScriptsInput?.checked;
     const parsedScale = Number.parseFloat(actorScaleInput?.value ?? '0.5');
     const scale = Number.isFinite(parsedScale) && parsedScale > 0 ? parsedScale : (kind === 'cube' ? 0.3 : 0.5);
@@ -2896,12 +3129,14 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
 
         actor = spawnImportedProp(templateId, {
             includeCollisionBody,
+            simulatePhysics,
             includeScripts,
             userData,
         });
     } else {
         actor = spawnDynamicPrimitive(kind, undefined, scale, {
             includeCollisionBody,
+            simulatePhysics,
             includeScripts,
             userData,
             returnActor: true,
@@ -2930,14 +3165,40 @@ function compileObjectEventScript(source) {
     const normalizedSource = typeof source === 'string' ? source.trim() : '';
 
     if (!normalizedSource) {
-        return new ObjectEventFunction('api', '"use strict"; return;');
+        const empty = new ObjectEventFunction('api', '"use strict"; return;');
+        empty.__ueLifecycle = false;
+        return empty;
     }
 
-    return new ObjectEventFunction('api', `
+    // UE lifecycle mode: source defines BeginPlay / Tick / OnHit / EndPlay.
+    // Compile a wrapper that runs the source once to register them and returns
+    // a handles map. Old flat-body scripts fall through to the legacy path so
+    // existing .umap saves continue to work unchanged.
+    if (detectsUeLifecycle(normalizedSource)) {
+        const wrapped = new ObjectEventFunction('api', `
+            "use strict";
+            const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp,
+                FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, UPrimitiveComponent, UTransformComponent, UWorld, Self, World, GetWorld, DeltaTime, Hit } = api;
+            ${normalizedSource}
+            return {
+                BeginPlay: typeof BeginPlay === 'function' ? BeginPlay : undefined,
+                Tick: typeof Tick === 'function' ? Tick : undefined,
+                OnHit: typeof OnHit === 'function' ? OnHit : undefined,
+                EndPlay: typeof EndPlay === 'function' ? EndPlay : undefined,
+            };
+        `);
+        wrapped.__ueLifecycle = true;
+        return wrapped;
+    }
+
+    const flat = new ObjectEventFunction('api', `
         "use strict";
-        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp } = api;
+        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp,
+            FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, UPrimitiveComponent, UTransformComponent, UWorld, Self, World, GetWorld, DeltaTime, Hit } = api;
         ${normalizedSource}
     `);
+    flat.__ueLifecycle = false;
+    return flat;
 }
 
 function syncPropScriptState(prop) {
@@ -3080,6 +3341,39 @@ function getDynamicPropById(propId) {
         }
     }
     return physics.dynamicBodies.find((prop) => prop.id === propId) || null;
+}
+
+function isTransformControlSphereHit(event, { mode = null } = {}) {
+    if (!transformControl || !transformControl.enabled || !transformControl.object || !renderer || !camera) {
+        return false;
+    }
+
+    if (mode && transformControl.getMode?.() !== mode) {
+        return false;
+    }
+
+    const helper = transformControl.getHelper?.() ?? null;
+    if (helper && helper.visible === false) {
+        return false;
+    }
+
+    const rect = renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+        return false;
+    }
+
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNdc, camera);
+
+    const gizmoCenter = tempVectorA;
+    transformControl.object.getWorldPosition(gizmoCenter);
+
+    const cameraDistance = camera.position.distanceTo(gizmoCenter);
+    const sphereRadius = Math.max(0.55, cameraDistance * 0.085 * (transformControl.size || 1));
+    const distanceToRay = Math.sqrt(raycaster.ray.distanceSqToPoint(gizmoCenter));
+
+    return distanceToRay <= sphereRadius;
 }
 
 function getDynamicPropHitFromEvent(event) {
@@ -3274,12 +3568,16 @@ function updatePropScriptSource(prop, eventType, source, { persist = true, notif
 
     try {
         eventState.compiled = compileObjectEventScript(normalizedSource);
+        eventState.handles = null;
+        eventState.beganPlay = false;
         eventState.enabled = eventType === 'tick'
             ? !!normalizedSource.trim() && !!scriptState.tick.enabled
             : !!normalizedSource.trim();
     } catch (error) {
         eventState.error = error?.message || String(error);
         eventState.compiled = null;
+        eventState.handles = null;
+        eventState.beganPlay = false;
         eventState.enabled = false;
         if (notify) {
             alert(`error: ${eventState.error}`);
@@ -3340,7 +3638,7 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
     const localPosition = object?.position?.clone?.() ?? null;
     const worldPosition = object ? object.getWorldPosition(new THREE.Vector3()) : null;
 
-    return {
+    const legacyApi = {
         THREE,
         scene,
         camera,
@@ -3368,6 +3666,24 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
         spawnDynamicPrimitive,
         spawnImportedProp,
     };
+
+    return buildUeContext(
+        legacyApi,
+        {
+            scene,
+            camera,
+            sceneSystem,
+            physics,
+            raycastWorld: typeof raycastWorld === 'function' ? raycastWorld : null,
+            spawnDynamicPrimitive,
+            spawnImportedProp,
+            spawnDrivableCar: typeof spawnDrivableCar === 'function' ? spawnDrivableCar : null,
+            destroyActor: typeof destroyDynamicPhysicsProp === 'function' ? destroyDynamicPhysicsProp : null,
+            deltaTime,
+        },
+        prop,
+        collision,
+    );
 }
 
 function handleObjectScriptRuntimeError(prop, eventType, error) {
@@ -3391,8 +3707,53 @@ function runObjectEventScript(prop, eventType, options = {}) {
         return false;
     }
 
+    const compiled = eventState.compiled;
+    const api = buildObjectEventApi(prop, eventType, options);
+
+    // UE lifecycle path: invoke the compiled wrapper once to harvest handles,
+    // then dispatch the appropriate lifecycle method for this event type.
+    if (compiled.__ueLifecycle) {
+        try {
+            if (!eventState.handles) {
+                eventState.handles = compiled(api) || {};
+            }
+            const handles = eventState.handles;
+
+            // BeginPlay fires once when the tick event slot first runs in play mode.
+            if (eventType === 'tick' && !eventState.beganPlay) {
+                eventState.beganPlay = true;
+                if (typeof handles.BeginPlay === 'function') {
+                    eventState.running = true;
+                    Promise.resolve(handles.BeginPlay.call(api.Self ?? null))
+                        .catch((error) => handleObjectScriptRuntimeError(prop, eventType, error))
+                        .finally(() => { eventState.running = false; });
+                }
+            }
+
+            const target = eventType === 'collision' ? handles.OnHit : handles.Tick;
+            if (typeof target !== 'function') return false;
+
+            eventState.running = true;
+            Promise.resolve(target.call(api.Self ?? null, eventType === 'collision' ? api.Hit : api.DeltaTime))
+                .then(() => {
+                    eventState.running = false;
+                    if (objectScriptState.targetPropId === prop.id && objectScriptState.targetEvent === eventType) {
+                        updateObjectScriptEditorStatus(`${getObjectScriptEventLabel(eventType)} code ran.`);
+                    }
+                })
+                .catch((error) => {
+                    handleObjectScriptRuntimeError(prop, eventType, error);
+                });
+            return true;
+        } catch (error) {
+            handleObjectScriptRuntimeError(prop, eventType, error);
+            return false;
+        }
+    }
+
+    // Legacy flat-body path: execute the whole script every event.
     eventState.running = true;
-    Promise.resolve(eventState.compiled(buildObjectEventApi(prop, eventType, options)))
+    Promise.resolve(compiled(api))
         .then(() => {
             eventState.running = false;
             if (objectScriptState.targetPropId === prop.id && objectScriptState.targetEvent === eventType) {
@@ -3415,6 +3776,506 @@ function runObjectTickScripts(delta) {
         const prop = physics.dynamicBodies[index];
         if (!getActorRenderObject(prop)) continue;
         runObjectEventScript(prop, 'tick', { deltaTime: delta });
+    }
+}
+
+/**
+ * Look up the dynamic-body actor whose Jolt body matches the given bodyId.
+ * Returns null for terrain/world-static hits.
+ */
+function getActorByBodyId(bodyId) {
+    if (bodyId == null || bodyId < 0) return null;
+    const actors = [...physics.dynamicBodies, ...physics.staticBodies];
+    for (let i = 0; i < actors.length; i++) {
+        const actor = actors[i];
+        const body = getActorBody(actor);
+        const id = body?.GetID?.();
+        if (id?.GetIndexAndSequenceNumber?.() === bodyId) return actor;
+    }
+    return null;
+}
+
+function ensureRaycastDebugLine() {
+    if (raycastDebugState.helper || !scene) return raycastDebugState.helper;
+
+    const helper = new THREE.ArrowHelper(
+        new THREE.Vector3(0, 0, -1),
+        new THREE.Vector3(),
+        1,
+        0xef4444,
+        0.35,
+        0.18,
+    );
+    helper.name = 'raycast-debug-line';
+    helper.renderOrder = 999;
+    helper.line.renderOrder = 999;
+    helper.cone.renderOrder = 999;
+    helper.line.material.depthTest = false;
+    helper.line.material.transparent = true;
+    helper.line.material.opacity = 0.95;
+    helper.line.material.toneMapped = false;
+    helper.cone.material.depthTest = false;
+    helper.cone.material.transparent = true;
+    helper.cone.material.opacity = 0.95;
+    helper.cone.material.toneMapped = false;
+    helper.visible = false;
+    scene.add(helper);
+
+    const hitMarker = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 14, 10),
+        new THREE.MeshBasicMaterial({
+            color: 0xef4444,
+            transparent: true,
+            opacity: 0.95,
+            depthTest: false,
+            toneMapped: false,
+        })
+    );
+    hitMarker.name = 'raycast-debug-hit';
+    hitMarker.renderOrder = 1000;
+    hitMarker.visible = false;
+    scene.add(hitMarker);
+
+    raycastDebugState.helper = helper;
+    raycastDebugState.hitMarker = hitMarker;
+    return helper;
+}
+
+function updateRaycastDebugLine(origin, direction, maxDist, hitPoint = null, hit = false) {
+    if (!raycastDebugState.enabled) {
+        return;
+    }
+
+    const helper = ensureRaycastDebugLine();
+    const distance = Number.isFinite(maxDist) && maxDist > 0 ? maxDist : 0;
+    const dx = Number(direction?.x);
+    const dy = Number(direction?.y);
+    const dz = Number(direction?.z);
+
+    if (!helper || !Number.isFinite(distance) || ![dx, dy, dz].every(Number.isFinite)) {
+        return;
+    }
+
+    raycastDebugState.points[0].set(
+        Number(origin?.x) || 0,
+        Number(origin?.y) || 0,
+        Number(origin?.z) || 0,
+    );
+
+    if (hitPoint && Number.isFinite(hitPoint.x) && Number.isFinite(hitPoint.y) && Number.isFinite(hitPoint.z)) {
+        raycastDebugState.points[1].set(hitPoint.x, hitPoint.y, hitPoint.z);
+    } else {
+        raycastDebugState.points[1].set(
+            raycastDebugState.points[0].x + dx * distance,
+            raycastDebugState.points[0].y + dy * distance,
+            raycastDebugState.points[0].z + dz * distance,
+        );
+    }
+
+    tempVectorC.subVectors(raycastDebugState.points[1], raycastDebugState.points[0]);
+    const length = tempVectorC.length();
+    if (length <= 1e-5) {
+        helper.visible = false;
+        if (raycastDebugState.hitMarker) {
+            raycastDebugState.hitMarker.visible = false;
+        }
+        return;
+    }
+
+    const visibleLength = Math.max(length, 1.25);
+    helper.position.copy(raycastDebugState.points[0]);
+    helper.setDirection(tempVectorC.normalize());
+    helper.setLength(
+        visibleLength,
+        Math.min(Math.max(visibleLength * 0.14, 0.25), 0.9),
+        Math.min(Math.max(visibleLength * 0.07, 0.12), 0.38),
+    );
+    helper.setColor(hit ? 0x22c55e : 0xef4444);
+    helper.visible = true;
+
+    if (raycastDebugState.hitMarker) {
+        raycastDebugState.hitMarker.position.copy(raycastDebugState.points[1]);
+        raycastDebugState.hitMarker.material.color.set(hit ? 0x22c55e : 0xef4444);
+        raycastDebugState.hitMarker.visible = true;
+    }
+    raycastDebugState.expiresAt = performance.now() + raycastDebugState.timeoutMs;
+}
+
+function updateRaycasterDebugLine(ray, maxDist, hitPoint = null, hit = false) {
+    if (!ray) return;
+    updateRaycastDebugLine(ray.origin, ray.direction, maxDist, hitPoint, hit);
+}
+
+function tickRaycastDebugLine() {
+    if (!raycastDebugState.helper?.visible) return;
+    if (performance.now() < raycastDebugState.expiresAt) return;
+    raycastDebugState.helper.visible = false;
+    if (raycastDebugState.hitMarker) {
+        raycastDebugState.hitMarker.visible = false;
+    }
+}
+
+function createCollisionLineSegments(geometry, color) {
+    const edges = new THREE.EdgesGeometry(geometry, 30);
+    const lines = new THREE.LineSegments(
+        edges,
+        new THREE.LineBasicMaterial({
+            color,
+            depthTest: false,
+            transparent: true,
+            opacity: 0.9,
+            toneMapped: false,
+        })
+    );
+    lines.renderOrder = 995;
+    return lines;
+}
+
+function createCollisionOverlayFromObject(sourceRoot, color) {
+    if (!sourceRoot) return null;
+
+    const overlayRoot = sourceRoot.isMesh && sourceRoot.geometry
+        ? createCollisionLineSegments(sourceRoot.geometry, color)
+        : new THREE.Group();
+    const sourceMap = new Map([[sourceRoot, overlayRoot]]);
+
+    sourceRoot.traverse((source) => {
+        const overlayParent = sourceMap.get(source);
+        if (!overlayParent) return;
+
+        source.children.forEach((child) => {
+            let overlayChild;
+            if (child.isMesh && child.geometry) {
+                overlayChild = createCollisionLineSegments(child.geometry, color);
+            } else {
+                overlayChild = new THREE.Group();
+            }
+
+            overlayChild.position.copy(child.position);
+            overlayChild.quaternion.copy(child.quaternion);
+            overlayChild.scale.copy(child.scale);
+            overlayParent.add(overlayChild);
+            sourceMap.set(child, overlayChild);
+        });
+    });
+
+    return overlayRoot;
+}
+
+function createImportedSimpleCollisionOverlay(template, color) {
+    if (!template?.root) return null;
+
+    template.root.updateWorldMatrix(true, true);
+    const bounds = new THREE.Box3().setFromObject(template.root);
+    const size = bounds.getSize(new THREE.Vector3());
+    const center = bounds.getCenter(new THREE.Vector3());
+    const lines = createCollisionLineSegments(
+        new THREE.BoxGeometry(
+            Math.max(size.x, 0.16),
+            Math.max(size.y, 0.16),
+            Math.max(size.z, 0.16),
+        ),
+        color,
+    );
+    lines.position.copy(center);
+    return lines;
+}
+
+function buildActorCollisionOverlay(actor) {
+    const flags = getActorComponentFlags(actor);
+    if (!flags.collision) return null;
+
+    const actorMesh = getActorRenderObject(actor);
+    if (!actorMesh) return null;
+
+    const color = flags.physics ? 0x22c55e : 0xf59e0b;
+
+    if (actor.kind === 'vehicle') {
+        return createCollisionLineSegments(
+            new THREE.BoxGeometry(VEHICLE_SETTINGS.width, VEHICLE_SETTINGS.height, VEHICLE_SETTINGS.length),
+            color,
+        );
+    }
+
+    if (actor.kind === 'imported') {
+        const template = importedPropState.templates.find((entry) => entry.id === actor.templateId);
+        if (template?.collisionMode === 'simple') {
+            return createImportedSimpleCollisionOverlay(template, color);
+        }
+        return createCollisionOverlayFromObject(actorMesh, color);
+    }
+
+    return createCollisionOverlayFromObject(actorMesh, color);
+}
+
+function disposeCollisionOverlayObject(object) {
+    if (!object) return;
+    object.traverse((child) => {
+        if (child.geometry) {
+            child.geometry.dispose?.();
+        }
+        const material = child.material;
+        if (Array.isArray(material)) {
+            material.forEach((entry) => entry?.dispose?.());
+        } else {
+            material?.dispose?.();
+        }
+    });
+}
+
+function clearCollisionDebugOverlays() {
+    collisionDebugState.overlays.forEach((overlay) => {
+        overlay.parent?.remove(overlay);
+        disposeCollisionOverlayObject(overlay);
+    });
+    collisionDebugState.overlays = [];
+}
+
+function refreshCollisionDebugOverlays() {
+    if (!collisionDebugState.enabled || !scene) {
+        clearCollisionDebugOverlays();
+        return;
+    }
+
+    clearCollisionDebugOverlays();
+
+    for (const actor of sceneSystem?.actors || []) {
+        const actorMesh = getActorRenderObject(actor);
+        const overlay = buildActorCollisionOverlay(actor);
+        if (!overlay || !actorMesh) continue;
+
+        overlay.name = 'collision-debug-overlay';
+        actorMesh.add(overlay);
+        collisionDebugState.overlays.push(overlay);
+    }
+}
+
+function setCollisionDebugEnabled(isEnabled) {
+    collisionDebugState.enabled = !!isEnabled;
+    refreshCollisionDebugOverlays();
+    pushDebugConsoleLine(`Collision overlay ${collisionDebugState.enabled ? 'enabled' : 'disabled'} (F8).`, 'success');
+}
+
+/**
+ * World-space raycast exposed to scripts and tools (e.g., the Physgun).
+ * Wraps physicsCore.castRay and attaches the owning actor for the hit body.
+ *
+ * @param {{x,y,z}} origin     World-space ray start.
+ * @param {{x,y,z}} direction  Unit direction vector.
+ * @param {number} [maxDist=1000]
+ * @returns {{hit:boolean, point?:{x,y,z}, normal?:{x,y,z}, distance?:number, actor?:object|null, bodyId?:number}}
+ */
+function raycastWorld(origin, direction, maxDist = 1000) {
+    if (!physicsCore?.castRay) return { hit: false };
+    const distance = Number(maxDist);
+    const safeDistance = Number.isFinite(distance) && distance > 0 ? distance : 1000;
+    const result = physicsCore.castRay(origin, direction, safeDistance);
+    updateRaycastDebugLine(origin, direction, safeDistance, result?.point ?? null, !!result?.hit);
+    if (!result?.hit) return { hit: false };
+    return { ...result, actor: getActorByBodyId(result.bodyId) };
+}
+
+function describeRaycastHit(result) {
+    if (!result?.hit) {
+        return {
+            key: 'miss',
+            message: 'Debug ray hit nothing.',
+        };
+    }
+
+    const actor = result.actor ?? null;
+    const actorLabel = actor?.userData?.label || actor?.rootNode?.name || actor?.name || actor?.id || '';
+    const kind = actor?.kind || 'world-static';
+    const distance = Number.isFinite(result.distance) ? result.distance.toFixed(2) : 'unknown';
+    const targetLabel = actorLabel || `body ${result.bodyId ?? 'unknown'}`;
+
+    return {
+        key: `${actor?.id || 'world-static'}:${distance}`,
+        message: `Debug ray hit ${targetLabel} (${kind}) at ${distance}m.`,
+    };
+}
+
+function logGameplayDebugRayHit(result) {
+    if (!raycastDebugState.enabled) {
+        return;
+    }
+
+    const description = describeRaycastHit(result);
+    if (description.key === raycastDebugState.lastConsoleHitKey) {
+        return;
+    }
+
+    raycastDebugState.lastConsoleHitKey = description.key;
+    console.log(description.message, result);
+}
+
+function updateGameplayDebugRay() {
+    if (!raycastDebugState.enabled || !gameplay.active || !camera) {
+        if (raycastDebugState.helper) {
+            raycastDebugState.helper.visible = false;
+        }
+        if (raycastDebugState.hitMarker) {
+            raycastDebugState.hitMarker.visible = false;
+        }
+        raycastDebugState.lastConsoleHitKey = '';
+        return;
+    }
+
+    const { origin, direction } = physgunCameraRay();
+    const result = raycastWorld(origin, direction, 50);
+    logGameplayDebugRayHit(result);
+}
+
+function setRayDebugEnabled(isEnabled) {
+    raycastDebugState.enabled = !!isEnabled;
+    raycastDebugState.lastConsoleHitKey = '';
+
+    if (!raycastDebugState.enabled) {
+        if (raycastDebugState.helper) {
+            raycastDebugState.helper.visible = false;
+        }
+        if (raycastDebugState.hitMarker) {
+            raycastDebugState.hitMarker.visible = false;
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────
+//  Physgun (GMod-style grab/push/pull/fling tool)
+// ──────────────────────────────────────────────────────────
+
+const physgunState = {
+    equipped: false,
+    heldActor: null,
+    grabDistance: 5,
+    minDistance: 1.5,
+    maxDistance: 25,
+    // PD controller gains for the grab spring.
+    springK: 60,
+    damping: 6,
+    maxSpeed: 30,
+    flingImpulse: 18,
+};
+
+function physgunSetEquipped(equipped) {
+    physgunState.equipped = !!equipped;
+    if (!physgunState.equipped) physgunReleaseHeld();
+    const ui = document.getElementById('physgun-crosshair');
+    if (ui) ui.classList.toggle('physgun-active', physgunState.equipped);
+}
+
+function physgunReleaseHeld() {
+    physgunState.heldActor = null;
+}
+
+function physgunCameraRay() {
+    const origin = new THREE.Vector3();
+    camera.getWorldPosition(origin);
+    const direction = new THREE.Vector3();
+    camera.getWorldDirection(direction);
+    return { origin, direction: direction.normalize() };
+}
+
+function physgunGrabFromCamera() {
+    const { origin, direction } = physgunCameraRay();
+    const r = raycastWorld(origin, direction, 30);
+    if (!r.hit || !r.actor) return false;
+    // Only grab dynamic actors (must have a physics body that simulates).
+    const body = getActorBody(r.actor);
+    if (!body) return false;
+    physgunState.heldActor = r.actor;
+    physgunState.grabDistance = Math.max(physgunState.minDistance, Math.min(physgunState.maxDistance, r.distance));
+    // Wake the body so the spring can move it.
+    const phys = r.actor.getComponentByClass(PhysicsComponent);
+    phys?.activate?.();
+    return true;
+}
+
+function physgunFlingHeld() {
+    const actor = physgunState.heldActor;
+    if (!actor) return false;
+    const phys = actor.getComponentByClass(PhysicsComponent);
+    if (!phys) { physgunReleaseHeld(); return false; }
+    const { direction } = physgunCameraRay();
+    const v = new THREE.Vector3(
+        direction.x * physgunState.flingImpulse,
+        direction.y * physgunState.flingImpulse + 2.5,
+        direction.z * physgunState.flingImpulse,
+    );
+    phys.addImpulse(v);
+    physgunReleaseHeld();
+    return true;
+}
+
+function physgunPunt() {
+    const { origin, direction } = physgunCameraRay();
+    const r = raycastWorld(origin, direction, 50);
+    if (!r.hit || !r.actor) return false;
+    const phys = r.actor.getComponentByClass(PhysicsComponent);
+    if (!phys) return false;
+    phys.activate?.();
+    phys.addImpulse(new THREE.Vector3(
+        direction.x * physgunState.flingImpulse * 1.6,
+        direction.y * physgunState.flingImpulse * 1.6 + 1.5,
+        direction.z * physgunState.flingImpulse * 1.6,
+    ));
+    return true;
+}
+
+function physgunAdjustDistance(delta) {
+    physgunState.grabDistance = Math.max(
+        physgunState.minDistance,
+        Math.min(physgunState.maxDistance, physgunState.grabDistance + delta),
+    );
+}
+
+function tickPhysgun(delta) {
+    if (!physgunState.equipped || !physgunState.heldActor || !gameplay.active) return;
+    const actor = physgunState.heldActor;
+    const phys = actor.getComponentByClass(PhysicsComponent);
+    const mesh = getActorRenderObject(actor);
+    if (!phys || !mesh || !phys.isReady()) {
+        physgunReleaseHeld();
+        return;
+    }
+
+    const { origin, direction } = physgunCameraRay();
+    const target = origin.clone().addScaledVector(direction, physgunState.grabDistance);
+
+    const pos = mesh.getWorldPosition(new THREE.Vector3());
+    const vel = phys.getLinearVelocity();
+    // PD controller: a = K*(target - pos) - D*vel
+    const ax = physgunState.springK * (target.x - pos.x) - physgunState.damping * vel.x;
+    const ay = physgunState.springK * (target.y - pos.y) - physgunState.damping * vel.y;
+    const az = physgunState.springK * (target.z - pos.z) - physgunState.damping * vel.z;
+
+    // Integrate to a velocity directly (treat the spring as a velocity drive),
+    // clamped so we don't fling the body across the world.
+    let vx = vel.x + ax * delta;
+    let vy = vel.y + ay * delta;
+    let vz = vel.z + az * delta;
+    const speed = Math.sqrt(vx * vx + vy * vy + vz * vz);
+    if (speed > physgunState.maxSpeed) {
+        const k = physgunState.maxSpeed / speed;
+        vx *= k; vy *= k; vz *= k;
+    }
+    phys.setLinearVelocity(new THREE.Vector3(vx, vy, vz));
+    // Tame angular velocity so held objects don't spin chaotically.
+    const av = phys.getAngularVelocity();
+    phys.setAngularVelocity(new THREE.Vector3(av.x * 0.85, av.y * 0.85, av.z * 0.85));
+}
+
+/**
+ * Reset BeginPlay bookkeeping on every actor's lifecycle scripts so that
+ * BeginPlay re-fires on each Edit→Play transition. Called from gameplay entry.
+ */
+function resetAllScriptLifecycleHandles() {
+    for (let i = 0; i < physics.dynamicBodies.length; i++) {
+        const prop = physics.dynamicBodies[i];
+        const state = getActorScriptState(prop);
+        if (!state) continue;
+        if (state.tick) { state.tick.beganPlay = false; }
+        if (state.collision) { state.collision.beganPlay = false; }
     }
 }
 
@@ -4098,9 +4959,34 @@ function runMobileCommand(args) {
     pushDebugConsoleLine('Usage: mobile on, mobile off, or mobile toggle.', 'warn');
 }
 
+function runRayDebugCommand(args) {
+    const action = args[0]?.toLowerCase() || 'toggle';
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        setRayDebugEnabled(true);
+        pushDebugConsoleLine('Ray debug enabled.', 'success');
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        setRayDebugEnabled(false);
+        pushDebugConsoleLine('Ray debug disabled.', 'success');
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        setRayDebugEnabled(!raycastDebugState.enabled);
+        pushDebugConsoleLine(`Ray debug ${raycastDebugState.enabled ? 'enabled' : 'disabled'}.`, 'success');
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: raydebug on, raydebug off, or raydebug toggle.', 'warn');
+}
+
 const debugCommandRegistry = {
     stat: runStatCommand,
     mobile: runMobileCommand,
+    raydebug: runRayDebugCommand,
 };
 
 function executeDebugConsoleCommand(rawCommand) {
@@ -4479,6 +5365,10 @@ function setupMobileControls() {
 }
 
 function refreshSceneUI() {
+    if (collisionDebugState.enabled) {
+        refreshCollisionDebugOverlays();
+    }
+
     if (!sceneUiList || !sceneUiCount) return;
 
     sceneUiList.innerHTML = '';
@@ -4613,6 +5503,7 @@ async function init() {
     actorScaleInput = document.getElementById('actor-scale-input');
     actorImportedTemplateSelect = document.getElementById('actor-imported-template-select');
     actorComponentCollisionInput = document.getElementById('actor-component-collision');
+    actorComponentPhysicsInput = document.getElementById('actor-component-physics');
     actorComponentScriptsInput = document.getElementById('actor-component-scripts');
     actorEditorCreateBtn = document.getElementById('actor-editor-create');
     actorEditorOpenScriptBtn = document.getElementById('actor-editor-open-script');
@@ -4702,6 +5593,7 @@ async function init() {
     actorKindSelect?.addEventListener('change', () => syncActorEditorUi());
     actorImportedTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
     actorComponentCollisionInput?.addEventListener('change', () => syncActorEditorUi());
+    actorComponentPhysicsInput?.addEventListener('change', () => syncActorEditorUi());
     actorComponentScriptsInput?.addEventListener('change', () => syncActorEditorUi());
     actorEditorCreateBtn?.addEventListener('click', () => {
         spawnActorFromEditor({ openScriptEditor: false });
@@ -4817,6 +5709,7 @@ async function init() {
         }
     });
     scene.add(transformControl.getHelper());
+    syncTransformControlState();
 
     // Initialize widget system AFTER renderer is set up
     widgetManager = new WidgetManager(container);
@@ -4946,6 +5839,7 @@ async function init() {
         } else {
             updateShowcaseCamera(delta);
         }
+        updateGameplayDebugRay();
         const updateDuration = performance.now() - updateStart;
 
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
@@ -4968,6 +5862,7 @@ async function init() {
             const scriptDuration = performance.now() - scriptStart;
 
             const renderStart = performance.now();
+            tickRaycastDebugLine();
             renderer.renderAsync(scene, camera);
 
             recordDebugFrameMetrics({
@@ -5143,6 +6038,7 @@ function setupGameplayEvents() {
         if (!blueprintState.active) return;
         if (event.button !== 0) return;
         if (typeof transformControl !== 'undefined' && (transformControl.dragging || transformControl.justFinishedDragging || transformControl.axis !== null)) return;
+        if (isTransformControlSphereHit(event, { mode: 'scale' })) return;
         
         const rect = renderer.domElement.getBoundingClientRect();
         if (rect.width <= 0 || rect.height <= 0) return;
@@ -5299,6 +6195,12 @@ function handleGameplayKeyEvent(event) {
         if (gameplay.pointerLocked || gameplay.active) {
             event.preventDefault();
         }
+        return;
+    }
+
+    if (isDown && !event.repeat && event.code === 'F8') {
+        setCollisionDebugEnabled(!collisionDebugState.enabled);
+        event.preventDefault();
         return;
     }
 
@@ -5485,6 +6387,10 @@ function handleShowcaseMouseButton(event) {
         }
         // Left-click: select actor and attach gizmo
         if (event.button === 0) {
+            if (isTransformControlSphereHit(event, { mode: 'scale' })) {
+                event.preventDefault();
+                return;
+            }
             const propHit = getDynamicPropHitFromEvent(event);
             if (propHit?.prop) {
                 selectShowcaseActor(propHit.prop.id);
@@ -5544,6 +6450,7 @@ function handlePointerLockChange() {
         gameplay.pointerLocked = true;
         gameplay.active = true;
         showcase.looking = false;
+        syncTransformControlState();
         closeObjectScriptMenu();
         closeObjectScriptEditor();
         updateWorldPresentation();
@@ -5560,6 +6467,7 @@ function handlePointerLockChange() {
     physics.desiredVelocity.set(0, 0, 0);
     resetMovementInputState();
     restoreSceneState();
+    syncTransformControlState();
 
     updateWorldPresentation();
     resetShowcaseCamera(false);
@@ -5574,6 +6482,8 @@ function enterGameplay() {
     respawnPlayer(true);
     gameplay.pointerLocked = false;
     gameplay.active = true;
+    syncTransformControlState();
+    resetAllScriptLifecycleHandles();
     applyMouseActionScripts({ persist: true });
     showcase.looking = false;
     resetMobileInputState();
@@ -5610,6 +6520,7 @@ function exitGameplay() {
     showcase.input.down = false;
     showcase.input.boost = false;
     resetMobileInputState();
+    syncTransformControlState();
 
     updateWorldPresentation();
     resetShowcaseCamera(false);
@@ -5856,16 +6767,41 @@ function updateVehicleGameplay(delta) {
     const drifting = driftInput && (throttle !== 0 || Math.abs(lateralSpeed) > 1.2);
     const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
     const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.5;
+    const rideState = vehicle.mesh.userData.vehicleRideState || {
+        sampleRideHeights: [null, null, null, null],
+        compression: 0,
+        contactRatio: 0,
+        frontCompression: 0,
+        rearCompression: 0,
+        leftCompression: 0,
+        rightCompression: 0,
+        filteredGroundHeight: null,
+    };
+    vehicle.mesh.userData.vehicleRideState = rideState;
     const cornerSamples = [
         { forward: halfWheelBase, sideways: -halfTrackWidth },
         { forward: halfWheelBase, sideways: halfTrackWidth },
         { forward: -halfWheelBase, sideways: -halfTrackWidth },
         { forward: -halfWheelBase, sideways: halfTrackWidth },
-    ].map((corner) => {
+    ].map((corner, index) => {
         const sampleX = vehiclePosition.x + flatForward.x * corner.forward + flatRight.x * corner.sideways;
         const sampleZ = vehiclePosition.z + flatForward.z * corner.forward + flatRight.z * corner.sideways;
-        const groundHeight = getGroundHeightAt(sampleX, sampleZ, true);
-        const rideHeight = groundHeight === null ? null : vehiclePosition.y - groundHeight;
+        const groundHeight = getGroundHeightAt(sampleX, sampleZ, true, {
+            minSurfaceUpDot: 0.35,
+            surfaceStepTolerance: 0.65,
+        });
+        const rawRideHeight = groundHeight === null ? null : vehiclePosition.y - groundHeight;
+        const previousRideHeight = rideState.sampleRideHeights[index];
+        let rideHeight = rawRideHeight;
+
+        if (rawRideHeight === null && previousRideHeight !== null) {
+            rideHeight = Math.min(
+                previousRideHeight + delta * 6,
+                VEHICLE_SETTINGS.suspensionRideHeight + VEHICLE_SETTINGS.suspensionTravel + 0.18,
+            );
+        }
+
+        rideState.sampleRideHeights[index] = rideHeight;
         const compression = rideHeight === null
             ? 0
             : THREE.MathUtils.clamp(VEHICLE_SETTINGS.suspensionRideHeight - rideHeight, 0, VEHICLE_SETTINGS.suspensionTravel);
@@ -5882,10 +6818,27 @@ function updateVehicleGameplay(delta) {
     const averageCompression = contactSamples.length
         ? contactSamples.reduce((sum, corner) => sum + corner.compression, 0) / contactSamples.length
         : 0;
+    const averageGroundHeight = contactSamples.length
+        ? contactSamples.reduce((sum, corner) => sum + (vehiclePosition.y - corner.rideHeight), 0) / contactSamples.length
+        : null;
     const frontCompression = (cornerSamples[0].compression + cornerSamples[1].compression) * 0.5;
     const rearCompression = (cornerSamples[2].compression + cornerSamples[3].compression) * 0.5;
     const leftCompression = (cornerSamples[0].compression + cornerSamples[2].compression) * 0.5;
     const rightCompression = (cornerSamples[1].compression + cornerSamples[3].compression) * 0.5;
+    rideState.compression = averageCompression;
+    rideState.contactRatio = contactRatio;
+    rideState.frontCompression = frontCompression;
+    rideState.rearCompression = rearCompression;
+    rideState.leftCompression = leftCompression;
+    rideState.rightCompression = rightCompression;
+    const smoothedAverageCompression = averageCompression;
+    const smoothedContactRatio = contactRatio;
+    const smoothedFrontCompression = frontCompression;
+    const smoothedRearCompression = rearCompression;
+    const smoothedLeftCompression = leftCompression;
+    const smoothedRightCompression = rightCompression;
+    let filteredGroundHeight = averageGroundHeight;
+    rideState.filteredGroundHeight = filteredGroundHeight;
     const targetForwardSpeed = grounded && throttle > 0
         ? VEHICLE_SETTINGS.maxDriveSpeed * boostMultiplier
         : grounded && throttle < 0
@@ -5922,7 +6875,7 @@ function updateVehicleGameplay(delta) {
             : gripBase * (throttle > 0 ? rearGripModifier : frontGripModifier);
 
     const contactGrip = grounded
-        ? THREE.MathUtils.lerp(VEHICLE_SETTINGS.partialContactGrip, gripLambda, contactRatio)
+        ? THREE.MathUtils.lerp(VEHICLE_SETTINGS.partialContactGrip, gripLambda, smoothedContactRatio)
         : VEHICLE_SETTINGS.partialContactGrip;
     const nextLateralSpeed = THREE.MathUtils.damp(lateralSpeed, 0, contactGrip, delta);
     const nextHorizontalVelocity = tempVectorE
@@ -5946,18 +6899,12 @@ function updateVehicleGameplay(delta) {
     vehicleState.tailWhipLastFrame = tailWhipActive;
 
     let nextVerticalVelocity = linearVelocity.y;
-    if (grounded && averageCompression > 0) {
-        const suspensionLift = averageCompression * VEHICLE_SETTINGS.suspensionSpring;
-        const dampingLift = -linearVelocity.y * VEHICLE_SETTINGS.suspensionDamping;
-        // Add downforce at high speeds for better stability
-        const downforce = speedRatio * speedRatio * 2.0;
-        nextVerticalVelocity += (suspensionLift + dampingLift - downforce) * delta;
-
-        const frontImpact = Math.max(0, frontCompression - rearCompression);
-        const bumpLaunch = frontImpact * speedRatio * VEHICLE_SETTINGS.bumpLaunchBoost;
-        if (bumpLaunch > 1e-4) {
-            nextVerticalVelocity += bumpLaunch;
-        }
+    if (grounded && filteredGroundHeight !== null) {
+        const targetBodyHeight = filteredGroundHeight + VEHICLE_SETTINGS.suspensionRideHeight - VEHICLE_SETTINGS.suspensionTravel * 0.42;
+        const heightError = targetBodyHeight - vehiclePosition.y;
+        const springForce = heightError * VEHICLE_SETTINGS.suspensionSpring * 18;
+        const damperForce = -linearVelocity.y * VEHICLE_SETTINGS.suspensionDamping * 0.8;
+        nextVerticalVelocity = linearVelocity.y + (springForce + damperForce) * delta;
     }
 
     const nextVelocity = new Jolt.Vec3(nextHorizontalVelocity.x, nextVerticalVelocity, nextHorizontalVelocity.z);
@@ -5993,26 +6940,18 @@ function updateVehicleGameplay(delta) {
         bodyInterface.ActivateBody(bodyId);
     }
 
-    const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? contactRatio : 0.08));
+    const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? smoothedContactRatio * 0.6 : 0.08));
     if (uprightCorrection.lengthSq() > 1e-6) {
         const uprightTorque = new Jolt.Vec3(uprightCorrection.x, uprightCorrection.y, uprightCorrection.z);
         bodyInterface.AddTorque(bodyId, uprightTorque, Jolt.EActivation_Activate);
         Jolt.destroy(uprightTorque);
     }
 
-    if (grounded) {
-        const bumpPitchTorque = (rearCompression - frontCompression) * VEHICLE_SETTINGS.bumpPitchTorque;
-        const bumpRollTorque = (leftCompression - rightCompression) * VEHICLE_SETTINGS.bumpRollTorque;
-        if (Math.abs(bumpPitchTorque) > 1e-4 || Math.abs(bumpRollTorque) > 1e-4) {
-            const suspensionTorque = new Jolt.Vec3(bumpPitchTorque, 0, bumpRollTorque);
-            bodyInterface.AddTorque(bodyId, suspensionTorque, Jolt.EActivation_Activate);
-            Jolt.destroy(suspensionTorque);
-        }
-    }
-
     if (grounded && (Math.abs(steer) > 0.05 || Math.abs(throttle) > 0.05)) {
-        const rollForce = tempVectorB.copy(vehicleRight).multiplyScalar(-steer * Math.abs(nextForwardSpeed) * VEHICLE_SETTINGS.rollTorque * 0.022);
-        const pitchForce = tempVectorC.copy(vehicleForward).multiplyScalar(throttle * VEHICLE_SETTINGS.pitchTorque * 0.035);
+        const bumpRollFilter = THREE.MathUtils.clamp(1 - Math.abs(smoothedLeftCompression - smoothedRightCompression) * 2.4, 0.2, 1);
+        const bumpPitchFilter = THREE.MathUtils.clamp(1 - Math.abs(smoothedFrontCompression - smoothedRearCompression) * 2.4, 0.2, 1);
+        const rollForce = tempVectorB.copy(vehicleRight).multiplyScalar(-steer * Math.abs(nextForwardSpeed) * VEHICLE_SETTINGS.rollTorque * 0.022 * bumpRollFilter);
+        const pitchForce = tempVectorC.copy(vehicleForward).multiplyScalar(throttle * VEHICLE_SETTINGS.pitchTorque * 0.035 * bumpPitchFilter);
         const handlingTorque = rollForce.add(pitchForce);
         const handlingJolt = new Jolt.Vec3(handlingTorque.x, handlingTorque.y, handlingTorque.z);
         bodyInterface.AddTorque(bodyId, handlingJolt, Jolt.EActivation_Activate);
@@ -6034,7 +6973,7 @@ function updateVehicleGameplay(delta) {
 
         // Update health bar based on vehicle "health" (using contact ratio as proxy)
         widgetManager.updateWidget(window.exampleWidgets.health, {
-            progress: Math.max(0.1, contactRatio)
+            progress: Math.max(0.1, smoothedContactRatio)
         });
 
         // Update score
@@ -6061,14 +7000,41 @@ function updateVehicleGameplay(delta) {
     }
 }
 
-function getGroundHitAt(x, z, includeFloor = true) {
+function getGroundHitAt(x, z, includeFloor = true, options = {}) {
+    const {
+        ignoreActor = null,
+        targetObjects = null,
+        minSurfaceUpDot = Number.NEGATIVE_INFINITY,
+        surfaceStepTolerance = 0,
+        cullBackFaces = false,
+    } = options;
     const originY = Math.max(PLAYER_SETTINGS.probeHeight, gameplayBounds.max.y + PLAYER_SETTINGS.probeHeight);
     const hits = [];
 
     raycaster.set(tempVectorA.set(x, originY, z), downVector);
 
-    if (currentMesh) {
-        hits.push(...raycaster.intersectObject(currentMesh, true));
+    if (Array.isArray(targetObjects)) {
+        if (targetObjects.length > 0) {
+            hits.push(...raycaster.intersectObjects(targetObjects, true));
+        }
+    } else {
+        if (currentMesh) {
+            hits.push(...raycaster.intersectObject(currentMesh, true));
+        }
+
+        if (sceneSystem?.actors?.size) {
+            for (const actor of sceneSystem.actors) {
+                if (!actor || actor === ignoreActor) continue;
+
+                const actorMesh = getActorRenderObject(actor);
+                if (!actorMesh) continue;
+
+                const actorHits = raycaster.intersectObject(actorMesh, true);
+                if (actorHits.length > 0) {
+                    hits.push(...actorHits);
+                }
+            }
+        }
     }
 
     if (includeFloor && worldFloor) {
@@ -6082,12 +7048,64 @@ function getGroundHitAt(x, z, includeFloor = true) {
         }
     }
 
-    hits.sort((a, b) => a.distance - b.distance);
-    return hits[0] || null;
+    // Optional strict back-face cull: drop hits whose triangle faces away
+    // from the ray direction (i.e. faces below the trace look down). Used by
+    // car-related ground tracing so a slight overlap between two stitched
+    // road segments can't surface a back-face hit and put the car at the
+    // wrong Y.
+    const backFaceCulledHits = cullBackFaces
+        ? hits.filter((hit) => {
+            if (!hit?.face || !hit.object?.matrixWorld) {
+                return true;
+            }
+            const hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+            return hitNormal.y > 1e-4;
+        })
+        : hits;
+
+    const filteredHits = minSurfaceUpDot > Number.NEGATIVE_INFINITY
+        ? backFaceCulledHits.filter((hit) => {
+            if (!hit?.face || !hit.object?.matrixWorld) {
+                return true;
+            }
+
+            const hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+            return hitNormal.y >= minSurfaceUpDot;
+        })
+        : backFaceCulledHits;
+
+    const resolvedHits = filteredHits.length > 0
+        ? filteredHits
+        : (cullBackFaces ? backFaceCulledHits : hits);
+
+    resolvedHits.sort((a, b) => a.distance - b.distance);
+    let resolvedHit = resolvedHits[0] || null;
+    if (resolvedHit && surfaceStepTolerance > 0) {
+        for (let index = 1; index < resolvedHits.length; index += 1) {
+            const candidateHit = resolvedHits[index];
+            if (!candidateHit?.point || !resolvedHit?.point) continue;
+
+            const verticalGap = resolvedHit.point.y - candidateHit.point.y;
+            if (verticalGap > 0 && verticalGap <= surfaceStepTolerance) {
+                resolvedHit = candidateHit;
+                continue;
+            }
+
+            break;
+        }
+    }
+
+    updateRaycasterDebugLine(
+        raycaster.ray,
+        resolvedHit?.distance ?? originY,
+        resolvedHit?.point ?? null,
+        !!resolvedHit,
+    );
+    return resolvedHit;
 }
 
-function getGroundHeightAt(x, z, includeFloor = true) {
-    const hit = getGroundHitAt(x, z, includeFloor);
+function getGroundHeightAt(x, z, includeFloor = true, options = {}) {
+    const hit = getGroundHitAt(x, z, includeFloor, options);
     return hit ? hit.point.y : null;
 }
 
@@ -6109,6 +7127,12 @@ function resolveHorizontalMovement(origin, movementDelta) {
         const hit = raycaster.intersectObject(currentMesh, true).find(entry => (
             entry.distance <= movementDelta.length() + PLAYER_SETTINGS.collisionRadius
         ));
+        updateRaycasterDebugLine(
+            raycaster.ray,
+            movementDelta.length() + PLAYER_SETTINGS.collisionRadius,
+            hit?.point ?? null,
+            !!hit,
+        );
 
         if (!hit || !hit.face) continue;
 
@@ -6706,7 +7730,9 @@ function downloadAsset() {
 }
 
 // Add download listener (using onclick to prevent duplicate listeners on HMR)
-downloadBtn.onclick = downloadAsset;
+if (downloadBtn) {
+    downloadBtn.onclick = downloadAsset;
+}
 
 function stopScanEffect() {
     if (scanPlane) {
@@ -6739,14 +7765,14 @@ function startScanEffect() {
 }
 
 // --- Controls ---
-document.getElementById('toggle-wireframe').addEventListener('click', () => {
+document.getElementById('toggle-wireframe')?.addEventListener('click', () => {
     if (!currentMesh) return;
     currentMesh.traverse(child => {
         if (child.isMesh) child.material.wireframe = !child.material.wireframe;
     });
 });
 
-document.getElementById('reset-view').addEventListener('click', () => {
+document.getElementById('reset-view')?.addEventListener('click', () => {
     resetShowcaseCamera();
 });
 
@@ -6765,32 +7791,211 @@ function exportWorldToUmap() {
 }
 
 // === ACTOR EXPORT / IMPORT ===
-function exportActorToFile(actor) {
-    if (!actor) return;
+function getActorComponentFlags(actor) {
+    if (!actor) {
+        return { collision: false, physics: false, scripts: false };
+    }
+
+    const storedFlags = actor._componentFlags || null;
+    const hasBody = !!getActorBody(actor);
+    const includeCollisionBody = typeof storedFlags?.collision === 'boolean'
+        ? storedFlags.collision
+        : hasBody;
+    const includeScripts = typeof storedFlags?.scripts === 'boolean'
+        ? storedFlags.scripts
+        : !!getActorScriptState(actor);
+
+    let simulatePhysics = false;
+    if (includeCollisionBody) {
+        if (typeof storedFlags?.physics === 'boolean') {
+            simulatePhysics = storedFlags.physics;
+        } else if (physics.dynamicBodies.includes(actor)) {
+            simulatePhysics = true;
+        } else if (physics.staticBodies.includes(actor)) {
+            simulatePhysics = false;
+        } else {
+            simulatePhysics = true;
+        }
+    }
+
+    return {
+        collision: !!includeCollisionBody,
+        physics: !!includeCollisionBody && !!simulatePhysics,
+        scripts: !!includeScripts,
+    };
+}
+
+function setActorComponentFlags(actor, flags = {}) {
+    if (!actor) {
+        return { collision: false, physics: false, scripts: false };
+    }
+
+    const normalizedFlags = {
+        collision: flags.collision !== false,
+        physics: flags.collision === false ? false : flags.physics !== false,
+        scripts: !!flags.scripts,
+    };
+
+    actor._componentFlags = normalizedFlags;
+    return normalizedFlags;
+}
+
+function normalizeSerializedActorComponentFlags(actorData = {}) {
+    const rawFlags = actorData.componentFlags || actorData.componentState || null;
+    const includeCollisionBody = actorData.kind === 'vehicle'
+        ? true
+        : typeof rawFlags?.collision === 'boolean'
+            ? rawFlags.collision
+            : typeof rawFlags?.includeCollisionBody === 'boolean'
+                ? rawFlags.includeCollisionBody
+                : true;
+    const simulatePhysics = includeCollisionBody && (actorData.kind === 'vehicle'
+        ? true
+        : typeof rawFlags?.physics === 'boolean'
+            ? rawFlags.physics
+            : typeof rawFlags?.simulatePhysics === 'boolean'
+                ? rawFlags.simulatePhysics
+                : true);
+    const includeScripts = typeof rawFlags?.scripts === 'boolean'
+        ? rawFlags.scripts
+        : typeof rawFlags?.includeScripts === 'boolean'
+            ? rawFlags.includeScripts
+            : !!actorData.scripts;
+
+    return {
+        collision: !!includeCollisionBody,
+        physics: !!includeCollisionBody && !!simulatePhysics,
+        scripts: !!includeScripts,
+    };
+}
+
+function serializeActorData(actor) {
+    if (!actor) return null;
 
     const mesh = getActorRenderObject(actor);
-    if (!mesh) return;
+    if (!mesh) return null;
 
-    
+    return {
+        id: actor.id,
+        kind: actor.kind,
+        name: actor.rootNode?.name || 'Actor',
+        templateId: actor.templateId,
+        userData: actor.entity.getComponent('metadata')?.userData || null,
+        transform: {
+            position: mesh.position.toArray(),
+            quaternion: mesh.quaternion.toArray(),
+            scale: mesh.scale.toArray(),
+        },
+        scripts: objectScriptState.drafts[actor.id] || null,
+        componentFlags: getActorComponentFlags(actor),
+        components: serializeComponentTree(mesh),
+    };
+}
 
-    const scripts = objectScriptState.drafts[actor.id] || null;
+function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
+    if (!actorData) return null;
+
+    const componentFlags = normalizeSerializedActorComponentFlags(actorData);
+    const savedScripts = actorData.scripts
+        ? JSON.parse(JSON.stringify(actorData.scripts))
+        : null;
+    let tempScriptId = '';
+
+    if (savedScripts) {
+        tempScriptId = `loaded-actor-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        objectScriptState.drafts[tempScriptId] = savedScripts;
+    }
+
+    let scale = 1;
+    if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
+        scale = actorData.transform.scale[0];
+    }
+
+    let actor = null;
+    if (actorData.kind === 'vehicle') {
+        actor = spawnDrivableCar({
+            includeScripts: componentFlags.scripts,
+            userData: actorData.userData,
+        });
+    } else if (actorData.kind === 'imported') {
+        if (!actorData.templateId || !importedPropState.templates.some((template) => template.id === actorData.templateId)) {
+            if (tempScriptId) {
+                delete objectScriptState.drafts[tempScriptId];
+            }
+            alert('This actor requires an imported prop source (template) that is not currently loaded. Import the matching prop file first, then try loading this actor again.');
+            return null;
+        }
+
+        actor = spawnImportedProp(actorData.templateId, {
+            includeScripts: componentFlags.scripts,
+            userData: actorData.userData,
+            includeCollisionBody: componentFlags.collision,
+            simulatePhysics: componentFlags.physics,
+        });
+    } else {
+        actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, {
+            includeScripts: componentFlags.scripts,
+            userData: actorData.userData,
+            returnActor: true,
+            includeCollisionBody: componentFlags.collision,
+            simulatePhysics: componentFlags.physics,
+        });
+    }
+
+    if (!actor) {
+        if (tempScriptId) {
+            delete objectScriptState.drafts[tempScriptId];
+        }
+        return null;
+    }
+
+    const previousId = actor.id;
+    if (preserveId && actorData.id) {
+        actor.id = actorData.id;
+    }
+
+    setActorComponentFlags(actor, componentFlags);
+
+    if (tempScriptId) {
+        const restoredScripts = objectScriptState.drafts[tempScriptId];
+        delete objectScriptState.drafts[tempScriptId];
+        if (restoredScripts) {
+            objectScriptState.drafts[actor.id] = restoredScripts;
+        }
+    }
+
+    if (previousId !== actor.id && objectScriptState.drafts[previousId]) {
+        delete objectScriptState.drafts[previousId];
+    }
+
+    if (actorData.name) {
+        actor.rootNode.name = actorData.name;
+    }
+
+    const mesh = getActorRenderObject(actor);
+    if (mesh) {
+        mesh.userData.dynamicPropId = actor.id;
+        mesh.position.fromArray(actorData.transform.position);
+        mesh.quaternion.fromArray(actorData.transform.quaternion);
+        mesh.scale.fromArray(actorData.transform.scale);
+        deserializeComponentTree(mesh, actorData.components);
+        rebuildActorPhysics(actor);
+    }
+
+    if (componentFlags.scripts) {
+        syncPropScriptState(actor);
+    }
+
+    return actor;
+}
+
+function exportActorToFile(actor) {
+    if (!actor) return;
 
     const actorData = {
         version: 1,
         type: 'polyflow-actor',
-        actor: {
-            kind: actor.kind,
-            name: actor.rootNode?.name || 'Actor',
-            templateId: actor.templateId,
-            userData: actor.entity.getComponent('metadata')?.userData || null,
-            transform: {
-                position: mesh.position.toArray(),
-                quaternion: mesh.quaternion.toArray(),
-                scale: mesh.scale.toArray()
-            },
-            scripts: scripts,
-            components: serializeComponentTree(mesh)
-        }
+        actor: serializeActorData(actor)
     };
 
     const displayName = getDynamicPropDisplayName(actor)
@@ -6821,72 +8026,9 @@ function loadActorFromFile(file) {
             }
 
             const actorData = data.actor;
-            if (actorData.scripts) {
-                const tempId = `loaded-actor-${Date.now()}`;
-                objectScriptState.drafts[tempId] = actorData.scripts;
-                actorData._tempScriptId = tempId;
-            }
-
-            let scale = 1;
-            if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
-                scale = actorData.transform.scale[0];
-            }
-
-            let actor = null;
-            if (actorData.kind === 'vehicle') {
-                actor = spawnDrivableCar({
-                    includeScripts: !!actorData.scripts,
-                    userData: actorData.userData
-                });
-            } else if (actorData.kind === 'imported') {
-                if (!actorData.templateId || !importedPropState.templates.some(t => t.id === actorData.templateId)) {
-                    alert('This actor requires an imported prop source (template) that is not currently loaded. Import the matching prop file first, then try loading this actor again.');
-                    return;
-                }
-                actor = spawnImportedProp(actorData.templateId, {
-                    includeScripts: !!actorData.scripts,
-                    userData: actorData.userData,
-                    includeCollisionBody: true
-                });
-            } else {
-                actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, {
-                    includeScripts: !!actorData.scripts,
-                    userData: actorData.userData,
-                    returnActor: true,
-                    includeCollisionBody: true
-                });
-            }
+            const actor = spawnActorFromSerializedData(actorData);
 
             if (actor) {
-                // Migrate scripts from temp ID to the actor's real ID
-                if (actorData._tempScriptId) {
-                    const savedScripts = objectScriptState.drafts[actorData._tempScriptId];
-                    delete objectScriptState.drafts[actorData._tempScriptId];
-                    if (savedScripts) {
-                        objectScriptState.drafts[actor.id] = savedScripts;
-                    }
-                }
-
-                if (actorData.name) {
-                    actor.rootNode.name = actorData.name;
-                }
-
-                const mesh = getActorRenderObject(actor);
-                if (mesh) {
-                    mesh.position.fromArray(actorData.transform.position);
-                    mesh.quaternion.fromArray(actorData.transform.quaternion);
-                    mesh.scale.fromArray(actorData.transform.scale);
-
-                    
-                    deserializeComponentTree(mesh, actorData.components);
-
-                    rebuildActorPhysics(actor);
-                }
-
-                if (actorData.scripts) {
-                    syncPropScriptState(actor);
-                }
-
                 saveObjectScriptDrafts();
                 refreshSceneUI();
                 selectShowcaseActor(actor.id);
@@ -6922,6 +8064,7 @@ function clearSceneActors() {
     }
     
     physics.dynamicBodies = [];
+    physics.staticBodies = [];
     selectShowcaseActor(null);
 }
 
@@ -6963,7 +8106,7 @@ document.getElementById('actor-file-input')?.addEventListener('change', (e) => {
     }
 });
 
-document.getElementById('reset-view').addEventListener('click', () => {
+document.getElementById('reset-view')?.addEventListener('click', () => {
     if (gameplay.active) {
         respawnPlayer();
         return;
@@ -7454,21 +8597,10 @@ function restoreSceneState() {
             }
         }
         restoreChildren(mesh, actorSnap.children);
-        
-        // Sync physics body to restored position
-        const body = getActorBody(actor);
-        if (body && physics.bodyInterface && physics.Jolt) {
-            const { Jolt, bodyInterface } = physics;
-            const pos = mesh.position;
-            const rot = mesh.quaternion;
-            const joltPos = new Jolt.Vec3(pos.x, pos.y, pos.z);
-            const joltRot = new Jolt.Quat(rot.x, rot.y, rot.z, rot.w);
-            bodyInterface.SetPositionAndRotation(body.GetID(), joltPos, joltRot, Jolt.EActivation_Activate);
-            bodyInterface.SetLinearVelocity(body.GetID(), new Jolt.Vec3(0, 0, 0));
-            bodyInterface.SetAngularVelocity(body.GetID(), new Jolt.Vec3(0, 0, 0));
-            Jolt.destroy(joltPos);
-            Jolt.destroy(joltRot);
-        }
+
+        // Rebuild collision from the restored mesh state so static collision bodies
+        // reset with the level instead of staying behind at their previous pose.
+        rebuildActorPhysics(actor);
     }
     
     pieSceneSnapshot = null;
@@ -7548,67 +8680,12 @@ function deserializeComponentTree(parent, comps) {
 let editorClipboard = null;
 
 function serializeActorToJSON(actor) {
-    if (!actor) return null;
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return null;
-    const scripts = objectScriptState.drafts[actor.id] || null;
-    return {
-        kind: actor.kind,
-        name: actor.rootNode?.name || 'Actor',
-        templateId: actor.templateId,
-        userData: actor.entity.getComponent('metadata')?.userData || null,
-        transform: {
-            position: mesh.position.toArray(),
-            quaternion: mesh.quaternion.toArray(),
-            scale: mesh.scale.toArray()
-        },
-        scripts: scripts,
-        components: serializeComponentTree(mesh)
-    };
+    return serializeActorData(actor);
 }
 
 function spawnActorFromJSON(actorData) {
-    if (actorData.scripts) {
-        const tempId = 'loaded-actor-' + Date.now() + Math.floor(Math.random()*1000);
-        objectScriptState.drafts[tempId] = JSON.parse(JSON.stringify(actorData.scripts));
-        actorData._tempScriptId = tempId;
-    }
-
-    let scale = 1;
-    if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
-        scale = actorData.transform.scale[0];
-    }
-
-    let actor = null;
-    if (actorData.kind === 'vehicle') {
-        actor = spawnDrivableCar({ includeScripts: !!actorData.scripts, userData: actorData.userData });
-    } else if (actorData.kind === 'imported') {
-        if (!actorData.templateId || !importedPropState.templates.some(t => t.id === actorData.templateId)) {
-            alert('Required template not loaded.');
-            return null;
-        }
-        actor = spawnImportedProp(actorData.templateId, { includeScripts: !!actorData.scripts, userData: actorData.userData, includeCollisionBody: true });
-    } else {
-        actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, { includeScripts: !!actorData.scripts, userData: actorData.userData, returnActor: true, includeCollisionBody: true });
-    }
-
+    const actor = spawnActorFromSerializedData(actorData);
     if (actor) {
-        if (actorData._tempScriptId) {
-            const savedScripts = objectScriptState.drafts[actorData._tempScriptId];
-            delete objectScriptState.drafts[actorData._tempScriptId];
-            if (savedScripts) objectScriptState.drafts[actor.id] = savedScripts;
-        }
-        if (actorData.name) actor.rootNode.name = actorData.name;
-
-        const mesh = getActorRenderObject(actor);
-        if (mesh) {
-            mesh.position.fromArray(actorData.transform.position);
-            mesh.quaternion.fromArray(actorData.transform.quaternion);
-            mesh.scale.fromArray(actorData.transform.scale);
-            deserializeComponentTree(mesh, actorData.components);
-            rebuildActorPhysics(actor);
-        }
-        if (actorData.scripts) syncPropScriptState(actor);
         saveObjectScriptDrafts();
         refreshSceneUI();
         selectShowcaseActor(actor.id);
@@ -7753,62 +8830,48 @@ const editorHistory = {
 };
 
 function exportWorldToJSON() {
-    const umap = { version: 1, actors: [] };
+    const umap = { version: 2, actors: [], importedTemplates: [] };
+    const usedTemplateIds = new Set();
     for (const actor of (sceneSystem?.actors || [])) {
-        const mesh = getActorRenderObject(actor);
-        if (!mesh) continue;
-        const scripts = objectScriptState.drafts[actor.id] || null;
-        umap.actors.push({
-            id: actor.id,
-            kind: actor.kind,
-            name: actor.rootNode?.name || 'Actor',
-            templateId: actor.templateId,
-            userData: actor.entity.getComponent('metadata')?.userData || null,
-            transform: {
-                position: mesh.position.toArray(),
-                quaternion: mesh.quaternion.toArray(),
-                scale: mesh.scale.toArray()
-            },
-            scripts: scripts,
-            components: serializeComponentTree(mesh)
-        });
+        const serializedActor = serializeActorData(actor);
+        if (!serializedActor) continue;
+        umap.actors.push(serializedActor);
+        if (serializedActor.kind === 'imported' && serializedActor.templateId) {
+            usedTemplateIds.add(serializedActor.templateId);
+        }
     }
+
+    usedTemplateIds.forEach((templateId) => {
+        const template = importedPropState.templates.find((entry) => entry.id === templateId);
+        const serializedTemplate = serializeImportedPropTemplate(template);
+        if (serializedTemplate) {
+            umap.importedTemplates.push(serializedTemplate);
+        }
+    });
+
+    if (umap.importedTemplates.length === 0) {
+        delete umap.importedTemplates;
+    }
+
     return umap;
 }
 
 function loadWorldFromJSON(umap) {
-    if (umap.version !== 1) console.warn('Unknown umap version', umap.version);
+    if (umap.version !== 1 && umap.version !== 2) console.warn('Unknown umap version', umap.version);
     clearSceneActors();
-    for (const actorData of umap.actors) {
-        if (actorData.scripts) objectScriptState.drafts[actorData.id] = JSON.parse(JSON.stringify(actorData.scripts));
-        let scale = 1;
-        if (actorData.kind === 'sphere' || actorData.kind === 'cube' || actorData.kind === 'capsule') {
-            scale = actorData.transform.scale[0]; 
-        }
-        let actor = null;
-        if (actorData.kind === 'vehicle') {
-            actor = spawnDrivableCar({ includeScripts: !!actorData.scripts, userData: actorData.userData });
-        } else if (actorData.kind === 'imported') {
-            actor = spawnImportedProp(actorData.templateId, { includeScripts: !!actorData.scripts, userData: actorData.userData, includeCollisionBody: true });
-        } else {
-            actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, { includeScripts: !!actorData.scripts, userData: actorData.userData, returnActor: true, includeCollisionBody: true });
-        }
-        if (actor) {
-            const oldId = actor.id;
-            actor.id = actorData.id;
-            if (objectScriptState.drafts[oldId]) delete objectScriptState.drafts[oldId];
-            if (actorData.name) actor.rootNode.name = actorData.name;
-            const mesh = getActorRenderObject(actor);
-            if (mesh) {
-                mesh.userData.dynamicPropId = actor.id;
-                mesh.position.fromArray(actorData.transform.position);
-                mesh.quaternion.fromArray(actorData.transform.quaternion);
-                mesh.scale.fromArray(actorData.transform.scale);
-                deserializeComponentTree(mesh, actorData.components);
-                rebuildActorPhysics(actor);
+
+    if (Array.isArray(umap.importedTemplates)) {
+        umap.importedTemplates.forEach((templateData) => {
+            try {
+                registerImportedPropTemplateFromSerializedData(templateData);
+            } catch (error) {
+                console.error('Failed to restore imported template from .umap.', error, templateData);
             }
-            if (actorData.scripts) syncPropScriptState(actor);
-        }
+        });
+    }
+
+    for (const actorData of umap.actors) {
+        spawnActorFromSerializedData(actorData, { preserveId: true });
     }
     saveObjectScriptDrafts();
     refreshSceneUI();
