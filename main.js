@@ -45,6 +45,10 @@ import {
     UTextWidget,
     UUserWidget,
 } from './src/scripting/ueApi.js';
+import {
+    SoundGeneratorAudioListener,
+    EngineSoundGenerator as WasmEngineSoundGenerator,
+} from './vendor/engine-sound/sound_generator_worklet_wasm.js';
 
 installUePrototypeMethods();
 
@@ -722,7 +726,7 @@ const TEST_SOUND_ID = 'polyflow:test';
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
-let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
+let playHint, gameplayStatus, vehicleAudioBackendEl, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
 let playTestSoundBtn, playTestSoundStatus;
 let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
@@ -936,7 +940,16 @@ const vehicleState = {
 };
 const vehicleEngineAudio = {
     activePropId: '',
+    backend: 'none',
+    lastAnnouncedBackend: '',
     listener: null,
+    wasmGenerator: null,
+    wasmLoadPromise: null,
+    wasmModuleReady: false,
+    wasmFailed: false,
+    wasmFailureReason: '',
+    wasmThrottleParam: null,
+    wasmRpmParam: null,
     combustionNode: null,
     harmonic2Node: null,
     harmonic3Node: null,
@@ -967,12 +980,13 @@ const vehicleEngineAudio = {
     intakeFilter: null,
     hissFilter: null,
     cabinFilter: null,
+    masterTone: null,
     panner: null,
-    idleRpm: 850,
-    minRpm: 750,
-    maxRpm: 7200,
-    rpm: 850,
-    targetRpm: 850,
+    idleRpm: 540,
+    minRpm: 480,
+    maxRpm: 4200,
+    rpm: 540,
+    targetRpm: 540,
     gear: 1,
     throttle: 0,
     lastThrottle: 0,
@@ -1240,31 +1254,39 @@ function createEngineNoiseBuffer(audioContext) {
 }
 
 function createCombustionPulseBuffer(audioContext) {
-    // A single cylinder firing impulse: sharp attack, exponential tail, faint underbite.
-    // Looped at the firing frequency this produces an authentic V-engine "blat" instead of a saw drone.
+    // Heavy-duty V8 cylinder firing impulse — Warthog flavor.
+    // Deep fundamental, long throaty tail, low-mid grit. Looped at firing frequency
+    // produces a chunky burble instead of a thin blat.
     const sampleRate = audioContext.sampleRate || 44100;
-    const duration = 0.06;
+    const duration = 0.12;
     const frameCount = Math.max(1, Math.floor(sampleRate * duration));
     const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
     const data = buffer.getChannelData(0);
 
+    let lpState = 0;
     for (let index = 0; index < frameCount; index++) {
         const t = index / frameCount;
-        const attack = Math.min(1, t / 0.02);
-        const decay = Math.exp(-t * 18);
-        const fundamental = Math.sin(t * Math.PI * 2 * 60);
-        const overtone = Math.sin(t * Math.PI * 2 * 180) * 0.45;
-        const grit = ((Math.random() * 2) - 1) * 0.18;
-        data[index] = THREE.MathUtils.clamp((fundamental + overtone + grit) * attack * decay, -1, 1);
+        const attack = Math.min(1, t / 0.012);
+        const decay = Math.exp(-t * 7.5);
+        // Deep fundamental + chest-thump octave + low-mid harmonic
+        const fundamental = Math.sin(t * Math.PI * 2 * 38);
+        const sub = Math.sin(t * Math.PI * 2 * 19) * 0.6;
+        const overtone = Math.sin(t * Math.PI * 2 * 110) * 0.28;
+        // Grit — but lowpassed so it's "rumble", not "buzz"
+        const white = (Math.random() * 2) - 1;
+        lpState = lpState * 0.82 + white * 0.18;
+        const rumble = lpState * 0.22;
+        const sample = (fundamental + sub + overtone + rumble) * attack * decay * 0.6;
+        data[index] = THREE.MathUtils.clamp(sample, -1, 1);
     }
     return buffer;
 }
 
-function createCombustionDistortionCurve(amount = 0.55) {
-    // Soft-clip waveshaper — adds the throaty saturated edge without going harsh.
+function createCombustionDistortionCurve(amount = 0.18) {
+    // Very gentle soft-clip — just rounds peaks, doesn't add harmonic harshness.
     const samples = 2048;
     const curve = new Float32Array(samples);
-    const k = amount * 18;
+    const k = amount * 6;
     for (let i = 0; i < samples; i++) {
         const x = (i / (samples - 1)) * 2 - 1;
         curve[i] = (1 + k) * x / (1 + k * Math.abs(x));
@@ -1281,9 +1303,145 @@ function resetVehicleEngineAudioState() {
     vehicleEngineAudio.lastThrottle = 0;
     vehicleEngineAudio.overrun = 0;
     vehicleEngineAudio.lastGrounded = false;
+    vehicleEngineAudio.backend = vehicleEngineAudio.wasmGenerator
+        ? 'wasm'
+        : vehicleEngineAudio.outputGain
+            ? 'js'
+            : 'none';
+    vehicleEngineAudio.crackleCooldown = 0;
+    vehicleEngineAudio.lastWorldPosition.set(0, 0, 0);
+    vehicleEngineAudio.velocity.set(0, 0, 0);
 }
 
-function shutdownVehicleEngineAudio() {
+function getVehicleEngineAudioBackendLabel() {
+    if (vehicleEngineAudio.backend === 'wasm') {
+        return { state: 'wasm', text: 'Engine audio: WASM worklet' };
+    }
+    if (vehicleEngineAudio.backend === 'js') {
+        return {
+            state: 'js',
+            text: vehicleEngineAudio.wasmFailed
+                ? `Engine audio: JS fallback (${vehicleEngineAudio.wasmFailureReason || 'WASM unavailable'})`
+                : 'Engine audio: JS fallback',
+        };
+    }
+    if (vehicleEngineAudio.wasmLoadPromise) {
+        return { state: 'none', text: 'Engine audio: loading WASM' };
+    }
+    if (vehicleEngineAudio.wasmFailed) {
+        return { state: 'error', text: `Engine audio: none (${vehicleEngineAudio.wasmFailureReason || 'WASM unavailable'})` };
+    }
+    return { state: 'none', text: 'Engine audio: none' };
+}
+
+function updateVehicleAudioBackendIndicator({ announce = false } = {}) {
+    const backend = getVehicleEngineAudioBackendLabel();
+    if (vehicleAudioBackendEl) {
+        vehicleAudioBackendEl.hidden = !isDrivingVehicle();
+        vehicleAudioBackendEl.textContent = backend.text;
+        vehicleAudioBackendEl.classList.remove(
+            'play-audio-backend-wasm',
+            'play-audio-backend-js',
+            'play-audio-backend-none',
+            'play-audio-backend-error',
+        );
+        vehicleAudioBackendEl.classList.add(`play-audio-backend-${backend.state}`);
+    }
+    if (announce && backend.text !== vehicleEngineAudio.lastAnnouncedBackend) {
+        vehicleEngineAudio.lastAnnouncedBackend = backend.text;
+        console.info(backend.text);
+    }
+}
+
+function createVehicleEngineWasmParameters() {
+    return {
+        cylinders: 4,
+        intakeWaveguideLength: 100,
+        exhaustWaveguideLength: 100,
+        extractorWaveguideLength: 100,
+        intakeOpenReflectionFactor: 0.01,
+        intakeClosedReflectionFactor: 0.95,
+        exhaustOpenReflectionFactor: 0.01,
+        exhaustClosedReflectionFactor: 0.95,
+        ignitionTime: 0.016,
+        straightPipeWaveguideLength: 128,
+        straightPipeReflectionFactor: 0.01,
+        mufflerElementsLength: [10, 15, 20, 25],
+        action: 0.1,
+        outletWaveguideLength: 5,
+        outletReflectionFactor: 0.01,
+    };
+}
+
+function describeVehicleEngineWasmError(error) {
+    const message = error?.message ? String(error.message) : String(error ?? 'Unknown error');
+    if (
+        error?.name === 'AbortError'
+        || message.includes('Unable to load a worklet')
+        || message.includes('environment detection error')
+        || message.includes('Chrome v2147483647')
+    ) {
+        return 'The vendored engine-sound worklet is still built for shell-only Emscripten output, so AudioWorklet startup aborts before the wasm engine can run.';
+    }
+    return message;
+}
+
+function markVehicleEngineWasmUnavailable(error) {
+    const reason = describeVehicleEngineWasmError(error);
+    const shouldLog = !vehicleEngineAudio.wasmFailed || vehicleEngineAudio.wasmFailureReason !== reason;
+    vehicleEngineAudio.wasmModuleReady = false;
+    vehicleEngineAudio.wasmFailed = true;
+    vehicleEngineAudio.wasmFailureReason = reason;
+    if (shouldLog) {
+        console.warn('Vehicle engine wasm audio unavailable. Falling back to legacy engine audio.', reason, error);
+    }
+    shutdownVehicleEngineAudioWasm();
+}
+
+function shutdownVehicleEngineAudioWasm() {
+    const generator = vehicleEngineAudio.wasmGenerator;
+    vehicleEngineAudio.wasmGenerator = null;
+    vehicleEngineAudio.wasmThrottleParam = null;
+    vehicleEngineAudio.wasmRpmParam = null;
+
+    if (!generator) {
+        return;
+    }
+
+    try { generator.stop(); } catch (_) {}
+    try { generator.disconnect(); } catch (_) {}
+    try { generator.removeFromParent(); } catch (_) {}
+}
+
+function primeVehicleEngineAudioWasm() {
+    const listener = runtimeAudio.listener;
+    const audioContext = listener?.context ?? null;
+    if (!listener || !audioContext || vehicleEngineAudio.wasmModuleReady || vehicleEngineAudio.wasmFailed || vehicleEngineAudio.wasmLoadPromise) {
+        return vehicleEngineAudio.wasmLoadPromise;
+    }
+
+    const loadingManager = new THREE.LoadingManager();
+    vehicleEngineAudio.wasmLoadPromise = WasmEngineSoundGenerator.load(
+        loadingManager,
+        listener,
+    )
+        .then(() => {
+            vehicleEngineAudio.wasmModuleReady = true;
+            vehicleEngineAudio.wasmFailureReason = '';
+            return true;
+        })
+        .catch((error) => {
+            markVehicleEngineWasmUnavailable(error);
+            return false;
+        })
+        .finally(() => {
+            vehicleEngineAudio.wasmLoadPromise = null;
+        });
+
+    return vehicleEngineAudio.wasmLoadPromise;
+}
+
+function shutdownLegacyVehicleEngineAudio() {
     const context = runtimeAudio.listener?.context ?? null;
     const now = context?.currentTime ?? 0;
     const fadeOutTime = now + 0.08;
@@ -1334,6 +1492,7 @@ function shutdownVehicleEngineAudio() {
         vehicleEngineAudio.intakeFilter,
         vehicleEngineAudio.hissFilter,
         vehicleEngineAudio.cabinFilter,
+        vehicleEngineAudio.masterTone,
         vehicleEngineAudio.panner,
     ];
     otherNodes.forEach((node) => {
@@ -1347,13 +1506,19 @@ function shutdownVehicleEngineAudio() {
         'combustionGain', 'harmonic2Gain', 'harmonic3Gain', 'bodyGain', 'subGain', 'whineGain',
         'intakeGain', 'overrunGain', 'crackleGain', 'crackleEnvelope', 'idleLfoGain', 'idleLfoOffset',
         'outputGain', 'compressor', 'waveShaper',
-        'exhaustFilter', 'resonancePeak', 'resonanceFilter', 'intakeFilter', 'hissFilter', 'cabinFilter',
+        'exhaustFilter', 'resonancePeak', 'resonanceFilter', 'intakeFilter', 'hissFilter', 'cabinFilter', 'masterTone',
         'panner', 'listener',
     ].forEach((key) => { vehicleEngineAudio[key] = null; });
     resetVehicleEngineAudioState();
 }
 
-function ensureVehicleEngineAudio() {
+function shutdownVehicleEngineAudio() {
+    shutdownVehicleEngineAudioWasm();
+    shutdownLegacyVehicleEngineAudio();
+    vehicleEngineAudio.backend = 'none';
+}
+
+function ensureLegacyVehicleEngineAudio() {
     const listener = runtimeAudio.listener;
     const audioContext = listener?.context ?? null;
     const listenerInput = typeof listener?.getInput === 'function' ? listener.getInput() : null;
@@ -1362,10 +1527,11 @@ function ensureVehicleEngineAudio() {
     }
 
     if (vehicleEngineAudio.outputGain && vehicleEngineAudio.listener === listener) {
+        vehicleEngineAudio.backend = 'js';
         return vehicleEngineAudio;
     }
 
-    shutdownVehicleEngineAudio();
+    shutdownLegacyVehicleEngineAudio();
 
     // ── Spatializer ──────────────────────────────────────────────────────────────
     const panner = audioContext.createPanner();
@@ -1383,37 +1549,43 @@ function ensureVehicleEngineAudio() {
     outputGain.gain.value = 0.0001;
 
     const compressor = audioContext.createDynamicsCompressor();
-    compressor.threshold.value = -16;
-    compressor.knee.value = 12;
-    compressor.ratio.value = 3.4;
-    compressor.attack.value = 0.005;
-    compressor.release.value = 0.14;
+    compressor.threshold.value = -22;
+    compressor.knee.value = 18;
+    compressor.ratio.value = 2.4;
+    compressor.attack.value = 0.012;
+    compressor.release.value = 0.22;
 
     const waveShaper = audioContext.createWaveShaper();
-    waveShaper.curve = createCombustionDistortionCurve(0.45);
+    waveShaper.curve = createCombustionDistortionCurve(0.15);
     waveShaper.oversample = '4x';
+
+    // Master tone-tamer — rolls off upper harshness, keeps Warthog growl below ~1.6 kHz.
+    const masterTone = audioContext.createBiquadFilter();
+    masterTone.type = 'lowpass';
+    masterTone.frequency.value = 1600;
+    masterTone.Q.value = 0.5;
 
     const cabinFilter = audioContext.createBiquadFilter();
     cabinFilter.type = 'lowshelf';
-    cabinFilter.frequency.value = 240;
-    cabinFilter.gain.value = 4.5;
+    cabinFilter.frequency.value = 280;
+    cabinFilter.gain.value = 8;
 
     // ── Exhaust path (combustion thump + harmonics) ──────────────────────────────
     const exhaustFilter = audioContext.createBiquadFilter();
     exhaustFilter.type = 'lowpass';
-    exhaustFilter.frequency.value = 520;
-    exhaustFilter.Q.value = 1.8;
+    exhaustFilter.frequency.value = 360;
+    exhaustFilter.Q.value = 0.9;
 
     const resonancePeak = audioContext.createBiquadFilter();
     resonancePeak.type = 'peaking';
-    resonancePeak.frequency.value = 220;
-    resonancePeak.Q.value = 4.2;
-    resonancePeak.gain.value = 8;
+    resonancePeak.frequency.value = 130;
+    resonancePeak.Q.value = 3.0;
+    resonancePeak.gain.value = 6;
 
     const resonanceFilter = audioContext.createBiquadFilter();
     resonanceFilter.type = 'lowpass';
-    resonanceFilter.frequency.value = 1400;
-    resonanceFilter.Q.value = 0.9;
+    resonanceFilter.frequency.value = 800;
+    resonanceFilter.Q.value = 0.7;
 
     // Combustion: looped pulse buffer at firing freq → throaty individual cylinder thumps.
     const combustionBuffer = createCombustionPulseBuffer(audioContext);
@@ -1424,16 +1596,16 @@ function ensureVehicleEngineAudio() {
     const combustionGain = audioContext.createGain();
     combustionGain.gain.value = 0.0001;
 
-    // 2nd-order harmonic stack (sawtooth → grit/snarl midband).
+    // 2nd-order harmonic — triangle (gentler than saw, fewer high partials).
     const harmonic2Node = audioContext.createOscillator();
-    harmonic2Node.type = 'sawtooth';
+    harmonic2Node.type = 'triangle';
     harmonic2Node.frequency.value = 90;
     const harmonic2Gain = audioContext.createGain();
     harmonic2Gain.gain.value = 0.0001;
 
-    // 3rd-order harmonic (square → top end bark).
+    // 3rd-order harmonic — sine (just adds gentle warmth, no buzz).
     const harmonic3Node = audioContext.createOscillator();
-    harmonic3Node.type = 'square';
+    harmonic3Node.type = 'sine';
     harmonic3Node.frequency.value = 130;
     const harmonic3Gain = audioContext.createGain();
     harmonic3Gain.gain.value = 0.0001;
@@ -1452,20 +1624,20 @@ function ensureVehicleEngineAudio() {
     const bodyGain = audioContext.createGain();
     bodyGain.gain.value = 0.0001;
 
-    // ── Intake path (whine + noise) ──────────────────────────────────────────────
+    // ── Intake path (gear/belt rumble + soft turbulence) ─────────────────────────
     const intakeFilter = audioContext.createBiquadFilter();
     intakeFilter.type = 'bandpass';
-    intakeFilter.frequency.value = 1600;
-    intakeFilter.Q.value = 1.4;
+    intakeFilter.frequency.value = 420;
+    intakeFilter.Q.value = 0.9;
 
     const hissFilter = audioContext.createBiquadFilter();
-    hissFilter.type = 'highpass';
-    hissFilter.frequency.value = 2400;
-    hissFilter.Q.value = 0.6;
+    hissFilter.type = 'bandpass';
+    hissFilter.frequency.value = 800;
+    hissFilter.Q.value = 0.7;
 
     const whineNode = audioContext.createOscillator();
-    whineNode.type = 'sawtooth';
-    whineNode.frequency.value = 280;
+    whineNode.type = 'triangle';
+    whineNode.frequency.value = 140;
     const whineGain = audioContext.createGain();
     whineGain.gain.value = 0.0001;
 
@@ -1487,7 +1659,7 @@ function ensureVehicleEngineAudio() {
     const crackleEnvelope = audioContext.createGain();
     crackleEnvelope.gain.value = 0.0001;
     const crackleGain = audioContext.createGain();
-    crackleGain.gain.value = 0.55;
+    crackleGain.gain.value = 0.18;
 
     // Idle LFO — slow wobble on combustion gain so idle isn't flat. Adds to combustionGain.gain.
     const idleLfo = audioContext.createOscillator();
@@ -1541,7 +1713,8 @@ function ensureVehicleEngineAudio() {
     idleLfoGain.connect(combustionGain.gain);
 
     panner.connect(compressor);
-    compressor.connect(outputGain);
+    compressor.connect(masterTone);
+    masterTone.connect(outputGain);
     outputGain.connect(listenerInput ?? audioContext.destination);
 
     const startTime = audioContext.currentTime + 0.01;
@@ -1561,7 +1734,7 @@ function ensureVehicleEngineAudio() {
         crackleNode, idleLfo,
         combustionGain, harmonic2Gain, harmonic3Gain, bodyGain, subGain, whineGain,
         intakeGain, overrunGain, crackleGain, crackleEnvelope, idleLfoGain, idleLfoOffset,
-        outputGain, compressor, waveShaper,
+        outputGain, compressor, waveShaper, masterTone,
         exhaustFilter, resonancePeak, resonanceFilter, intakeFilter, hissFilter, cabinFilter,
         panner,
     });
@@ -1574,14 +1747,94 @@ function ensureVehicleEngineAudio() {
     vehicleEngineAudio.crackleCooldown = 0;
     vehicleEngineAudio.lastWorldPosition.set(0, 0, 0);
     vehicleEngineAudio.velocity.set(0, 0, 0);
+    vehicleEngineAudio.backend = 'js';
     return vehicleEngineAudio;
 }
 
-function updateVehicleEngineAudio(delta, vehicle, telemetry) {
-    const engine = ensureVehicleEngineAudio();
+function ensureVehicleEngineAudioWasm(vehicle) {
+    const listener = runtimeAudio.listener;
+    const audioContext = listener?.context ?? null;
+    const mesh = vehicle?.mesh ?? null;
+    if (!listener || !audioContext || !mesh || !vehicleEngineAudio.wasmModuleReady || vehicleEngineAudio.wasmFailed) {
+        return null;
+    }
+
+    const existingGenerator = vehicleEngineAudio.wasmGenerator;
+    if (existingGenerator && vehicleEngineAudio.listener === listener) {
+        if (existingGenerator.parent !== mesh) {
+            try { existingGenerator.removeFromParent(); } catch (_) {}
+            mesh.add(existingGenerator);
+            existingGenerator.position.set(0, 0.45, 0);
+            existingGenerator.reset?.();
+        }
+        vehicleEngineAudio.backend = 'wasm';
+        return vehicleEngineAudio;
+    }
+
+    shutdownLegacyVehicleEngineAudio();
+    shutdownVehicleEngineAudioWasm();
+
+    let generator;
+    try {
+        generator = new WasmEngineSoundGenerator({
+            listener,
+            parameters: createVehicleEngineWasmParameters(),
+            clamp: true,
+        });
+    } catch (error) {
+        markVehicleEngineWasmUnavailable(error);
+        return null;
+    }
+
+    const throttleParam = generator.worklet?.parameters?.get('throttle') ?? null;
+    const rpmParam = generator.worklet?.parameters?.get('rpm') ?? null;
+
+    Object.assign(vehicleEngineAudio, {
+        listener,
+        wasmGenerator: generator,
+        wasmThrottleParam: throttleParam,
+        wasmRpmParam: rpmParam,
+        backend: 'wasm',
+    });
+
+    if (!throttleParam || !rpmParam) {
+        markVehicleEngineWasmUnavailable(new Error('The engine sound worklet did not expose the expected throttle/rpm parameters.'));
+        return null;
+    }
+
+    generator.name = 'vehicle-engine-wasm-audio';
+    generator.position.set(0, 0.45, 0);
+    generator.setRefDistance(5);
+    generator.setMaxDistance(120);
+    generator.setRolloffFactor(0.85);
+    generator.setDirectionalCone(200, 320, 0.72);
+    generator.gain.gain.value = 0.0001;
+    generator.gainIntake.gain.value = 0.16;
+    generator.gainEngineBlockVibrations.gain.value = 0.22;
+    generator.gainOutlet.gain.value = 0.3;
+    mesh.add(generator);
+
+    try {
+        generator.play();
+    } catch (error) {
+        markVehicleEngineWasmUnavailable(error);
+        return null;
+    }
+
+    resetVehicleEngineAudioState();
+    return vehicleEngineAudio;
+}
+
+function ensureVehicleEngineAudio(vehicle = null) {
+    primeVehicleEngineAudioWasm();
+    return ensureVehicleEngineAudioWasm(vehicle) ?? ensureLegacyVehicleEngineAudio();
+}
+
+function updateLegacyVehicleEngineAudio(delta, vehicle, telemetry) {
+    const engine = ensureLegacyVehicleEngineAudio();
     const audioContext = runtimeAudio.listener?.context ?? null;
     if (!engine || !audioContext || !vehicle?.id || !vehicle?.mesh) {
-        shutdownVehicleEngineAudio();
+        shutdownLegacyVehicleEngineAudio();
         return;
     }
 
@@ -1644,38 +1897,41 @@ function updateVehicleEngineAudio(delta, vehicle, telemetry) {
     engine.lastThrottle = throttleDemand;
     engine.lastGrounded = grounded;
 
-    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1800, 0, 1);
+    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1600, 0, 1);
     const rpmRatio = THREE.MathUtils.clamp((engine.rpm - engine.minRpm) / (engine.maxRpm - engine.minRpm), 0, 1);
-    // 4-cylinder, 4-stroke firing frequency = (rpm / 60) * (cylinders / 2) — two power strokes per rev for 4 cyl.
-    const cylinders = 4;
-    const firingFrequency = THREE.MathUtils.clamp((engine.rpm / 60) * (cylinders / 2), 25, 260);
-    // Combustion buffer is ~0.06s at base pitch; loop it at firingFrequency / baseFundamental.
-    const combustionPlaybackRate = THREE.MathUtils.clamp(firingFrequency / 60, 0.4, 4.5);
+    // V8 4-stroke: 4 power strokes per rev → firing freq = rpm/60 * 4.
+    // Halved further to land in chunky 18–140 Hz burble range so each cylinder is audible.
+    const cylinders = 8;
+    const firingFrequency = THREE.MathUtils.clamp((engine.rpm / 60) * (cylinders / 2), 18, 160);
+    // Combustion buffer fundamental is 38 Hz; rate scales fundamental to firing freq.
+    const combustionPlaybackRate = THREE.MathUtils.clamp(firingFrequency / 38, 0.45, 3.6);
 
-    // Harmonic stack tracks combustion as integer multiples → musical thickness.
-    const harmonic2Frequency = firingFrequency * 2;
-    const harmonic3Frequency = firingFrequency * 3;
-    const subFrequency = THREE.MathUtils.clamp(firingFrequency * 0.5, 18, 90);
-    const bodyFrequency = THREE.MathUtils.lerp(firingFrequency * 1.3, firingFrequency * 1.6, idleBlend);
-    const intakeWhineFrequency = THREE.MathUtils.lerp(180, 2600, Math.pow(rpmRatio, 0.7));
+    // Harmonic stack tracks combustion — kept low-mid, no top end.
+    const harmonic2Frequency = firingFrequency * 1.5;
+    const harmonic3Frequency = firingFrequency * 2.0;
+    const subFrequency = THREE.MathUtils.clamp(firingFrequency * 0.5, 16, 70);
+    const bodyFrequency = THREE.MathUtils.lerp(firingFrequency * 1.1, firingFrequency * 1.35, idleBlend);
+    // No turbo whine — Warthog is naturally aspirated. This becomes a subtle gear/belt whine
+    // that only appears under speed, low pitch.
+    const intakeWhineFrequency = THREE.MathUtils.lerp(120, 480, Math.pow(speedRatio, 0.9));
 
-    // ── Per-section levels — tuned for a beefy V-engine character ────────────────
-    const masterGain = 0.18 + speedRatio * 0.16 + engine.throttle * 0.24 + engine.overrun * 0.06 + (grounded ? 0.04 : 0);
-    const combustionLevel = 0.32 + engine.throttle * 0.22 + speedRatio * 0.10 + idleBlend * 0.08;
-    const harmonic2Level = 0.05 + engine.throttle * 0.20 + rpmRatio * 0.10;
-    const harmonic3Level = 0.02 + engine.throttle * 0.16 + Math.pow(rpmRatio, 1.4) * 0.10;
+    // ── Per-section levels — Warthog: massive low-end, throaty mids, no top whine ──
+    const masterGain = 0.12 + speedRatio * 0.10 + engine.throttle * 0.16 + engine.overrun * 0.03 + (grounded ? 0.02 : 0);
+    const combustionLevel = 0.36 + engine.throttle * 0.20 + speedRatio * 0.06 + idleBlend * 0.06;
+    const harmonic2Level = 0.04 + engine.throttle * 0.10 + rpmRatio * 0.05;
+    const harmonic3Level = 0.01 + engine.throttle * 0.05 + Math.pow(rpmRatio, 1.4) * 0.03;
     const bodyLevel = 0.10 + idleBlend * 0.10 + speedRatio * 0.06 + engine.overrun * 0.03;
-    const subLevel = 0.18 + idleBlend * 0.06 + engine.throttle * 0.14;
-    const whineLevel = 0.005 + engine.throttle * 0.045 + Math.max(0, rpmRatio - 0.35) * 0.06;
-    const intakeNoiseLevel = 0.012 + engine.throttle * 0.065 + speedRatio * 0.018;
-    const overrunNoiseLevel = 0.002 + engine.overrun * 0.085 + (brakeHeld ? 0.018 : 0);
+    const subLevel = 0.32 + idleBlend * 0.12 + engine.throttle * 0.18;
+    const whineLevel = 0.0005 + Math.max(0, speedRatio - 0.2) * 0.012;
+    const intakeNoiseLevel = 0.004 + engine.throttle * 0.024 + speedRatio * 0.008;
+    const overrunNoiseLevel = 0.001 + engine.overrun * 0.04 + (brakeHeld ? 0.008 : 0);
 
-    // Filter frequencies — these breathe with revs to give the "growing" character of a real engine.
-    const exhaustFilterFrequency = 360 + rpmRatio * 720 + engine.throttle * 280;
-    const resonancePeakFrequency = 180 + rpmRatio * 220 + idleBlend * 60;
-    const resonanceCutoff = 950 + idleBlend * 720 + engine.throttle * 1450 + speedRatio * 380;
-    const intakeFilterFrequency = 760 + engine.throttle * 2400 + rpmRatio * 1100;
-    const hissCutoff = 2200 + engine.overrun * 1600 + speedRatio * 700;
+    // Filter frequencies — Warthog stays low-mid; only the upper roll-off opens with throttle.
+    const exhaustFilterFrequency = 260 + rpmRatio * 320 + engine.throttle * 180;
+    const resonancePeakFrequency = 110 + rpmRatio * 140 + idleBlend * 40;
+    const resonanceCutoff = 600 + idleBlend * 380 + engine.throttle * 720 + speedRatio * 220;
+    const intakeFilterFrequency = 360 + engine.throttle * 480 + speedRatio * 220;
+    const hissCutoff = 1800 + engine.overrun * 800 + speedRatio * 400;
 
     // ── Apply ────────────────────────────────────────────────────────────────────
     engine.combustionNode.playbackRate.cancelScheduledValues(now);
@@ -1719,7 +1975,7 @@ function updateVehicleEngineAudio(delta, vehicle, telemetry) {
     engine.resonancePeak.frequency.cancelScheduledValues(now);
     engine.resonancePeak.frequency.setTargetAtTime(resonancePeakFrequency, now, 0.08);
     engine.resonancePeak.gain.cancelScheduledValues(now);
-    engine.resonancePeak.gain.setTargetAtTime(6 + engine.throttle * 4, now, 0.08);
+    engine.resonancePeak.gain.setTargetAtTime(2 + engine.throttle * 2, now, 0.08);
     engine.resonanceFilter.frequency.cancelScheduledValues(now);
     engine.resonanceFilter.frequency.setTargetAtTime(resonanceCutoff, now, 0.08);
     engine.intakeFilter.frequency.cancelScheduledValues(now);
@@ -1727,17 +1983,17 @@ function updateVehicleEngineAudio(delta, vehicle, telemetry) {
     engine.hissFilter.frequency.cancelScheduledValues(now);
     engine.hissFilter.frequency.setTargetAtTime(hissCutoff, now, 0.05);
 
-    // ── Crackle / pop on lift-off ───────────────────────────────────────────────
+    // ── Crackle / pop on lift-off — sparse and quiet, just texture ──────────────
     engine.crackleCooldown = Math.max(0, engine.crackleCooldown - delta);
-    if (engine.overrun > 0.45 && engine.crackleCooldown <= 0 && Math.random() < 0.55) {
+    if (engine.overrun > 0.6 && engine.crackleCooldown <= 0 && Math.random() < 0.25) {
         const popTime = now + 0.005;
-        const popDuration = 0.04 + Math.random() * 0.06;
-        const popPeak = 0.6 + engine.overrun * 0.4 + Math.random() * 0.2;
+        const popDuration = 0.05 + Math.random() * 0.06;
+        const popPeak = 0.12 + engine.overrun * 0.12 + Math.random() * 0.08;
         engine.crackleEnvelope.gain.cancelScheduledValues(popTime);
         engine.crackleEnvelope.gain.setValueAtTime(0.0001, popTime);
-        engine.crackleEnvelope.gain.exponentialRampToValueAtTime(popPeak, popTime + 0.005);
+        engine.crackleEnvelope.gain.exponentialRampToValueAtTime(popPeak, popTime + 0.008);
         engine.crackleEnvelope.gain.exponentialRampToValueAtTime(0.0001, popTime + popDuration);
-        engine.crackleCooldown = 0.07 + Math.random() * 0.18;
+        engine.crackleCooldown = 0.18 + Math.random() * 0.32;
     }
 
     // ── Spatializer position + simple Doppler via velocity ──────────────────────
@@ -1753,6 +2009,108 @@ function updateVehicleEngineAudio(delta, vehicle, telemetry) {
     engine.panner.orientationX.setValueAtTime(worldForward.x, now);
     engine.panner.orientationY.setValueAtTime(worldForward.y, now);
     engine.panner.orientationZ.setValueAtTime(worldForward.z, now);
+}
+
+function updateVehicleEngineAudioWasm(delta, vehicle, telemetry) {
+    const engine = ensureVehicleEngineAudioWasm(vehicle);
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    const generator = engine?.wasmGenerator ?? null;
+    if (!engine || !generator || !audioContext || !vehicle?.id || !vehicle?.mesh) {
+        shutdownVehicleEngineAudioWasm();
+        return false;
+    }
+
+    const now = audioContext.currentTime;
+    const isActiveVehicle = gameplay.active && vehicleState.activePropId === vehicle.id;
+    const body = getActorBody(vehicle);
+    const bodyId = body?.GetID?.() ?? null;
+
+    if (!isActiveVehicle || !bodyId) {
+        generator.gain.gain.cancelScheduledValues(now);
+        generator.gain.gain.setValueAtTime(Math.max(0.0001, generator.gain.gain.value || 0.0001), now);
+        generator.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+        resetVehicleEngineAudioState();
+        return true;
+    }
+
+    runtimeAudio.resume();
+    engine.activePropId = vehicle.id;
+
+    const throttleInput = telemetry?.throttleInput ?? 0;
+    const brakeHeld = telemetry?.brakeHeld === true;
+    const grounded = telemetry?.grounded === true;
+    const forwardSpeed = telemetry?.forwardSpeed ?? 0;
+    const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
+    const throttleDemand = Math.abs(throttleInput);
+    const gearCount = 5;
+    const targetGear = THREE.MathUtils.clamp(
+        Math.floor(speedRatio * (gearCount - 0.15) + 1 + throttleDemand * 0.25),
+        1,
+        gearCount,
+    );
+    engine.gear = THREE.MathUtils.damp(engine.gear, targetGear, grounded ? 5.8 : 2.4, delta);
+    const gearIndex = THREE.MathUtils.clamp(Math.round(engine.gear), 1, gearCount);
+    const gearStartRatio = (gearIndex - 1) / gearCount;
+    const gearEndRatio = gearIndex / gearCount;
+    const gearBand = Math.max(0.0001, gearEndRatio - gearStartRatio);
+    const gearProgress = THREE.MathUtils.clamp((speedRatio - gearStartRatio) / gearBand, 0, 1);
+    const revKick = grounded ? throttleDemand * 1400 : throttleDemand * 650;
+    const brakeDip = brakeHeld ? 220 : 0;
+    const targetRpm = clampVehicleEngineRpm(
+        engine.idleRpm + gearProgress * (engine.maxRpm - engine.idleRpm * 1.08) + revKick - brakeDip
+    );
+    const rpmLambda = throttleDemand > 0.04
+        ? 6.5
+        : brakeHeld
+            ? 5.2
+            : 2.8;
+    engine.targetRpm = targetRpm;
+    engine.rpm = THREE.MathUtils.damp(engine.rpm, targetRpm, rpmLambda, delta);
+    engine.throttle = THREE.MathUtils.damp(engine.throttle, throttleDemand, grounded ? 7.5 : 3.5, delta);
+    const throttleDrop = Math.max(0, engine.lastThrottle - throttleDemand);
+    const overrunTarget = (!brakeHeld && throttleDemand < 0.08 && speedRatio > 0.18)
+        ? THREE.MathUtils.clamp(0.22 + speedRatio * 0.9 + throttleDrop * 1.8, 0, 1)
+        : 0;
+    engine.overrun = THREE.MathUtils.damp(engine.overrun, overrunTarget, overrunTarget > 0 ? 9.5 : 4.5, delta);
+    engine.lastThrottle = throttleDemand;
+    engine.lastGrounded = grounded;
+
+    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1600, 0, 1);
+    const masterGain = 0.05 + speedRatio * 0.04 + engine.throttle * 0.06 + engine.overrun * 0.015 + (grounded ? 0.01 : 0);
+    const intakeGain = 0.12 + engine.throttle * 0.16 + speedRatio * 0.04;
+    const blockGain = 0.18 + idleBlend * 0.06 + engine.throttle * 0.14 + engine.overrun * 0.03;
+    const outletGain = 0.24 + engine.throttle * 0.18 + speedRatio * 0.06 + engine.overrun * 0.04;
+
+    generator.gain.gain.cancelScheduledValues(now);
+    generator.gain.gain.setTargetAtTime(Math.max(0.0001, masterGain), now, grounded ? 0.06 : 0.12);
+    generator.gainIntake.gain.cancelScheduledValues(now);
+    generator.gainIntake.gain.setTargetAtTime(Math.max(0.0001, intakeGain), now, 0.08);
+    generator.gainEngineBlockVibrations.gain.cancelScheduledValues(now);
+    generator.gainEngineBlockVibrations.gain.setTargetAtTime(Math.max(0.0001, blockGain), now, 0.08);
+    generator.gainOutlet.gain.cancelScheduledValues(now);
+    generator.gainOutlet.gain.setTargetAtTime(Math.max(0.0001, outletGain), now, 0.08);
+
+    engine.wasmThrottleParam.cancelScheduledValues(now);
+    engine.wasmThrottleParam.setTargetAtTime(engine.throttle, now, grounded ? 0.04 : 0.09);
+    engine.wasmRpmParam.cancelScheduledValues(now);
+    engine.wasmRpmParam.setTargetAtTime(engine.rpm, now, 0.05);
+
+    return true;
+}
+
+function updateVehicleEngineAudio(delta, vehicle, telemetry) {
+    primeVehicleEngineAudioWasm();
+
+    if (vehicleEngineAudio.wasmModuleReady && !vehicleEngineAudio.wasmFailed) {
+        const usedWasm = updateVehicleEngineAudioWasm(delta, vehicle, telemetry);
+        updateVehicleAudioBackendIndicator({ announce: true });
+        if (usedWasm) {
+            return;
+        }
+    }
+
+    updateLegacyVehicleEngineAudio(delta, vehicle, telemetry);
+    updateVehicleAudioBackendIndicator({ announce: true });
 }
 
 function resolveRuntimeSoundBuffer(soundSpec) {
@@ -6868,7 +7226,7 @@ async function init() {
     syncShowcaseAnglesFromTarget(SHOWCASE_CAMERA_TARGET);
     applyShowcaseCameraRotation();
     scene.add(camera);
-    runtimeAudio.listener = new THREE.AudioListener();
+    runtimeAudio.listener = new SoundGeneratorAudioListener();
     camera.add(runtimeAudio.listener);
 
     renderer = new WebGPURenderer({ antialias: true, alpha: true });
@@ -6991,6 +7349,7 @@ async function init() {
 
     playHint = document.getElementById('play-hint');
     gameplayStatus = document.getElementById('gameplay-status');
+    vehicleAudioBackendEl = document.getElementById('vehicle-audio-backend');
     resetViewBtn = document.getElementById('reset-view');
     if (multiplayerServerUrlInput && !multiplayerServerUrlInput.value.trim()) {
         multiplayerServerUrlInput.value = getDefaultMultiplayerServerUrl();
@@ -7779,6 +8138,7 @@ function updateGameplayUI() {
     }
 
     updateMobileButtons();
+    updateVehicleAudioBackendIndicator();
     updateMouseActionStatus();
     updateWorldPresentation();
 }
