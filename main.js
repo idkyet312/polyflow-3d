@@ -938,31 +938,49 @@ const vehicleEngineAudio = {
     activePropId: '',
     listener: null,
     combustionNode: null,
+    harmonic2Node: null,
+    harmonic3Node: null,
     bodyNode: null,
+    subNode: null,
     whineNode: null,
     noiseNode: null,
+    crackleNode: null,
+    idleLfo: null,
     combustionGain: null,
+    harmonic2Gain: null,
+    harmonic3Gain: null,
     bodyGain: null,
+    subGain: null,
     whineGain: null,
     intakeGain: null,
     overrunGain: null,
+    crackleGain: null,
+    crackleEnvelope: null,
+    idleLfoGain: null,
+    idleLfoOffset: null,
     outputGain: null,
     compressor: null,
+    waveShaper: null,
     exhaustFilter: null,
+    resonancePeak: null,
     resonanceFilter: null,
     intakeFilter: null,
     hissFilter: null,
+    cabinFilter: null,
     panner: null,
-    idleRpm: 900,
-    minRpm: 800,
-    maxRpm: 6400,
-    rpm: 900,
-    targetRpm: 900,
+    idleRpm: 850,
+    minRpm: 750,
+    maxRpm: 7200,
+    rpm: 850,
+    targetRpm: 850,
     gear: 1,
     throttle: 0,
     lastThrottle: 0,
     overrun: 0,
     lastGrounded: false,
+    crackleCooldown: 0,
+    lastWorldPosition: new THREE.Vector3(),
+    velocity: new THREE.Vector3(),
 };
 const showcase = {
     looking: false,
@@ -1197,21 +1215,61 @@ function clampVehicleEngineRpm(value) {
 }
 
 function createEngineNoiseBuffer(audioContext) {
-    const duration = 1.4;
+    const duration = 2.6;
     const sampleRate = audioContext.sampleRate || 44100;
     const frameCount = Math.max(1, Math.floor(sampleRate * duration));
     const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
     const data = buffer.getChannelData(0);
-    let previous = 0;
 
+    // Paul Kellet's pink-noise filter — much more natural turbulence than RC-filtered white noise.
+    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
     for (let index = 0; index < frameCount; index++) {
         const white = (Math.random() * 2) - 1;
-        previous = previous * 0.93 + white * 0.07;
-        const pulse = Math.sin((index / sampleRate) * Math.PI * 2 * 28) * 0.15;
-        data[index] = THREE.MathUtils.clamp(previous * 0.32 + pulse, -1, 1);
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.96900 * b2 + white * 0.1538520;
+        b3 = 0.86650 * b3 + white * 0.3104856;
+        b4 = 0.55000 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.0168980;
+        const pink = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+        b6 = white * 0.115926;
+        data[index] = THREE.MathUtils.clamp(pink, -1, 1);
     }
 
     return buffer;
+}
+
+function createCombustionPulseBuffer(audioContext) {
+    // A single cylinder firing impulse: sharp attack, exponential tail, faint underbite.
+    // Looped at the firing frequency this produces an authentic V-engine "blat" instead of a saw drone.
+    const sampleRate = audioContext.sampleRate || 44100;
+    const duration = 0.06;
+    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
+    const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
+    const data = buffer.getChannelData(0);
+
+    for (let index = 0; index < frameCount; index++) {
+        const t = index / frameCount;
+        const attack = Math.min(1, t / 0.02);
+        const decay = Math.exp(-t * 18);
+        const fundamental = Math.sin(t * Math.PI * 2 * 60);
+        const overtone = Math.sin(t * Math.PI * 2 * 180) * 0.45;
+        const grit = ((Math.random() * 2) - 1) * 0.18;
+        data[index] = THREE.MathUtils.clamp((fundamental + overtone + grit) * attack * decay, -1, 1);
+    }
+    return buffer;
+}
+
+function createCombustionDistortionCurve(amount = 0.55) {
+    // Soft-clip waveshaper — adds the throaty saturated edge without going harsh.
+    const samples = 2048;
+    const curve = new Float32Array(samples);
+    const k = amount * 18;
+    for (let i = 0; i < samples; i++) {
+        const x = (i / (samples - 1)) * 2 - 1;
+        curve[i] = (1 + k) * x / (1 + k * Math.abs(x));
+    }
+    return curve;
 }
 
 function resetVehicleEngineAudioState() {
@@ -1237,58 +1295,61 @@ function shutdownVehicleEngineAudio() {
         gain.exponentialRampToValueAtTime(0.0001, fadeOutTime);
     }
 
-    [
+    const sourceNodes = [
         vehicleEngineAudio.combustionNode,
+        vehicleEngineAudio.harmonic2Node,
+        vehicleEngineAudio.harmonic3Node,
         vehicleEngineAudio.bodyNode,
+        vehicleEngineAudio.subNode,
         vehicleEngineAudio.whineNode,
         vehicleEngineAudio.noiseNode,
-    ].forEach((node) => {
+        vehicleEngineAudio.crackleNode,
+        vehicleEngineAudio.idleLfo,
+    ];
+    sourceNodes.forEach((node) => {
         if (!node) return;
-        try {
-            node.stop(fadeOutTime + 0.02);
-        } catch (_) {}
-        try {
-            node.disconnect();
-        } catch (_) {}
+        try { node.stop(fadeOutTime + 0.02); } catch (_) {}
+        try { node.disconnect(); } catch (_) {}
     });
 
-    [
+    const otherNodes = [
         vehicleEngineAudio.combustionGain,
+        vehicleEngineAudio.harmonic2Gain,
+        vehicleEngineAudio.harmonic3Gain,
         vehicleEngineAudio.bodyGain,
+        vehicleEngineAudio.subGain,
         vehicleEngineAudio.whineGain,
         vehicleEngineAudio.intakeGain,
         vehicleEngineAudio.overrunGain,
+        vehicleEngineAudio.crackleGain,
+        vehicleEngineAudio.crackleEnvelope,
+        vehicleEngineAudio.idleLfoGain,
+        vehicleEngineAudio.idleLfoOffset,
         vehicleEngineAudio.outputGain,
         vehicleEngineAudio.compressor,
+        vehicleEngineAudio.waveShaper,
         vehicleEngineAudio.exhaustFilter,
+        vehicleEngineAudio.resonancePeak,
         vehicleEngineAudio.resonanceFilter,
         vehicleEngineAudio.intakeFilter,
         vehicleEngineAudio.hissFilter,
+        vehicleEngineAudio.cabinFilter,
         vehicleEngineAudio.panner,
-    ].forEach((node) => {
+    ];
+    otherNodes.forEach((node) => {
         if (!node) return;
-        try {
-            node.disconnect();
-        } catch (_) {}
+        try { node.disconnect(); } catch (_) {}
     });
 
-    vehicleEngineAudio.combustionNode = null;
-    vehicleEngineAudio.bodyNode = null;
-    vehicleEngineAudio.whineNode = null;
-    vehicleEngineAudio.noiseNode = null;
-    vehicleEngineAudio.combustionGain = null;
-    vehicleEngineAudio.bodyGain = null;
-    vehicleEngineAudio.whineGain = null;
-    vehicleEngineAudio.intakeGain = null;
-    vehicleEngineAudio.overrunGain = null;
-    vehicleEngineAudio.outputGain = null;
-    vehicleEngineAudio.compressor = null;
-    vehicleEngineAudio.exhaustFilter = null;
-    vehicleEngineAudio.resonanceFilter = null;
-    vehicleEngineAudio.intakeFilter = null;
-    vehicleEngineAudio.hissFilter = null;
-    vehicleEngineAudio.panner = null;
-    vehicleEngineAudio.listener = null;
+    [
+        'combustionNode', 'harmonic2Node', 'harmonic3Node', 'bodyNode', 'subNode', 'whineNode', 'noiseNode',
+        'crackleNode', 'idleLfo',
+        'combustionGain', 'harmonic2Gain', 'harmonic3Gain', 'bodyGain', 'subGain', 'whineGain',
+        'intakeGain', 'overrunGain', 'crackleGain', 'crackleEnvelope', 'idleLfoGain', 'idleLfoOffset',
+        'outputGain', 'compressor', 'waveShaper',
+        'exhaustFilter', 'resonancePeak', 'resonanceFilter', 'intakeFilter', 'hissFilter', 'cabinFilter',
+        'panner', 'listener',
+    ].forEach((key) => { vehicleEngineAudio[key] = null; });
     resetVehicleEngineAudioState();
 }
 
@@ -1306,64 +1367,105 @@ function ensureVehicleEngineAudio() {
 
     shutdownVehicleEngineAudio();
 
+    // ── Spatializer ──────────────────────────────────────────────────────────────
     const panner = audioContext.createPanner();
     panner.panningModel = 'HRTF';
     panner.distanceModel = 'inverse';
-    panner.refDistance = 4.5;
-    panner.maxDistance = 90;
-    panner.rolloffFactor = 0.72;
-    panner.coneInnerAngle = 210;
-    panner.coneOuterAngle = 300;
-    panner.coneOuterGain = 0.78;
+    panner.refDistance = 5;
+    panner.maxDistance = 120;
+    panner.rolloffFactor = 0.85;
+    panner.coneInnerAngle = 200;
+    panner.coneOuterAngle = 320;
+    panner.coneOuterGain = 0.72;
 
+    // ── Master output ────────────────────────────────────────────────────────────
     const outputGain = audioContext.createGain();
     outputGain.gain.value = 0.0001;
 
     const compressor = audioContext.createDynamicsCompressor();
-    compressor.threshold.value = -24;
-    compressor.knee.value = 18;
-    compressor.ratio.value = 2.6;
-    compressor.attack.value = 0.01;
-    compressor.release.value = 0.18;
+    compressor.threshold.value = -16;
+    compressor.knee.value = 12;
+    compressor.ratio.value = 3.4;
+    compressor.attack.value = 0.005;
+    compressor.release.value = 0.14;
 
+    const waveShaper = audioContext.createWaveShaper();
+    waveShaper.curve = createCombustionDistortionCurve(0.45);
+    waveShaper.oversample = '4x';
+
+    const cabinFilter = audioContext.createBiquadFilter();
+    cabinFilter.type = 'lowshelf';
+    cabinFilter.frequency.value = 240;
+    cabinFilter.gain.value = 4.5;
+
+    // ── Exhaust path (combustion thump + harmonics) ──────────────────────────────
     const exhaustFilter = audioContext.createBiquadFilter();
-    exhaustFilter.type = 'bandpass';
-    exhaustFilter.frequency.value = 180;
-    exhaustFilter.Q.value = 0.9;
+    exhaustFilter.type = 'lowpass';
+    exhaustFilter.frequency.value = 520;
+    exhaustFilter.Q.value = 1.8;
+
+    const resonancePeak = audioContext.createBiquadFilter();
+    resonancePeak.type = 'peaking';
+    resonancePeak.frequency.value = 220;
+    resonancePeak.Q.value = 4.2;
+    resonancePeak.gain.value = 8;
 
     const resonanceFilter = audioContext.createBiquadFilter();
     resonanceFilter.type = 'lowpass';
-    resonanceFilter.frequency.value = 1100;
-    resonanceFilter.Q.value = 0.7;
+    resonanceFilter.frequency.value = 1400;
+    resonanceFilter.Q.value = 0.9;
 
-    const intakeFilter = audioContext.createBiquadFilter();
-    intakeFilter.type = 'bandpass';
-    intakeFilter.frequency.value = 1400;
-    intakeFilter.Q.value = 0.8;
-
-    const hissFilter = audioContext.createBiquadFilter();
-    hissFilter.type = 'highpass';
-    hissFilter.frequency.value = 2200;
-    hissFilter.Q.value = 0.5;
-
-    const combustionNode = audioContext.createOscillator();
-    combustionNode.type = 'sawtooth';
-    combustionNode.frequency.value = 42;
-
+    // Combustion: looped pulse buffer at firing freq → throaty individual cylinder thumps.
+    const combustionBuffer = createCombustionPulseBuffer(audioContext);
+    const combustionNode = audioContext.createBufferSource();
+    combustionNode.buffer = combustionBuffer;
+    combustionNode.loop = true;
+    combustionNode.playbackRate.value = 1;
     const combustionGain = audioContext.createGain();
     combustionGain.gain.value = 0.0001;
 
+    // 2nd-order harmonic stack (sawtooth → grit/snarl midband).
+    const harmonic2Node = audioContext.createOscillator();
+    harmonic2Node.type = 'sawtooth';
+    harmonic2Node.frequency.value = 90;
+    const harmonic2Gain = audioContext.createGain();
+    harmonic2Gain.gain.value = 0.0001;
+
+    // 3rd-order harmonic (square → top end bark).
+    const harmonic3Node = audioContext.createOscillator();
+    harmonic3Node.type = 'square';
+    harmonic3Node.frequency.value = 130;
+    const harmonic3Gain = audioContext.createGain();
+    harmonic3Gain.gain.value = 0.0001;
+
+    // Sub-octave for chest-thump body.
+    const subNode = audioContext.createOscillator();
+    subNode.type = 'sine';
+    subNode.frequency.value = 32;
+    const subGain = audioContext.createGain();
+    subGain.gain.value = 0.0001;
+
+    // Mid-body resonance (triangle).
     const bodyNode = audioContext.createOscillator();
     bodyNode.type = 'triangle';
-    bodyNode.frequency.value = 96;
-
+    bodyNode.frequency.value = 110;
     const bodyGain = audioContext.createGain();
     bodyGain.gain.value = 0.0001;
 
-    const whineNode = audioContext.createOscillator();
-    whineNode.type = 'triangle';
-    whineNode.frequency.value = 260;
+    // ── Intake path (whine + noise) ──────────────────────────────────────────────
+    const intakeFilter = audioContext.createBiquadFilter();
+    intakeFilter.type = 'bandpass';
+    intakeFilter.frequency.value = 1600;
+    intakeFilter.Q.value = 1.4;
 
+    const hissFilter = audioContext.createBiquadFilter();
+    hissFilter.type = 'highpass';
+    hissFilter.frequency.value = 2400;
+    hissFilter.Q.value = 0.6;
+
+    const whineNode = audioContext.createOscillator();
+    whineNode.type = 'sawtooth';
+    whineNode.frequency.value = 280;
     const whineGain = audioContext.createGain();
     whineGain.gain.value = 0.0001;
 
@@ -1378,24 +1480,65 @@ function ensureVehicleEngineAudio() {
     const overrunGain = audioContext.createGain();
     overrunGain.gain.value = 0.0001;
 
+    // Crackle/pop on overrun — separate noise tap with its own envelope.
+    const crackleNode = audioContext.createBufferSource();
+    crackleNode.buffer = noiseBuffer;
+    crackleNode.loop = true;
+    const crackleEnvelope = audioContext.createGain();
+    crackleEnvelope.gain.value = 0.0001;
+    const crackleGain = audioContext.createGain();
+    crackleGain.gain.value = 0.55;
+
+    // Idle LFO — slow wobble on combustion gain so idle isn't flat. Adds to combustionGain.gain.
+    const idleLfo = audioContext.createOscillator();
+    idleLfo.type = 'sine';
+    idleLfo.frequency.value = 4.6;
+    const idleLfoGain = audioContext.createGain();
+    idleLfoGain.gain.value = 0;
+    const idleLfoOffset = null;
+
+    // ── Wiring ───────────────────────────────────────────────────────────────────
+    // Combustion thump path
     combustionNode.connect(combustionGain);
     combustionGain.connect(exhaustFilter);
-    exhaustFilter.connect(resonanceFilter);
-    resonanceFilter.connect(panner);
-
+    harmonic2Node.connect(harmonic2Gain);
+    harmonic2Gain.connect(exhaustFilter);
+    harmonic3Node.connect(harmonic3Gain);
+    harmonic3Gain.connect(exhaustFilter);
     bodyNode.connect(bodyGain);
-    bodyGain.connect(resonanceFilter);
+    bodyGain.connect(resonancePeak);
+    exhaustFilter.connect(resonancePeak);
+    resonancePeak.connect(resonanceFilter);
+    resonanceFilter.connect(waveShaper);
 
+    // Sub thump goes around the saturator to keep low end clean.
+    subNode.connect(subGain);
+    subGain.connect(cabinFilter);
+
+    // Intake path
     whineNode.connect(whineGain);
     whineGain.connect(intakeFilter);
-    intakeFilter.connect(panner);
-
     noiseNode.connect(intakeGain);
     intakeGain.connect(intakeFilter);
+    intakeFilter.connect(panner);
 
+    // Overrun hiss
     noiseNode.connect(overrunGain);
     overrunGain.connect(hissFilter);
     hissFilter.connect(panner);
+
+    // Crackle path — gated noise into hiss filter for snappy pops.
+    crackleNode.connect(crackleEnvelope);
+    crackleEnvelope.connect(crackleGain);
+    crackleGain.connect(hissFilter);
+
+    // Saturated combustion + clean sub merge into cabin lowshelf.
+    waveShaper.connect(cabinFilter);
+    cabinFilter.connect(panner);
+
+    // Idle LFO adds wobble directly to combustionGain.gain.
+    idleLfo.connect(idleLfoGain);
+    idleLfoGain.connect(combustionGain.gain);
 
     panner.connect(compressor);
     compressor.connect(outputGain);
@@ -1403,33 +1546,34 @@ function ensureVehicleEngineAudio() {
 
     const startTime = audioContext.currentTime + 0.01;
     combustionNode.start(startTime);
+    harmonic2Node.start(startTime);
+    harmonic3Node.start(startTime);
     bodyNode.start(startTime);
+    subNode.start(startTime);
     whineNode.start(startTime);
     noiseNode.start(startTime);
+    crackleNode.start(startTime);
+    idleLfo.start(startTime);
 
-    vehicleEngineAudio.listener = listener;
-    vehicleEngineAudio.combustionNode = combustionNode;
-    vehicleEngineAudio.bodyNode = bodyNode;
-    vehicleEngineAudio.whineNode = whineNode;
-    vehicleEngineAudio.noiseNode = noiseNode;
-    vehicleEngineAudio.combustionGain = combustionGain;
-    vehicleEngineAudio.bodyGain = bodyGain;
-    vehicleEngineAudio.whineGain = whineGain;
-    vehicleEngineAudio.intakeGain = intakeGain;
-    vehicleEngineAudio.overrunGain = overrunGain;
-    vehicleEngineAudio.outputGain = outputGain;
-    vehicleEngineAudio.compressor = compressor;
-    vehicleEngineAudio.exhaustFilter = exhaustFilter;
-    vehicleEngineAudio.resonanceFilter = resonanceFilter;
-    vehicleEngineAudio.intakeFilter = intakeFilter;
-    vehicleEngineAudio.hissFilter = hissFilter;
-    vehicleEngineAudio.panner = panner;
+    Object.assign(vehicleEngineAudio, {
+        listener,
+        combustionNode, harmonic2Node, harmonic3Node, bodyNode, subNode, whineNode, noiseNode,
+        crackleNode, idleLfo,
+        combustionGain, harmonic2Gain, harmonic3Gain, bodyGain, subGain, whineGain,
+        intakeGain, overrunGain, crackleGain, crackleEnvelope, idleLfoGain, idleLfoOffset,
+        outputGain, compressor, waveShaper,
+        exhaustFilter, resonancePeak, resonanceFilter, intakeFilter, hissFilter, cabinFilter,
+        panner,
+    });
     vehicleEngineAudio.rpm = vehicleEngineAudio.idleRpm;
     vehicleEngineAudio.targetRpm = vehicleEngineAudio.idleRpm;
     vehicleEngineAudio.gear = 1;
     vehicleEngineAudio.throttle = 0;
     vehicleEngineAudio.lastThrottle = 0;
     vehicleEngineAudio.overrun = 0;
+    vehicleEngineAudio.crackleCooldown = 0;
+    vehicleEngineAudio.lastWorldPosition.set(0, 0, 0);
+    vehicleEngineAudio.velocity.set(0, 0, 0);
     return vehicleEngineAudio;
 }
 
@@ -1500,42 +1644,82 @@ function updateVehicleEngineAudio(delta, vehicle, telemetry) {
     engine.lastThrottle = throttleDemand;
     engine.lastGrounded = grounded;
 
-    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1600, 0, 1);
-    const rpmRatio = (engine.rpm - engine.minRpm) / (engine.maxRpm - engine.minRpm);
-    const firingFrequency = THREE.MathUtils.clamp((engine.rpm / 60) * 2, 30, 220);
-    const exhaustBodyFrequency = firingFrequency * THREE.MathUtils.lerp(1.75, 2.45, idleBlend + speedRatio * 0.2);
-    const intakeWhineFrequency = THREE.MathUtils.lerp(220, 1680, Math.pow(rpmRatio, 0.8));
-    const masterGain = 0.14 + speedRatio * 0.12 + engine.throttle * 0.18 + engine.overrun * 0.05 + (grounded ? 0.03 : 0);
-    const combustionLevel = 0.16 + engine.throttle * 0.08 + speedRatio * 0.04;
-    const bodyLevel = 0.08 + idleBlend * 0.08 + speedRatio * 0.05 + engine.overrun * 0.03;
-    const whineLevel = 0.012 + engine.throttle * 0.055 + Math.max(0, speedRatio - 0.12) * 0.04;
-    const intakeNoiseLevel = 0.008 + engine.throttle * 0.052 + speedRatio * 0.012;
-    const overrunNoiseLevel = 0.002 + engine.overrun * 0.072 + (brakeHeld ? 0.018 : 0);
-    const exhaustFilterFrequency = 160 + rpmRatio * 340 + engine.throttle * 90;
-    const resonanceCutoff = 820 + idleBlend * 620 + engine.throttle * 1150 + speedRatio * 280;
-    const intakeFilterFrequency = 880 + engine.throttle * 2200 + rpmRatio * 940;
-    const hissCutoff = 2100 + engine.overrun * 1400 + speedRatio * 500;
+    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1800, 0, 1);
+    const rpmRatio = THREE.MathUtils.clamp((engine.rpm - engine.minRpm) / (engine.maxRpm - engine.minRpm), 0, 1);
+    // 4-cylinder, 4-stroke firing frequency = (rpm / 60) * (cylinders / 2) — two power strokes per rev for 4 cyl.
+    const cylinders = 4;
+    const firingFrequency = THREE.MathUtils.clamp((engine.rpm / 60) * (cylinders / 2), 25, 260);
+    // Combustion buffer is ~0.06s at base pitch; loop it at firingFrequency / baseFundamental.
+    const combustionPlaybackRate = THREE.MathUtils.clamp(firingFrequency / 60, 0.4, 4.5);
 
-    engine.combustionNode.frequency.cancelScheduledValues(now);
-    engine.combustionNode.frequency.setTargetAtTime(firingFrequency, now, 0.045);
+    // Harmonic stack tracks combustion as integer multiples → musical thickness.
+    const harmonic2Frequency = firingFrequency * 2;
+    const harmonic3Frequency = firingFrequency * 3;
+    const subFrequency = THREE.MathUtils.clamp(firingFrequency * 0.5, 18, 90);
+    const bodyFrequency = THREE.MathUtils.lerp(firingFrequency * 1.3, firingFrequency * 1.6, idleBlend);
+    const intakeWhineFrequency = THREE.MathUtils.lerp(180, 2600, Math.pow(rpmRatio, 0.7));
+
+    // ── Per-section levels — tuned for a beefy V-engine character ────────────────
+    const masterGain = 0.18 + speedRatio * 0.16 + engine.throttle * 0.24 + engine.overrun * 0.06 + (grounded ? 0.04 : 0);
+    const combustionLevel = 0.32 + engine.throttle * 0.22 + speedRatio * 0.10 + idleBlend * 0.08;
+    const harmonic2Level = 0.05 + engine.throttle * 0.20 + rpmRatio * 0.10;
+    const harmonic3Level = 0.02 + engine.throttle * 0.16 + Math.pow(rpmRatio, 1.4) * 0.10;
+    const bodyLevel = 0.10 + idleBlend * 0.10 + speedRatio * 0.06 + engine.overrun * 0.03;
+    const subLevel = 0.18 + idleBlend * 0.06 + engine.throttle * 0.14;
+    const whineLevel = 0.005 + engine.throttle * 0.045 + Math.max(0, rpmRatio - 0.35) * 0.06;
+    const intakeNoiseLevel = 0.012 + engine.throttle * 0.065 + speedRatio * 0.018;
+    const overrunNoiseLevel = 0.002 + engine.overrun * 0.085 + (brakeHeld ? 0.018 : 0);
+
+    // Filter frequencies — these breathe with revs to give the "growing" character of a real engine.
+    const exhaustFilterFrequency = 360 + rpmRatio * 720 + engine.throttle * 280;
+    const resonancePeakFrequency = 180 + rpmRatio * 220 + idleBlend * 60;
+    const resonanceCutoff = 950 + idleBlend * 720 + engine.throttle * 1450 + speedRatio * 380;
+    const intakeFilterFrequency = 760 + engine.throttle * 2400 + rpmRatio * 1100;
+    const hissCutoff = 2200 + engine.overrun * 1600 + speedRatio * 700;
+
+    // ── Apply ────────────────────────────────────────────────────────────────────
+    engine.combustionNode.playbackRate.cancelScheduledValues(now);
+    engine.combustionNode.playbackRate.setTargetAtTime(combustionPlaybackRate, now, 0.04);
+    engine.harmonic2Node.frequency.cancelScheduledValues(now);
+    engine.harmonic2Node.frequency.setTargetAtTime(harmonic2Frequency, now, 0.05);
+    engine.harmonic3Node.frequency.cancelScheduledValues(now);
+    engine.harmonic3Node.frequency.setTargetAtTime(harmonic3Frequency, now, 0.05);
     engine.bodyNode.frequency.cancelScheduledValues(now);
-    engine.bodyNode.frequency.setTargetAtTime(exhaustBodyFrequency, now, 0.05);
+    engine.bodyNode.frequency.setTargetAtTime(bodyFrequency, now, 0.06);
+    engine.subNode.frequency.cancelScheduledValues(now);
+    engine.subNode.frequency.setTargetAtTime(subFrequency, now, 0.08);
     engine.whineNode.frequency.cancelScheduledValues(now);
     engine.whineNode.frequency.setTargetAtTime(intakeWhineFrequency, now, 0.06);
+
     engine.outputGain.gain.cancelScheduledValues(now);
     engine.outputGain.gain.setTargetAtTime(Math.max(0.0001, masterGain), now, grounded ? 0.06 : 0.12);
     engine.combustionGain.gain.cancelScheduledValues(now);
     engine.combustionGain.gain.setTargetAtTime(Math.max(0.0001, combustionLevel), now, 0.05);
+    // Idle wobble LFO sums on top of combustionGain.gain; depth shrinks with throttle and revs.
+    engine.idleLfoGain.gain.cancelScheduledValues(now);
+    engine.idleLfoGain.gain.setTargetAtTime(0.06 * (1 - engine.throttle) * (1 - rpmRatio * 0.6), now, 0.1);
+
+    engine.harmonic2Gain.gain.cancelScheduledValues(now);
+    engine.harmonic2Gain.gain.setTargetAtTime(Math.max(0.0001, harmonic2Level), now, 0.06);
+    engine.harmonic3Gain.gain.cancelScheduledValues(now);
+    engine.harmonic3Gain.gain.setTargetAtTime(Math.max(0.0001, harmonic3Level), now, 0.06);
     engine.bodyGain.gain.cancelScheduledValues(now);
     engine.bodyGain.gain.setTargetAtTime(Math.max(0.0001, bodyLevel), now, 0.06);
+    engine.subGain.gain.cancelScheduledValues(now);
+    engine.subGain.gain.setTargetAtTime(Math.max(0.0001, subLevel), now, 0.08);
     engine.whineGain.gain.cancelScheduledValues(now);
     engine.whineGain.gain.setTargetAtTime(Math.max(0.0001, whineLevel), now, 0.06);
     engine.intakeGain.gain.cancelScheduledValues(now);
     engine.intakeGain.gain.setTargetAtTime(Math.max(0.0001, intakeNoiseLevel), now, 0.07);
     engine.overrunGain.gain.cancelScheduledValues(now);
     engine.overrunGain.gain.setTargetAtTime(Math.max(0.0001, overrunNoiseLevel), now, 0.04);
+
     engine.exhaustFilter.frequency.cancelScheduledValues(now);
     engine.exhaustFilter.frequency.setTargetAtTime(exhaustFilterFrequency, now, 0.05);
+    engine.resonancePeak.frequency.cancelScheduledValues(now);
+    engine.resonancePeak.frequency.setTargetAtTime(resonancePeakFrequency, now, 0.08);
+    engine.resonancePeak.gain.cancelScheduledValues(now);
+    engine.resonancePeak.gain.setTargetAtTime(6 + engine.throttle * 4, now, 0.08);
     engine.resonanceFilter.frequency.cancelScheduledValues(now);
     engine.resonanceFilter.frequency.setTargetAtTime(resonanceCutoff, now, 0.08);
     engine.intakeFilter.frequency.cancelScheduledValues(now);
@@ -1543,8 +1727,26 @@ function updateVehicleEngineAudio(delta, vehicle, telemetry) {
     engine.hissFilter.frequency.cancelScheduledValues(now);
     engine.hissFilter.frequency.setTargetAtTime(hissCutoff, now, 0.05);
 
+    // ── Crackle / pop on lift-off ───────────────────────────────────────────────
+    engine.crackleCooldown = Math.max(0, engine.crackleCooldown - delta);
+    if (engine.overrun > 0.45 && engine.crackleCooldown <= 0 && Math.random() < 0.55) {
+        const popTime = now + 0.005;
+        const popDuration = 0.04 + Math.random() * 0.06;
+        const popPeak = 0.6 + engine.overrun * 0.4 + Math.random() * 0.2;
+        engine.crackleEnvelope.gain.cancelScheduledValues(popTime);
+        engine.crackleEnvelope.gain.setValueAtTime(0.0001, popTime);
+        engine.crackleEnvelope.gain.exponentialRampToValueAtTime(popPeak, popTime + 0.005);
+        engine.crackleEnvelope.gain.exponentialRampToValueAtTime(0.0001, popTime + popDuration);
+        engine.crackleCooldown = 0.07 + Math.random() * 0.18;
+    }
+
+    // ── Spatializer position + simple Doppler via velocity ──────────────────────
     const worldPosition = mesh.getWorldPosition(new THREE.Vector3());
     const worldForward = mesh.getWorldDirection(new THREE.Vector3()).normalize();
+    if (delta > 0 && engine.lastWorldPosition.lengthSq() > 0) {
+        engine.velocity.subVectors(worldPosition, engine.lastWorldPosition).divideScalar(delta);
+    }
+    engine.lastWorldPosition.copy(worldPosition);
     engine.panner.positionX.setValueAtTime(worldPosition.x, now);
     engine.panner.positionY.setValueAtTime(worldPosition.y + 0.45, now);
     engine.panner.positionZ.setValueAtTime(worldPosition.z, now);
