@@ -25,6 +25,32 @@ This branch keeps the original HDR-lit scene and asset pipeline, but adds a ligh
 - Collision is intentionally lightweight for this first pass and is based on raycasts rather than a full physics engine.
 - The current play mode is desktop-first and intended for pointer-lock mouse input.
 
+## UE-Style Scripting
+
+- Actor scripts support Unreal-style lifecycle functions: `BeginPlay()`, `Tick()`, `OnHit()`, and `EndPlay()`.
+- Input action scripts now run on the same UE-style facade.
+- Preferred symbols are `World`, `GameMode`, `PlayerController`, `Pawn`, `Character`, `GameInstance`, `GetWorld()`, `FVector`, `FRotator`, `UPrimitiveComponent`, `UAudioComponent`, `HUD`, and `CreateWidget()`.
+- Legacy raw globals such as `THREE`, `scene`, `camera`, `gameplay`, and `physics` still remain available for compatibility.
+
+Example:
+
+```javascript
+function BeginPlay() {
+	const widget = CreateWidget(UTextWidget, {
+		Text: 'Ready',
+		Position: { x: 0.08, y: 0.1 },
+	});
+	widget.AddToViewport();
+}
+
+function Tick() {
+	const phys = Self.GetComponentByClass(UPrimitiveComponent);
+	if (phys) {
+		phys.AddForce(new FVector(0, 15, 0));
+	}
+}
+```
+
 ## Development
 
 - `npm run dev`: start the Vite dev server.

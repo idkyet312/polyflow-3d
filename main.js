@@ -20,6 +20,7 @@ import {
     createActor,
     createSceneSystem,
     ensureActorScriptComponent,
+    AudioComponent,
     getMetadataComponent,
     getPhysicsBodyComponent,
     getRenderComponent,
@@ -34,9 +35,15 @@ import {
     sampleTerrainHeightAt as sampleTerrainHeightAtWorldFloor,
 } from './src/world/terrain.js';
 import {
+    AHUD,
     installUePrototypeMethods,
     buildUeContext,
     detectsUeLifecycle,
+    UButtonWidget,
+    UImageWidget,
+    UProgressBarWidget,
+    UTextWidget,
+    UUserWidget,
 } from './src/scripting/ueApi.js';
 
 installUePrototypeMethods();
@@ -182,11 +189,13 @@ class BaseWidget {
             position: { x: 0.5, y: 0.5 }, // Normalized screen coordinates (0-1)
             scale: 1,
             visible: true,
+            zOrder: 0,
             ...config
         };
 
         this.updatePosition();
         this.element.style.display = this.config.visible ? 'block' : 'none';
+        this.element.style.zIndex = String(this.config.zOrder);
     }
 
     update(updates) {
@@ -201,6 +210,10 @@ class BaseWidget {
         if (updates.visible !== undefined) {
             this.config.visible = updates.visible;
             this.element.style.display = updates.visible ? 'block' : 'none';
+        }
+        if (updates.zOrder !== undefined) {
+            this.config.zOrder = updates.zOrder;
+            this.element.style.zIndex = String(updates.zOrder);
         }
 
         Object.assign(this.config, updates);
@@ -503,6 +516,7 @@ class ButtonWidget extends BaseWidget {
 
 // Global widget manager instance
 let widgetManager;
+let runtimeHud;
 
 // Widget API functions (call these from Three.js commands)
 window.WidgetAPI = {
@@ -547,72 +561,78 @@ window.WidgetAPI = {
     }
 };
 
+function getRuntimeHud() {
+    if (!runtimeHud) {
+        runtimeHud = new AHUD({ widgetApi: window.WidgetAPI });
+    }
+    return runtimeHud;
+}
+
+window.UnrealWidgetAPI = {
+    AHUD,
+    UUserWidget,
+    UTextWidget,
+    UImageWidget,
+    UProgressBarWidget,
+    UButtonWidget,
+    CreateWidget: (WidgetClass = UUserWidget, config = {}) => getRuntimeHud().CreateWidget(WidgetClass, config),
+    GetHUD: () => getRuntimeHud(),
+};
+
 // Example widget creation function
 function createExampleWidgets() {
     if (!widgetManager) return;
 
-    // Create a score display widget
-    const scoreWidgetId = widgetManager.createWidget('text', {
-        text: 'Score: 0',
+    const hud = getRuntimeHud();
+
+    const scoreWidget = hud.CreateWidget(UTextWidget, {
+        Text: 'Score: 0',
         fontSize: 20,
         color: '#ffff00',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
         position: { x: 0.05, y: 0.9 }, // Top-left corner
-        visible: true
+        visible: true,
     });
+    scoreWidget.AddToViewport(20);
 
-    // Create a health bar
-    const healthBarId = widgetManager.createWidget('progress', {
-        progress: 1.0,
+    const healthBar = hud.CreateWidget(UProgressBarWidget, {
+        Percent: 1.0,
         width: 200,
         height: 20,
         fillColor: '#00ff00',
         backgroundColor: '#333333',
         position: { x: 0.05, y: 0.8 }, // Below score
-        visible: true
+        visible: true,
     });
+    healthBar.AddToViewport(19);
 
-    // Create a speed display
-    /*const speedWidgetId = widgetManager.createWidget('text', {
-        text: 'Speed: 0 km/h',
+    const speedWidget = hud.CreateWidget(UTextWidget, {
+        Text: 'Speed: 0 km/h',
         fontSize: 16,
         color: '#00ffff',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
         position: { x: 0.05, y: 0.7 }, // Below health bar
-        visible: true
+        visible: true,
     });
+    speedWidget.AddToViewport(18);
 
-    // Create a button widget
-    const buttonWidgetId = widgetManager.createWidget('button', {
-        text: 'Boost',
-        width: 80,
-        height: 30,
-        backgroundColor: '#444444',
-        hoverColor: '#666666',
-        position: { x: 0.85, y: 0.9 }, // Top-right corner
-        onClick: (id) => {
-            console.log('Boost button clicked!', id);
-            // Add boost logic here
-        },
-        visible: true
-    });*/
-
-    // Store widget IDs globally for easy access
+    // Store widget handles globally for easy access
     window.exampleWidgets = {
-        score: scoreWidgetId,
-        health: healthBarId,
-        //speed: speedWidgetId,
-        //boost: buttonWidgetId
+        score: scoreWidget,
+        health: healthBar,
+        speed: speedWidget,
     };
+    window.gameHud = hud;
 
     // Initialize score system
     window.gameScore = 0;
 
     console.log('Example widgets created:', window.exampleWidgets);
     console.log('Widget API available at window.WidgetAPI');
+    console.log('Unreal widget API available at window.UnrealWidgetAPI');
     console.log('Example usage:');
     console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
-    console.log('  WidgetAPI.updateWidget(widgetId, {text: "Updated text"})');
+    console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
 }
 
 // --- Configuration ---
@@ -698,10 +718,12 @@ const VEHICLE_SETTINGS = {
     maxAngularVelocity: 3.0,
 };
 const PHYSICS_COLLISION_STEPS = 2;
+const TEST_SOUND_ID = 'polyflow:test';
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
 let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
+let playTestSoundBtn, playTestSoundStatus;
 let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
 let propCollisionPrompt, propCollisionCopy, propCollisionRemember, propCollisionSimpleBtn, propCollisionComplexBtn, propCollisionCancelBtn;
@@ -760,32 +782,28 @@ const DEBUG_CONSOLE_LOG_LIMIT = 18;
 const DEBUG_CONSOLE_HISTORY_LIMIT = 24;
 const DEBUG_TIMING_SAMPLE_LIMIT = 30;
 const DEFAULT_MOUSE_ACTION_SCRIPTS = {
-    left: `const sphere = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, -1, 0), 0.5);
-if (sphere) {
-    physics.bodyInterface.SetMotionQuality(
-        sphere.GetID(),
-        physics.Jolt.EMotionQuality_LinearCast
-    );
+    left: `const direction = Character?.GetActorForwardVector?.()?.GetSafeNormal?.() ?? FVector.Forward();
+const playerLocation = Character?.GetActorLocation?.() ?? FVector.Zero();
+const spawnLocation = playerLocation
+    .Add(direction.Scale(1.8))
+    .Add(new FVector(0, -0.35, 0));
 
-    const direction = new THREE.Vector3();
-    camera.getWorldDirection(direction);
-    direction.normalize();
+const sphere = World.SpawnActor('Sphere', spawnLocation);
+const phys = sphere?.GetComponentByClass(UPrimitiveComponent);
 
-    const velocity = new physics.Jolt.Vec3(
-        direction.x * 36000,
-        direction.y * 36000,
-        direction.z * 36000
-    );
-
-    physics.bodyInterface.AddImpulse(sphere.GetID(), velocity);
-    physics.Jolt.destroy(velocity);
+if (phys) {
+    phys.AddImpulse(direction.Scale(36000));
 }`,
     right: `const cubesPerSide = 5;
 const totalCubes = 50;
-const cubeHalfExtent = 0.16;
-const spacing = cubeHalfExtent * 2;
+const spacing = 0.34;
 const baseYOffset = -0.8;
 let spawned = 0;
+const playerLocation = Character?.GetActorLocation?.() ?? new FVector(camera.position.x, camera.position.y, camera.position.z);
+const forward = Character?.GetActorForwardVector?.()?.GetSafeNormal?.() ?? new FVector(0, 0, -1);
+const right = Character?.GetActorRightVector?.()?.GetSafeNormal?.() ?? new FVector(1, 0, 0);
+const up = Character?.GetActorUpVector?.()?.GetSafeNormal?.() ?? new FVector(0, 1, 0);
+const baseCenter = playerLocation.Add(forward.Scale(2.6));
 
 for (let layer = 0; spawned < totalCubes; layer++) {
     for (let row = 0; row < cubesPerSide && spawned < totalCubes; row++) {
@@ -793,28 +811,11 @@ for (let layer = 0; spawned < totalCubes; layer++) {
             const xOffset = (col - (cubesPerSide - 1) * 0.5) * spacing;
             const yOffset = baseYOffset + layer * spacing;
             const zOffset = (row - (cubesPerSide - 1) * 0.5) * spacing;
-            const cube = spawnDynamicPrimitive(
-                'cube',
-                new THREE.Vector3(xOffset, yOffset, zOffset),
-                cubeHalfExtent,
-                {
-                    skipImpulse: true,
-                    activate: false,
-                    castShadow: false,
-                    receiveShadow: false,
-                    allowSleeping: true,
-                    linearDamping: 0.18,
-                    angularDamping: 0.22,
-                    motionQuality: physics.Jolt.EMotionQuality_Discrete,
-                }
-            );
-
-            if (cube) {
-                physics.bodyInterface.SetMotionQuality(
-                    cube.GetID(),
-                    physics.Jolt.EMotionQuality_Discrete
-                );
-            }
+            const spawnLocation = baseCenter
+                .Add(right.Scale(xOffset))
+                .Add(up.Scale(yOffset))
+                .Add(forward.Scale(zOffset));
+            World.SpawnActor('Cube', spawnLocation);
 
             spawned += 1;
         }
@@ -933,6 +934,36 @@ const vehicleState = {
     brakeHeld: false,
     tailWhipLastFrame: false,
 };
+const vehicleEngineAudio = {
+    activePropId: '',
+    listener: null,
+    combustionNode: null,
+    bodyNode: null,
+    whineNode: null,
+    noiseNode: null,
+    combustionGain: null,
+    bodyGain: null,
+    whineGain: null,
+    intakeGain: null,
+    overrunGain: null,
+    outputGain: null,
+    compressor: null,
+    exhaustFilter: null,
+    resonanceFilter: null,
+    intakeFilter: null,
+    hissFilter: null,
+    panner: null,
+    idleRpm: 900,
+    minRpm: 800,
+    maxRpm: 6400,
+    rpm: 900,
+    targetRpm: 900,
+    gear: 1,
+    throttle: 0,
+    lastThrottle: 0,
+    overrun: 0,
+    lastGrounded: false,
+};
 const showcase = {
     looking: false,
     yaw: 0,
@@ -977,6 +1008,656 @@ const physics = {
     jumpQueued: false,
     allowSliding: false,
 };
+const runtimeAudio = {
+    listener: null,
+    loader: new THREE.AudioLoader(),
+    unlocked: false,
+    testBuffer: null,
+    mediaTestUrl: null,
+    transientAnchors: new Set(),
+    resume() {
+        const context = this.listener?.context ?? null;
+        if (!context || context.state === 'running') {
+            this.unlocked = !!context;
+            return Promise.resolve();
+        }
+
+        return context.resume()
+            .then(() => {
+                this.unlocked = true;
+            })
+            .catch((error) => {
+                console.warn('Failed to resume audio context.', error);
+            });
+    },
+};
+
+function sampleTestTone(progress, sampleIndex, sampleRate) {
+    const attack = Math.min(1, progress / 0.06);
+    const release = Math.min(1, (1 - progress) / 0.24);
+    const envelope = Math.min(attack, release);
+    const frequency = THREE.MathUtils.lerp(880, 440, progress);
+    const omega = (Math.PI * 2 * frequency * sampleIndex) / sampleRate;
+    const overtone = (Math.PI * 2 * (frequency * 2.02) * sampleIndex) / sampleRate;
+    return (Math.sin(omega) * 0.34 + Math.sin(overtone) * 0.14) * envelope;
+}
+
+function writeWaveAscii(view, offset, value) {
+    for (let index = 0; index < value.length; index++) {
+        view.setUint8(offset + index, value.charCodeAt(index));
+    }
+}
+
+function createTestSoundBuffer(audioContext) {
+    const sampleRate = audioContext.sampleRate || 44100;
+    const duration = 0.6;
+    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
+    const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
+    const channelData = buffer.getChannelData(0);
+
+    for (let index = 0; index < frameCount; index++) {
+        const progress = index / frameCount;
+        channelData[index] = sampleTestTone(progress, index, sampleRate);
+    }
+
+    return buffer;
+}
+
+function createMediaTestSoundUrl() {
+    const sampleRate = 44100;
+    const duration = 0.6;
+    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
+    const dataBytes = frameCount * 2;
+    const waveBuffer = new ArrayBuffer(44 + dataBytes);
+    const view = new DataView(waveBuffer);
+
+    writeWaveAscii(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataBytes, true);
+    writeWaveAscii(view, 8, 'WAVE');
+    writeWaveAscii(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeWaveAscii(view, 36, 'data');
+    view.setUint32(40, dataBytes, true);
+
+    for (let index = 0; index < frameCount; index++) {
+        const progress = index / frameCount;
+        const sample = THREE.MathUtils.clamp(sampleTestTone(progress, index, sampleRate), -1, 1);
+        view.setInt16(44 + (index * 2), sample * 32767, true);
+    }
+
+    const blob = new Blob([waveBuffer], { type: 'audio/wav' });
+    return URL.createObjectURL(blob);
+}
+
+async function playSpeakerTestTone({ frequency = 660, duration = 0.55, volume = 0.22 } = {}) {
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    if (!audioContext) {
+        return false;
+    }
+
+    await runtimeAudio.resume();
+
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const startTime = audioContext.currentTime + 0.01;
+    const endTime = startTime + Math.max(0.08, duration);
+
+    oscillator.type = 'square';
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    oscillator.frequency.exponentialRampToValueAtTime(Math.max(220, frequency * 0.72), endTime);
+
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.02, volume), startTime + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, endTime);
+
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+
+    oscillator.start(startTime);
+    oscillator.stop(endTime + 0.02);
+    oscillator.onended = () => {
+        oscillator.disconnect();
+        gain.disconnect();
+    };
+
+    return true;
+}
+
+async function playMediaElementTestSound() {
+    if (typeof Audio === 'undefined') {
+        return false;
+    }
+
+    if (!runtimeAudio.mediaTestUrl) {
+        runtimeAudio.mediaTestUrl = createMediaTestSoundUrl();
+    }
+
+    const audio = new Audio(runtimeAudio.mediaTestUrl);
+    audio.preload = 'auto';
+    audio.volume = 1;
+
+    try {
+        await audio.play();
+        return true;
+    } catch (error) {
+        console.warn('Failed to play media-element test sound.', error);
+        return false;
+    }
+}
+
+function resolveSoundLocation(location, fallbackDistance = 3) {
+    if (location?.isVector3) {
+        return location.clone();
+    }
+
+    if (location && typeof location === 'object' && Number.isFinite(location.x) && Number.isFinite(location.y) && Number.isFinite(location.z)) {
+        return new THREE.Vector3(location.x, location.y, location.z);
+    }
+
+    if (camera) {
+        const worldLocation = new THREE.Vector3();
+        const forward = new THREE.Vector3();
+        camera.getWorldPosition(worldLocation);
+        camera.getWorldDirection(forward);
+        worldLocation.addScaledVector(forward, fallbackDistance);
+        return worldLocation;
+    }
+
+    return new THREE.Vector3();
+}
+
+function cleanupTransientAudio(anchor, sound) {
+    if (!anchor) return;
+
+    runtimeAudio.transientAnchors.delete(anchor);
+    if (sound?.isPlaying) {
+        sound.stop();
+    }
+    if (sound?.parent === anchor) {
+        anchor.remove(sound);
+    }
+    sound?.disconnect?.();
+    if (anchor.parent === scene) {
+        scene.remove(anchor);
+    }
+}
+
+function clampVehicleEngineRpm(value) {
+    return THREE.MathUtils.clamp(
+        value,
+        vehicleEngineAudio.minRpm,
+        vehicleEngineAudio.maxRpm,
+    );
+}
+
+function createEngineNoiseBuffer(audioContext) {
+    const duration = 1.4;
+    const sampleRate = audioContext.sampleRate || 44100;
+    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
+    const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
+    const data = buffer.getChannelData(0);
+    let previous = 0;
+
+    for (let index = 0; index < frameCount; index++) {
+        const white = (Math.random() * 2) - 1;
+        previous = previous * 0.93 + white * 0.07;
+        const pulse = Math.sin((index / sampleRate) * Math.PI * 2 * 28) * 0.15;
+        data[index] = THREE.MathUtils.clamp(previous * 0.32 + pulse, -1, 1);
+    }
+
+    return buffer;
+}
+
+function resetVehicleEngineAudioState() {
+    vehicleEngineAudio.activePropId = '';
+    vehicleEngineAudio.rpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.targetRpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.gear = 1;
+    vehicleEngineAudio.throttle = 0;
+    vehicleEngineAudio.lastThrottle = 0;
+    vehicleEngineAudio.overrun = 0;
+    vehicleEngineAudio.lastGrounded = false;
+}
+
+function shutdownVehicleEngineAudio() {
+    const context = runtimeAudio.listener?.context ?? null;
+    const now = context?.currentTime ?? 0;
+    const fadeOutTime = now + 0.08;
+
+    if (vehicleEngineAudio.outputGain) {
+        const gain = vehicleEngineAudio.outputGain.gain;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+        gain.exponentialRampToValueAtTime(0.0001, fadeOutTime);
+    }
+
+    [
+        vehicleEngineAudio.combustionNode,
+        vehicleEngineAudio.bodyNode,
+        vehicleEngineAudio.whineNode,
+        vehicleEngineAudio.noiseNode,
+    ].forEach((node) => {
+        if (!node) return;
+        try {
+            node.stop(fadeOutTime + 0.02);
+        } catch (_) {}
+        try {
+            node.disconnect();
+        } catch (_) {}
+    });
+
+    [
+        vehicleEngineAudio.combustionGain,
+        vehicleEngineAudio.bodyGain,
+        vehicleEngineAudio.whineGain,
+        vehicleEngineAudio.intakeGain,
+        vehicleEngineAudio.overrunGain,
+        vehicleEngineAudio.outputGain,
+        vehicleEngineAudio.compressor,
+        vehicleEngineAudio.exhaustFilter,
+        vehicleEngineAudio.resonanceFilter,
+        vehicleEngineAudio.intakeFilter,
+        vehicleEngineAudio.hissFilter,
+        vehicleEngineAudio.panner,
+    ].forEach((node) => {
+        if (!node) return;
+        try {
+            node.disconnect();
+        } catch (_) {}
+    });
+
+    vehicleEngineAudio.combustionNode = null;
+    vehicleEngineAudio.bodyNode = null;
+    vehicleEngineAudio.whineNode = null;
+    vehicleEngineAudio.noiseNode = null;
+    vehicleEngineAudio.combustionGain = null;
+    vehicleEngineAudio.bodyGain = null;
+    vehicleEngineAudio.whineGain = null;
+    vehicleEngineAudio.intakeGain = null;
+    vehicleEngineAudio.overrunGain = null;
+    vehicleEngineAudio.outputGain = null;
+    vehicleEngineAudio.compressor = null;
+    vehicleEngineAudio.exhaustFilter = null;
+    vehicleEngineAudio.resonanceFilter = null;
+    vehicleEngineAudio.intakeFilter = null;
+    vehicleEngineAudio.hissFilter = null;
+    vehicleEngineAudio.panner = null;
+    vehicleEngineAudio.listener = null;
+    resetVehicleEngineAudioState();
+}
+
+function ensureVehicleEngineAudio() {
+    const listener = runtimeAudio.listener;
+    const audioContext = listener?.context ?? null;
+    const listenerInput = typeof listener?.getInput === 'function' ? listener.getInput() : null;
+    if (!listener || !audioContext) {
+        return null;
+    }
+
+    if (vehicleEngineAudio.outputGain && vehicleEngineAudio.listener === listener) {
+        return vehicleEngineAudio;
+    }
+
+    shutdownVehicleEngineAudio();
+
+    const panner = audioContext.createPanner();
+    panner.panningModel = 'HRTF';
+    panner.distanceModel = 'inverse';
+    panner.refDistance = 4.5;
+    panner.maxDistance = 90;
+    panner.rolloffFactor = 0.72;
+    panner.coneInnerAngle = 210;
+    panner.coneOuterAngle = 300;
+    panner.coneOuterGain = 0.78;
+
+    const outputGain = audioContext.createGain();
+    outputGain.gain.value = 0.0001;
+
+    const compressor = audioContext.createDynamicsCompressor();
+    compressor.threshold.value = -24;
+    compressor.knee.value = 18;
+    compressor.ratio.value = 2.6;
+    compressor.attack.value = 0.01;
+    compressor.release.value = 0.18;
+
+    const exhaustFilter = audioContext.createBiquadFilter();
+    exhaustFilter.type = 'bandpass';
+    exhaustFilter.frequency.value = 180;
+    exhaustFilter.Q.value = 0.9;
+
+    const resonanceFilter = audioContext.createBiquadFilter();
+    resonanceFilter.type = 'lowpass';
+    resonanceFilter.frequency.value = 1100;
+    resonanceFilter.Q.value = 0.7;
+
+    const intakeFilter = audioContext.createBiquadFilter();
+    intakeFilter.type = 'bandpass';
+    intakeFilter.frequency.value = 1400;
+    intakeFilter.Q.value = 0.8;
+
+    const hissFilter = audioContext.createBiquadFilter();
+    hissFilter.type = 'highpass';
+    hissFilter.frequency.value = 2200;
+    hissFilter.Q.value = 0.5;
+
+    const combustionNode = audioContext.createOscillator();
+    combustionNode.type = 'sawtooth';
+    combustionNode.frequency.value = 42;
+
+    const combustionGain = audioContext.createGain();
+    combustionGain.gain.value = 0.0001;
+
+    const bodyNode = audioContext.createOscillator();
+    bodyNode.type = 'triangle';
+    bodyNode.frequency.value = 96;
+
+    const bodyGain = audioContext.createGain();
+    bodyGain.gain.value = 0.0001;
+
+    const whineNode = audioContext.createOscillator();
+    whineNode.type = 'triangle';
+    whineNode.frequency.value = 260;
+
+    const whineGain = audioContext.createGain();
+    whineGain.gain.value = 0.0001;
+
+    const noiseBuffer = createEngineNoiseBuffer(audioContext);
+    const noiseNode = audioContext.createBufferSource();
+    noiseNode.buffer = noiseBuffer;
+    noiseNode.loop = true;
+
+    const intakeGain = audioContext.createGain();
+    intakeGain.gain.value = 0.0001;
+
+    const overrunGain = audioContext.createGain();
+    overrunGain.gain.value = 0.0001;
+
+    combustionNode.connect(combustionGain);
+    combustionGain.connect(exhaustFilter);
+    exhaustFilter.connect(resonanceFilter);
+    resonanceFilter.connect(panner);
+
+    bodyNode.connect(bodyGain);
+    bodyGain.connect(resonanceFilter);
+
+    whineNode.connect(whineGain);
+    whineGain.connect(intakeFilter);
+    intakeFilter.connect(panner);
+
+    noiseNode.connect(intakeGain);
+    intakeGain.connect(intakeFilter);
+
+    noiseNode.connect(overrunGain);
+    overrunGain.connect(hissFilter);
+    hissFilter.connect(panner);
+
+    panner.connect(compressor);
+    compressor.connect(outputGain);
+    outputGain.connect(listenerInput ?? audioContext.destination);
+
+    const startTime = audioContext.currentTime + 0.01;
+    combustionNode.start(startTime);
+    bodyNode.start(startTime);
+    whineNode.start(startTime);
+    noiseNode.start(startTime);
+
+    vehicleEngineAudio.listener = listener;
+    vehicleEngineAudio.combustionNode = combustionNode;
+    vehicleEngineAudio.bodyNode = bodyNode;
+    vehicleEngineAudio.whineNode = whineNode;
+    vehicleEngineAudio.noiseNode = noiseNode;
+    vehicleEngineAudio.combustionGain = combustionGain;
+    vehicleEngineAudio.bodyGain = bodyGain;
+    vehicleEngineAudio.whineGain = whineGain;
+    vehicleEngineAudio.intakeGain = intakeGain;
+    vehicleEngineAudio.overrunGain = overrunGain;
+    vehicleEngineAudio.outputGain = outputGain;
+    vehicleEngineAudio.compressor = compressor;
+    vehicleEngineAudio.exhaustFilter = exhaustFilter;
+    vehicleEngineAudio.resonanceFilter = resonanceFilter;
+    vehicleEngineAudio.intakeFilter = intakeFilter;
+    vehicleEngineAudio.hissFilter = hissFilter;
+    vehicleEngineAudio.panner = panner;
+    vehicleEngineAudio.rpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.targetRpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.gear = 1;
+    vehicleEngineAudio.throttle = 0;
+    vehicleEngineAudio.lastThrottle = 0;
+    vehicleEngineAudio.overrun = 0;
+    return vehicleEngineAudio;
+}
+
+function updateVehicleEngineAudio(delta, vehicle, telemetry) {
+    const engine = ensureVehicleEngineAudio();
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    if (!engine || !audioContext || !vehicle?.id || !vehicle?.mesh) {
+        shutdownVehicleEngineAudio();
+        return;
+    }
+
+    const now = audioContext.currentTime;
+    const isActiveVehicle = gameplay.active && vehicleState.activePropId === vehicle.id;
+    const mesh = vehicle.mesh;
+    const body = getActorBody(vehicle);
+    const bodyId = body?.GetID?.() ?? null;
+
+    if (!isActiveVehicle || !bodyId) {
+        if (engine.outputGain) {
+            const gain = engine.outputGain.gain;
+            gain.cancelScheduledValues(now);
+            gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+            gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+        }
+        resetVehicleEngineAudioState();
+        return;
+    }
+
+    runtimeAudio.resume();
+    engine.activePropId = vehicle.id;
+
+    const throttleInput = telemetry?.throttleInput ?? 0;
+    const brakeHeld = telemetry?.brakeHeld === true;
+    const grounded = telemetry?.grounded === true;
+    const forwardSpeed = telemetry?.forwardSpeed ?? 0;
+    const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
+    const throttleDemand = Math.abs(throttleInput);
+    const gearCount = 5;
+    const targetGear = THREE.MathUtils.clamp(
+        Math.floor(speedRatio * (gearCount - 0.15) + 1 + throttleDemand * 0.25),
+        1,
+        gearCount,
+    );
+    engine.gear = THREE.MathUtils.damp(engine.gear, targetGear, grounded ? 5.8 : 2.4, delta);
+    const gearIndex = THREE.MathUtils.clamp(Math.round(engine.gear), 1, gearCount);
+    const gearStartRatio = (gearIndex - 1) / gearCount;
+    const gearEndRatio = gearIndex / gearCount;
+    const gearBand = Math.max(0.0001, gearEndRatio - gearStartRatio);
+    const gearProgress = THREE.MathUtils.clamp((speedRatio - gearStartRatio) / gearBand, 0, 1);
+    const revKick = grounded ? throttleDemand * 1400 : throttleDemand * 650;
+    const brakeDip = brakeHeld ? 220 : 0;
+    const targetRpm = clampVehicleEngineRpm(
+        engine.idleRpm + gearProgress * (engine.maxRpm - engine.idleRpm * 1.08) + revKick - brakeDip
+    );
+    const rpmLambda = throttleDemand > 0.04
+        ? 6.5
+        : brakeHeld
+            ? 5.2
+            : 2.8;
+    engine.targetRpm = targetRpm;
+    engine.rpm = THREE.MathUtils.damp(engine.rpm, targetRpm, rpmLambda, delta);
+    engine.throttle = THREE.MathUtils.damp(engine.throttle, throttleDemand, grounded ? 7.5 : 3.5, delta);
+    const throttleDrop = Math.max(0, engine.lastThrottle - throttleDemand);
+    const overrunTarget = (!brakeHeld && throttleDemand < 0.08 && speedRatio > 0.18)
+        ? THREE.MathUtils.clamp(0.22 + speedRatio * 0.9 + throttleDrop * 1.8, 0, 1)
+        : 0;
+    engine.overrun = THREE.MathUtils.damp(engine.overrun, overrunTarget, overrunTarget > 0 ? 9.5 : 4.5, delta);
+    engine.lastThrottle = throttleDemand;
+    engine.lastGrounded = grounded;
+
+    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1600, 0, 1);
+    const rpmRatio = (engine.rpm - engine.minRpm) / (engine.maxRpm - engine.minRpm);
+    const firingFrequency = THREE.MathUtils.clamp((engine.rpm / 60) * 2, 30, 220);
+    const exhaustBodyFrequency = firingFrequency * THREE.MathUtils.lerp(1.75, 2.45, idleBlend + speedRatio * 0.2);
+    const intakeWhineFrequency = THREE.MathUtils.lerp(220, 1680, Math.pow(rpmRatio, 0.8));
+    const masterGain = 0.14 + speedRatio * 0.12 + engine.throttle * 0.18 + engine.overrun * 0.05 + (grounded ? 0.03 : 0);
+    const combustionLevel = 0.16 + engine.throttle * 0.08 + speedRatio * 0.04;
+    const bodyLevel = 0.08 + idleBlend * 0.08 + speedRatio * 0.05 + engine.overrun * 0.03;
+    const whineLevel = 0.012 + engine.throttle * 0.055 + Math.max(0, speedRatio - 0.12) * 0.04;
+    const intakeNoiseLevel = 0.008 + engine.throttle * 0.052 + speedRatio * 0.012;
+    const overrunNoiseLevel = 0.002 + engine.overrun * 0.072 + (brakeHeld ? 0.018 : 0);
+    const exhaustFilterFrequency = 160 + rpmRatio * 340 + engine.throttle * 90;
+    const resonanceCutoff = 820 + idleBlend * 620 + engine.throttle * 1150 + speedRatio * 280;
+    const intakeFilterFrequency = 880 + engine.throttle * 2200 + rpmRatio * 940;
+    const hissCutoff = 2100 + engine.overrun * 1400 + speedRatio * 500;
+
+    engine.combustionNode.frequency.cancelScheduledValues(now);
+    engine.combustionNode.frequency.setTargetAtTime(firingFrequency, now, 0.045);
+    engine.bodyNode.frequency.cancelScheduledValues(now);
+    engine.bodyNode.frequency.setTargetAtTime(exhaustBodyFrequency, now, 0.05);
+    engine.whineNode.frequency.cancelScheduledValues(now);
+    engine.whineNode.frequency.setTargetAtTime(intakeWhineFrequency, now, 0.06);
+    engine.outputGain.gain.cancelScheduledValues(now);
+    engine.outputGain.gain.setTargetAtTime(Math.max(0.0001, masterGain), now, grounded ? 0.06 : 0.12);
+    engine.combustionGain.gain.cancelScheduledValues(now);
+    engine.combustionGain.gain.setTargetAtTime(Math.max(0.0001, combustionLevel), now, 0.05);
+    engine.bodyGain.gain.cancelScheduledValues(now);
+    engine.bodyGain.gain.setTargetAtTime(Math.max(0.0001, bodyLevel), now, 0.06);
+    engine.whineGain.gain.cancelScheduledValues(now);
+    engine.whineGain.gain.setTargetAtTime(Math.max(0.0001, whineLevel), now, 0.06);
+    engine.intakeGain.gain.cancelScheduledValues(now);
+    engine.intakeGain.gain.setTargetAtTime(Math.max(0.0001, intakeNoiseLevel), now, 0.07);
+    engine.overrunGain.gain.cancelScheduledValues(now);
+    engine.overrunGain.gain.setTargetAtTime(Math.max(0.0001, overrunNoiseLevel), now, 0.04);
+    engine.exhaustFilter.frequency.cancelScheduledValues(now);
+    engine.exhaustFilter.frequency.setTargetAtTime(exhaustFilterFrequency, now, 0.05);
+    engine.resonanceFilter.frequency.cancelScheduledValues(now);
+    engine.resonanceFilter.frequency.setTargetAtTime(resonanceCutoff, now, 0.08);
+    engine.intakeFilter.frequency.cancelScheduledValues(now);
+    engine.intakeFilter.frequency.setTargetAtTime(intakeFilterFrequency, now, 0.07);
+    engine.hissFilter.frequency.cancelScheduledValues(now);
+    engine.hissFilter.frequency.setTargetAtTime(hissCutoff, now, 0.05);
+
+    const worldPosition = mesh.getWorldPosition(new THREE.Vector3());
+    const worldForward = mesh.getWorldDirection(new THREE.Vector3()).normalize();
+    engine.panner.positionX.setValueAtTime(worldPosition.x, now);
+    engine.panner.positionY.setValueAtTime(worldPosition.y + 0.45, now);
+    engine.panner.positionZ.setValueAtTime(worldPosition.z, now);
+    engine.panner.orientationX.setValueAtTime(worldForward.x, now);
+    engine.panner.orientationY.setValueAtTime(worldForward.y, now);
+    engine.panner.orientationZ.setValueAtTime(worldForward.z, now);
+}
+
+function resolveRuntimeSoundBuffer(soundSpec) {
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    if (!audioContext) {
+        return Promise.resolve(null);
+    }
+
+    if (typeof AudioBuffer !== 'undefined' && soundSpec instanceof AudioBuffer) {
+        return Promise.resolve(soundSpec);
+    }
+
+    if (!soundSpec || soundSpec === TEST_SOUND_ID || soundSpec === 'test' || soundSpec === 'default') {
+        if (!runtimeAudio.testBuffer) {
+            runtimeAudio.testBuffer = createTestSoundBuffer(audioContext);
+        }
+        return Promise.resolve(runtimeAudio.testBuffer);
+    }
+
+    const url = String(soundSpec);
+    return new Promise((resolve, reject) => {
+        runtimeAudio.loader.load(url, resolve, undefined, reject);
+    });
+}
+
+async function playSoundAtLocation(soundSpec = TEST_SOUND_ID, location = null, options = {}) {
+    if (!scene || !runtimeAudio.listener) {
+        return false;
+    }
+
+    await runtimeAudio.resume();
+
+    const buffer = await resolveRuntimeSoundBuffer(soundSpec);
+    if (!buffer) {
+        return false;
+    }
+
+    const anchor = new THREE.Object3D();
+    anchor.position.copy(resolveSoundLocation(location, options.fallbackDistance ?? 3));
+    anchor.name = 'transient-audio-anchor';
+    scene.add(anchor);
+    runtimeAudio.transientAnchors.add(anchor);
+
+    const sound = new THREE.PositionalAudio(runtimeAudio.listener);
+    anchor.add(sound);
+    sound.setBuffer(buffer);
+    sound.setLoop(!!options.loop);
+    sound.setVolume(Number.isFinite(options.volume) ? options.volume : 0.95);
+    sound.setPlaybackRate(Number.isFinite(options.playbackRate) ? options.playbackRate : 1);
+    sound.setRefDistance(Number.isFinite(options.refDistance) ? options.refDistance : 2.4);
+    sound.setMaxDistance(Number.isFinite(options.maxDistance) ? options.maxDistance : 42);
+    sound.setRolloffFactor(Number.isFinite(options.rolloffFactor) ? options.rolloffFactor : 1.2);
+
+    try {
+        sound.play(options.delay ?? 0);
+    } catch (error) {
+        cleanupTransientAudio(anchor, sound);
+        console.warn('Failed to play positional sound.', error);
+        return false;
+    }
+
+    if (!options.loop && sound.source) {
+        const previousOnEnded = sound.source.onended;
+        sound.source.onended = (...args) => {
+            previousOnEnded?.(...args);
+            cleanupTransientAudio(anchor, sound);
+        };
+    }
+
+    return { anchor, sound };
+}
+
+function getAudioTestLocation() {
+    const selectedActor = getDynamicPropById(objectScriptState.targetPropId);
+    const selectedMesh = getActorRenderObject(selectedActor);
+    if (selectedMesh) {
+        return selectedMesh.getWorldPosition(new THREE.Vector3());
+    }
+
+    return resolveSoundLocation(null, gameplay.active ? 4 : 3);
+}
+
+async function playAudioTestCue() {
+    const location = getAudioTestLocation();
+    const [positionalResult, speakerResult, mediaResult] = await Promise.allSettled([
+        playSoundAtLocation(TEST_SOUND_ID, location, {
+            volume: 1,
+            refDistance: 2.8,
+            maxDistance: 48,
+        }),
+        playSpeakerTestTone(),
+        playMediaElementTestSound(),
+    ]);
+    const didPlayPositional = positionalResult.status === 'fulfilled' && !!positionalResult.value;
+    const didPlaySpeaker = speakerResult.status === 'fulfilled' && !!speakerResult.value;
+    const didPlayMedia = mediaResult.status === 'fulfilled' && !!mediaResult.value;
+    const result = didPlayPositional || didPlaySpeaker || didPlayMedia;
+
+    if (playTestSoundStatus) {
+        playTestSoundStatus.textContent = result
+            ? `Played test sound at ${location.x.toFixed(1)}, ${location.y.toFixed(1)}, ${location.z.toFixed(1)}. WebAudio and media-element fallbacks also triggered.`
+            : 'Test sound failed. Click inside the app once to unlock audio and try again.';
+    }
+
+    return result;
+}
+
 physicsCore = createPhysicsCore({
     physics,
     playerSettings: PLAYER_SETTINGS,
@@ -1633,7 +2314,12 @@ function registerImportedPropTemplateFromSerializedData(templateData) {
     const objectLoader = new THREE.ObjectLoader();
     const root = objectLoader.parse(templateData.rootJson);
     convertLoadedObjectMaterials(root);
-    normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+    // Serialized imported templates already include the normalized root transform
+    // that was authored at import time. Re-normalizing on scene load mutates the
+    // source asset before any actor transform is restored.
+    if (templateData.normalized === false) {
+        normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+    }
 
     const triangleCount = Number.isFinite(templateData.triangleCount)
         ? templateData.triangleCount
@@ -1668,6 +2354,7 @@ function serializeImportedPropTemplate(template) {
         id: template.id,
         fileName: template.fileName,
         displayName: template.displayName,
+        normalized: true,
         collisionMode: template.collisionMode,
         triangleCount: template.triangleCount,
         rootJson: template.root.toJSON(),
@@ -1802,6 +2489,10 @@ function destroyPhysicsBody(body) {
 function destroyDynamicPhysicsProp(prop) {
     if (!prop) return;
 
+    if (prop.id && vehicleEngineAudio.activePropId === prop.id) {
+        shutdownVehicleEngineAudio();
+    }
+
     if (vehicleState.activePropId && vehicleState.activePropId === prop.id) {
         vehicleState.activePropId = '';
         vehicleState.brakeHeld = false;
@@ -1813,6 +2504,8 @@ function destroyDynamicPhysicsProp(prop) {
         objectScriptState.menuOpen = false;
         objectScriptState.editorOpen = false;
     }
+
+    prop.destroyAllComponents?.();
 
     sceneSystem?.removeActor(prop);
 
@@ -1894,6 +2587,9 @@ function getActiveVehicleProp() {
 
 function clearActiveVehicle({ updateUi = false } = {}) {
     const wasDriving = !!vehicleState.activePropId;
+    if (wasDriving) {
+        shutdownVehicleEngineAudio();
+    }
     vehicleState.activePropId = '';
     vehicleState.brakeHeld = false;
     vehicleState.tailWhipLastFrame = false;
@@ -2872,6 +3568,7 @@ function rebuildActorPhysics(prop) {
     };
     
     const rootMesh = getActorRenderObject(prop);
+    rootMesh.updateMatrixWorld(true);
 
     if (useExactMeshCollision) {
         const newBody = createStaticMeshBody(rootMesh);
@@ -3325,7 +4022,7 @@ function compileObjectEventScript(source) {
         const wrapped = new ObjectEventFunction('api', `
             "use strict";
             const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp,
-                FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, UPrimitiveComponent, UTransformComponent, UWorld, Self, World, GetWorld, DeltaTime, Hit } = api;
+                FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, AHUD, UAudioComponent, UUserWidget, UTextWidget, UImageWidget, UProgressBarWidget, UButtonWidget, UPrimitiveComponent, UTransformComponent, UGameInstance, UWorld, AGameModeBase, AGameMode, APlayerController, APawn, ACharacter, Self, HUD, WidgetAPI, UnrealWidgetAPI, World, GameInstance, GameMode, PlayerController, Pawn, Character, CreateWidget, GetHUD, GetWorld, GetGameInstance, GetGameMode, GetPlayerController, GetPlayerPawn, GetPlayerCharacter, DeltaTime, Hit } = api;
             ${normalizedSource}
             return {
                 BeginPlay: typeof BeginPlay === 'function' ? BeginPlay : undefined,
@@ -3341,7 +4038,7 @@ function compileObjectEventScript(source) {
     const flat = new ObjectEventFunction('api', `
         "use strict";
         const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp,
-            FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, UPrimitiveComponent, UTransformComponent, UWorld, Self, World, GetWorld, DeltaTime, Hit } = api;
+            FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, AHUD, UAudioComponent, UUserWidget, UTextWidget, UImageWidget, UProgressBarWidget, UButtonWidget, UPrimitiveComponent, UTransformComponent, UGameInstance, UWorld, AGameModeBase, AGameMode, APlayerController, APawn, ACharacter, Self, HUD, WidgetAPI, UnrealWidgetAPI, World, GameInstance, GameMode, PlayerController, Pawn, Character, CreateWidget, GetHUD, GetWorld, GetGameInstance, GetGameMode, GetPlayerController, GetPlayerPawn, GetPlayerCharacter, DeltaTime, Hit } = api;
         ${normalizedSource}
     `);
     flat.__ueLifecycle = false;
@@ -3413,6 +4110,11 @@ function createDynamicPropActor({
         phys.setPhysicsContext(physics);
         if (body) phys.setBody(body);
         actor.addComponent(phys);
+    }
+    if (!actor.hasComponent(AudioComponent)) {
+        const audio = new AudioComponent();
+        audio.setAudioRuntime(runtimeAudio);
+        actor.addComponent(audio);
     }
 
     sceneSystem?.addActor(actor);
@@ -3786,6 +4488,7 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
     const physicsComponent = getPhysicsBodyComponent(prop);
     const scriptComponent = getScriptComponent(prop);
     const metadataComponent = getMetadataComponent(prop);
+    const audioComponent = prop?.getComponentByClass?.(AudioComponent) ?? null;
     const object = renderComponent?.mesh || null;
     const body = physicsComponent?.body || null;
     const localPosition = object?.position?.clone?.() ?? null;
@@ -3813,8 +4516,13 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
         physicsComponent,
         scriptComponent,
         metadataComponent,
+        audioComponent,
+        audio: runtimeAudio,
+        playSoundAtLocation,
+        AudioComponent,
         PhysicsComponent,
         TransformComponent,
+        TEST_SOUND_ID,
         actor: prop,
         spawnDynamicPrimitive,
         spawnImportedProp,
@@ -3825,13 +4533,26 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
         {
             scene,
             camera,
+            renderer,
             sceneSystem,
             physics,
+            gameplay,
+            audio: runtimeAudio,
+            hud: getRuntimeHud(),
+            getHUD: getRuntimeHud,
+            widgetApi: window.WidgetAPI,
+            unrealWidgetApi: window.UnrealWidgetAPI,
+            playSoundAtLocation,
             raycastWorld: typeof raycastWorld === 'function' ? raycastWorld : null,
             spawnDynamicPrimitive,
             spawnImportedProp,
             spawnDrivableCar: typeof spawnDrivableCar === 'function' ? spawnDrivableCar : null,
             destroyActor: typeof destroyDynamicPhysicsProp === 'function' ? destroyDynamicPhysicsProp : null,
+            enterGameplay: typeof enterGameplay === 'function' ? enterGameplay : null,
+            exitGameplay: typeof exitGameplay === 'function' ? exitGameplay : null,
+            respawnPlayer: typeof respawnPlayer === 'function' ? respawnPlayer : null,
+            syncCameraToCharacter: typeof syncCameraToCharacter === 'function' ? syncCameraToCharacter : null,
+            applyGameplayCameraRotation: typeof applyGameplayCameraRotation === 'function' ? applyGameplayCameraRotation : null,
             deltaTime,
         },
         prop,
@@ -4706,13 +5427,14 @@ function compileMouseActionScript(source) {
 
     return new MouseActionFunction('api', `
         "use strict";
-        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive, spawnImportedProp } = api;
+        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive, spawnImportedProp,
+            FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, AHUD, UAudioComponent, UUserWidget, UTextWidget, UImageWidget, UProgressBarWidget, UButtonWidget, UPrimitiveComponent, UTransformComponent, UGameInstance, UWorld, AGameModeBase, AGameMode, APlayerController, APawn, ACharacter, Self, HUD, WidgetAPI, UnrealWidgetAPI, World, GameInstance, GameMode, PlayerController, Pawn, Character, CreateWidget, GetHUD, GetWorld, GetGameInstance, GetGameMode, GetPlayerController, GetPlayerPawn, GetPlayerCharacter, DeltaTime, Hit } = api;
         ${normalizedSource}
     `);
 }
 
 function buildMouseActionApi(event, button) {
-    return {
+    const legacyApi = {
         THREE,
         scene,
         camera,
@@ -4727,6 +5449,35 @@ function buildMouseActionApi(event, button) {
         spawnDynamicPrimitive,
         spawnImportedProp,
     };
+
+    return buildUeContext(
+        legacyApi,
+        {
+            scene,
+            camera,
+            sceneSystem,
+            physics,
+            audio: runtimeAudio,
+            hud: getRuntimeHud(),
+            getHUD: getRuntimeHud,
+            widgetApi: window.WidgetAPI,
+            unrealWidgetApi: window.UnrealWidgetAPI,
+            playSoundAtLocation,
+            raycastWorld: typeof raycastWorld === 'function' ? raycastWorld : null,
+            spawnDynamicPrimitive,
+            spawnImportedProp,
+            spawnDrivableCar: typeof spawnDrivableCar === 'function' ? spawnDrivableCar : null,
+            destroyActor: typeof destroyDynamicPhysicsProp === 'function' ? destroyDynamicPhysicsProp : null,
+            enterGameplay: typeof enterGameplay === 'function' ? enterGameplay : null,
+            exitGameplay: typeof exitGameplay === 'function' ? exitGameplay : null,
+            respawnPlayer: typeof respawnPlayer === 'function' ? respawnPlayer : null,
+            syncCameraToCharacter: typeof syncCameraToCharacter === 'function' ? syncCameraToCharacter : null,
+            applyGameplayCameraRotation: typeof applyGameplayCameraRotation === 'function' ? applyGameplayCameraRotation : null,
+            deltaTime: 0,
+        },
+        null,
+        null,
+    );
 }
 
 function applyMouseActionScripts({ persist = true } = {}) {
@@ -5706,6 +6457,8 @@ async function init() {
     showcaseModeBtn = document.getElementById('camera-showcase');
     playModeBtn = document.getElementById('camera-play');
     openActorEditorBtn = document.getElementById('open-actor-editor');
+    playTestSoundBtn = document.getElementById('play-test-sound-btn');
+    playTestSoundStatus = document.getElementById('play-test-sound-status');
     multiplayerServerUrlInput = document.getElementById('multiplayer-server-url');
     multiplayerRoomInput = document.getElementById('multiplayer-room');
     multiplayerConnectBtn = document.getElementById('multiplayer-connect');
@@ -5813,6 +6566,9 @@ async function init() {
     propCollisionCancelBtn?.addEventListener('click', () => resolvePropCollisionPrompt(null));
 
     openActorEditorBtn?.addEventListener('click', () => openActorEditor());
+    playTestSoundBtn?.addEventListener('click', () => {
+        void playAudioTestCue();
+    });
     actorKindSelect?.addEventListener('change', () => syncActorEditorUi());
     actorImportedTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
     actorComponentCollisionInput?.addEventListener('change', () => syncActorEditorUi());
@@ -5909,6 +6665,9 @@ async function init() {
     camera.rotation.order = 'YXZ';
     syncShowcaseAnglesFromTarget(SHOWCASE_CAMERA_TARGET);
     applyShowcaseCameraRotation();
+    scene.add(camera);
+    runtimeAudio.listener = new THREE.AudioListener();
+    camera.add(runtimeAudio.listener);
 
     renderer = new WebGPURenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -6064,6 +6823,7 @@ async function init() {
         if (gameplay.active) {
             updateGameplay(delta);
         } else {
+            shutdownVehicleEngineAudio();
             updateShowcaseCamera(delta);
         }
         updateGameplayDebugRay();
@@ -6250,6 +7010,13 @@ function refreshGameplayWorld() {
 }
 
 function setupGameplayEvents() {
+    const resumeAudio = () => {
+        runtimeAudio.resume();
+    };
+
+    document.addEventListener('pointerdown', resumeAudio, { passive: true });
+    document.addEventListener('touchend', resumeAudio, { passive: true });
+    document.addEventListener('keydown', resumeAudio);
     document.addEventListener('pointerlockchange', handlePointerLockChange);
     document.addEventListener('mousemove', handleGameplayMouseMove);
     document.addEventListener('keydown', handleDebugConsoleKeydown, true);
@@ -6417,6 +7184,7 @@ function updateShowcaseInput(event, isDown) {
 
 function handleGameplayKeyEvent(event) {
     const isDown = event.type === 'keydown';
+    const eventTarget = event.target instanceof HTMLElement ? event.target : document.activeElement;
 
     if (debugConsoleState.visible) {
         if (gameplay.pointerLocked || gameplay.active) {
@@ -6427,6 +7195,12 @@ function handleGameplayKeyEvent(event) {
 
     if (isDown && !event.repeat && event.code === 'F8') {
         setCollisionDebugEnabled(!collisionDebugState.enabled);
+        event.preventDefault();
+        return;
+    }
+
+    if (isDown && !event.repeat && event.code === 'KeyL' && !isEditableElement(eventTarget)) {
+        void playAudioTestCue();
         event.preventDefault();
         return;
     }
@@ -6980,6 +7754,7 @@ function updateVehicleGameplay(delta) {
     const horizontalVelocity = tempVectorD.copy(linearVelocity).setY(0);
     const forwardSpeed = horizontalVelocity.dot(flatForward);
     const lateralSpeed = horizontalVelocity.dot(flatRight);
+    const throttleInput = throttle;
     const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
     const driftInput = Math.abs(steer) > 0.1 && speedRatio > VEHICLE_SETTINGS.driftBoostThreshold;
     const drifting = driftInput && (throttle !== 0 || Math.abs(lateralSpeed) > 1.2);
@@ -7140,21 +7915,23 @@ function updateVehicleGameplay(delta) {
 
     vehicle.mesh.position.copy(vehiclePosition);
     vehicle.mesh.quaternion.copy(vehicleRotation);
+    updateVehicleEngineAudio(delta, vehicle, {
+        throttleInput,
+        brakeHeld: vehicleState.brakeHeld,
+        grounded,
+        forwardSpeed: nextForwardSpeed,
+    });
     positionVehicleCamera(vehiclePosition, vehicleRotation, delta);
     gameplay.grounded = grounded;
     physics.jumpQueued = false;
 
     // Update example widgets with vehicle data
-    if (window.exampleWidgets && widgetManager) {
+    if (window.exampleWidgets) {
         const speedKmh = Math.round(forwardSpeed * 3.6); // Convert m/s to km/h
-        widgetManager.updateWidget(window.exampleWidgets.speed, {
-            text: `Speed: ${speedKmh} km/h`
-        });
+        window.exampleWidgets.speed?.SetText(`Speed: ${speedKmh} km/h`);
 
         // Update health bar based on vehicle "health" (using contact ratio as proxy)
-        widgetManager.updateWidget(window.exampleWidgets.health, {
-            progress: Math.max(0.1, smoothedContactRatio)
-        });
+        window.exampleWidgets.health?.SetPercent(Math.max(0.1, smoothedContactRatio));
 
         // Update score
         if (window.gameScore !== undefined) {
@@ -7164,9 +7941,7 @@ function updateVehicleGameplay(delta) {
             if (forwardSpeed > 15) {
             }
 
-            widgetManager.updateWidget(window.exampleWidgets.score, {
-                text: `Score: ${Math.floor(window.gameScore)}`
-            });
+            window.exampleWidgets.score?.SetText(`Score: ${Math.floor(window.gameScore)}`);
         }
     }
 
@@ -7332,6 +8107,8 @@ function updateGameplay(delta) {
         updateVehicleGameplay(delta);
         return;
     }
+
+    shutdownVehicleEngineAudio();
 
     if (!physics.character) return;
 
@@ -8168,6 +8945,7 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
         } else {
             applyObjectMaterialState(mesh, actorData.material);
         }
+        mesh.updateMatrixWorld(true);
         rebuildActorPhysics(actor);
     }
 
@@ -8802,36 +9580,47 @@ function serializeComponentTree(object3D) {
 
 function deserializeComponentTree(parent, comps) {
     if (!comps || !comps.length) return;
-    for (const compData of comps) {
-        let comp = null;
-        if (compData.type === 'PointLight') {
-            const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
-            const lightIntensity = compData.light?.intensity ?? 2;
-            const lightDistance = compData.light?.distance ?? 10;
-            comp = new THREE.PointLight(lightColor, lightIntensity, lightDistance);
-            comp.castShadow = true;
-        } else if (compData.type === 'BoxGeometry') {
-            comp = buildPrimitiveActorMesh('cube');
-        } else if (compData.type === 'SphereGeometry') {
-            comp = buildPrimitiveActorMesh('sphere');
+    comps.forEach((compData, index) => {
+        const existing = parent.children[index];
+        const existingMatches = existing && (existing.isMesh || existing.isLight);
+        let comp = existingMatches ? existing : null;
+
+        if (!comp) {
+            if (compData.type === 'PointLight') {
+                const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
+                const lightIntensity = compData.light?.intensity ?? 2;
+                const lightDistance = compData.light?.distance ?? 10;
+                comp = new THREE.PointLight(lightColor, lightIntensity, lightDistance);
+                comp.castShadow = true;
+            } else if (compData.type === 'BoxGeometry') {
+                comp = buildPrimitiveActorMesh('cube');
+            } else if (compData.type === 'SphereGeometry') {
+                comp = buildPrimitiveActorMesh('sphere');
+            }
+
+            if (comp) {
+                parent.add(comp);
+            }
         }
 
-        if (comp) {
-            comp.name = compData.name;
-            comp.position.fromArray(compData.position);
-            comp.quaternion.fromArray(compData.quaternion);
-            comp.scale.fromArray(compData.scale);
-            if (comp.isMesh && compData.material) {
-                comp.material = new THREE.MeshStandardMaterial({
-                    color: new THREE.Color(compData.material.color),
-                    roughness: compData.material.roughness ?? 0.5,
-                    metalness: compData.material.metalness ?? 0.0
-                });
-            }
-            parent.add(comp);
-            deserializeComponentTree(comp, compData.children);
+        if (!comp) return;
+
+        if (compData.name) comp.name = compData.name;
+        if (Array.isArray(compData.position)) comp.position.fromArray(compData.position);
+        if (Array.isArray(compData.quaternion)) comp.quaternion.fromArray(compData.quaternion);
+        if (Array.isArray(compData.scale)) comp.scale.fromArray(compData.scale);
+
+        if (comp.isMesh && compData.material) {
+            applyObjectMaterialState(comp, compData.material);
         }
-    }
+        if (comp.isPointLight && compData.light) {
+            if (compData.light.color) comp.color = new THREE.Color(compData.light.color);
+            if (Number.isFinite(compData.light.intensity)) comp.intensity = compData.light.intensity;
+            if (Number.isFinite(compData.light.distance)) comp.distance = compData.light.distance;
+        }
+
+        deserializeComponentTree(comp, compData.children);
+    });
 }
 
 

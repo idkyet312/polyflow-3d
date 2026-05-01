@@ -5,5 +5,6 @@
  *   import { PhysicsComponent, TransformComponent } from './runtime/components';
  */
 export { ActorComponent } from './ActorComponent.js';
+export { AudioComponent } from './AudioComponent.js';
 export { PhysicsComponent } from './PhysicsComponent.js';
 export { TransformComponent } from './TransformComponent.js';

@@ -11,6 +11,39 @@ The widget system has been updated from 3D scene objects to HTML DOM elements th
 - **Interactive Elements**: Buttons and other widgets can receive user input
 - **CSS Styling**: Full CSS control over widget appearance and animations
 
+## Unreal-Style HUD Layer
+
+The runtime now exposes a thin Unreal-style facade on top of the DOM widget manager.
+
+- `window.UnrealWidgetAPI.GetHUD()` returns a shared HUD instance.
+- `window.UnrealWidgetAPI.CreateWidget(...)` mirrors Unreal's `CreateWidget(...)` flow.
+- Actor scripts now receive `HUD`, `GetHUD()`, `CreateWidget()`, `UUserWidget`, `UTextWidget`, `UImageWidget`, `UProgressBarWidget`, and `UButtonWidget`.
+
+```javascript
+function BeginPlay() {
+    const scoreWidget = CreateWidget(UTextWidget, {
+        Text: 'Score: 0',
+        Position: { x: 0.08, y: 0.1 },
+        ZOrder: 20,
+        backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    });
+
+    scoreWidget.AddToViewport();
+    scoreWidget.SetText('Score: 10');
+
+    const healthBar = HUD.CreateWidget(UProgressBarWidget, {
+        Percent: 0.75,
+        width: 220,
+        height: 18,
+        Position: { x: 0.08, y: 0.16 },
+    });
+
+    healthBar.AddToViewport(19);
+}
+```
+
+The legacy `WidgetAPI` is still available for lower-level direct widget management.
+
 ## Widget Types
 
 ### TextWidget

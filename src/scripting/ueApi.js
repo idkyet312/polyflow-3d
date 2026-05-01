@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { Actor } from '../runtime/sceneRuntime.js';
+import { AudioComponent } from '../runtime/components/AudioComponent.js';
 import { PhysicsComponent } from '../runtime/components/PhysicsComponent.js';
 import { TransformComponent } from '../runtime/components/TransformComponent.js';
 
@@ -115,6 +116,305 @@ export const ECollisionChannel = Object.freeze({
     WorldDynamic: 8,
 });
 
+const DEFAULT_WIDGET_POSITION = Object.freeze({ x: 0.5, y: 0.5 });
+
+function normalizeWidgetType(value) {
+    switch (String(value ?? 'text').toLowerCase()) {
+        case 'text':
+        case 'textblock':
+        case 'label':
+            return 'text';
+        case 'image':
+        case 'imagewidget':
+            return 'image';
+        case 'progress':
+        case 'progressbar':
+            return 'progress';
+        case 'button':
+            return 'button';
+        default:
+            return 'text';
+    }
+}
+
+function normalizeViewportPoint(value, fallback = DEFAULT_WIDGET_POSITION) {
+    return {
+        x: Number.isFinite(value?.x) ? value.x : fallback.x,
+        y: Number.isFinite(value?.y) ? value.y : fallback.y,
+    };
+}
+
+function normalizeWidgetScale(value, fallback = 1) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+    }
+    if (Number.isFinite(value?.x)) {
+        return value.x;
+    }
+    return fallback;
+}
+
+function normalizeWidgetVisibility(value, fallback = true) {
+    if (value === undefined) {
+        return fallback;
+    }
+    if (typeof value === 'string') {
+        const normalized = value.toLowerCase();
+        return normalized !== 'hidden' && normalized !== 'collapsed' && normalized !== 'false';
+    }
+    return !!value;
+}
+
+function normalizeWidgetConfig(config = {}) {
+    const normalized = { ...config };
+
+    if (normalized.Text !== undefined && normalized.text === undefined) {
+        normalized.text = normalized.Text;
+    }
+    if (normalized.Percent !== undefined && normalized.progress === undefined) {
+        normalized.progress = normalized.Percent;
+    }
+    if (normalized.Image !== undefined && normalized.imageUrl === undefined) {
+        normalized.imageUrl = normalized.Image;
+    }
+    if (normalized.Brush !== undefined && normalized.imageUrl === undefined) {
+        normalized.imageUrl = normalized.Brush;
+    }
+    if (normalized.Texture !== undefined && normalized.imageUrl === undefined) {
+        normalized.imageUrl = normalized.Texture;
+    }
+    if (normalized.Position !== undefined && normalized.position === undefined) {
+        normalized.position = normalized.Position;
+    }
+    if (normalized.RenderScale !== undefined && normalized.scale === undefined) {
+        normalized.scale = normalized.RenderScale;
+    }
+    if (normalized.Visibility !== undefined && normalized.visible === undefined) {
+        normalized.visible = normalizeWidgetVisibility(normalized.Visibility, true);
+    }
+    if (normalized.ZOrder !== undefined && normalized.zOrder === undefined) {
+        normalized.zOrder = normalized.ZOrder;
+    }
+    if (normalized.OnClicked !== undefined && normalized.onClick === undefined) {
+        normalized.onClick = normalized.OnClicked;
+    }
+    if (normalized.DesiredSize) {
+        if (normalized.width === undefined && Number.isFinite(normalized.DesiredSize.x)) {
+            normalized.width = normalized.DesiredSize.x;
+        }
+        if (normalized.height === undefined && Number.isFinite(normalized.DesiredSize.y)) {
+            normalized.height = normalized.DesiredSize.y;
+        }
+    }
+
+    if (normalized.position !== undefined) {
+        normalized.position = normalizeViewportPoint(normalized.position, DEFAULT_WIDGET_POSITION);
+    }
+    if (normalized.scale !== undefined) {
+        normalized.scale = normalizeWidgetScale(normalized.scale, 1);
+    }
+    if (normalized.progress !== undefined) {
+        normalized.progress = THREE.MathUtils.clamp(normalized.progress, 0, 1);
+    }
+    if (normalized.visible !== undefined) {
+        normalized.visible = normalizeWidgetVisibility(normalized.visible, true);
+    }
+    if (normalized.zOrder !== undefined) {
+        normalized.zOrder = Number.isFinite(normalized.zOrder) ? normalized.zOrder : 0;
+    }
+
+    return normalized;
+}
+
+export class UUserWidget {
+    constructor(WidgetType = 'text', Config = {}, RuntimeContext = null) {
+        this._widgetId = null;
+        this._widgetType = normalizeWidgetType(WidgetType);
+        this._config = normalizeWidgetConfig(Config);
+        this._runtimeContext = null;
+        this._widgetApi = null;
+        this._attachRuntime(RuntimeContext);
+    }
+
+    _attachRuntime(RuntimeContext = null) {
+        this._runtimeContext = RuntimeContext;
+        this._widgetApi = RuntimeContext?.widgetApi ?? null;
+        return this;
+    }
+
+    _applyConfig(updates = {}) {
+        this._config = normalizeWidgetConfig({ ...this._config, ...updates });
+        if (this._widgetId !== null && this._widgetApi) {
+            this._widgetApi.updateWidget(this._widgetId, this._config);
+        }
+        return this;
+    }
+
+    AddToViewport(ZOrder = this._config.zOrder ?? 0) {
+        this._config = normalizeWidgetConfig({
+            ...this._config,
+            visible: this._config.visible ?? true,
+            zOrder: ZOrder,
+        });
+        if (!this._widgetApi) {
+            return this;
+        }
+        if (this._widgetId === null) {
+            this._widgetId = this._widgetApi.createWidget(this._widgetType, this._config);
+        } else {
+            this._widgetApi.updateWidget(this._widgetId, this._config);
+        }
+        return this;
+    }
+
+    RemoveFromParent() {
+        if (this._widgetId === null || !this._widgetApi) {
+            return false;
+        }
+        const removed = this._widgetApi.removeWidget(this._widgetId);
+        if (removed) {
+            this._widgetId = null;
+        }
+        return removed;
+    }
+
+    SetVisibility(Visibility) {
+        return this._applyConfig({ visible: normalizeWidgetVisibility(Visibility, true) });
+    }
+
+    SetPositionInViewport(Position) {
+        return this._applyConfig({
+            position: normalizeViewportPoint(Position, this._config.position ?? DEFAULT_WIDGET_POSITION),
+        });
+    }
+
+    SetRenderScale(Scale) {
+        return this._applyConfig({ scale: normalizeWidgetScale(Scale, this._config.scale ?? 1) });
+    }
+
+    SetDesiredSizeInViewport(Size) {
+        return this._applyConfig({
+            width: Number.isFinite(Size?.x) ? Size.x : this._config.width,
+            height: Number.isFinite(Size?.y) ? Size.y : this._config.height,
+        });
+    }
+
+    SetText(Text) {
+        return this._applyConfig({ text: Text });
+    }
+
+    SetPercent(Percent) {
+        return this._applyConfig({ progress: THREE.MathUtils.clamp(Percent ?? 0, 0, 1) });
+    }
+
+    SetBrushFromTexture(Texture) {
+        return this._applyConfig({ imageUrl: Texture });
+    }
+
+    SetColorAndOpacity(Color) {
+        return this._applyConfig({ color: Color });
+    }
+
+    SetOnClicked(Handler) {
+        return this._applyConfig({ onClick: Handler });
+    }
+
+    GetWidgetId() { return this._widgetId; }
+    GetWidgetType() { return this._widgetType; }
+    GetIsInViewport() { return this._widgetId !== null; }
+    SynchronizeProperties() { return this._applyConfig(); }
+}
+
+export class UTextWidget extends UUserWidget {
+    constructor(Config = {}, RuntimeContext = null) {
+        super('text', Config, RuntimeContext);
+    }
+}
+
+export class UImageWidget extends UUserWidget {
+    constructor(Config = {}, RuntimeContext = null) {
+        super('image', Config, RuntimeContext);
+    }
+}
+
+export class UProgressBarWidget extends UUserWidget {
+    constructor(Config = {}, RuntimeContext = null) {
+        super('progress', Config, RuntimeContext);
+    }
+}
+
+export class UButtonWidget extends UUserWidget {
+    constructor(Config = {}, RuntimeContext = null) {
+        super('button', Config, RuntimeContext);
+    }
+}
+
+function createHudWidget(RuntimeContext, WidgetClass = 'text', Config = {}) {
+    if (WidgetClass instanceof UUserWidget) {
+        return WidgetClass._attachRuntime(RuntimeContext);
+    }
+
+    if (typeof WidgetClass === 'function' && (WidgetClass === UUserWidget || WidgetClass.prototype instanceof UUserWidget)) {
+        const widget = new WidgetClass(Config, RuntimeContext);
+        return widget._attachRuntime(RuntimeContext);
+    }
+
+    if (WidgetClass && typeof WidgetClass === 'object') {
+        const defaults = WidgetClass.defaults ?? WidgetClass.Defaults ?? {};
+        const widgetType = WidgetClass.widgetType ?? WidgetClass.WidgetType ?? WidgetClass.type ?? 'text';
+        return new UUserWidget(widgetType, { ...defaults, ...Config }, RuntimeContext);
+    }
+
+    return new UUserWidget(WidgetClass, Config, RuntimeContext);
+}
+
+export class AHUD {
+    constructor(RuntimeContext = null) {
+        this._runtimeContext = RuntimeContext;
+        this._widgets = new Set();
+    }
+
+    _attachRuntime(RuntimeContext = null) {
+        this._runtimeContext = RuntimeContext;
+        return this;
+    }
+
+    CreateWidget(WidgetClass = UUserWidget, Config = {}) {
+        const widget = createHudWidget(this._runtimeContext, WidgetClass, Config);
+        this._widgets.add(widget);
+        return widget;
+    }
+
+    AddWidget(Widget, ZOrder = 0) {
+        const widget = Widget instanceof UUserWidget
+            ? Widget._attachRuntime(this._runtimeContext)
+            : this.CreateWidget(Widget);
+        widget.AddToViewport(ZOrder);
+        this._widgets.add(widget);
+        return widget;
+    }
+
+    RemoveWidget(Widget) {
+        if (!(Widget instanceof UUserWidget)) {
+            return false;
+        }
+        const removed = Widget.RemoveFromParent();
+        this._widgets.delete(Widget);
+        return removed;
+    }
+
+    ClearWidgets() {
+        for (const widget of Array.from(this._widgets)) {
+            widget.RemoveFromParent();
+        }
+        this._widgets.clear();
+    }
+
+    GetWidgets() {
+        return Array.from(this._widgets);
+    }
+}
+
 // ───────── Prototype augmentation ─────────
 // One-time install of PascalCase aliases on existing Actor and PhysicsComponent
 // prototypes. Camel-case API stays untouched.
@@ -224,6 +524,20 @@ export function installUePrototypeMethods() {
     P.WakeAllRigidBodies = function () { this.activate(); };
     P.PutAllRigidBodiesToSleep = function () { this.deactivate(); };
 
+    const A = AudioComponent.prototype;
+    A.Play = function (delay = 0) { return this.play(delay); };
+    A.Stop = function () { return this.stop(); };
+    A.IsPlaying = function () { return this.isPlaying(); };
+    A.SetSound = function (sound) { return this.setSound(sound); };
+    A.SetLooping = function (loop) { return this.setLoop(loop); };
+    A.SetVolumeMultiplier = function (volume) { return this.setVolume(volume); };
+    A.SetPitchMultiplier = function (rate) { return this.setPlaybackRate(rate); };
+    A.SetUISound = function () { return this.setPositional(false); };
+    A.SetWorldSound = function () { return this.setPositional(true); };
+    A.PlayTone = function (frequency = 440, duration = 0.2, type = 'sine') {
+        return this.playTone(frequency, duration, type);
+    };
+
     // ────── UTransformComponent aliases on TransformComponent ──────
     // TransformComponent already exposes get/set world location/rotation in
     // camelCase; add a few PascalCase aliases for completeness.
@@ -256,7 +570,59 @@ export class UWorld {
 
     GetDeltaSeconds() { return this._ctx?.deltaTime ?? 0; }
 
+    GetHUD() {
+        if (!this._ctx) return null;
+        const sharedHud = typeof this._ctx.getHUD === 'function'
+            ? this._ctx.getHUD()
+            : this._ctx.hud;
+        if (sharedHud) {
+            if (typeof sharedHud._attachRuntime === 'function') {
+                sharedHud._attachRuntime(this._ctx);
+            }
+            this._ctx._hud = sharedHud;
+            return sharedHud;
+        }
+        if (!this._ctx._hud) {
+            this._ctx._hud = new AHUD(this._ctx);
+        } else {
+            this._ctx._hud._attachRuntime(this._ctx);
+        }
+        return this._ctx._hud;
+    }
+
+    CreateWidget(WidgetClass = UUserWidget, Config = {}) {
+        return this.GetHUD()?.CreateWidget(WidgetClass, Config) ?? null;
+    }
+
     GetAllActors() { return Array.from(this._ctx?.sceneSystem?.actors ?? []); }
+
+    GetGameInstance() {
+        return getRuntimeGameInstance(this._ctx);
+    }
+
+    GetFirstPlayerController() {
+        return getRuntimePlayerController(this._ctx);
+    }
+
+    GetPlayerController(PlayerIndex = 0) {
+        return PlayerIndex === 0 ? getRuntimePlayerController(this._ctx) : null;
+    }
+
+    GetPlayerPawn(PlayerIndex = 0) {
+        return PlayerIndex === 0 ? getRuntimePlayerPawn(this._ctx) : null;
+    }
+
+    GetPlayerCharacter(PlayerIndex = 0) {
+        return PlayerIndex === 0 ? getRuntimePlayerCharacter(this._ctx) : null;
+    }
+
+    GetAuthGameMode() {
+        return getRuntimeGameMode(this._ctx);
+    }
+
+    PlaySoundAtLocation(Sound = 'test', Location = new FVector(), Options = {}) {
+        return this._ctx?.playSoundAtLocation?.(Sound, Location, Options) ?? false;
+    }
 
     /**
      * Spawn an actor by class name (mirrors AGameModeBase::SpawnActor).
@@ -321,6 +687,353 @@ export class UWorld {
     }
 }
 
+function getRuntimeWorld(ctx) {
+    if (!ctx) return null;
+    if (!ctx._world || ctx._world._ctx !== ctx) {
+        ctx._world = new UWorld(ctx);
+    }
+    return ctx._world;
+}
+
+function getPlayerRuntimeLocation(ctx) {
+    const character = ctx?.physics?.character ?? null;
+    if (character?.GetPosition) {
+        const position = character.GetPosition();
+        return new FVector(position.GetX(), position.GetY(), position.GetZ());
+    }
+
+    const camera = ctx?.camera ?? null;
+    if (camera?.position) {
+        return new FVector(camera.position.x, camera.position.y, camera.position.z);
+    }
+
+    return new FVector();
+}
+
+function getPlayerRuntimeVelocity(ctx) {
+    const character = ctx?.physics?.character ?? null;
+    if (character?.GetLinearVelocity) {
+        const velocity = character.GetLinearVelocity();
+        return new FVector(velocity.GetX(), velocity.GetY(), velocity.GetZ());
+    }
+
+    if (ctx?.gameplay?.velocity) {
+        return new FVector(ctx.gameplay.velocity.x, ctx.gameplay.velocity.y, ctx.gameplay.velocity.z);
+    }
+
+    return new FVector();
+}
+
+function setPlayerRuntimeLocation(ctx, location) {
+    if (!ctx || !location) return null;
+
+    if (ctx.gameplay?.spawnPoint) {
+        ctx.gameplay.spawnPoint.set(location.x, location.y, location.z);
+    }
+
+    const physics = ctx.physics ?? null;
+    const character = physics?.character ?? null;
+    const Jolt = physics?.Jolt ?? null;
+    if (character && Jolt) {
+        const spawnPosition = new Jolt.RVec3(location.x, location.y, location.z);
+        character.SetPosition(spawnPosition);
+        Jolt.destroy?.(spawnPosition);
+        character.SetLinearVelocity(Jolt.Vec3.prototype.sZero());
+    }
+
+    ctx.syncCameraToCharacter?.();
+    return location;
+}
+
+function getPlayerRuntimeRotation(ctx) {
+    if (ctx?.gameplay) {
+        return new FRotator(
+            THREE.MathUtils.radToDeg(ctx.gameplay.pitch ?? 0),
+            THREE.MathUtils.radToDeg(ctx.gameplay.yaw ?? 0),
+            0,
+        );
+    }
+
+    const camera = ctx?.camera ?? null;
+    if (camera?.quaternion) {
+        return FRotator.FromQuaternion(camera.quaternion);
+    }
+
+    return new FRotator();
+}
+
+function setPlayerRuntimeRotation(ctx, rotation) {
+    if (!ctx || !rotation) return null;
+
+    const nextRotation = rotation instanceof FRotator
+        ? rotation
+        : new FRotator(rotation.Pitch ?? rotation.pitch ?? 0, rotation.Yaw ?? rotation.yaw ?? 0, rotation.Roll ?? rotation.roll ?? 0);
+
+    if (ctx.gameplay) {
+        ctx.gameplay.pitch = THREE.MathUtils.degToRad(nextRotation.Pitch);
+        ctx.gameplay.yaw = THREE.MathUtils.degToRad(nextRotation.Yaw);
+        ctx.applyGameplayCameraRotation?.();
+    } else if (ctx.camera) {
+        ctx.camera.quaternion.copy(nextRotation.toQuaternion());
+    }
+
+    return nextRotation;
+}
+
+function getRuntimeGameInstance(ctx) {
+    if (!ctx) return null;
+    if (!ctx._gameInstance) {
+        ctx._gameInstance = new UGameInstance(ctx);
+    }
+    return ctx._gameInstance;
+}
+
+function getRuntimePlayerController(ctx) {
+    if (!ctx) return null;
+    if (!ctx._playerController) {
+        ctx._playerController = new APlayerController(ctx);
+    }
+    return ctx._playerController;
+}
+
+function getRuntimePlayerCharacter(ctx) {
+    if (!ctx) return null;
+    if (!ctx._playerCharacter) {
+        ctx._playerCharacter = new ACharacter(ctx);
+    }
+    return ctx._playerCharacter;
+}
+
+function getRuntimePlayerPawn(ctx) {
+    return getRuntimePlayerCharacter(ctx);
+}
+
+function getRuntimeGameMode(ctx) {
+    if (!ctx) return null;
+    if (!ctx._gameMode) {
+        ctx._gameMode = new AGameMode(ctx);
+    }
+    return ctx._gameMode;
+}
+
+export class UGameInstance {
+    constructor(ctx) {
+        this._ctx = ctx;
+    }
+
+    GetWorld() {
+        return getRuntimeWorld(this._ctx);
+    }
+
+    GetFirstLocalPlayerController() {
+        return getRuntimePlayerController(this._ctx);
+    }
+}
+
+export class APawn {
+    constructor(ctx) {
+        this._ctx = ctx;
+    }
+
+    GetWorld() {
+        return getRuntimeWorld(this._ctx);
+    }
+
+    GetController() {
+        return getRuntimePlayerController(this._ctx);
+    }
+
+    GetActorLocation() {
+        return getPlayerRuntimeLocation(this._ctx);
+    }
+
+    SetActorLocation(location) {
+        setPlayerRuntimeLocation(this._ctx, location instanceof FVector ? location : new FVector(location?.x ?? 0, location?.y ?? 0, location?.z ?? 0));
+        return this;
+    }
+
+    GetActorRotation() {
+        return getPlayerRuntimeRotation(this._ctx);
+    }
+
+    SetActorRotation(rotation) {
+        setPlayerRuntimeRotation(this._ctx, rotation);
+        return this;
+    }
+
+    GetActorForwardVector() {
+        const camera = this._ctx?.camera ?? null;
+        if (camera?.getWorldDirection) {
+            const direction = new THREE.Vector3();
+            camera.getWorldDirection(direction);
+            return new FVector(direction.x, direction.y, direction.z);
+        }
+        return FVector.Forward();
+    }
+
+    GetActorRightVector() {
+        const forward = this.GetActorForwardVector();
+        return forward.Cross(FVector.Up()).GetSafeNormal();
+    }
+
+    GetActorUpVector() {
+        return FVector.Up();
+    }
+
+    GetVelocity() {
+        return getPlayerRuntimeVelocity(this._ctx);
+    }
+}
+
+export class ACharacter extends APawn {
+    Jump() {
+        if (this._ctx?.physics) {
+            this._ctx.physics.jumpQueued = true;
+        }
+        return this;
+    }
+
+    StopJumping() {
+        if (this._ctx?.physics) {
+            this._ctx.physics.jumpQueued = false;
+        }
+        return this;
+    }
+
+    IsFalling() {
+        return this._ctx?.gameplay ? !this._ctx.gameplay.grounded : false;
+    }
+
+    LaunchCharacter(LaunchVelocity = new FVector(), _bXYOverride = false, bZOverride = true) {
+        const physics = this._ctx?.physics ?? null;
+        const character = physics?.character ?? null;
+        const Jolt = physics?.Jolt ?? null;
+        if (!character || !Jolt) {
+            return this;
+        }
+
+        const currentVelocity = character.GetLinearVelocity();
+        const nextVelocity = new Jolt.Vec3(
+            LaunchVelocity.x,
+            bZOverride ? LaunchVelocity.z ?? LaunchVelocity.y : currentVelocity.GetY() + (LaunchVelocity.z ?? LaunchVelocity.y),
+            LaunchVelocity.z ?? currentVelocity.GetZ(),
+        );
+        character.SetLinearVelocity(nextVelocity);
+        Jolt.destroy?.(nextVelocity);
+        return this;
+    }
+}
+
+export class APlayerController {
+    constructor(ctx) {
+        this._ctx = ctx;
+        this.bShowMouseCursor = false;
+    }
+
+    GetWorld() {
+        return getRuntimeWorld(this._ctx);
+    }
+
+    GetHUD() {
+        return this.GetWorld()?.GetHUD() ?? null;
+    }
+
+    GetPawn() {
+        return getRuntimePlayerPawn(this._ctx);
+    }
+
+    GetCharacter() {
+        return getRuntimePlayerCharacter(this._ctx);
+    }
+
+    GetGameInstance() {
+        return getRuntimeGameInstance(this._ctx);
+    }
+
+    GetControlRotation() {
+        return getPlayerRuntimeRotation(this._ctx);
+    }
+
+    SetControlRotation(rotation) {
+        setPlayerRuntimeRotation(this._ctx, rotation);
+        return this;
+    }
+
+    SetShowMouseCursor(showMouseCursor) {
+        this.bShowMouseCursor = !!showMouseCursor;
+        return this;
+    }
+
+    SetInputModeGameOnly() {
+        this._ctx?.enterGameplay?.();
+        return this;
+    }
+
+    SetInputModeUIOnly() {
+        this._ctx?.exitGameplay?.();
+        return this;
+    }
+
+    ProjectWorldLocationToScreen(worldLocation) {
+        const camera = this._ctx?.camera ?? null;
+        const renderer = this._ctx?.renderer ?? null;
+        if (!camera || !renderer || !worldLocation) {
+            return { X: 0, Y: 0, bPlayerViewportRelative: true };
+        }
+
+        const projected = new THREE.Vector3(worldLocation.x, worldLocation.y, worldLocation.z).project(camera);
+        const viewport = renderer.getSize(new THREE.Vector2());
+        return {
+            X: (projected.x * 0.5 + 0.5) * viewport.x,
+            Y: (-projected.y * 0.5 + 0.5) * viewport.y,
+            bPlayerViewportRelative: true,
+        };
+    }
+}
+
+export class AGameModeBase {
+    constructor(ctx) {
+        this._ctx = ctx;
+    }
+
+    GetWorld() {
+        return getRuntimeWorld(this._ctx);
+    }
+
+    GetGameInstance() {
+        return getRuntimeGameInstance(this._ctx);
+    }
+
+    GetDefaultPawnClassForController() {
+        return ACharacter;
+    }
+
+    GetNumPlayers() {
+        return 1;
+    }
+
+    GetPlayerController(PlayerIndex = 0) {
+        return PlayerIndex === 0 ? getRuntimePlayerController(this._ctx) : null;
+    }
+
+    RestartPlayer(_PlayerController = this.GetPlayerController(0)) {
+        this._ctx?.respawnPlayer?.(true);
+        return getRuntimePlayerCharacter(this._ctx);
+    }
+
+    StartPlay() {
+        this._ctx?.enterGameplay?.();
+        return true;
+    }
+
+    EndPlay() {
+        this._ctx?.exitGameplay?.();
+        return true;
+    }
+}
+
+export class AGameMode extends AGameModeBase {}
+
 // ───────── Lifecycle detection ─────────
 
 const LIFECYCLE_PROBE = /\bfunction\s+(BeginPlay|Tick|OnHit|EndPlay)\s*\(/;
@@ -344,13 +1057,21 @@ export function detectsUeLifecycle(source) {
  * @param {object} ctx         Engine context: { scene, camera, sceneSystem,
  *                              physics, raycastWorld, spawnDynamicPrimitive,
  *                              spawnImportedProp, spawnDrivableCar, deltaTime,
+ *                              playSoundAtLocation,
  *                              destroyActor }
  * @param {object} actor        The actor running the script.
  * @param {object|null} collision  Optional collision payload for OnHit.
  * @returns {object}            Combined api bag.
  */
 export function buildUeContext(legacyApi, ctx, actor, collision = null) {
-    const world = new UWorld({ ...ctx, deltaTime: legacyApi?.deltaTime ?? 0 });
+    const runtimeCtx = {
+        ...ctx,
+        renderer: ctx?.renderer ?? legacyApi?.renderer ?? null,
+        gameplay: ctx?.gameplay ?? legacyApi?.gameplay ?? null,
+        currentMesh: ctx?.currentMesh ?? legacyApi?.currentMesh ?? null,
+        deltaTime: legacyApi?.deltaTime ?? ctx?.deltaTime ?? 0,
+    };
+    const world = getRuntimeWorld(runtimeCtx);
 
     // Pre-build a Hit from the engine's collision payload so OnHit gets it.
     let hit = null;
@@ -364,7 +1085,7 @@ export function buildUeContext(legacyApi, ctx, actor, collision = null) {
     }
 
     // Patch a Destroy() on Self that knows about the destroy helper.
-    const destroyActor = ctx?.destroyActor;
+    const destroyActor = runtimeCtx?.destroyActor;
     if (actor && destroyActor && typeof actor.Destroy !== 'function') {
         actor.Destroy = function () { destroyActor(this); };
     }
@@ -379,13 +1100,41 @@ export function buildUeContext(legacyApi, ctx, actor, collision = null) {
         ECollisionChannel,
         // Class symbols (for GetComponentByClass et al.)
         AActor: Actor,
+        AHUD,
+        UAudioComponent: AudioComponent,
+        UButtonWidget,
+        UImageWidget,
         UPrimitiveComponent: PhysicsComponent,
+        UProgressBarWidget,
+        UTextWidget,
         UTransformComponent: TransformComponent,
+        UUserWidget,
+        UGameInstance,
         UWorld,
+        AGameModeBase,
+        AGameMode,
+        APlayerController,
+        APawn,
+        ACharacter,
         // Globals
         Self: actor,
+        HUD: world.GetHUD(),
+        WidgetAPI: runtimeCtx?.widgetApi ?? null,
+        UnrealWidgetAPI: runtimeCtx?.unrealWidgetApi ?? null,
         World: world,
+        GameInstance: world.GetGameInstance(),
+        GameMode: world.GetAuthGameMode(),
+        PlayerController: world.GetFirstPlayerController(),
+        Pawn: world.GetPlayerPawn(),
+        Character: world.GetPlayerCharacter(),
+        CreateWidget: (WidgetClass = UUserWidget, Config = {}) => world.CreateWidget(WidgetClass, Config),
+        GetHUD: () => world.GetHUD(),
         GetWorld: () => world,
+        GetGameInstance: () => world.GetGameInstance(),
+        GetGameMode: () => world.GetAuthGameMode(),
+        GetPlayerController: (PlayerIndex = 0) => world.GetPlayerController(PlayerIndex),
+        GetPlayerPawn: (PlayerIndex = 0) => world.GetPlayerPawn(PlayerIndex),
+        GetPlayerCharacter: (PlayerIndex = 0) => world.GetPlayerCharacter(PlayerIndex),
         DeltaTime: legacyApi?.deltaTime ?? 0,
         Hit: hit,
     };

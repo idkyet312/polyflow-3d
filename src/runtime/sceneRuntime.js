@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { ActorComponent } from './components/ActorComponent.js';
+import { AudioComponent } from './components/AudioComponent.js';
 import { PhysicsComponent } from './components/PhysicsComponent.js';
 import { TransformComponent } from './components/TransformComponent.js';
 
@@ -518,6 +519,7 @@ export function createSceneSystem(scene) {
 
 // ─── Re-export built-in components for convenience ───
 export { ActorComponent } from './components/ActorComponent.js';
+export { AudioComponent } from './components/AudioComponent.js';
 export { PhysicsComponent } from './components/PhysicsComponent.js';
 export { TransformComponent } from './components/TransformComponent.js';
 

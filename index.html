@@ -50,6 +50,10 @@
                             <button class="btn btn-primary viewer-menu-btn" id="open-actor-editor">Add Actor</button>
                             <button class="btn viewer-menu-btn" id="load-actor-btn">⬆ Load Actor</button>
                         </div>
+                        <div class="viewer-menu-actions">
+                            <button class="btn viewer-menu-btn" id="play-test-sound-btn">Test 3D Sound</button>
+                        </div>
+                        <div class="viewer-inline-note" id="play-test-sound-status">Plays a short test cue at the selected actor or just ahead of the camera.</div>
                         <div class="viewer-inline-note">Create a new actor or load a saved .actor file. Importing props,
                             multiplayer, and input scripting now live under Menu Sections.</div>
                         <input type="file" id="actor-file-input" accept=".actor,.json" style="display: none;">
@@ -350,8 +354,10 @@
                                 <textarea id="input-action-editor-input" class="viewer-code-textarea" rows="8"
                                     spellcheck="false"></textarea>
                             </label>
-                            <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, gameplay,
-                                showcase, physics, event, button, mode, spawnDynamicPrimitive(), spawnImportedProp()
+                            <div class="viewer-code-hint">Available in code: World, GetWorld(), GameMode,
+                                PlayerController, Pawn, Character, GameInstance, FVector, FRotator,
+                                UPrimitiveComponent, CreateWidget(), HUD, event, button, mode, plus raw globals like
+                                THREE, scene, camera, gameplay, physics, spawnDynamicPrimitive(), and spawnImportedProp().
                             </div>
                             <div class="viewer-inline-note viewer-script-editor-status"
                                 id="input-actions-editor-status">Input actions are loaded from local draft storage.
@@ -429,7 +435,7 @@
                         <div class="viewer-modal-eyebrow">Showcase Actor Script</div>
                         <h2 class="viewer-modal-title" id="object-script-editor-title">Attach Script to Actor</h2>
                         <p class="viewer-modal-copy">Right-clicked authored actors in Showcase mode can run per-actor
-                            Three.js code on tick or on collision.</p>
+                            Unreal-style lifecycle scripts with BeginPlay, Tick, OnHit, and EndPlay.</p>
                         <div class="viewer-script-editor-target" id="object-script-editor-target">No prop selected</div>
                         <label class="viewer-script-editor-mode" for="object-script-editor-mode">
                             <span class="viewer-script-editor-mode-label">Script Event</span>
@@ -444,14 +450,15 @@
                             <span>Enable this object's tick event in Play mode.</span>
                         </label>
                         <label class="viewer-code-field" for="object-script-editor-input">
-                            <span class="viewer-code-field-label">Three.js Code</span>
+                            <span class="viewer-code-field-label">Actor Script</span>
                             <textarea id="object-script-editor-input" class="viewer-code-textarea" rows="8"
                                 spellcheck="false"></textarea>
                         </label>
-                        <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, currentMesh,
-                            gameplay, showcase, physics, prop, actor, object, body, eventType, deltaTime, collision,
-                            PhysicsComponent, TransformComponent, spawnDynamicPrimitive(), spawnImportedProp() — Use
-                            actor.GetComponent(PhysicsComponent).addForce(new THREE.Vector3(900000,0,0))</div>
+                        <div class="viewer-code-hint">Preferred UE-style API: BeginPlay(), Tick(), OnHit(), EndPlay(),
+                            World, GameMode, PlayerController, Pawn, Character, GameInstance, GetWorld(), FVector,
+                            FRotator, UPrimitiveComponent, UAudioComponent, HUD, CreateWidget(), WidgetAPI, and
+                            UnrealWidgetAPI. Raw globals like THREE, scene, camera, gameplay, physics,
+                            spawnDynamicPrimitive(), and spawnImportedProp() still work.</div>
                         <div class="viewer-inline-note viewer-script-editor-status" id="object-script-editor-status">
                             Pick a prop in Showcase mode to attach code.</div>
                         <div class="viewer-modal-actions">
@@ -474,7 +481,10 @@
 
                 <div id="crosshair" aria-hidden="true"></div>
 
+                <div class="desktop-version-badge" aria-label="Desktop app version">v0.0.1</div>
+
                 <div class="mobile-ui" aria-label="Mobile controls">
+                    <div class="mobile-version-badge" aria-label="App version">v0.0.1</div>
                     <div class="mobile-topbar">
                         <button class="btn mobile-chip" id="mobile-menu-toggle" type="button">Menu</button>
                         <button class="btn mobile-chip" id="mobile-mode-toggle" type="button">Play</button>

@@ -1221,6 +1221,24 @@ main {
   transform: translateX(-50%);
 }
 
+.desktop-version-badge {
+  position: absolute;
+  right: 1rem;
+  bottom: 1rem;
+  padding: 0.45rem 0.72rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.56);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(10px);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  z-index: 19;
+  pointer-events: none;
+}
+
 body.play-active #crosshair {
   opacity: 1;
 }
@@ -1269,6 +1287,10 @@ body.mobile-ui-preview .mobile-ui {
   pointer-events: none;
 }
 
+body.mobile-ui-preview .desktop-version-badge {
+  display: none;
+}
+
 body.mobile-ui-preview .mobile-topbar {
   position: fixed;
   top: auto;
@@ -1280,6 +1302,24 @@ body.mobile-ui-preview .mobile-topbar {
   justify-content: center;
   z-index: 19;
   pointer-events: auto;
+}
+
+body.mobile-ui-preview .mobile-version-badge {
+  position: fixed;
+  top: calc(1rem + env(safe-area-inset-top, 0px));
+  right: 1rem;
+  padding: 0.45rem 0.72rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.56);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(10px);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  z-index: 19;
+  pointer-events: none;
 }
 
 body.mobile-ui-preview .debug-console {
