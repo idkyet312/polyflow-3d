@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base: '/2-05-2026-2050/'
+  base: '/polyflow-3d/'
 });

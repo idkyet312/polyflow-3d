@@ -40,6 +40,7 @@ import { createPhysicsCore } from './src/physics/core.js';
 import { createPhysicsRuntime } from './src/physics/runtime.js';
 import { createEnvironmentController } from './src/world/environment.js';
 import { createLightGridController } from './src/world/lightGrid.js';
+import { createVolumetricFog } from './src/world/volumetricFog.js';
 import {
     createActor,
     createSceneSystem,
@@ -205,7 +206,7 @@ let optimizedTriCount = 0;
 let scanPlane;
 let originalFileSize = 0;
 let optimizedBlobUrl = null;
-let environmentController;
+let environmentController, volumetricFogController;
 let physicsCore;
 let physicsRuntime;
 let multiplayerController;
@@ -513,7 +514,6 @@ const vehicleFx = createVehicleFx({
     vehicleSettings: VEHICLE_SETTINGS,
 });
 const emitVehicleParticle = vehicleFx.emitParticle;
-const emitVehicleSkidMark = vehicleFx.emitSkidMark;
 const emitVehicleSurfaceEffects = vehicleFx.emitSurfaceEffects;
 const updateVehicleSurfaceEffects = vehicleFx.updateSurfaceEffects;
 const vehicleEngineAudio = {
@@ -6714,6 +6714,10 @@ async function init() {
     syncShowcaseAnglesFromTarget(SHOWCASE_CAMERA_TARGET);
     applyShowcaseCameraRotation();
     scene.add(camera);
+    volumetricFogController = createVolumetricFog({
+        scene,
+        camera,
+    });
     runtimeAudio.listener = new SoundGeneratorAudioListener();
     camera.add(runtimeAudio.listener);
 
@@ -6736,7 +6740,7 @@ async function init() {
     }));
     const sceneColor = scenePass.getTextureNode('output');
     const sceneEmissive = scenePass.getTextureNode('emissive');
-    const bloomNode = bloom(sceneEmissive, 0.85, 0.6, 0.85);
+    const bloomNode = bloom(sceneEmissive, 1.25, 0.95, 0.48);
     postProcessing = new PostProcessing(renderer);
     postProcessing.outputNode = sceneColor.add(bloomNode);
 
@@ -6899,6 +6903,7 @@ async function init() {
         }
         updateVehicleVisuals(delta);
         updateVehicleSurfaceEffects(delta);
+        volumetricFogController?.update(delta);
         
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
         multiplayerController?.update(delta);
@@ -7981,6 +7986,22 @@ function updateVehicleGameplay(delta) {
         bodyInterface.ActivateBody(bodyId);
     }
 
+    const vehicleRenderObject = getActorRenderObject(vehicle);
+    const vehicleVisualState = vehicleRenderObject ? ensureVehicleVisualState(vehicleRenderObject) : null;
+    const rearWheelWorldPositions = [];
+    if (vehicleVisualState?.steeringPivots?.length >= 4) {
+        const forwardOffset = VEHICLE_SETTINGS.wheelBase * 0.18;
+        for (let i = 2; i < 4; i++) {
+            const pivot = vehicleVisualState.steeringPivots[i];
+            if (!pivot?.isObject3D) { rearWheelWorldPositions.push(null); continue; }
+            const wheelPos = new THREE.Vector3();
+            pivot.getWorldPosition(wheelPos);
+            wheelPos.y -= vehicleVisualState.wheelRadius || 0;
+            wheelPos.addScaledVector(flatForward, forwardOffset);
+            rearWheelWorldPositions.push(wheelPos);
+        }
+    }
+
     emitVehicleSurfaceEffects(delta, {
         vehiclePosition,
         flatForward,
@@ -7993,6 +8014,7 @@ function updateVehicleGameplay(delta) {
         lateralSpeed,
         averageCompression,
         verticalSpeed: linearVelocity.y,
+        rearWheelWorldPositions,
     });
 
     const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? 1 : 0.05));

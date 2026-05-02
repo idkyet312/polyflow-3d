@@ -6,6 +6,10 @@ export const VEHICLE_FX_SETTINGS = {
     dustSpeed: 2.5,
     smokeSpeed: 3.5,
     skidSpeed: 5.5,
+    skidRibbonSegments: 2048,
+    skidRibbonWidth: 0.22,
+    skidRibbonLifeSeconds: 300,
+    skidRibbonMinSpacing: 0.04,
 };
 
 const _upVector = new THREE.Vector3(0, 1, 0);
@@ -34,13 +38,106 @@ function createVehicleFxTexture(kind) {
     return texture;
 }
 
+function createSkidRibbon(maxSegments, baseOpacity) {
+    const vertexCount = maxSegments * 2;
+    const positions = new Float32Array(vertexCount * 3);
+    const colors = new Float32Array(vertexCount * 4);
+    const indices = [];
+    for (let i = 0; i < maxSegments - 1; i++) {
+        const a = i * 2;
+        indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+    geometry.setIndex(indices);
+    geometry.setDrawRange(0, 0);
+    const material = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        vertexColors: true,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.frustumCulled = false;
+    mesh.name = 'tire-skid-ribbon';
+    return {
+        mesh,
+        positions,
+        colors,
+        maxSegments,
+        baseOpacity,
+        // ring buffer of per-segment ages [maxSegments]
+        ages: new Float32Array(maxSegments),
+        opacities: new Float32Array(maxSegments),
+        count: 0,
+        head: 0,
+        lastPos: new THREE.Vector3(),
+        hasLast: false,
+    };
+}
+
+function pushRibbonSegment(ribbon, position, right, halfWidth, opacity) {
+    const i = ribbon.head * 2;
+    ribbon.positions[i * 3 + 0] = position.x - right.x * halfWidth;
+    ribbon.positions[i * 3 + 1] = position.y;
+    ribbon.positions[i * 3 + 2] = position.z - right.z * halfWidth;
+    ribbon.positions[i * 3 + 3] = position.x + right.x * halfWidth;
+    ribbon.positions[i * 3 + 4] = position.y;
+    ribbon.positions[i * 3 + 5] = position.z + right.z * halfWidth;
+
+    ribbon.ages[ribbon.head] = 0;
+    ribbon.opacities[ribbon.head] = opacity;
+
+    ribbon.head = (ribbon.head + 1) % ribbon.maxSegments;
+    if (ribbon.count < ribbon.maxSegments) ribbon.count++;
+}
+
+function rebuildRibbonGeometry(ribbon, lifeSeconds) {
+    const { count, head, maxSegments, positions, colors, ages, opacities } = ribbon;
+    if (count < 2) {
+        ribbon.mesh.geometry.setDrawRange(0, 0);
+        return;
+    }
+    // Walk from oldest to newest. Oldest index = (head - count) mod max.
+    const start = (head - count + maxSegments) % maxSegments;
+    const outPos = ribbon.mesh.geometry.attributes.position.array;
+    const outCol = ribbon.mesh.geometry.attributes.color.array;
+    for (let n = 0; n < count; n++) {
+        const ringIdx = (start + n) % maxSegments;
+        const srcOffset = ringIdx * 6;
+        const dstOffset = n * 6;
+        outPos[dstOffset + 0] = positions[srcOffset + 0];
+        outPos[dstOffset + 1] = positions[srcOffset + 1];
+        outPos[dstOffset + 2] = positions[srcOffset + 2];
+        outPos[dstOffset + 3] = positions[srcOffset + 3];
+        outPos[dstOffset + 4] = positions[srcOffset + 4];
+        outPos[dstOffset + 5] = positions[srcOffset + 5];
+
+        const ageNorm = Math.min(1, ages[ringIdx] / lifeSeconds);
+        // Stay solid for first 80% of life, fade out only the last 20% (older end).
+        const ageFade = ageNorm < 0.8 ? 1 : 1 - (ageNorm - 0.8) / 0.2;
+        const a = opacities[ringIdx] * ageFade;
+        const colOffset = n * 8;
+        outCol[colOffset + 0] = 0.06; outCol[colOffset + 1] = 0.06; outCol[colOffset + 2] = 0.06; outCol[colOffset + 3] = a;
+        outCol[colOffset + 4] = 0.06; outCol[colOffset + 5] = 0.06; outCol[colOffset + 6] = 0.06; outCol[colOffset + 7] = a;
+    }
+    ribbon.mesh.geometry.attributes.position.needsUpdate = true;
+    ribbon.mesh.geometry.attributes.color.needsUpdate = true;
+    ribbon.mesh.geometry.setDrawRange(0, (count - 1) * 6);
+    ribbon.mesh.geometry.computeBoundingSphere();
+}
+
 export function createVehicleFx({ getScene, vehicleSettings }) {
     const state = {
         group: null,
         particles: [],
-        skidMarks: [],
+        ribbons: new Map(),
         textures: {},
-        skidMaterial: null,
     };
 
     function ensureGroup() {
@@ -56,16 +153,18 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
                 state.textures[kind] = createVehicleFxTexture(kind);
             }
         }
-        if (!state.skidMaterial) {
-            state.skidMaterial = new THREE.MeshBasicMaterial({
-                color: 0x101010,
-                transparent: true,
-                opacity: 0.42,
-                depthWrite: false,
-                side: THREE.DoubleSide,
-            });
-        }
         return state.group;
+    }
+
+    function getRibbon(key) {
+        let r = state.ribbons.get(key);
+        if (r) return r;
+        const group = ensureGroup();
+        if (!group) return null;
+        r = createSkidRibbon(VEHICLE_FX_SETTINGS.skidRibbonSegments, 0.55);
+        group.add(r.mesh);
+        state.ribbons.set(key, r);
+        return r;
     }
 
     function emitParticle(kind, position, velocity, size = 0.35, life = 0.7) {
@@ -101,31 +200,34 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
         particle.sprite.visible = true;
     }
 
-    function emitSkidMark(position, forward, width, length, opacity) {
-        const group = ensureGroup();
-        if (!group) return;
+    function extendSkidRibbon(wheelKey, position, forward, opacity) {
+        const ribbon = getRibbon(wheelKey);
+        if (!ribbon) return;
 
-        let mark = state.skidMarks.find((entry) => entry.life <= 0);
-        if (!mark) {
-            if (state.skidMarks.length >= VEHICLE_FX_SETTINGS.maxSkidMarks) {
-                mark = state.skidMarks.shift();
-                if (mark?.mesh?.parent) mark.mesh.parent.remove(mark.mesh);
-            }
-            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), state.skidMaterial.clone());
-            mesh.name = 'tire-skid-mark';
-            group.add(mesh);
-            mark = { mesh, life: 0, maxLife: 1 };
-            state.skidMarks.push(mark);
+        // Right vector perpendicular to forward, lying flat on ground.
+        const rightX = -forward.z;
+        const rightZ = forward.x;
+        const len = Math.hypot(rightX, rightZ) || 1;
+        const right = { x: rightX / len, y: 0, z: rightZ / len };
+        const halfWidth = VEHICLE_FX_SETTINGS.skidRibbonWidth * 0.5;
+        const placed = position.clone();
+        placed.y += 0.012;
+
+        if (ribbon.hasLast) {
+            const dx = placed.x - ribbon.lastPos.x;
+            const dz = placed.z - ribbon.lastPos.z;
+            const dist = Math.hypot(dx, dz);
+            if (dist < VEHICLE_FX_SETTINGS.skidRibbonMinSpacing) return;
         }
 
-        mark.life = 9;
-        mark.maxLife = 9;
-        mark.mesh.visible = true;
-        mark.mesh.position.copy(position);
-        mark.mesh.position.y += 0.012;
-        mark.mesh.scale.set(width, length, 1);
-        mark.mesh.rotation.set(-Math.PI * 0.5, 0, Math.atan2(forward.x, forward.z));
-        mark.mesh.material.opacity = opacity;
+        pushRibbonSegment(ribbon, placed, right, halfWidth, opacity);
+        ribbon.lastPos.copy(placed);
+        ribbon.hasLast = true;
+    }
+
+    function breakSkidRibbon(wheelKey) {
+        const ribbon = state.ribbons.get(wheelKey);
+        if (ribbon) ribbon.hasLast = false;
     }
 
     function emitSurfaceEffects(delta, data) {
@@ -139,12 +241,21 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
         const skidAmount = slip ? THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.skidSpeed) / 18 + lateral / 10, 0, 1) : 0;
         const rearCorners = data.cornerSamples.slice(2);
 
-        rearCorners.forEach((corner) => {
-            if (corner.rideHeight === null) return;
-            const wheelPos = data.vehiclePosition.clone()
-                .addScaledVector(data.flatForward, corner.forward)
-                .addScaledVector(data.flatRight, corner.sideways);
-            wheelPos.y -= Math.min(corner.rideHeight, vehicleSettings.suspensionRideHeight);
+        rearCorners.forEach((corner, idx) => {
+            const wheelKey = `rear:${idx}`;
+            if (corner.rideHeight === null) {
+                breakSkidRibbon(wheelKey);
+                return;
+            }
+            const visualWheel = data.rearWheelWorldPositions?.[idx];
+            const wheelPos = visualWheel
+                ? visualWheel.clone()
+                : data.vehiclePosition.clone()
+                    .addScaledVector(data.flatForward, corner.forward)
+                    .addScaledVector(data.flatRight, corner.sideways);
+            if (!visualWheel) {
+                wheelPos.y -= Math.min(corner.rideHeight, vehicleSettings.suspensionRideHeight);
+            }
 
             if (dustAmount > 0 && Math.random() < dustAmount * 18 * delta) {
                 emitParticle(
@@ -166,8 +277,10 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
                     1.05 + Math.random() * 0.95
                 );
             }
-            if (skidAmount > 0.05 && Math.random() < skidAmount * 18 * delta) {
-                emitSkidMark(wheelPos, data.flatForward, 0.18, 0.7 + speed * 0.025, 0.18 + skidAmount * 0.28);
+            if (skidAmount > 0.05) {
+                extendSkidRibbon(wheelKey, wheelPos, data.flatForward, 0.35 + skidAmount * 0.5);
+            } else {
+                breakSkidRibbon(wheelKey);
             }
         });
 
@@ -204,21 +317,29 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
             particle.sprite.material.opacity = (particle.kind === 'spark' ? 1 : 0.65) * (1 - t);
         }
 
-        for (const mark of state.skidMarks) {
-            if (mark.life <= 0) continue;
-            mark.life -= delta;
-            if (mark.life <= 0) {
-                mark.mesh.visible = false;
-                continue;
+        const lifeSeconds = VEHICLE_FX_SETTINGS.skidRibbonLifeSeconds;
+        for (const ribbon of state.ribbons.values()) {
+            if (ribbon.count === 0) continue;
+            for (let n = 0; n < ribbon.count; n++) {
+                const ringIdx = (ribbon.head - ribbon.count + n + ribbon.maxSegments) % ribbon.maxSegments;
+                ribbon.ages[ringIdx] += delta;
             }
-            mark.mesh.material.opacity *= Math.pow(0.86, delta);
+            // Drop fully-faded oldest segments to free ring slots.
+            while (ribbon.count > 0) {
+                const oldest = (ribbon.head - ribbon.count + ribbon.maxSegments) % ribbon.maxSegments;
+                if (ribbon.ages[oldest] >= lifeSeconds) {
+                    ribbon.count--;
+                } else break;
+            }
+            rebuildRibbonGeometry(ribbon, lifeSeconds);
         }
     }
 
     return {
         state,
         emitParticle,
-        emitSkidMark,
+        extendSkidRibbon,
+        breakSkidRibbon,
         emitSurfaceEffects,
         updateSurfaceEffects,
     };
