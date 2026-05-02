@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node test-scene-io.mjs)",
+      "Bash(kill %1)"
+    ]
+  }
+}

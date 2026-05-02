@@ -786,6 +786,8 @@ const blueprintState = {
     active: false,
     targetActor: null,
     selectedComponent: null,
+    selectedComponents: new Set(),
+    materialMultiSelectActive: false,
     floorMesh: null,
     savedCameraPosition: null,
     savedShowcaseAngles: null,
@@ -8166,6 +8168,9 @@ function setupGameplayEvents() {
         if (hits.length > 0) {
             const hitObj = hits[0].object;
             blueprintState.selectedComponent = hitObj;
+            blueprintState.selectedComponents.clear();
+            blueprintState.materialMultiSelectActive = false;
+            if (hitObj.isMesh) blueprintState.selectedComponents.add(hitObj);
             if (typeof transformControl !== 'undefined') transformControl.attach(hitObj);
             refreshBlueprintComponents();
         }
@@ -8191,6 +8196,9 @@ function setupGameplayEvents() {
             if (hits.length > 0) {
                 const hitObj = hits[0].object;
                 blueprintState.selectedComponent = hitObj;
+                blueprintState.selectedComponents.clear();
+                blueprintState.materialMultiSelectActive = false;
+                if (hitObj.isMesh) blueprintState.selectedComponents.add(hitObj);
                 if (typeof transformControl !== 'undefined') transformControl.attach(hitObj);
                 refreshBlueprintComponents();
                 
@@ -10592,6 +10600,8 @@ function enterBlueprintEditor() {
     if (typeof updateBlueprintTransformUI === 'function') updateBlueprintTransformUI();
     blueprintState.targetActor = prop;
     blueprintState.selectedComponent = getActorRenderObject(prop);
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
     
     blueprintState.savedCameraPosition = camera.position.clone();
     blueprintState.savedShowcaseAngles = { yaw: showcase.yaw, pitch: showcase.pitch };
@@ -10684,6 +10694,8 @@ function exitBlueprintEditor() {
     blueprintState.active = false;
     blueprintState.targetActor = null;
     blueprintState.selectedComponent = null;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
     
     if (typeof sceneSystem !== 'undefined') {
         for (const actor of sceneSystem.actors) {
@@ -10792,6 +10804,28 @@ function getBlueprintComponentDisplayName(object3D) {
     return object3D.type || 'Object3D';
 }
 
+function isBlueprintMaterialTarget(object3D) {
+    return !!object3D?.isMesh;
+}
+
+function getBlueprintMaterialTargets() {
+    const selectedMeshes = Array.from(blueprintState.selectedComponents || [])
+        .filter(isBlueprintMaterialTarget);
+    if (blueprintState.materialMultiSelectActive || selectedMeshes.length > 0) {
+        return selectedMeshes;
+    }
+    return isBlueprintMaterialTarget(blueprintState.selectedComponent)
+        ? [blueprintState.selectedComponent]
+        : [];
+}
+
+function getBlueprintMaterialPreviewTarget() {
+    if (isBlueprintMaterialTarget(blueprintState.selectedComponent)) {
+        return blueprintState.selectedComponent;
+    }
+    return getBlueprintMaterialTargets()[0] || null;
+}
+
 function setBlueprintMaterialScalarPair(rangeInput, numberInput, value, fallback = 0, min = 0, max = 1, decimals = 2) {
     const formatted = formatBlueprintMaterialScalar(value, fallback, min, max, decimals);
     if (rangeInput) rangeInput.value = formatted;
@@ -10828,11 +10862,14 @@ function syncBlueprintMaterialEditor(statusMessage = '') {
     const refs = getBlueprintMaterialEditorRefs();
     if (!refs.target || !refs.status) return;
 
-    const comp = blueprintState.selectedComponent;
-    refs.target.textContent = `Target: ${getBlueprintComponentDisplayName(comp)}`;
+    const comp = getBlueprintMaterialPreviewTarget() || blueprintState.selectedComponent;
+    const targets = getBlueprintMaterialTargets();
+    refs.target.textContent = targets.length > 1
+        ? `Targets: ${targets.length} meshes`
+        : `Target: ${getBlueprintComponentDisplayName(comp)}`;
 
     const materialState = getObjectMaterialPreviewState(comp);
-    const isEditable = !!materialState;
+    const isEditable = targets.length > 0 && !!materialState;
     setBlueprintMaterialEditorEnabled(refs, isEditable);
 
     if (!isEditable) {
@@ -10845,7 +10882,9 @@ function syncBlueprintMaterialEditor(statusMessage = '') {
         setBlueprintMaterialScalarPair(refs.alphaTest, refs.alphaTestNumber, 0, 0);
         setBlueprintMaterialScalarPair(refs.envIntensity, refs.envIntensityNumber, 1, 1, 0, 4);
         if (refs.side) refs.side.value = 'front';
-        refs.status.textContent = comp?.isLight
+        refs.status.textContent = blueprintState.materialMultiSelectActive && targets.length === 0
+            ? 'No mesh material targets selected. Ctrl/Shift-click mesh components to add them.'
+            : comp?.isLight
             ? 'Selected component is a light. Material editor only applies to mesh components.'
             : 'Select a mesh component to edit base color, emissive glow, reflectivity, opacity, and surface response.';
         return;
@@ -10862,7 +10901,9 @@ function syncBlueprintMaterialEditor(statusMessage = '') {
     if (refs.side) refs.side.value = materialState.side || 'front';
 
     const materialCount = getObjectMaterialArray(comp).length;
-    const defaultStatus = materialCount > 1
+    const defaultStatus = targets.length > 1
+        ? `Editing ${targets.length} selected meshes. Values preview from ${getBlueprintComponentDisplayName(comp)}.`
+        : materialCount > 1
         ? `This mesh has ${materialCount} material slots. The editor previews slot 1, Apply stamps all slots, and save/load preserves per-slot data.`
         : 'Selected mesh updates live and now persists richer material data with actor save/load.';
     refs.status.textContent = statusMessage || defaultStatus;
@@ -10888,8 +10929,7 @@ function readBlueprintMaterialScalarInput(numberId, rangeId, fallback = 0, min =
 
 function readBlueprintMaterialEditorState() {
     const refs = getBlueprintMaterialEditorRefs();
-    const selectedComponent = blueprintState.selectedComponent;
-    if (!selectedComponent?.isMesh || !refs.color) return null;
+    if (!getBlueprintMaterialTargets().length || !refs.color) return null;
 
     return {
         color: refs.color.value || '#888888',
@@ -10907,10 +10947,10 @@ function readBlueprintMaterialEditorState() {
 
 function applyBlueprintMaterialEdits({ applyToActor = false, captureHistory = true, refresh = true, statusMessage = '' } = {}) {
     const prop = blueprintState.targetActor;
-    const selectedComponent = blueprintState.selectedComponent;
     const rootMesh = getActorRenderObject(prop);
+    const targets = getBlueprintMaterialTargets();
     const materialState = readBlueprintMaterialEditorState();
-    if (!rootMesh || !selectedComponent?.isMesh || !materialState) return;
+    if (!rootMesh || (!applyToActor && !targets.length) || !materialState) return;
 
     if (captureHistory) {
         editorHistory.captureState();
@@ -10925,8 +10965,10 @@ function applyBlueprintMaterialEdits({ applyToActor = false, captureHistory = tr
         });
         nextStatus ||= 'Applied the current material settings to every mesh under the actor.';
     } else {
-        applyObjectMaterialState(selectedComponent, materialState);
-        nextStatus ||= `Applied material to ${getBlueprintComponentDisplayName(selectedComponent)}.`;
+        targets.forEach((target) => applyObjectMaterialState(target, materialState));
+        nextStatus ||= targets.length > 1
+            ? `Applied material to ${targets.length} selected meshes.`
+            : `Applied material to ${getBlueprintComponentDisplayName(targets[0])}.`;
     }
     rootMesh.userData.hasMaterialOverrides = true;
 
@@ -10941,7 +10983,9 @@ function previewBlueprintMaterialEdits() {
         applyToActor: false,
         captureHistory: false,
         refresh: false,
-        statusMessage: 'Live preview active. Save Actor now captures the currently shown selected-mesh material values.',
+        statusMessage: getBlueprintMaterialTargets().length > 1
+            ? `Live preview active on ${getBlueprintMaterialTargets().length} selected meshes.`
+            : 'Live preview active. Save Actor now captures the currently shown selected-mesh material values.',
     });
 }
 
@@ -10969,14 +11013,24 @@ function refreshBlueprintComponents() {
 
         if (showItem && !isInternal) {
             const item = document.createElement('div');
+            const isPrimarySelected = blueprintState.selectedComponent === object3D;
+            const isMultiSelected = blueprintState.selectedComponents?.has(object3D);
             item.style.padding = `4px 4px 4px ${4 + depth * 12}px`;
             item.style.cursor = 'pointer';
             item.style.borderRadius = '4px';
             item.style.display = 'flex';
             item.style.alignItems = 'center';
             item.style.justifyContent = 'space-between';
-            item.style.background = blueprintState.selectedComponent === object3D ? 'rgba(112, 0, 255, 0.4)' : 'rgba(255,255,255,0.05)';
-            item.style.border = blueprintState.selectedComponent === object3D ? '1px solid rgba(112, 0, 255, 0.8)' : '1px solid transparent';
+            item.style.background = isPrimarySelected
+                ? 'rgba(112, 0, 255, 0.4)'
+                : isMultiSelected
+                    ? 'rgba(112, 0, 255, 0.22)'
+                    : 'rgba(255,255,255,0.05)';
+            item.style.border = isPrimarySelected
+                ? '1px solid rgba(112, 0, 255, 0.8)'
+                : isMultiSelected
+                    ? '1px solid rgba(112, 0, 255, 0.55)'
+                    : '1px solid transparent';
 
             const label = document.createElement('span');
             let typeName = 'Group';
@@ -10996,6 +11050,21 @@ function refreshBlueprintComponents() {
 
             item.addEventListener('click', (e) => {
                 e.stopPropagation();
+                const additiveSelection = (e.ctrlKey || e.metaKey || e.shiftKey) && object3D.isMesh;
+                if (additiveSelection) {
+                    blueprintState.materialMultiSelectActive = true;
+                    if (blueprintState.selectedComponents.has(object3D)) {
+                        blueprintState.selectedComponents.delete(object3D);
+                    } else {
+                        blueprintState.selectedComponents.add(object3D);
+                    }
+                } else {
+                    blueprintState.selectedComponents.clear();
+                    blueprintState.materialMultiSelectActive = false;
+                    if (object3D.isMesh) {
+                        blueprintState.selectedComponents.add(object3D);
+                    }
+                }
                 blueprintState.selectedComponent = object3D;
                 if (typeof transformControl !== 'undefined') transformControl.attach(object3D);
                 refreshBlueprintComponents();
@@ -11034,6 +11103,9 @@ document.getElementById('btn-add-comp-cube')?.addEventListener('click', () => {
     mesh.name = 'Cube Component';
     parent.add(mesh);
     blueprintState.selectedComponent = mesh;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
+    blueprintState.selectedComponents.add(mesh);
     if (typeof transformControl !== 'undefined') transformControl.attach(mesh);
     refreshBlueprintComponents();
 });
@@ -11050,6 +11122,9 @@ document.getElementById('btn-add-comp-sphere')?.addEventListener('click', () => 
     mesh.name = 'Sphere Component';
     parent.add(mesh);
     blueprintState.selectedComponent = mesh;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
+    blueprintState.selectedComponents.add(mesh);
     if (typeof transformControl !== 'undefined') transformControl.attach(mesh);
     refreshBlueprintComponents();
 });
@@ -11065,6 +11140,8 @@ document.getElementById('btn-add-comp-light')?.addEventListener('click', () => {
     light.name = 'Point Light';
     parent.add(light);
     blueprintState.selectedComponent = light;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
     if (typeof transformControl !== 'undefined') transformControl.attach(light);
     refreshBlueprintComponents();
 });
@@ -11086,6 +11163,9 @@ document.getElementById('btn-delete-comp')?.addEventListener('click', () => {
         if (selected.material) selected.material.dispose();
         
         blueprintState.selectedComponent = rootMesh;
+        blueprintState.selectedComponents.delete(selected);
+        blueprintState.selectedComponents.clear();
+        blueprintState.materialMultiSelectActive = false;
         if (typeof transformControl !== 'undefined') transformControl.attach(rootMesh);
         refreshBlueprintComponents();
     }
