@@ -8,6 +8,20 @@ import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
 const _tempCenter = new THREE.Vector3();
 const _tempSize = new THREE.Vector3();
 
+function applyImportedMeshShadowSettings(mesh) {
+    if (!mesh?.isMesh) return;
+
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach((material) => {
+        if (!material) return;
+        material.shadowSide = THREE.DoubleSide;
+        material.needsUpdate = true;
+    });
+}
+
 export function cloneDisposableObject(root) {
     const clone = root.clone(true);
 
@@ -18,8 +32,7 @@ export function cloneDisposableObject(root) {
         child.material = Array.isArray(child.material)
             ? child.material.map((material) => material.clone())
             : child.material.clone();
-        child.castShadow = true;
-        child.receiveShadow = true;
+        applyImportedMeshShadowSettings(child);
     });
 
     return clone;
@@ -91,8 +104,7 @@ export function convertLoadedObjectMaterials(root) {
     root.traverse((child) => {
         if (!child.isMesh) return;
 
-        child.castShadow = true;
-        child.receiveShadow = true;
+        applyImportedMeshShadowSettings(child);
 
         if (!child.geometry.attributes.normal) {
             child.geometry.computeVertexNormals();
@@ -104,12 +116,17 @@ export function convertLoadedObjectMaterials(root) {
 
             const hasAlphaMap = !!material.alphaMap;
             const isActuallyTransparent = (material.transparent || false) && ((material.opacity ?? 1.0) < 1.0 || hasAlphaMap);
+            const hasEmissiveColor = !!material.emissive
+                && (material.emissive.r > 0 || material.emissive.g > 0 || material.emissive.b > 0);
+            const hasEmissiveContent = (material.emissiveIntensity ?? 1) > 0
+                && (!!material.emissiveMap || hasEmissiveColor);
 
             if (material.isMeshStandardMaterial || material.isMeshPhysicalMaterial) {
                 material.side = THREE.FrontSide;
                 material.envMapIntensity = Math.min(material.envMapIntensity ?? 0.6, 0.75);
                 material.metalness = Math.min(material.metalness ?? 0.0, 0.25);
                 material.roughness = Math.max(material.roughness ?? 0.5, 0.35);
+                material.fog = !hasEmissiveContent;
                 material.transparent = isActuallyTransparent;
                 material.alphaTest = hasAlphaMap ? Math.max(material.alphaTest || 0, 0.5) : (material.alphaTest || 0);
                 material.depthWrite = !isActuallyTransparent || hasAlphaMap;
@@ -141,6 +158,7 @@ export function convertLoadedObjectMaterials(root) {
                 opacity: material.opacity !== undefined ? material.opacity : 1.0,
                 alphaTest: hasAlphaMap ? 0.5 : (material.alphaTest || 0),
                 depthWrite: !isActuallyTransparent || hasAlphaMap,
+                fog: !hasEmissiveContent,
                 vertexColors: !!child.geometry.attributes.color,
                 side: THREE.FrontSide,
                 envMapIntensity: 0.6,

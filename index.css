@@ -609,6 +609,24 @@ main {
   text-align: right;
 }
 
+.viewer-post-process-toggle-group {
+  margin-top: 0.75rem;
+}
+
+.viewer-post-process-volume-stack {
+  margin-top: 0.85rem;
+}
+
+.viewer-post-process-size-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.viewer-post-process-actions {
+  flex-wrap: wrap;
+}
+
 .viewer-prop-library {
   margin-top: 0.85rem;
   padding-top: 0.8rem;

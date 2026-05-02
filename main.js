@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { WebGPURenderer, PostProcessing } from 'three/webgpu';
-import { pass, mrt, output, emissive } from 'three/tsl';
+import { pass, mrt, output, emissive, uniform } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
@@ -41,6 +41,7 @@ import { createPhysicsRuntime } from './src/physics/runtime.js';
 import { createEnvironmentController } from './src/world/environment.js';
 import { createLightGridController } from './src/world/lightGrid.js';
 import { createVolumetricFog } from './src/world/volumetricFog.js';
+import { createPostProcessVolumeManager } from './src/world/postProcessVolume.js';
 import {
     createActor,
     createSceneSystem,
@@ -200,13 +201,18 @@ function createExampleWidgets() {
 }
 
 // --- Configuration ---
-let scene, camera, renderer, currentMesh, transformControl, postProcessing;
+let scene, camera, renderer, currentMesh, transformControl, postProcessing, mainDirectionalLight;
 let originalTriCount = 0;
 let optimizedTriCount = 0;
 let scanPlane;
 let originalFileSize = 0;
 let optimizedBlobUrl = null;
-let environmentController, volumetricFogController;
+let environmentController, volumetricFogController, postProcessVolumeManager;
+const globalPostProcessUniforms = {
+    bloomStrength: uniform(1.25),
+    bloomRadius: uniform(0.95),
+    bloomThreshold: uniform(0.48)
+};
 let physicsCore;
 let physicsRuntime;
 let multiplayerController;
@@ -291,6 +297,8 @@ let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browse
 let playTestSoundBtn, playTestSoundStatus;
 let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
+let postProcessUiRefs;
+let shadowDebugUiRefs;
 let propCollisionPrompt, propCollisionCopy, propCollisionRemember, propCollisionSimpleBtn, propCollisionComplexBtn, propCollisionCancelBtn;
 let inputActionsOpenBtn, inputActionsEditor, inputActionLeftBtn, inputActionRightBtn, inputActionMode, inputActionEditorInput, inputActionsEditorStatus, mouseActionApplyBtn, mouseActionResetBtn, inputActionsCloseBtn, mouseActionStatus;
 let objectScriptMenu, objectScriptTickActionBtn, objectScriptCollisionActionBtn;
@@ -350,6 +358,9 @@ const blueprintState = {
     savedCameraPosition: null,
     savedShowcaseAngles: null,
     savedBackground: null
+};
+const postProcessUiState = {
+    target: 'global',
 };
 const MOUSE_ACTION_STORAGE_KEY = 'polyflow-3d.mouse-actions.v1';
 const OBJECT_SCRIPT_STORAGE_KEY = 'polyflow-3d.object-scripts.v1';
@@ -469,6 +480,8 @@ const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
+const mainDirectionalLightOffset = new THREE.Vector3(5, 10, 5);
+const mainDirectionalLightShadowFocus = new THREE.Vector3();
 const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
@@ -484,6 +497,14 @@ const raycastDebugState = {
 const collisionDebugState = {
     enabled: false,
     overlays: [],
+};
+const shadowDebugState = {
+    forceAllMeshes: false,
+    lastAppliedAt: 0,
+    lastMeshCount: 0,
+    lastUpdatedCount: 0,
+    lastLightCount: 0,
+    autoApplyIntervalMs: 500,
 };
 const gameplay = {
     canPlay: true,
@@ -1833,6 +1854,155 @@ function updateMultiplayerUiState({ statusText, playerCount, connected }) {
     if (multiplayerDisconnectBtn) {
         multiplayerDisconnectBtn.disabled = !connected;
     }
+}
+
+function formatPostProcessValue(value, digits = 2) {
+    return Number.isFinite(value) ? value.toFixed(digits) : '--';
+}
+
+function clampPostProcessInput(value, fallback, min, max) {
+    const numericValue = Number.isFinite(value) ? value : fallback;
+    return THREE.MathUtils.clamp(numericValue, min, max);
+}
+
+function readPostProcessInputValue(element, fallback, min, max) {
+    const numericValue = Number.parseFloat(element?.value ?? '');
+    return clampPostProcessInput(numericValue, fallback, min, max);
+}
+
+function updatePostProcessSliderLabels() {
+    const refs = postProcessUiRefs;
+    if (!refs) return;
+
+    if (refs.exposureValue) refs.exposureValue.textContent = formatPostProcessValue(Number.parseFloat(refs.exposureInput?.value ?? '1'), 2);
+    if (refs.bloomStrengthValue) refs.bloomStrengthValue.textContent = formatPostProcessValue(Number.parseFloat(refs.bloomStrengthInput?.value ?? '1.25'), 2);
+    if (refs.bloomRadiusValue) refs.bloomRadiusValue.textContent = formatPostProcessValue(Number.parseFloat(refs.bloomRadiusInput?.value ?? '0.95'), 2);
+    if (refs.bloomThresholdValue) refs.bloomThresholdValue.textContent = formatPostProcessValue(Number.parseFloat(refs.bloomThresholdInput?.value ?? '0.48'), 2);
+    if (refs.blendSpeedValue) refs.blendSpeedValue.textContent = formatPostProcessValue(Number.parseFloat(refs.blendSpeedInput?.value ?? '2.5'), 1);
+}
+
+function updatePostProcessToggleUi() {
+    const refs = postProcessUiRefs;
+    if (!refs) return;
+
+    const editingVolume = postProcessUiState.target === 'volume';
+    refs.targetGlobalBtn?.classList.toggle('viewer-toggle-btn-active', !editingVolume);
+    refs.targetVolumeBtn?.classList.toggle('viewer-toggle-btn-active', editingVolume);
+
+    refs.priorityInput.disabled = !editingVolume;
+    refs.sizeXInput.disabled = !editingVolume;
+    refs.sizeYInput.disabled = !editingVolume;
+    refs.sizeZInput.disabled = !editingVolume;
+}
+
+function updatePostProcessStatusUi() {
+    const refs = postProcessUiRefs;
+    if (!refs?.status) return;
+
+    const snapshot = postProcessVolumeManager?.getSnapshot?.();
+    if (!snapshot) {
+        refs.status.textContent = 'Post processing is not ready yet.';
+        return;
+    }
+
+    const editorVolume = snapshot.editorVolume;
+    const current = snapshot.currentSettings;
+    const modeLabel = postProcessUiState.target === 'volume' ? 'Editing volume override.' : 'Editing global defaults.';
+
+    if (!editorVolume) {
+        refs.status.textContent = `${modeLabel} No box volume placed yet. Active exposure ${formatPostProcessValue(current.toneMappingExposure, 2)}, bloom ${formatPostProcessValue(current.bloomStrength, 2)} / ${formatPostProcessValue(current.bloomRadius, 2)} / ${formatPostProcessValue(current.bloomThreshold, 2)}.`;
+        return;
+    }
+
+    const size = editorVolume.size;
+    refs.status.textContent = `${modeLabel} 1 volume live. Size ${formatPostProcessValue(size.x, 1)} x ${formatPostProcessValue(size.y, 1)} x ${formatPostProcessValue(size.z, 1)}, priority ${editorVolume.priority}. Active exposure ${formatPostProcessValue(current.toneMappingExposure, 2)}, bloom ${formatPostProcessValue(current.bloomStrength, 2)} / ${formatPostProcessValue(current.bloomRadius, 2)} / ${formatPostProcessValue(current.bloomThreshold, 2)}.`;
+}
+
+function loadPostProcessInputsFromState() {
+    const refs = postProcessUiRefs;
+    if (!refs) return;
+
+    const snapshot = postProcessVolumeManager?.getSnapshot?.();
+    const defaults = snapshot?.defaultSettings ?? {
+        bloomStrength: globalPostProcessUniforms.bloomStrength.value,
+        bloomRadius: globalPostProcessUniforms.bloomRadius.value,
+        bloomThreshold: globalPostProcessUniforms.bloomThreshold.value,
+        toneMappingExposure: renderer?.toneMappingExposure ?? 1.0,
+        priority: 0,
+    };
+    const editorVolume = snapshot?.editorVolume;
+    const volumeSettings = editorVolume?.settings ?? defaults;
+    const selectedSettings = postProcessUiState.target === 'volume' ? volumeSettings : defaults;
+
+    if (refs.exposureInput) refs.exposureInput.value = formatPostProcessValue(selectedSettings.toneMappingExposure, 2);
+    if (refs.bloomStrengthInput) refs.bloomStrengthInput.value = formatPostProcessValue(selectedSettings.bloomStrength, 2);
+    if (refs.bloomRadiusInput) refs.bloomRadiusInput.value = formatPostProcessValue(selectedSettings.bloomRadius, 2);
+    if (refs.bloomThresholdInput) refs.bloomThresholdInput.value = formatPostProcessValue(selectedSettings.bloomThreshold, 2);
+    if (refs.blendSpeedInput) refs.blendSpeedInput.value = formatPostProcessValue(snapshot?.transitionSpeed ?? 2.5, 1);
+    if (refs.priorityInput) refs.priorityInput.value = String(Math.round(volumeSettings.priority ?? 0));
+    if (refs.sizeXInput) refs.sizeXInput.value = formatPostProcessValue(editorVolume?.size.x ?? 12, 1);
+    if (refs.sizeYInput) refs.sizeYInput.value = formatPostProcessValue(editorVolume?.size.y ?? 6, 1);
+    if (refs.sizeZInput) refs.sizeZInput.value = formatPostProcessValue(editorVolume?.size.z ?? 12, 1);
+
+    if (refs.placeVolumeBtn) refs.placeVolumeBtn.textContent = editorVolume ? 'Move To Camera' : 'Place At Camera';
+    if (refs.removeVolumeBtn) refs.removeVolumeBtn.disabled = !editorVolume;
+    if (refs.toggleBoundsBtn) {
+        refs.toggleBoundsBtn.textContent = snapshot?.debugVisible ? 'Hide Bounds' : 'Show Bounds';
+        refs.toggleBoundsBtn.classList.toggle('viewer-toggle-btn-active', !!snapshot?.debugVisible);
+    }
+
+    updatePostProcessSliderLabels();
+}
+
+function syncPostProcessVolumeUi({ reloadInputs = true } = {}) {
+    updatePostProcessToggleUi();
+    if (reloadInputs) {
+        loadPostProcessInputsFromState();
+    } else {
+        updatePostProcessSliderLabels();
+    }
+    updatePostProcessStatusUi();
+}
+
+function applyPostProcessSettingsFromUi({ createVolumeIfNeeded = false, placeVolumeAtCamera = false, reloadInputs = false } = {}) {
+    const refs = postProcessUiRefs;
+    const manager = postProcessVolumeManager;
+    if (!refs || !manager) return;
+
+    const settings = {
+        toneMappingExposure: readPostProcessInputValue(refs.exposureInput, 1.0, 0.1, 2.5),
+        bloomStrength: readPostProcessInputValue(refs.bloomStrengthInput, 1.25, 0, 3),
+        bloomRadius: readPostProcessInputValue(refs.bloomRadiusInput, 0.95, 0, 2),
+        bloomThreshold: readPostProcessInputValue(refs.bloomThresholdInput, 0.48, 0, 2),
+        priority: Math.round(readPostProcessInputValue(refs.priorityInput, 0, -100, 100)),
+    };
+    const transitionSpeed = readPostProcessInputValue(refs.blendSpeedInput, 2.5, 0.1, 10);
+    manager.setTransitionSpeed?.(transitionSpeed);
+
+    if (postProcessUiState.target === 'volume') {
+        const snapshot = manager.getSnapshot?.();
+        const existingVolume = snapshot?.editorVolume ?? null;
+        const size = new THREE.Vector3(
+            readPostProcessInputValue(refs.sizeXInput, 12, 0.5, 512),
+            readPostProcessInputValue(refs.sizeYInput, 6, 0.5, 512),
+            readPostProcessInputValue(refs.sizeZInput, 12, 0.5, 512)
+        );
+
+        if (existingVolume || createVolumeIfNeeded || placeVolumeAtCamera) {
+            const position = placeVolumeAtCamera || !existingVolume
+                ? (camera?.position?.clone?.() ?? new THREE.Vector3())
+                : existingVolume.position;
+            manager.ensureEditorVolume?.({ position, size, settings });
+            if (placeVolumeAtCamera) {
+                manager.setDebugVisible?.(true);
+            }
+        }
+    } else {
+        manager.setDefaultSettings?.(settings);
+    }
+
+    manager.update?.(1);
+    syncPostProcessVolumeUi({ reloadInputs });
 }
 
 function getLocalMultiplayerSnapshot() {
@@ -5033,6 +5203,120 @@ function setRayDebugEnabled(isEnabled) {
     }
 }
 
+function formatShadowDebugStatus() {
+    const lastPassSuffix = shadowDebugState.lastAppliedAt > 0
+        ? ` Last pass hit ${shadowDebugState.lastMeshCount} mesh${shadowDebugState.lastMeshCount === 1 ? '' : 'es'}, changed ${shadowDebugState.lastUpdatedCount}, armed ${shadowDebugState.lastLightCount} shadow light${shadowDebugState.lastLightCount === 1 ? '' : 's'}.`
+        : '';
+
+    if (shadowDebugState.forceAllMeshes) {
+        return `Auto force is on. New scene meshes get swept every ${Math.round(shadowDebugState.autoApplyIntervalMs)} ms.${lastPassSuffix}`;
+    }
+
+    if (shadowDebugState.lastAppliedAt > 0) {
+        return `Auto force is off.${lastPassSuffix}`;
+    }
+
+    return 'Auto force is off. Apply Now runs one scene-wide shadow pass without keeping it enabled.';
+}
+
+function updateShadowDebugUi() {
+    if (!shadowDebugUiRefs) return;
+
+    shadowDebugUiRefs.forceOffBtn?.classList.toggle('viewer-toggle-btn-active', !shadowDebugState.forceAllMeshes);
+    shadowDebugUiRefs.forceOnBtn?.classList.toggle('viewer-toggle-btn-active', shadowDebugState.forceAllMeshes);
+
+    if (shadowDebugUiRefs.status) {
+        shadowDebugUiRefs.status.textContent = formatShadowDebugStatus();
+    }
+}
+
+function isShadowForceExcludedObject(object) {
+    let current = object;
+    while (current) {
+        if (current.userData?.ignoreForcedSceneShadows) {
+            return true;
+        }
+        current = current.parent ?? null;
+    }
+
+    return object?.name === 'tire-skid-ribbon';
+}
+
+function forceAllSceneMeshShadows() {
+    if (!scene?.traverse) {
+        shadowDebugState.lastAppliedAt = performance.now();
+        shadowDebugState.lastMeshCount = 0;
+        shadowDebugState.lastUpdatedCount = 0;
+        shadowDebugState.lastLightCount = 0;
+        updateShadowDebugUi();
+        return {
+            meshCount: 0,
+            updatedCount: 0,
+            shadowLightCount: 0,
+        };
+    }
+
+    let meshCount = 0;
+    let updatedCount = 0;
+    let shadowLightCount = 0;
+
+    scene.traverse((object) => {
+        if (!object) return;
+
+        if (object.isMesh) {
+            if (isShadowForceExcludedObject(object)) {
+                return;
+            }
+
+            meshCount += 1;
+
+            if (!object.castShadow || !object.receiveShadow) {
+                updatedCount += 1;
+            }
+
+            object.castShadow = true;
+            object.receiveShadow = true;
+            return;
+        }
+
+        if (object.isDirectionalLight || object.isSpotLight || object.isPointLight) {
+            if (!object.castShadow) {
+                shadowLightCount += 1;
+            }
+            object.castShadow = true;
+        }
+    });
+
+    if (renderer?.shadowMap) {
+        renderer.shadowMap.enabled = true;
+    }
+
+    shadowDebugState.lastAppliedAt = performance.now();
+    shadowDebugState.lastMeshCount = meshCount;
+    shadowDebugState.lastUpdatedCount = updatedCount;
+    shadowDebugState.lastLightCount = shadowLightCount;
+    updateShadowDebugUi();
+
+    return {
+        meshCount,
+        updatedCount,
+        shadowLightCount,
+    };
+}
+
+function setForceAllSceneMeshShadowsEnabled(isEnabled) {
+    shadowDebugState.forceAllMeshes = !!isEnabled;
+    const result = shadowDebugState.forceAllMeshes ? forceAllSceneMeshShadows() : null;
+    updateShadowDebugUi();
+    return result;
+}
+
+function tickForceAllSceneMeshShadows() {
+    if (!shadowDebugState.forceAllMeshes && !gameplay.active) return;
+    if ((performance.now() - shadowDebugState.lastAppliedAt) < shadowDebugState.autoApplyIntervalMs) return;
+    forceAllSceneMeshShadows();
+}
+
 // ──────────────────────────────────────────────────────────
 //  Physgun (GMod-style grab/push/pull/fling tool)
 // ──────────────────────────────────────────────────────────
@@ -5976,10 +6260,45 @@ function runRayDebugCommand(args) {
     pushDebugConsoleLine('Usage: raydebug on, raydebug off, or raydebug toggle.', 'warn');
 }
 
+function runMeshShadowsCommand(args) {
+    const action = args[0]?.toLowerCase() || 'apply';
+
+    if (['apply', 'now', 'once'].includes(action)) {
+        const result = forceAllSceneMeshShadows();
+        pushDebugConsoleLine(`Forced shadows on ${result.updatedCount}/${result.meshCount} meshes.`, 'success');
+        return;
+    }
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        const result = setForceAllSceneMeshShadowsEnabled(true) ?? { meshCount: 0 };
+        pushDebugConsoleLine(`Mesh shadow auto-force enabled. Watching ${result.meshCount} meshes.`, 'success');
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        setForceAllSceneMeshShadowsEnabled(false);
+        pushDebugConsoleLine('Mesh shadow auto-force disabled.', 'success');
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        const result = setForceAllSceneMeshShadowsEnabled(!shadowDebugState.forceAllMeshes) ?? { meshCount: shadowDebugState.lastMeshCount };
+        if (shadowDebugState.forceAllMeshes) {
+            pushDebugConsoleLine(`Mesh shadow auto-force enabled. Watching ${result.meshCount} meshes.`, 'success');
+        } else {
+            pushDebugConsoleLine('Mesh shadow auto-force disabled.', 'success');
+        }
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: meshshadows apply, meshshadows on, meshshadows off, or meshshadows toggle.', 'warn');
+}
+
 const debugCommandRegistry = {
     stat: runStatCommand,
     mobile: runMobileCommand,
     raydebug: runRayDebugCommand,
+    meshshadows: runMeshShadowsCommand,
 };
 
 function executeDebugConsoleCommand(rawCommand) {
@@ -6543,9 +6862,99 @@ async function init() {
     debugConsoleFooter = document.getElementById('debug-console-footer');
     debugStatsOverlay = document.getElementById('debug-stats-overlay');
     engineAudioDebugEl = document.getElementById('engine-audio-debug');
+    postProcessUiRefs = {
+        targetGlobalBtn: document.getElementById('post-process-target-global'),
+        targetVolumeBtn: document.getElementById('post-process-target-volume'),
+        exposureInput: document.getElementById('post-process-exposure'),
+        exposureValue: document.getElementById('post-process-exposure-value'),
+        bloomStrengthInput: document.getElementById('post-process-bloom-strength'),
+        bloomStrengthValue: document.getElementById('post-process-bloom-strength-value'),
+        bloomRadiusInput: document.getElementById('post-process-bloom-radius'),
+        bloomRadiusValue: document.getElementById('post-process-bloom-radius-value'),
+        bloomThresholdInput: document.getElementById('post-process-bloom-threshold'),
+        bloomThresholdValue: document.getElementById('post-process-bloom-threshold-value'),
+        blendSpeedInput: document.getElementById('post-process-blend-speed'),
+        blendSpeedValue: document.getElementById('post-process-blend-speed-value'),
+        priorityInput: document.getElementById('post-process-priority'),
+        sizeXInput: document.getElementById('post-process-size-x'),
+        sizeYInput: document.getElementById('post-process-size-y'),
+        sizeZInput: document.getElementById('post-process-size-z'),
+        placeVolumeBtn: document.getElementById('post-process-place-volume'),
+        removeVolumeBtn: document.getElementById('post-process-remove-volume'),
+        toggleBoundsBtn: document.getElementById('post-process-toggle-bounds'),
+        applyBtn: document.getElementById('post-process-apply-settings'),
+        status: document.getElementById('post-process-status'),
+    };
+    shadowDebugUiRefs = {
+        forceOffBtn: document.getElementById('debug-force-mesh-shadows-off'),
+        forceOnBtn: document.getElementById('debug-force-mesh-shadows-on'),
+        applyBtn: document.getElementById('debug-apply-mesh-shadows'),
+        status: document.getElementById('debug-shadow-status'),
+    };
 
     renderDebugConsoleOutput();
     debugConsoleInput?.addEventListener('keydown', handleDebugConsoleInputKeydown);
+
+    postProcessUiRefs?.targetGlobalBtn?.addEventListener('click', () => {
+        postProcessUiState.target = 'global';
+        syncPostProcessVolumeUi();
+    });
+    postProcessUiRefs?.targetVolumeBtn?.addEventListener('click', () => {
+        postProcessUiState.target = 'volume';
+        syncPostProcessVolumeUi();
+    });
+
+    [
+        postProcessUiRefs?.exposureInput,
+        postProcessUiRefs?.bloomStrengthInput,
+        postProcessUiRefs?.bloomRadiusInput,
+        postProcessUiRefs?.bloomThresholdInput,
+        postProcessUiRefs?.blendSpeedInput,
+    ].forEach((input) => {
+        input?.addEventListener('input', () => {
+            updatePostProcessSliderLabels();
+            applyPostProcessSettingsFromUi({ reloadInputs: false });
+        });
+    });
+
+    [
+        postProcessUiRefs?.priorityInput,
+        postProcessUiRefs?.sizeXInput,
+        postProcessUiRefs?.sizeYInput,
+        postProcessUiRefs?.sizeZInput,
+    ].forEach((input) => {
+        input?.addEventListener('change', () => {
+            applyPostProcessSettingsFromUi({ reloadInputs: false });
+        });
+    });
+
+    postProcessUiRefs?.placeVolumeBtn?.addEventListener('click', () => {
+        postProcessUiState.target = 'volume';
+        applyPostProcessSettingsFromUi({ createVolumeIfNeeded: true, placeVolumeAtCamera: true, reloadInputs: true });
+    });
+    postProcessUiRefs?.removeVolumeBtn?.addEventListener('click', () => {
+        postProcessVolumeManager?.removeEditorVolume?.();
+        postProcessVolumeManager?.update?.(1);
+        syncPostProcessVolumeUi();
+    });
+    postProcessUiRefs?.toggleBoundsBtn?.addEventListener('click', () => {
+        const snapshot = postProcessVolumeManager?.getSnapshot?.();
+        postProcessVolumeManager?.setDebugVisible?.(!snapshot?.debugVisible);
+        syncPostProcessVolumeUi({ reloadInputs: false });
+    });
+    postProcessUiRefs?.applyBtn?.addEventListener('click', () => {
+        applyPostProcessSettingsFromUi({ createVolumeIfNeeded: postProcessUiState.target === 'volume', reloadInputs: true });
+    });
+    shadowDebugUiRefs?.forceOffBtn?.addEventListener('click', () => {
+        setForceAllSceneMeshShadowsEnabled(false);
+    });
+    shadowDebugUiRefs?.forceOnBtn?.addEventListener('click', () => {
+        setForceAllSceneMeshShadowsEnabled(true);
+    });
+    shadowDebugUiRefs?.applyBtn?.addEventListener('click', () => {
+        forceAllSceneMeshShadows();
+    });
+    updateShadowDebugUi();
 
     if (browseModelBtn) {
         browseModelBtn.addEventListener('click', () => {
@@ -6725,6 +7134,8 @@ async function init() {
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
@@ -6740,9 +7151,17 @@ async function init() {
     }));
     const sceneColor = scenePass.getTextureNode('output');
     const sceneEmissive = scenePass.getTextureNode('emissive');
-    const bloomNode = bloom(sceneEmissive, 1.25, 0.95, 0.48);
+    const bloomNode = bloom(sceneEmissive, globalPostProcessUniforms.bloomStrength, globalPostProcessUniforms.bloomRadius, globalPostProcessUniforms.bloomThreshold);
     postProcessing = new PostProcessing(renderer);
     postProcessing.outputNode = sceneColor.add(bloomNode);
+
+    postProcessVolumeManager = createPostProcessVolumeManager({
+        scene,
+        camera,
+        renderer,
+        globalUniforms: globalPostProcessUniforms
+    });
+    syncPostProcessVolumeUi();
 
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
@@ -6824,19 +7243,21 @@ async function init() {
     hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
     scene.add(hemiLight);
 
-    const mainLight = new THREE.DirectionalLight(0xffffff, 2.5);
-    mainLight.position.set(5, 10, 5);
-    mainLight.castShadow = true;
-    mainLight.shadow.mapSize.width = 2048;
-    mainLight.shadow.mapSize.height = 2048;
-    mainLight.shadow.camera.near = 0.5;
-    mainLight.shadow.camera.far = 15;
-    mainLight.shadow.camera.left = -3;
-    mainLight.shadow.camera.right = 3;
-    mainLight.shadow.camera.top = 3;
-    mainLight.shadow.camera.bottom = -3;
-    mainLight.shadow.bias = -0.001;
-    scene.add(mainLight);
+    mainDirectionalLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    mainDirectionalLight.castShadow = true;
+    mainDirectionalLight.shadow.mapSize.width = 4096;
+    mainDirectionalLight.shadow.mapSize.height = 4096;
+    mainDirectionalLight.shadow.camera.near = 0.5;
+    mainDirectionalLight.shadow.camera.far = 60;
+    mainDirectionalLight.shadow.camera.left = -24;
+    mainDirectionalLight.shadow.camera.right = 24;
+    mainDirectionalLight.shadow.camera.top = 24;
+    mainDirectionalLight.shadow.camera.bottom = -24;
+    mainDirectionalLight.shadow.bias = -0.001;
+    mainDirectionalLight.shadow.normalBias = 0.02;
+    scene.add(mainDirectionalLight);
+    scene.add(mainDirectionalLight.target);
+    updateMainDirectionalLightShadowFocus();
 
     // Create example widgets
     createExampleWidgets();
@@ -6894,6 +7315,7 @@ async function init() {
             updateEngineAudioDebugOverlay('idle', null, null);
             updateShowcaseCamera(delta);
         }
+        updateMainDirectionalLightShadowFocus();
         updateGameplayDebugRay();
         const updateDuration = performance.now() - updateStart;
 
@@ -6904,9 +7326,10 @@ async function init() {
         updateVehicleVisuals(delta);
         updateVehicleSurfaceEffects(delta);
         volumetricFogController?.update(delta);
-        
-        multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
-        multiplayerController?.update(delta);
+        postProcessVolumeManager?.update(delta);
+        tickForceAllSceneMeshShadows();
+
+        multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());        multiplayerController?.update(delta);
 
         try {
             // Update widget system
@@ -7521,6 +7944,7 @@ function handlePointerLockChange() {
     if (isLocked) {
         gameplay.pointerLocked = true;
         gameplay.active = true;
+        forceAllSceneMeshShadows();
         showcase.looking = false;
         syncTransformControlState();
         closeObjectScriptMenu();
@@ -7554,6 +7978,7 @@ function enterGameplay() {
     respawnPlayer(true);
     gameplay.pointerLocked = false;
     gameplay.active = true;
+    forceAllSceneMeshShadows();
     syncTransformControlState();
     resetAllScriptLifecycleHandles();
     applyMouseActionScripts({ persist: true });
@@ -7603,6 +8028,17 @@ function updateWorldPresentation() {
     if (pedestal) pedestal.visible = !gameplay.active;
     document.body.classList.toggle('play-ready', gameplay.canPlay);
     document.body.classList.toggle('play-active', gameplay.active);
+}
+
+function updateMainDirectionalLightShadowFocus() {
+    if (!mainDirectionalLight || !camera) return;
+
+    mainDirectionalLightShadowFocus.copy(camera.position);
+    mainDirectionalLightShadowFocus.y = worldFloor?.position?.y ?? 0;
+
+    mainDirectionalLight.position.copy(mainDirectionalLightShadowFocus).add(mainDirectionalLightOffset);
+    mainDirectionalLight.target.position.copy(mainDirectionalLightShadowFocus);
+    mainDirectionalLight.target.updateMatrixWorld();
 }
 
 function updateGameplayUI() {

@@ -140,12 +140,41 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
         textures: {},
     };
 
+    function applyParticleMaterialStyle(material, kind) {
+        if (!material) return;
+
+        material.map = state.textures[kind] || state.textures.smoke;
+        material.color.setHex(0xffffff);
+        material.transparent = true;
+        material.depthWrite = false;
+        material.fog = false;
+
+        if (kind === 'spark') {
+            material.blending = THREE.AdditiveBlending;
+            material.opacity = 1;
+            material.toneMapped = false;
+            return;
+        }
+
+        if (kind === 'smoke') {
+            material.blending = THREE.AdditiveBlending;
+            material.opacity = 0.12;
+            material.toneMapped = false;
+            return;
+        }
+
+        material.blending = THREE.AdditiveBlending;
+        material.opacity = 0.14;
+        material.toneMapped = false;
+    }
+
     function ensureGroup() {
         const scene = typeof getScene === 'function' ? getScene() : null;
         if (!scene) return null;
         if (!state.group) {
             state.group = new THREE.Group();
             state.group.name = 'vehicle-surface-fx';
+            state.group.userData.ignoreForcedSceneShadows = true;
             scene.add(state.group);
         }
         for (const kind of ['smoke', 'dust', 'spark']) {
@@ -177,8 +206,9 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
                 map: state.textures[kind] || state.textures.smoke,
                 transparent: true,
                 depthWrite: false,
-                blending: kind === 'spark' ? THREE.AdditiveBlending : THREE.NormalBlending,
+                toneMapped: false,
             });
+            applyParticleMaterialStyle(material, kind);
             const sprite = new THREE.Sprite(material);
             sprite.visible = false;
             group.add(sprite);
@@ -194,9 +224,7 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
         particle.velocity.copy(velocity);
         particle.sprite.position.copy(position);
         particle.sprite.scale.setScalar(size);
-        particle.sprite.material.map = state.textures[kind] || state.textures.smoke;
-        particle.sprite.material.blending = kind === 'spark' ? THREE.AdditiveBlending : THREE.NormalBlending;
-        particle.sprite.material.opacity = kind === 'spark' ? 1 : 0.65;
+        applyParticleMaterialStyle(particle.sprite.material, kind);
         particle.sprite.visible = true;
     }
 
@@ -257,11 +285,15 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
                 wheelPos.y -= Math.min(corner.rideHeight, vehicleSettings.suspensionRideHeight);
             }
 
+            const plumeBasePos = wheelPos.clone()
+                .addScaledVector(data.flatForward, -0.42)
+                .addScaledVector(_upVector, -0.16);
+
             if (dustAmount > 0 && Math.random() < dustAmount * 18 * delta) {
                 emitParticle(
                     'dust',
-                    wheelPos.clone().addScaledVector(data.flatRight, (Math.random() - 0.5) * 0.18),
-                    data.flatForward.clone().multiplyScalar(-speed * (0.12 + Math.random() * 0.08)).addScaledVector(_upVector, 0.45 + Math.random() * 0.55),
+                    plumeBasePos.clone().addScaledVector(data.flatRight, (Math.random() - 0.5) * 0.18),
+                    data.flatForward.clone().multiplyScalar(-speed * (0.16 + Math.random() * 0.1)).addScaledVector(_upVector, 0.22 + Math.random() * 0.22),
                     0.34 + dustAmount * 0.62 + Math.random() * 0.16,
                     0.55 + Math.random() * 0.55
                 );
@@ -269,10 +301,10 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
             if (smokeAmount > 0.08 && slip && Math.random() < smokeAmount * 26 * delta) {
                 emitParticle(
                     'smoke',
-                    wheelPos.clone().addScaledVector(data.flatRight, (Math.random() - 0.5) * 0.24),
-                    data.flatForward.clone().multiplyScalar(-0.8 - Math.random() * 1.1)
+                    plumeBasePos.clone().addScaledVector(data.flatRight, (Math.random() - 0.5) * 0.24),
+                    data.flatForward.clone().multiplyScalar(-1.25 - Math.random() * 1.35)
                         .addScaledVector(data.flatRight, (Math.random() - 0.5) * 0.65)
-                        .addScaledVector(_upVector, 0.85 + Math.random() * 0.75),
+                        .addScaledVector(_upVector, 0.32 + Math.random() * 0.28),
                     0.62 + smokeAmount * 1.05 + Math.random() * 0.28,
                     1.05 + Math.random() * 0.95
                 );
@@ -314,7 +346,12 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
             particle.velocity.y += particle.kind === 'spark' ? -9.5 * delta : 0.35 * delta;
             particle.sprite.position.addScaledVector(particle.velocity, delta);
             particle.sprite.scale.setScalar(particle.baseSize * (particle.kind === 'spark' ? 1 - t * 0.55 : 1 + t * 1.35));
-            particle.sprite.material.opacity = (particle.kind === 'spark' ? 1 : 0.65) * (1 - t);
+            const baseOpacity = particle.kind === 'spark'
+                ? 1
+                : particle.kind === 'smoke'
+                    ? 0.12
+                    : 0.14;
+            particle.sprite.material.opacity = baseOpacity * (1 - t);
         }
 
         const lifeSeconds = VEHICLE_FX_SETTINGS.skidRibbonLifeSeconds;

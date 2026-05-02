@@ -365,6 +365,76 @@
                             </details>
 
                             <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Post Process Volume</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Godot-style global grading plus one editable box volume that overrides bloom and exposure when the camera enters it.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="post-process-target-global">Global</button>
+                                        <button class="btn viewer-toggle-btn" id="post-process-target-volume">Volume</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Exposure</div>
+                                        <input id="post-process-exposure" type="range" min="0.1" max="2.5" step="0.01" value="1.00">
+                                        <div class="viewer-slider-value" id="post-process-exposure-value">1.00</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Strength</div>
+                                        <input id="post-process-bloom-strength" type="range" min="0" max="3" step="0.01" value="1.25">
+                                        <div class="viewer-slider-value" id="post-process-bloom-strength-value">1.25</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Radius</div>
+                                        <input id="post-process-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.95">
+                                        <div class="viewer-slider-value" id="post-process-bloom-radius-value">0.95</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Threshold</div>
+                                        <input id="post-process-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
+                                        <div class="viewer-slider-value" id="post-process-bloom-threshold-value">0.48</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Blend Speed</div>
+                                        <input id="post-process-blend-speed" type="range" min="0.1" max="10" step="0.1" value="2.5">
+                                        <div class="viewer-slider-value" id="post-process-blend-speed-value">2.5</div>
+                                    </div>
+                                    <div class="viewer-input-stack viewer-post-process-volume-stack">
+                                        <label class="viewer-input-label" for="post-process-priority">Volume Priority</label>
+                                        <input class="viewer-text-input" id="post-process-priority" type="number" step="1" value="0">
+                                        <label class="viewer-input-label" for="post-process-size-x">Volume Size</label>
+                                        <div class="viewer-post-process-size-grid">
+                                            <input class="viewer-text-input" id="post-process-size-x" type="number" min="0.5" step="0.5" value="12">
+                                            <input class="viewer-text-input" id="post-process-size-y" type="number" min="0.5" step="0.5" value="6">
+                                            <input class="viewer-text-input" id="post-process-size-z" type="number" min="0.5" step="0.5" value="12">
+                                        </div>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="post-process-place-volume">Place At Camera</button>
+                                        <button class="btn viewer-menu-btn" id="post-process-remove-volume">Remove Volume</button>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="post-process-toggle-bounds">Show Bounds</button>
+                                        <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="post-process-apply-settings">Apply Settings</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="post-process-status">Global defaults are active. Place a volume to override bloom and exposure inside a region.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Debug Shadows</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Force every live mesh in the scene to cast and receive shadows. Useful when imported actors come in with shadow flags off.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="debug-force-mesh-shadows-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="debug-force-mesh-shadows-on">On</button>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="debug-apply-mesh-shadows">Apply Now</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="debug-shadow-status">Auto force is off. Apply Now runs one scene-wide shadow pass without keeping it enabled.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Multiplayer</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-input-stack">

@@ -32,6 +32,16 @@ export function getMetadataComponent(actor) {
     return getActorComponent(actor, RUNTIME_COMPONENT_KEYS.metadata);
 }
 
+function applyActorShadowFlags(object3D) {
+    if (!object3D?.traverse) return;
+
+    object3D.traverse((child) => {
+        if (!child?.isMesh) return;
+        child.castShadow = true;
+        child.receiveShadow = true;
+    });
+}
+
 export class Entity {
     constructor(id = '') {
         this.id = id;
@@ -157,6 +167,8 @@ export class Actor {
         templateId = '',
         userData = null,
     } = {}) {
+        applyActorShadowFlags(mesh);
+
         this.entity = new Entity(id);
         this.rootNode = new SceneNode(name, mesh);
         this.sceneSystem = null;
@@ -206,6 +218,7 @@ export class Actor {
     set mesh(value) {
         const renderComponent = this.entity.getComponent(RUNTIME_COMPONENT_KEYS.render);
         const previousMesh = renderComponent?.mesh ?? null;
+        applyActorShadowFlags(value);
         if (renderComponent) {
             renderComponent.mesh = value;
         }

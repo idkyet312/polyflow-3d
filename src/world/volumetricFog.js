@@ -3,6 +3,7 @@ import * as THREE from 'three';
 const DEFAULT_SETTINGS = {
     enabled: true,
     color: 0xd8dee6,
+    sceneFogColor: 0x58616c,
     density: 0.012,
     layerCount: 34,
     radius: 92,
@@ -53,17 +54,19 @@ export function createVolumetricFog({ scene, camera, settings = {} }) {
 
     state.group.name = 'volumetric-fog';
     state.group.renderOrder = -10;
+    state.group.userData.ignoreForcedSceneShadows = true;
 
-    const material = new THREE.MeshStandardMaterial({
-        color: config.color,
+    const fogSheetColor = new THREE.Color(config.color).multiplyScalar(0.42);
+    const material = new THREE.MeshBasicMaterial({
+        color: fogSheetColor,
         map: state.texture,
         transparent: true,
         opacity: config.opacity,
+        blending: THREE.AdditiveBlending,
         depthWrite: false,
         side: THREE.DoubleSide,
         fog: false,
-        roughness: 1,
-        metalness: 0,
+        toneMapped: false,
     });
 
     const geometry = new THREE.PlaneGeometry(config.radius * 2, config.radius * 2);
@@ -83,7 +86,7 @@ export function createVolumetricFog({ scene, camera, settings = {} }) {
 
     function applyEnabled() {
         state.group.visible = config.enabled;
-        scene.fog = config.enabled ? new THREE.FogExp2(config.color, config.density) : null;
+        scene.fog = config.enabled ? new THREE.FogExp2(config.sceneFogColor, config.density) : null;
     }
 
     function update(delta) {
