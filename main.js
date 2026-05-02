@@ -726,7 +726,7 @@ const TEST_SOUND_ID = 'polyflow:test';
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
-let playHint, gameplayStatus, vehicleAudioBackendEl, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
+let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
 let playTestSoundBtn, playTestSoundStatus;
 let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
@@ -736,7 +736,7 @@ let objectScriptMenu, objectScriptTickActionBtn, objectScriptCollisionActionBtn;
 let objectScriptEditor, objectScriptEditorTitle, objectScriptEditorTarget, objectScriptEditorMode;
 let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBtn, objectScriptEditorClearBtn, objectScriptEditorCancelBtn;
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
-let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect;
+let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect, actorVehicleBodyTemplateSelect, actorVehicleWheelTemplateSelect;
 let actorComponentCollisionInput, actorComponentPhysicsInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
 let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
 let sceneUiPanel, sceneUiCount, sceneUiList;
@@ -941,7 +941,6 @@ const vehicleState = {
 const vehicleEngineAudio = {
     activePropId: '',
     backend: 'none',
-    lastAnnouncedBackend: '',
     listener: null,
     wasmGenerator: null,
     wasmLoadPromise: null,
@@ -1313,63 +1312,23 @@ function resetVehicleEngineAudioState() {
     vehicleEngineAudio.velocity.set(0, 0, 0);
 }
 
-function getVehicleEngineAudioBackendLabel() {
-    if (vehicleEngineAudio.backend === 'wasm') {
-        return { state: 'wasm', text: 'Engine audio: WASM worklet' };
-    }
-    if (vehicleEngineAudio.backend === 'js') {
-        return {
-            state: 'js',
-            text: vehicleEngineAudio.wasmFailed
-                ? `Engine audio: JS fallback (${vehicleEngineAudio.wasmFailureReason || 'WASM unavailable'})`
-                : 'Engine audio: JS fallback',
-        };
-    }
-    if (vehicleEngineAudio.wasmLoadPromise) {
-        return { state: 'none', text: 'Engine audio: loading WASM' };
-    }
-    if (vehicleEngineAudio.wasmFailed) {
-        return { state: 'error', text: `Engine audio: none (${vehicleEngineAudio.wasmFailureReason || 'WASM unavailable'})` };
-    }
-    return { state: 'none', text: 'Engine audio: none' };
-}
-
-function updateVehicleAudioBackendIndicator({ announce = false } = {}) {
-    const backend = getVehicleEngineAudioBackendLabel();
-    if (vehicleAudioBackendEl) {
-        vehicleAudioBackendEl.hidden = !isDrivingVehicle();
-        vehicleAudioBackendEl.textContent = backend.text;
-        vehicleAudioBackendEl.classList.remove(
-            'play-audio-backend-wasm',
-            'play-audio-backend-js',
-            'play-audio-backend-none',
-            'play-audio-backend-error',
-        );
-        vehicleAudioBackendEl.classList.add(`play-audio-backend-${backend.state}`);
-    }
-    if (announce && backend.text !== vehicleEngineAudio.lastAnnouncedBackend) {
-        vehicleEngineAudio.lastAnnouncedBackend = backend.text;
-        console.info(backend.text);
-    }
-}
-
 function createVehicleEngineWasmParameters() {
     return {
-        cylinders: 4,
-        intakeWaveguideLength: 100,
-        exhaustWaveguideLength: 100,
-        extractorWaveguideLength: 100,
-        intakeOpenReflectionFactor: 0.01,
-        intakeClosedReflectionFactor: 0.95,
-        exhaustOpenReflectionFactor: 0.01,
-        exhaustClosedReflectionFactor: 0.95,
-        ignitionTime: 0.016,
-        straightPipeWaveguideLength: 128,
-        straightPipeReflectionFactor: 0.01,
-        mufflerElementsLength: [10, 15, 20, 25],
-        action: 0.1,
-        outletWaveguideLength: 5,
-        outletReflectionFactor: 0.01,
+        cylinders: 8,
+        intakeWaveguideLength: 120,
+        exhaustWaveguideLength: 180,
+        extractorWaveguideLength: 80,
+        intakeOpenReflectionFactor: 0.02,
+        intakeClosedReflectionFactor: 0.92,
+        exhaustOpenReflectionFactor: 0.02,
+        exhaustClosedReflectionFactor: 0.92,
+        ignitionTime: 0.014,
+        straightPipeWaveguideLength: 144,
+        straightPipeReflectionFactor: 0.03,
+        mufflerElementsLength: [16, 22, 28, 36],
+        action: 0.16,
+        outletWaveguideLength: 10,
+        outletReflectionFactor: 0.03,
     };
 }
 
@@ -2103,14 +2062,12 @@ function updateVehicleEngineAudio(delta, vehicle, telemetry) {
 
     if (vehicleEngineAudio.wasmModuleReady && !vehicleEngineAudio.wasmFailed) {
         const usedWasm = updateVehicleEngineAudioWasm(delta, vehicle, telemetry);
-        updateVehicleAudioBackendIndicator({ announce: true });
         if (usedWasm) {
             return;
         }
     }
 
     updateLegacyVehicleEngineAudio(delta, vehicle, telemetry);
-    updateVehicleAudioBackendIndicator({ announce: true });
 }
 
 function resolveRuntimeSoundBuffer(soundSpec) {
@@ -3276,10 +3233,58 @@ function exitVehicle() {
     return true;
 }
 
-function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wheelWidth }) {
+function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wheelWidth, wheelTemplate = null, mirrorX = false }) {
     const steeringPivot = new THREE.Group();
     const spinGroup = new THREE.Group();
-    
+
+    if (wheelTemplate?.root) {
+        const customWheel = cloneDisposableObject(wheelTemplate.root);
+        const bbox = new THREE.Box3().setFromObject(customWheel);
+        const size = bbox.getSize(new THREE.Vector3());
+        const center = bbox.getCenter(new THREE.Vector3());
+
+        // Detect axle as the smallest extent; the other two axes form the
+        // round face whose larger extent is the diameter.
+        const axes = [
+            { axis: 'x', size: size.x },
+            { axis: 'y', size: size.y },
+            { axis: 'z', size: size.z },
+        ].sort((a, b) => a.size - b.size);
+        const axleAxis = axes[0].axis;
+        const diameter = Math.max(axes[1].size, axes[2].size);
+        const targetDiameter = wheelRadius * 2.0;
+        const fit = diameter > 1e-4 ? targetDiameter / diameter : 1;
+
+        // Centre the wheel on its bbox, then orient so axle aligns with X
+        // (which is what spinGroup.rotation.x rotates around).
+        const orienter = new THREE.Group();
+        customWheel.position.set(-center.x, -center.y, -center.z);
+        orienter.add(customWheel);
+        if (axleAxis === 'y') {
+            orienter.rotation.z = Math.PI * 0.5;
+        } else if (axleAxis === 'z') {
+            orienter.rotation.y = Math.PI * 0.5;
+        }
+        orienter.scale.setScalar(fit);
+        if (mirrorX) {
+            orienter.scale.x *= -1;
+        }
+        customWheel.traverse((child) => {
+            if (!child.isMesh) return;
+            child.castShadow = true;
+            child.receiveShadow = true;
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            mats.forEach((mat) => {
+                if (!mat) return;
+                mat.side = THREE.DoubleSide;
+                mat.needsUpdate = true;
+            });
+        });
+        spinGroup.add(orienter);
+        steeringPivot.add(spinGroup);
+        return { steeringPivot, spinGroup };
+    }
+
     const wheelMesh = new THREE.Group();
     wheelMesh.rotation.z = Math.PI * 0.5;
 
@@ -3328,7 +3333,7 @@ function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wh
     return { steeringPivot, spinGroup };
 }
 
-function createDrivableCarVisual() {
+function createDrivableCarVisual(bodyTemplateId = '', wheelTemplateId = '') {
     const root = new THREE.Group();
     const W = VEHICLE_SETTINGS.width;
     const L = VEHICLE_SETTINGS.length;
@@ -3339,124 +3344,169 @@ function createDrivableCarVisual() {
     visualGroup.rotation.y = Math.PI;
     root.add(visualGroup);
 
-    const bodyMaterial = new THREE.MeshStandardMaterial({
-        color: 0xf7f7f5, metalness: 0.18, roughness: 0.34,
-    });
-    const trimMaterial = new THREE.MeshStandardMaterial({
-        color: 0x15171b, metalness: 0.42, roughness: 0.48,
-    });
-    const glassMaterial = new THREE.MeshStandardMaterial({
-        color: 0xdce8f5, metalness: 0.08, roughness: 0.16, transparent: true, opacity: 0.72,
-    });
     const tireMaterial = new THREE.MeshStandardMaterial({
         color: 0x17191d, metalness: 0.02, roughness: 0.92,
     });
     const rimMaterial = new THREE.MeshStandardMaterial({
         color: 0xc5ccd6, metalness: 0.86, roughness: 0.24,
     });
-    const lightMaterial = new THREE.MeshStandardMaterial({
-        color: 0xf8f1d0, emissive: 0x8c6d1f, emissiveIntensity: 0.2, roughness: 0.28, metalness: 0.02,
-    });
 
-    const lowerBody = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.96, H * 0.38, L * 0.94),
-        bodyMaterial
-    );
-    lowerBody.position.y = -H * 0.08;
-    lowerBody.castShadow = true;
-    lowerBody.receiveShadow = true;
-    visualGroup.add(lowerBody);
+    const bodyTemplate = bodyTemplateId
+        ? importedPropState.templates.find((entry) => entry.id === bodyTemplateId)
+        : null;
+    const wheelTemplate = wheelTemplateId
+        ? importedPropState.templates.find((entry) => entry.id === wheelTemplateId)
+        : null;
 
-    const cabin = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.72, H * 0.32, L * 0.38),
-        glassMaterial
-    );
-    cabin.position.set(0, H * 0.22, -L * 0.06);
-    cabin.castShadow = true;
-    visualGroup.add(cabin);
+    const usingCustomBody = !!bodyTemplate?.root;
 
-    const roof = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.68, H * 0.06, L * 0.32),
-        bodyMaterial
-    );
-    roof.position.set(0, H * 0.39, -L * 0.06);
-    roof.castShadow = true;
-    visualGroup.add(roof);
+    if (usingCustomBody) {
+        const customBody = cloneDisposableObject(bodyTemplate.root);
+        const bbox = new THREE.Box3().setFromObject(customBody);
+        const size = bbox.getSize(new THREE.Vector3());
+        const center = bbox.getCenter(new THREE.Vector3());
+        const targetW = W * 1.0;
+        const targetL = L * 1.0;
+        const sx = size.x > 1e-4 ? targetW / size.x : 1;
+        const sz = size.z > 1e-4 ? targetL / size.z : 1;
+        const fit = Math.min(sx, sz);
+        customBody.scale.setScalar(fit);
+        // Park bottom of model on chassis ground plane (chassis local y = -H/2,
+        // visualGroup local y = -H/2 - 0.28*H).
+        const groundLocal = -H * 0.5 - H * 0.28;
+        customBody.position.set(
+            -center.x * fit,
+            groundLocal - bbox.min.y * fit,
+            -center.z * fit - L * -0.04
+        );
+        customBody.traverse((child) => {
+            if (!child.isMesh) return;
+            child.castShadow = true;
+            child.receiveShadow = true;
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            mats.forEach((mat) => {
+                if (!mat) return;
+                mat.side = THREE.DoubleSide;
+                mat.needsUpdate = true;
+            });
+        });
+        visualGroup.add(customBody);
+    } else {
+        const bodyMaterial = new THREE.MeshStandardMaterial({
+            color: 0xf7f7f5, metalness: 0.18, roughness: 0.34,
+        });
+        const trimMaterial = new THREE.MeshStandardMaterial({
+            color: 0x15171b, metalness: 0.42, roughness: 0.48,
+        });
+        const glassMaterial = new THREE.MeshStandardMaterial({
+            color: 0xdce8f5, metalness: 0.08, roughness: 0.16, transparent: true, opacity: 0.72,
+        });
+        const lightMaterial = new THREE.MeshStandardMaterial({
+            color: 0xf8f1d0, emissive: 0x8c6d1f, emissiveIntensity: 0.2, roughness: 0.28, metalness: 0.02,
+        });
 
-    const hood = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.88, H * 0.1, L * 0.28),
-        bodyMaterial
-    );
-    hood.position.set(0, H * 0.06, L * 0.30);
-    hood.rotation.x = -0.06;
-    hood.castShadow = true;
-    hood.receiveShadow = true;
-    visualGroup.add(hood);
+        const lowerBody = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.96, H * 0.38, L * 0.94),
+            bodyMaterial
+        );
+        lowerBody.position.y = -H * 0.08;
+        lowerBody.castShadow = true;
+        lowerBody.receiveShadow = true;
+        visualGroup.add(lowerBody);
 
-    const trunk = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.84, H * 0.1, L * 0.18),
-        bodyMaterial
-    );
-    trunk.position.set(0, H * 0.06, -L * 0.36);
-    trunk.rotation.x = 0.04;
-    trunk.castShadow = true;
-    visualGroup.add(trunk);
+        const cabin = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.72, H * 0.32, L * 0.38),
+            glassMaterial
+        );
+        cabin.position.set(0, H * 0.22, -L * 0.06);
+        cabin.castShadow = true;
+        visualGroup.add(cabin);
 
-    const frontBumper = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.92, H * 0.12, L * 0.06),
-        trimMaterial
-    );
-    frontBumper.position.set(0, -H * 0.16, L * 0.48);
-    frontBumper.castShadow = true;
-    visualGroup.add(frontBumper);
+        const roof = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.68, H * 0.06, L * 0.32),
+            bodyMaterial
+        );
+        roof.position.set(0, H * 0.39, -L * 0.06);
+        roof.castShadow = true;
+        visualGroup.add(roof);
 
-    const rearBumper = frontBumper.clone();
-    rearBumper.position.z = -L * 0.48;
-    visualGroup.add(rearBumper);
+        const hood = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.88, H * 0.1, L * 0.28),
+            bodyMaterial
+        );
+        hood.position.set(0, H * 0.06, L * 0.30);
+        hood.rotation.x = -0.06;
+        hood.castShadow = true;
+        hood.receiveShadow = true;
+        visualGroup.add(hood);
 
-    const skirtLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.04, H * 0.1, L * 0.7),
-        trimMaterial
-    );
-    skirtLeft.position.set(-W * 0.48, -H * 0.2, 0);
-    visualGroup.add(skirtLeft);
-    const skirtRight = skirtLeft.clone();
-    skirtRight.position.x *= -1;
-    visualGroup.add(skirtRight);
+        const trunk = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.84, H * 0.1, L * 0.18),
+            bodyMaterial
+        );
+        trunk.position.set(0, H * 0.06, -L * 0.36);
+        trunk.rotation.x = 0.04;
+        trunk.castShadow = true;
+        visualGroup.add(trunk);
 
-    const grille = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.5, H * 0.1, L * 0.03),
-        trimMaterial
-    );
-    grille.position.set(0, -H * 0.02, L * 0.49);
-    visualGroup.add(grille);
+        const frontBumper = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.92, H * 0.12, L * 0.06),
+            trimMaterial
+        );
+        frontBumper.position.set(0, -H * 0.16, L * 0.48);
+        frontBumper.castShadow = true;
+        visualGroup.add(frontBumper);
 
-    const headlightLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.14, H * 0.06, L * 0.02),
-        lightMaterial
-    );
-    headlightLeft.position.set(-W * 0.32, H * 0.02, L * 0.49);
-    const headlightRight = headlightLeft.clone();
-    headlightRight.position.x *= -1;
-    visualGroup.add(headlightLeft, headlightRight);
+        const rearBumper = frontBumper.clone();
+        rearBumper.position.z = -L * 0.48;
+        visualGroup.add(rearBumper);
 
-    const taillightMat = new THREE.MeshStandardMaterial({
-        color: 0xff2222, emissive: 0x991111, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.02,
-    });
-    const taillightLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.12, H * 0.05, L * 0.02),
-        taillightMat
-    );
-    taillightLeft.position.set(-W * 0.34, H * 0.02, -L * 0.49);
-    const taillightRight = taillightLeft.clone();
-    taillightRight.position.x *= -1;
-    visualGroup.add(taillightLeft, taillightRight);
+        const skirtLeft = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.04, H * 0.1, L * 0.7),
+            trimMaterial
+        );
+        skirtLeft.position.set(-W * 0.48, -H * 0.2, 0);
+        visualGroup.add(skirtLeft);
+        const skirtRight = skirtLeft.clone();
+        skirtRight.position.x *= -1;
+        visualGroup.add(skirtRight);
 
-    const wheelRadius = H * 0.36;
+        const grille = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.5, H * 0.1, L * 0.03),
+            trimMaterial
+        );
+        grille.position.set(0, -H * 0.02, L * 0.49);
+        visualGroup.add(grille);
+
+        const headlightLeft = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.14, H * 0.06, L * 0.02),
+            lightMaterial
+        );
+        headlightLeft.position.set(-W * 0.32, H * 0.02, L * 0.49);
+        const headlightRight = headlightLeft.clone();
+        headlightRight.position.x *= -1;
+        visualGroup.add(headlightLeft, headlightRight);
+
+        const taillightMat = new THREE.MeshStandardMaterial({
+            color: 0xff2222, emissive: 0x991111, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.02,
+        });
+        const taillightLeft = new THREE.Mesh(
+            new THREE.BoxGeometry(W * 0.12, H * 0.05, L * 0.02),
+            taillightMat
+        );
+        taillightLeft.position.set(-W * 0.34, H * 0.02, -L * 0.49);
+        const taillightRight = taillightLeft.clone();
+        taillightRight.position.x *= -1;
+        visualGroup.add(taillightLeft, taillightRight);
+    }
+
+    const wheelRadius = usingCustomBody ? H * 0.62 : H * 0.36;
     const wheelWidth = W * 0.16;
-    const wheelY = -H * 0.42;
-    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
-    const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.45;
+    // For custom body, raise wheel-axle so fully sized wheels straddle the
+    // chassis ground plane (-H/2 in chassis local, -0.78H in visualGroup local).
+    const wheelY = usingCustomBody ? (-H * 0.78 + wheelRadius + H * 0.55) : -H * 0.42;
+    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * (usingCustomBody ? 0.86 : 0.5);
+    const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * (usingCustomBody ? 0.72 : 0.45);
     const wheelOffsets = [
         { x: -halfTrackWidth, z: halfWheelBase, steerable: true },
         { x: halfTrackWidth, z: halfWheelBase, steerable: true },
@@ -3466,15 +3516,21 @@ function createDrivableCarVisual() {
     const steeringPivots = [];
     const spinGroups = [];
 
+    const usingCustomWheels = !!wheelTemplate?.root;
     wheelOffsets.forEach((offset) => {
         const wheel = createVehicleWheelAssembly({
             tireMaterial,
             rimMaterial,
             wheelRadius,
             wheelWidth,
+            wheelTemplate,
+            mirrorX: offset.x < 0,
         });
         wheel.steeringPivot.position.set(offset.x, wheelY, offset.z);
         wheel.steeringPivot.userData.steerable = offset.steerable;
+        if (usingCustomBody && !usingCustomWheels) {
+            wheel.steeringPivot.visible = false;
+        }
         visualGroup.add(wheel.steeringPivot);
         steeringPivots.push(wheel.steeringPivot);
         spinGroups.push(wheel.spinGroup);
@@ -3591,7 +3647,9 @@ function spawnDrivableCar(options = {}) {
     }
 
     bodyInterface.SetMaxAngularVelocity(body.GetID(), VEHICLE_SETTINGS.maxAngularVelocity);
-    const chassis = createDrivableCarVisual();
+    const bodyTemplateId = options.bodyTemplateId || '';
+    const wheelTemplateId = options.wheelTemplateId || '';
+    const chassis = createDrivableCarVisual(bodyTemplateId, wheelTemplateId);
     chassis.position.copy(spawnPosition);
     chassis.quaternion.copy(carRotation);
 
@@ -3602,6 +3660,8 @@ function spawnDrivableCar(options = {}) {
         userData: options.userData ?? { label: 'Car' },
         includeScripts: options.includeScripts !== false,
     });
+    vehicle.vehicleBodyTemplateId = bodyTemplateId || null;
+    vehicle.vehicleWheelTemplateId = wheelTemplateId || null;
     setActorComponentFlags(vehicle, {
         collision: true,
         physics: true,
@@ -4308,30 +4368,49 @@ function buildPrimitiveActorMesh(kind) {
     }
 }
 
-function syncActorEditorTemplateOptions(selectedTemplateId = '') {
-    if (!actorImportedTemplateSelect) return;
+function syncActorEditorTemplateOptions(selectedTemplateId = '', selectedVehicleBodyTemplateId = '', selectedVehicleWheelTemplateId = '') {
+    if (actorImportedTemplateSelect) {
+        actorImportedTemplateSelect.innerHTML = '';
 
-    actorImportedTemplateSelect.innerHTML = '';
+        if (!importedPropState.templates.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No imported source available';
+            actorImportedTemplateSelect.appendChild(option);
+            actorImportedTemplateSelect.value = '';
+        } else {
+            importedPropState.templates.forEach((template) => {
+                const option = document.createElement('option');
+                option.value = template.id;
+                option.textContent = `${template.displayName} (${template.collisionMode})`;
+                actorImportedTemplateSelect.appendChild(option);
+            });
 
-    if (!importedPropState.templates.length) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = 'No imported source available';
-        actorImportedTemplateSelect.appendChild(option);
-        actorImportedTemplateSelect.value = '';
-        return;
+            actorImportedTemplateSelect.value = selectedTemplateId && importedPropState.templates.some((template) => template.id === selectedTemplateId)
+                ? selectedTemplateId
+                : importedPropState.templates[0].id;
+        }
     }
 
-    importedPropState.templates.forEach((template) => {
-        const option = document.createElement('option');
-        option.value = template.id;
-        option.textContent = `${template.displayName} (${template.collisionMode})`;
-        actorImportedTemplateSelect.appendChild(option);
-    });
-
-    actorImportedTemplateSelect.value = selectedTemplateId && importedPropState.templates.some((template) => template.id === selectedTemplateId)
-        ? selectedTemplateId
-        : importedPropState.templates[0].id;
+    const populateVehicleSelect = (select, selectedId, defaultLabel) => {
+        if (!select) return;
+        select.innerHTML = '';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = '';
+        defaultOption.textContent = defaultLabel;
+        select.appendChild(defaultOption);
+        importedPropState.templates.forEach((template) => {
+            const option = document.createElement('option');
+            option.value = template.id;
+            option.textContent = template.displayName;
+            select.appendChild(option);
+        });
+        select.value = selectedId && importedPropState.templates.some((template) => template.id === selectedId)
+            ? selectedId
+            : '';
+    };
+    populateVehicleSelect(actorVehicleBodyTemplateSelect, selectedVehicleBodyTemplateId, 'Default Sedan');
+    populateVehicleSelect(actorVehicleWheelTemplateSelect, selectedVehicleWheelTemplateId, 'Default Wheel');
 }
 
 function syncActorEditorUi() {
@@ -4344,6 +4423,12 @@ function syncActorEditorUi() {
     const isVehicle = kind === 'vehicle';
 
     actorImportedTemplateSelect.disabled = !isImported;
+    if (actorVehicleBodyTemplateSelect) {
+        actorVehicleBodyTemplateSelect.disabled = !isVehicle;
+    }
+    if (actorVehicleWheelTemplateSelect) {
+        actorVehicleWheelTemplateSelect.disabled = !isVehicle;
+    }
     actorComponentCollisionInput.disabled = isVehicle;
     actorComponentPhysicsInput.disabled = isVehicle || !actorComponentCollisionInput.checked;
     if (isVehicle) {
@@ -4383,7 +4468,7 @@ function closeActorEditor() {
     }
 }
 
-function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
+function openActorEditor({ kind = 'cube', templateId = '', label = '', vehicleBodyTemplateId = '', vehicleWheelTemplateId = '' } = {}) {
     if (!actorEditor) return;
 
     actorEditorState.open = true;
@@ -4406,7 +4491,7 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
         actorComponentScriptsInput.checked = true;
     }
 
-    syncActorEditorTemplateOptions(templateId);
+    syncActorEditorTemplateOptions(templateId, vehicleBodyTemplateId, vehicleWheelTemplateId);
     syncActorEditorUi();
     actorEditor.hidden = false;
 }
@@ -4518,7 +4603,9 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     let actor = null;
 
     if (kind === 'vehicle') {
-        actor = spawnDrivableCar({ includeScripts, userData });
+        const bodyTemplateId = actorVehicleBodyTemplateSelect?.value || '';
+        const wheelTemplateId = actorVehicleWheelTemplateSelect?.value || '';
+        actor = spawnDrivableCar({ includeScripts, userData, bodyTemplateId, wheelTemplateId });
     } else if (kind === 'imported') {
         const templateId = actorImportedTemplateSelect?.value || '';
         if (!templateId) {
@@ -7038,6 +7125,8 @@ async function init() {
     actorLabelInput = document.getElementById('actor-label-input');
     actorScaleInput = document.getElementById('actor-scale-input');
     actorImportedTemplateSelect = document.getElementById('actor-imported-template-select');
+    actorVehicleBodyTemplateSelect = document.getElementById('actor-vehicle-body-template-select');
+    actorVehicleWheelTemplateSelect = document.getElementById('actor-vehicle-wheel-template-select');
     actorComponentCollisionInput = document.getElementById('actor-component-collision');
     actorComponentPhysicsInput = document.getElementById('actor-component-physics');
     actorComponentScriptsInput = document.getElementById('actor-component-scripts');
@@ -7131,6 +7220,8 @@ async function init() {
     });
     actorKindSelect?.addEventListener('change', () => syncActorEditorUi());
     actorImportedTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
+    actorVehicleBodyTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
+    actorVehicleWheelTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
     actorComponentCollisionInput?.addEventListener('change', () => syncActorEditorUi());
     actorComponentPhysicsInput?.addEventListener('change', () => syncActorEditorUi());
     actorComponentScriptsInput?.addEventListener('change', () => syncActorEditorUi());
@@ -7349,7 +7440,6 @@ async function init() {
 
     playHint = document.getElementById('play-hint');
     gameplayStatus = document.getElementById('gameplay-status');
-    vehicleAudioBackendEl = document.getElementById('vehicle-audio-backend');
     resetViewBtn = document.getElementById('reset-view');
     if (multiplayerServerUrlInput && !multiplayerServerUrlInput.value.trim()) {
         multiplayerServerUrlInput.value = getDefaultMultiplayerServerUrl();
@@ -8138,7 +8228,6 @@ function updateGameplayUI() {
     }
 
     updateMobileButtons();
-    updateVehicleAudioBackendIndicator();
     updateMouseActionStatus();
     updateWorldPresentation();
 }
@@ -8320,7 +8409,7 @@ function updateVehicleGameplay(delta) {
     const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
     const driftInput = Math.abs(steer) > 0.1 && speedRatio > VEHICLE_SETTINGS.driftBoostThreshold;
     const drifting = driftInput && (throttle !== 0 || Math.abs(lateralSpeed) > 1.2);
-    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
+    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 1.0;
     const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.5;
     const rideState = vehicle.mesh.userData.vehicleRideState || {
         sampleRideHeights: [null, null, null, null],
@@ -9400,6 +9489,8 @@ function serializeActorData(actor) {
         kind: actor.kind,
         name: actor.rootNode?.name || 'Actor',
         templateId: actor.templateId,
+        vehicleBodyTemplateId: actor.vehicleBodyTemplateId || null,
+        vehicleWheelTemplateId: actor.vehicleWheelTemplateId || null,
         userData: actor.entity.getComponent('metadata')?.userData || null,
         transform: {
             position: mesh.position.toArray(),
@@ -9435,9 +9526,19 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
 
     let actor = null;
     if (actorData.kind === 'vehicle') {
+        const savedBodyTemplateId = actorData.vehicleBodyTemplateId
+            && importedPropState.templates.some((template) => template.id === actorData.vehicleBodyTemplateId)
+            ? actorData.vehicleBodyTemplateId
+            : '';
+        const savedWheelTemplateId = actorData.vehicleWheelTemplateId
+            && importedPropState.templates.some((template) => template.id === actorData.vehicleWheelTemplateId)
+            ? actorData.vehicleWheelTemplateId
+            : '';
         actor = spawnDrivableCar({
             includeScripts: componentFlags.scripts,
             userData: actorData.userData,
+            bodyTemplateId: savedBodyTemplateId,
+            wheelTemplateId: savedWheelTemplateId,
         });
     } else if (actorData.kind === 'imported') {
         if (!actorData.templateId || !importedPropState.templates.some((template) => template.id === actorData.templateId)) {
@@ -10347,6 +10448,12 @@ function exportWorldToJSON() {
         umap.actors.push(serializedActor);
         if (serializedActor.kind === 'imported' && serializedActor.templateId) {
             usedTemplateIds.add(serializedActor.templateId);
+        }
+        if (serializedActor.kind === 'vehicle' && serializedActor.vehicleBodyTemplateId) {
+            usedTemplateIds.add(serializedActor.vehicleBodyTemplateId);
+        }
+        if (serializedActor.kind === 'vehicle' && serializedActor.vehicleWheelTemplateId) {
+            usedTemplateIds.add(serializedActor.vehicleWheelTemplateId);
         }
     }
 

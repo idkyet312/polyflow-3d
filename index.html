@@ -99,6 +99,18 @@
                                         <option value="">No imported source available</option>
                                     </select>
                                 </label>
+                                <label class="viewer-code-field" for="actor-vehicle-body-template-select">
+                                    <span class="viewer-code-field-label">Vehicle Body Source</span>
+                                    <select id="actor-vehicle-body-template-select" class="viewer-text-input">
+                                        <option value="">Default Sedan</option>
+                                    </select>
+                                </label>
+                                <label class="viewer-code-field" for="actor-vehicle-wheel-template-select">
+                                    <span class="viewer-code-field-label">Vehicle Wheel Source</span>
+                                    <select id="actor-vehicle-wheel-template-select" class="viewer-text-input">
+                                        <option value="">Default Wheel</option>
+                                    </select>
+                                </label>
                             </div>
                             <div class="viewer-actor-components">
                                 <div class="viewer-prop-library-label">Components</div>
@@ -475,7 +487,6 @@
                 <div class="play-hud">
                     <div class="play-status" id="gameplay-status">Play mode is ready. Load a model to explore imported
                         assets too.</div>
-                    <div class="play-audio-backend" id="vehicle-audio-backend" hidden>Engine audio: none</div>
                     <div class="play-hint" id="play-hint">Play is available immediately. Load a sample or drop a model
                         anytime to explore imported geometry too.</div>
                 </div>
