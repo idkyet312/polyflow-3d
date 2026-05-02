@@ -330,9 +330,14 @@
                                             (.umap)</button>
                                         <button class="btn viewer-menu-btn" id="load-scene-btn">Load Scene</button>
                                     </div>
-                                    <div class="viewer-inline-note">Save your placed actors, physics bodies, and scripts
-                                        to a .umap file to load later.</div>
+                                    <div class="viewer-menu-actions" style="margin-top: 0.4rem;">
+                                        <button class="btn viewer-menu-btn" id="save-scene-folder-btn">Save Scene Folder</button>
+                                        <button class="btn viewer-menu-btn" id="load-scene-folder-btn">Load Scene Folder</button>
+                                    </div>
+                                    <div class="viewer-inline-note">A scene folder keeps source assets next to the .umap so loads stay fast even with many imported props.</div>
                                     <input type="file" id="scene-file-input" accept=".umap,.json"
+                                        style="display: none;">
+                                    <input type="file" id="scene-folder-input" webkitdirectory directory multiple
                                         style="display: none;">
                                 </div>
                             </details>
@@ -467,7 +472,7 @@
                 </div>
 
                 <div id="processing-overlay">
-                    <h2>Processing Asset</h2>
+                    <h2 id="processing-title">Processing Asset</h2>
                     <div class="loader-container">
                         <div class="loader-bar" id="loader-bar"></div>
                     </div>

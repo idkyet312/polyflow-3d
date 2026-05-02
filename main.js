@@ -773,6 +773,11 @@ const importedPropState = {
     templates: [],
     futureCollisionMode: null,
     promptResolver: null,
+    // Track the original imported File per template so "Save Scene Folder"
+    // can copy the raw asset alongside the .umap rather than inlining the
+    // mesh as a giant rootJson blob (which is what makes legacy .umap loads
+    // slow). Keyed by template.id.
+    sourceFiles: Object.create(null),
 };
 const actorEditorState = {
     open: false,
@@ -2937,22 +2942,43 @@ function registerImportedPropTemplate(fileName, root, collisionMode, shape, tria
     return template;
 }
 
-function registerImportedPropTemplateFromSerializedData(templateData) {
-    if (!templateData?.rootJson) return null;
+async function registerImportedPropTemplateFromSerializedData(templateData, { fileMap = null } = {}) {
+    if (!templateData) return null;
 
     const existingTemplate = importedPropState.templates.find((entry) => entry.id === templateData.id);
     if (existingTemplate) {
         return existingTemplate;
     }
 
-    const objectLoader = new THREE.ObjectLoader();
-    const root = objectLoader.parse(templateData.rootJson);
-    convertLoadedObjectMaterials(root);
-    // Serialized imported templates already include the normalized root transform
-    // that was authored at import time. Re-normalizing on scene load mutates the
-    // source asset before any actor transform is restored.
-    if (templateData.normalized === false) {
-        normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+    let root = null;
+
+    // Folder-bundle path: the .umap stores assetPath instead of rootJson and
+    // the raw OBJ/GLB lives next to it. Resolve via the loaded fileMap and
+    // run the same importer the fresh-import flow uses — much faster than
+    // re-hydrating a THREE.ObjectLoader JSON blob.
+    if (templateData.assetPath && fileMap) {
+        const entry = lookupBundleAsset(fileMap, templateData.assetPath, templateData.fileName);
+        if (entry?.file) {
+            root = await loadObjectFromFile(entry.file, fileMap);
+            if (templateData.assetType !== 'glb') {
+                normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+            }
+        } else {
+            console.warn(`[scene] Asset "${templateData.assetPath}" missing from bundle; template will be skipped.`);
+            return null;
+        }
+    } else if (templateData.rootJson) {
+        const objectLoader = new THREE.ObjectLoader();
+        root = objectLoader.parse(templateData.rootJson);
+        convertLoadedObjectMaterials(root);
+        // Legacy serialized templates already carried the normalized transform
+        // applied at import time. Re-normalizing here mutates the source asset
+        // before any actor transform is restored.
+        if (templateData.normalized === false) {
+            normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+        }
+    } else {
+        return null;
     }
 
     const triangleCount = Number.isFinite(templateData.triangleCount)
@@ -2971,6 +2997,15 @@ function registerImportedPropTemplateFromSerializedData(templateData) {
 
     importedPropState.templates.push(template);
 
+    // If we loaded from a folder bundle, retain the original File so the user
+    // can re-save the scene as a folder without re-inlining the geometry.
+    if (templateData.assetPath && fileMap) {
+        const entry = lookupBundleAsset(fileMap, templateData.assetPath, templateData.fileName);
+        if (entry?.file) {
+            importedPropState.sourceFiles[template.id] = entry.file;
+        }
+    }
+
     const matchedId = /imported-prop-(\d+)$/.exec(template.id || '');
     if (matchedId) {
         importedPropState.nextId = Math.max(importedPropState.nextId, Number(matchedId[1]) + 1);
@@ -2981,18 +3016,39 @@ function registerImportedPropTemplateFromSerializedData(templateData) {
     return template;
 }
 
-function serializeImportedPropTemplate(template) {
+function lookupBundleAsset(fileMap, assetPath, fileName) {
+    if (!fileMap) return null;
+    // fileMap is the same shape used by setupDropHandlers / createLoadingManager:
+    // { 'relative/path.ext': { file, url } } and/or { 'basename.ext': { file, url } }.
+    return fileMap[assetPath]
+        || (fileName ? fileMap[fileName] : null)
+        || (fileName ? fileMap[fileName.toLowerCase()] : null)
+        || null;
+}
+
+function serializeImportedPropTemplate(template, { preferAssetPath = false } = {}) {
     if (!template?.root) return null;
 
-    return {
+    const base = {
         id: template.id,
         fileName: template.fileName,
         displayName: template.displayName,
         normalized: true,
         collisionMode: template.collisionMode,
         triangleCount: template.triangleCount,
-        rootJson: template.root.toJSON(),
     };
+
+    // When a scene is being saved as a folder bundle and we still have the
+    // original imported File, point at it via assetPath. Bundle loading then
+    // re-runs the OBJ/GLB importer on the raw file (fast) instead of parsing
+    // a serialized THREE.ObjectLoader blob (slow). Inline rootJson stays as
+    // the fallback for templates whose source file isn't available.
+    const sourceFile = importedPropState.sourceFiles?.[template.id];
+    if (preferAssetPath && sourceFile) {
+        return { ...base, assetPath: `assets/${template.fileName}` };
+    }
+
+    return { ...base, rootJson: template.root.toJSON() };
 }
 
 function spawnImportedProp(templateId, options = {}) {
@@ -3095,6 +3151,9 @@ async function importPhysicsProp(file, fileMap = {}) {
 
         const collision = createImportedCollisionShape(root, collisionPreference.mode);
         const template = registerImportedPropTemplate(file.name, root, collision.mode, collision.shape, triangleCount);
+        if (template?.id && file instanceof File) {
+            importedPropState.sourceFiles[template.id] = file;
+        }
         updatePropImportStatus();
         return template;
     } catch (error) {
@@ -3684,6 +3743,20 @@ function updateVehicleVisuals(delta) {
 
         const visualState = renderObject.userData?.vehicleVisual;
         if (!visualState) continue;
+
+        // If userData was JSON-roundtripped (e.g. via three.js Object3D.clone
+        // on a serialized template), every live reference inside vehicleVisual
+        // is now a plain object: Vector3 has no .copy, steeringPivots / spinGroups
+        // entries have no .rotation/.userData. Rather than crash every frame,
+        // skip the broken state — the wheels won't animate but the editor stays
+        // usable.
+        const refsValid =
+            visualState.lastWorldPosition instanceof THREE.Vector3
+            && Array.isArray(visualState.steeringPivots)
+            && visualState.steeringPivots.every((p) => p?.isObject3D)
+            && Array.isArray(visualState.spinGroups)
+            && visualState.spinGroups.every((g) => g?.isObject3D);
+        if (!refsValid) continue;
 
         const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(renderObject.quaternion);
         flatForward.y = 0;
@@ -4669,6 +4742,15 @@ function setActorColor(actor, hexColor) {
             }
         }
     });
+    // Mark this actor as having user-authored material edits so .actor save
+    // includes the per-mesh overrides instead of taking the fast path that
+    // relies on template defaults.
+    mesh.userData.hasMaterialOverrides = true;
+}
+
+function markActorMaterialDirty(actor) {
+    const mesh = getActorRenderObject(actor);
+    if (mesh) mesh.userData.hasMaterialOverrides = true;
 }
 
 function getObjectMaterialArray(object3D) {
@@ -4868,7 +4950,13 @@ function applyObjectMaterialState(object3D, materialState) {
         if ('side' in material && side !== null) {
             material.side = side;
         }
-        material.needsUpdate = true;
+        // Intentionally not setting material.needsUpdate. The fields touched
+        // above (color, roughness, metalness, opacity, emissive, etc.) are
+        // uniform updates — none of them require a shader recompile. Marking
+        // every material dirty triggers re-link work on the next frame, which
+        // is the difference between "instant" and "multi-second hitch" when
+        // restoring a 100k-mesh actor. Side changes flip culling, also no
+        // recompile.
     }
 }
 
@@ -9773,6 +9861,207 @@ function exportWorldToUmap() {
     setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
+// === SCENE FOLDER BUNDLE ============================================
+// Folder layout:
+//   <picked-folder>/
+//     scene.umap          (slim — actor records + assetPath references)
+//     assets/
+//       <fileName>.obj    (raw imported source files)
+//
+// Loading any folder bundle is far faster than a legacy .umap because
+// importedTemplates no longer carry rootJson; the OBJ/GLB importer runs
+// against the raw bytes the same way a fresh import does.
+
+async function exportWorldToSceneFolder() {
+    const umap = exportWorldToJSON({ preferAssetPath: true });
+    const vehicleTemplateIds = new Set();
+    for (const actor of umap.actors || []) {
+        if (actor?.kind !== 'vehicle') continue;
+        if (actor.vehicleBodyTemplateId) vehicleTemplateIds.add(actor.vehicleBodyTemplateId);
+        if (actor.vehicleWheelTemplateId) vehicleTemplateIds.add(actor.vehicleWheelTemplateId);
+    }
+
+    // Build a parallel GLB cache for every imported template referenced by the
+    // bundle. GLB parses ~10x faster than text OBJ for huge models (e.g. a
+    // 300 MB car), so on next load registerImportedPropTemplateFromSerializedData
+    // can skip the OBJ path entirely. Fall back to the raw source file for any
+    // template whose GLB export fails.
+    const glbAssets = new Map(); // templateId -> { fileName, blob }
+    const rawFiles = new Map();  // templateId -> File (fallback only)
+
+    for (const t of umap.importedTemplates || []) {
+        const template = importedPropState.templates.find((entry) => entry.id === t.id);
+        if (!template?.root) continue;
+        const sourceFile = importedPropState.sourceFiles[t.id];
+
+        if (vehicleTemplateIds.has(t.id) && sourceFile) {
+            rawFiles.set(t.id, sourceFile);
+            t.assetPath = `assets/${sourceFile.name}`;
+            t.assetType = 'raw';
+            delete t.rootJson;
+            continue;
+        }
+
+        try {
+            const glbBlob = await exportRootToGlb(template.root);
+            const glbName = `${t.id}.glb`;
+            glbAssets.set(t.id, { fileName: glbName, blob: glbBlob });
+            t.assetPath = `assets/${glbName}`;
+            t.assetType = 'glb';
+        } catch (err) {
+            console.warn(`[scene] GLB export failed for template ${t.id}; falling back to raw source.`, err);
+            if (sourceFile) {
+                rawFiles.set(t.id, sourceFile);
+                t.assetPath = `assets/${sourceFile.name}`;
+                t.assetType = 'raw';
+            } else {
+                // No GLB and no raw file — re-inline rootJson so this template
+                // still loads (slower but correct).
+                delete t.assetPath;
+                delete t.assetType;
+                t.rootJson = template.root.toJSON();
+            }
+        }
+    }
+
+    const useFsAccess = typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
+    if (useFsAccess) {
+        let dirHandle;
+        try {
+            dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        } catch (err) {
+            if (err?.name === 'AbortError') return;
+            console.error('Folder picker failed; falling back to multi-file download.', err);
+            return downloadSceneFolderFallback(umap, glbAssets, rawFiles);
+        }
+        try {
+            await writeFileToDirectory(dirHandle, 'scene.umap', JSON.stringify(umap, null, 2));
+            if (glbAssets.size > 0 || rawFiles.size > 0) {
+                const assetsDir = await dirHandle.getDirectoryHandle('assets', { create: true });
+                for (const { fileName, blob } of glbAssets.values()) {
+                    await writeFileToDirectory(assetsDir, fileName, blob);
+                }
+                for (const file of rawFiles.values()) {
+                    await writeFileToDirectory(assetsDir, file.name, file);
+                }
+            }
+            console.info('[scene] Saved scene folder to picked directory.');
+        } catch (err) {
+            console.error('Failed to write scene folder.', err);
+            alert('Failed to write scene folder. See console for details.');
+        }
+        return;
+    }
+
+    // Fallback for browsers without File System Access API: drop separate
+    // downloads. The user reassembles the folder manually.
+    downloadSceneFolderFallback(umap, glbAssets, rawFiles);
+}
+
+function exportRootToGlb(root) {
+    return new Promise((resolve, reject) => {
+        const exporter = new GLTFExporter();
+        exporter.parse(
+            root,
+            (result) => {
+                if (result instanceof ArrayBuffer) {
+                    resolve(new Blob([result], { type: 'model/gltf-binary' }));
+                } else {
+                    // Defensive: caller asked for binary, but if a runtime
+                    // returns JSON anyway, ship it as a non-binary GLB blob.
+                    resolve(new Blob([JSON.stringify(result)], { type: 'model/gltf+json' }));
+                }
+            },
+            reject,
+            { binary: true, onlyVisible: false }
+        );
+    });
+}
+
+async function writeFileToDirectory(dirHandle, name, contents) {
+    const fileHandle = await dirHandle.getFileHandle(name, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(contents);
+    await writable.close();
+}
+
+function downloadSceneFolderFallback(umap, glbAssets, rawFiles) {
+    const triggerDownload = (blob, name) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+    };
+
+    triggerDownload(
+        new Blob([JSON.stringify(umap, null, 2)], { type: 'application/json' }),
+        'scene.umap'
+    );
+    if (glbAssets) {
+        for (const { fileName, blob } of glbAssets.values()) {
+            triggerDownload(blob, fileName);
+        }
+    }
+    if (rawFiles) {
+        for (const file of rawFiles.values()) {
+            triggerDownload(file, file.name);
+        }
+    }
+    alert('Saved scene.umap and its assets as separate downloads. Place them in a folder with assets/<file> next to scene.umap before loading.');
+}
+
+async function loadWorldFromSceneFolder(fileList) {
+    if (!fileList || fileList.length === 0) return;
+
+    // Build a fileMap keyed by both basename and the relative path the
+    // browser exposes via webkitRelativePath. registerImportedPropTemplate
+    // looks up either form via lookupBundleAsset().
+    const fileMap = Object.create(null);
+    let umapFile = null;
+
+    for (const file of fileList) {
+        const relPath = file.webkitRelativePath || file.name;
+        const idx = relPath.indexOf('/');
+        const inFolderPath = idx >= 0 ? relPath.slice(idx + 1) : relPath;
+        fileMap[inFolderPath] = { file, url: URL.createObjectURL(file) };
+        if (!fileMap[file.name]) {
+            fileMap[file.name] = { file, url: URL.createObjectURL(file) };
+        }
+        if (!fileMap[file.name.toLowerCase()]) {
+            fileMap[file.name.toLowerCase()] = fileMap[file.name];
+        }
+        if (inFolderPath === 'scene.umap' || file.name === 'scene.umap') {
+            umapFile = file;
+        }
+    }
+
+    if (!umapFile) {
+        alert('Pick a folder that contains scene.umap.');
+        return;
+    }
+
+    let umap;
+    try {
+        umap = JSON.parse(await umapFile.text());
+    } catch (err) {
+        console.error('Failed to parse scene.umap.', err);
+        alert('scene.umap is not valid JSON.');
+        return;
+    }
+
+    editorHistory.captureState();
+    try {
+        await loadWorldFromJSON(umap, { fileMap });
+    } catch (err) {
+        console.error('Failed to load scene folder.', err);
+        alert('Failed to load scene folder. See console for details.');
+    }
+}
+
 // === ACTOR EXPORT / IMPORT ===
 function getActorComponentFlags(actor) {
     if (!actor) {
@@ -9858,6 +10147,13 @@ function serializeActorData(actor) {
     const mesh = getActorRenderObject(actor);
     if (!mesh) return null;
 
+    // Fast path: an imported actor whose materials were never edited reuses
+    // the template's materials verbatim. Walking the (possibly 100k-node)
+    // mesh tree to emit per-node overrides — and re-applying them on load —
+    // burns seconds for nothing. Skip both sides unless the user actually
+    // touched a material.
+    const dirtyMaterials = mesh.userData.hasMaterialOverrides === true;
+
     return {
         id: actor.id,
         kind: actor.kind,
@@ -9871,8 +10167,8 @@ function serializeActorData(actor) {
             quaternion: mesh.quaternion.toArray(),
             scale: mesh.scale.toArray(),
         },
-        material: serializeObjectMaterialState(mesh),
-        materialOverrides: serializeObjectMaterialOverrides(mesh),
+        material: dirtyMaterials ? serializeObjectMaterialState(mesh) : null,
+        materialOverrides: dirtyMaterials ? serializeObjectMaterialOverrides(mesh) : [],
         scripts: objectScriptState.drafts[actor.id] || null,
         componentFlags: getActorComponentFlags(actor),
         components: serializeComponentTree(mesh),
@@ -9986,10 +10282,15 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
         mesh.quaternion.fromArray(actorData.transform.quaternion);
         mesh.scale.fromArray(actorData.transform.scale);
         deserializeComponentTree(mesh, actorData.components);
+        // Fast path: when an actor was saved with no material edits the
+        // template's materials are already on the spawned mesh — skip the
+        // (very expensive) per-node override walk and the root-level apply.
         if (Array.isArray(actorData.materialOverrides) && actorData.materialOverrides.length > 0) {
             applyObjectMaterialOverrides(mesh, actorData.materialOverrides);
-        } else {
+            mesh.userData.hasMaterialOverrides = true;
+        } else if (actorData.material) {
             applyObjectMaterialState(mesh, actorData.material);
+            mesh.userData.hasMaterialOverrides = true;
         }
         mesh.updateMatrixWorld(true);
         // Primitive bodies were already created at the saved transform via
@@ -10012,17 +10313,48 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
 function exportActorToFile(actor) {
     if (!actor) return;
 
+    const serializedActor = serializeActorData(actor);
+    if (!serializedActor) return;
+
+    const usedTemplateIds = new Set();
+    if (serializedActor.kind === 'imported' && serializedActor.templateId) {
+        usedTemplateIds.add(serializedActor.templateId);
+    }
+    if (serializedActor.kind === 'vehicle' && serializedActor.vehicleBodyTemplateId) {
+        usedTemplateIds.add(serializedActor.vehicleBodyTemplateId);
+    }
+    if (serializedActor.kind === 'vehicle' && serializedActor.vehicleWheelTemplateId) {
+        usedTemplateIds.add(serializedActor.vehicleWheelTemplateId);
+    }
+
+    const importedTemplates = [];
+    usedTemplateIds.forEach((templateId) => {
+        const template = importedPropState.templates.find((entry) => entry.id === templateId);
+        const serializedTemplate = serializeImportedPropTemplate(template, { preferAssetPath: false });
+        if (serializedTemplate) {
+            importedTemplates.push(serializedTemplate);
+        }
+    });
+
     const actorData = {
         version: 1,
         type: 'polyflow-actor',
-        actor: serializeActorData(actor)
+        actor: serializedActor
     };
+
+    if (importedTemplates.length > 0) {
+        actorData.importedTemplates = importedTemplates;
+    }
 
     const displayName = getDynamicPropDisplayName(actor)
         .replace(/[^a-zA-Z0-9_\- ]/g, '')
         .replace(/\s+/g, '_')
         .toLowerCase() || 'actor';
-    const blob = new Blob([JSON.stringify(actorData, null, 2)], { type: 'application/json' });
+    // Non-pretty stringify: indented JSON inflates large actor files (e.g. an
+    // imported car with thousands of components) by 3-5x and slows down both
+    // serialize and the JSON.parse on load. The file is meant to be loaded by
+    // the editor, not hand-edited.
+    const blob = new Blob([JSON.stringify(actorData)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -10033,34 +10365,131 @@ function exportActorToFile(actor) {
     setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
-function loadActorFromFile(file) {
+// === Progress overlay ============================================
+// Reuses the existing #processing-overlay panel for any long-running task
+// (asset import, actor load, scene load). Caller drives the bar manually.
+const progressOverlay = {
+    el: null,
+    titleEl: null,
+    barEl: null,
+    stepEl: null,
+    show(title, step = '') {
+        this.el ||= document.getElementById('processing-overlay');
+        this.titleEl ||= document.getElementById('processing-title');
+        this.barEl ||= document.getElementById('loader-bar');
+        this.stepEl ||= document.getElementById('processing-step');
+        if (!this.el) return;
+        if (this.titleEl) this.titleEl.textContent = title;
+        if (this.stepEl) this.stepEl.textContent = step;
+        if (this.barEl) this.barEl.style.width = '0%';
+        this.el.style.display = 'flex';
+    },
+    update(percent, step) {
+        if (this.barEl && Number.isFinite(percent)) {
+            this.barEl.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+        }
+        if (this.stepEl && step !== undefined) {
+            this.stepEl.textContent = step;
+        }
+    },
+    hide() {
+        if (this.el) {
+            this.el.style.display = 'none';
+            this.el.style.pointerEvents = 'none';
+        }
+    },
+};
+
+// Yield to the browser so the overlay actually repaints between heavy steps.
+// requestAnimationFrame + a microtask flush is enough — long sync work after
+// a style change otherwise blocks paint until it returns.
+function yieldToPaint() {
+    return new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+}
+
+async function loadActorFromFile(file) {
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const data = JSON.parse(e.target.result);
-            if (data.type !== 'polyflow-actor' || !data.actor) {
-                alert('This file is not a valid PolyFlow actor file.');
-                return;
-            }
+    const fileSizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    progressOverlay.show('Loading Actor', `Reading ${file.name} (${fileSizeMb} MB)...`);
+    await yieldToPaint();
 
-            const actorData = data.actor;
-            const actor = spawnActorFromSerializedData(actorData);
-
-            if (actor) {
-                saveObjectScriptDrafts();
-                refreshSceneUI();
-                selectShowcaseActor(actor.id);
-            } else {
-                alert('Failed to spawn the loaded actor. Physics may not be ready yet.');
+    try {
+        // Stream-read with progress so big .actor files (thousands of components)
+        // show a moving bar instead of looking frozen on large reads.
+        const text = await readFileAsTextWithProgress(file, (loaded, total) => {
+            if (total > 0) {
+                progressOverlay.update((loaded / total) * 60, `Reading ${(loaded / (1024 * 1024)).toFixed(1)} / ${fileSizeMb} MB`);
             }
-        } catch (err) {
-            console.error('Error loading actor file', err);
-            alert('Failed to load actor file. It may be corrupt or in an unsupported format.');
+        });
+
+        progressOverlay.update(65, 'Parsing JSON...');
+        await yieldToPaint();
+
+        const data = JSON.parse(text);
+        if (data.type !== 'polyflow-actor' || !data.actor) {
+            alert('This file is not a valid PolyFlow actor file.');
+            return;
         }
-    };
-    reader.readAsText(file);
+
+        if (data.importedTemplates && Array.isArray(data.importedTemplates)) {
+            progressOverlay.update(70, 'Loading templates...');
+            await yieldToPaint();
+            for (const templateData of data.importedTemplates) {
+                try {
+                    await registerImportedPropTemplateFromSerializedData(templateData);
+                } catch (e) {
+                    console.error('Failed to load template for actor:', e);
+                }
+            }
+        }
+
+        progressOverlay.update(75, 'Spawning actor...');
+        await yieldToPaint();
+
+        const actorData = data.actor;
+        const actor = spawnActorFromSerializedData(actorData);
+
+        if (!actor) {
+            alert('Failed to spawn the loaded actor. Physics may not be ready yet.');
+            return;
+        }
+
+        progressOverlay.update(92, 'Restoring scripts...');
+        await yieldToPaint();
+        saveObjectScriptDrafts();
+
+        progressOverlay.update(98, 'Refreshing scene UI...');
+        await yieldToPaint();
+        refreshSceneUI();
+        selectShowcaseActor(actor.id);
+
+        progressOverlay.update(100, 'Done.');
+    } catch (err) {
+        console.error('Error loading actor file', err);
+        alert('Failed to load actor file. It may be corrupt or in an unsupported format.');
+    } finally {
+        // Always hide so a thrown error or early return can't leave the
+        // overlay covering the viewer (it has z-index:20 and would block
+        // every click in the scene).
+        progressOverlay.hide();
+    }
+}
+
+function readFileAsTextWithProgress(file, onProgress) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onprogress = (e) => {
+            if (e.lengthComputable && typeof onProgress === 'function') {
+                onProgress(e.loaded, e.total);
+            }
+        };
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+        reader.readAsText(file);
+    });
 }
 
 function clearSceneActors() {
@@ -10085,11 +10514,11 @@ function clearSceneActors() {
 
 function loadWorldFromUmap(file) {
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
         try {
             const umap = JSON.parse(e.target.result);
             editorHistory.captureState();
-            loadWorldFromJSON(umap);
+            await loadWorldFromJSON(umap);
         } catch (err) {
             console.error('Error loading scene file', err);
             alert('Failed to load scene file.');
@@ -10106,6 +10535,24 @@ document.getElementById('scene-file-input')?.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
         loadWorldFromUmap(file);
+        e.target.value = '';
+    }
+});
+
+document.getElementById('save-scene-folder-btn')?.addEventListener('click', () => {
+    exportWorldToSceneFolder().catch((err) => {
+        console.error('Save Scene Folder failed.', err);
+    });
+});
+document.getElementById('load-scene-folder-btn')?.addEventListener('click', () => {
+    document.getElementById('scene-folder-input')?.click();
+});
+document.getElementById('scene-folder-input')?.addEventListener('change', (e) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+        loadWorldFromSceneFolder(files).catch((err) => {
+            console.error('Load Scene Folder failed.', err);
+        });
         e.target.value = '';
     }
 });
@@ -10481,6 +10928,7 @@ function applyBlueprintMaterialEdits({ applyToActor = false, captureHistory = tr
         applyObjectMaterialState(selectedComponent, materialState);
         nextStatus ||= `Applied material to ${getBlueprintComponentDisplayName(selectedComponent)}.`;
     }
+    rootMesh.userData.hasMaterialOverrides = true;
 
     if (refresh) {
         refreshBlueprintComponents();
@@ -11078,7 +11526,7 @@ const editorHistory = {
     }
 };
 
-function exportWorldToJSON() {
+function exportWorldToJSON({ preferAssetPath = false } = {}) {
     const umap = { version: 2, actors: [], importedTemplates: [] };
     const usedTemplateIds = new Set();
     for (const actor of (sceneSystem?.actors || [])) {
@@ -11098,7 +11546,7 @@ function exportWorldToJSON() {
 
     usedTemplateIds.forEach((templateId) => {
         const template = importedPropState.templates.find((entry) => entry.id === templateId);
-        const serializedTemplate = serializeImportedPropTemplate(template);
+        const serializedTemplate = serializeImportedPropTemplate(template, { preferAssetPath });
         if (serializedTemplate) {
             umap.importedTemplates.push(serializedTemplate);
         }
@@ -11111,18 +11559,21 @@ function exportWorldToJSON() {
     return umap;
 }
 
-function loadWorldFromJSON(umap) {
+async function loadWorldFromJSON(umap, { fileMap = null } = {}) {
     if (umap.version !== 1 && umap.version !== 2) console.warn('Unknown umap version', umap.version);
     clearSceneActors();
 
     if (Array.isArray(umap.importedTemplates)) {
-        umap.importedTemplates.forEach((templateData) => {
+        // Run sequentially so registration errors land in the console with the
+        // matching template, and so loadObjectFromFile (used by the bundle
+        // path) doesn't fight itself for the LoadingManager fileMap.
+        for (const templateData of umap.importedTemplates) {
             try {
-                registerImportedPropTemplateFromSerializedData(templateData);
+                await registerImportedPropTemplateFromSerializedData(templateData, { fileMap });
             } catch (error) {
                 console.error('Failed to restore imported template from .umap.', error, templateData);
             }
-        });
+        }
     }
 
     for (const actorData of umap.actors) {
