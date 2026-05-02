@@ -1,5 +1,7 @@
 import * as THREE from 'three';
-import { WebGPURenderer } from 'three/webgpu';
+import { WebGPURenderer, PostProcessing } from 'three/webgpu';
+import { pass, mrt, output, emissive } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
@@ -640,7 +642,7 @@ function createExampleWidgets() {
 }
 
 // --- Configuration ---
-let scene, camera, renderer, currentMesh, transformControl;
+let scene, camera, renderer, currentMesh, transformControl, postProcessing;
 let originalTriCount = 0;
 let optimizedTriCount = 0;
 let scanPlane;
@@ -654,6 +656,7 @@ let sceneSystem;
 const EXPORT_MAX_TEXTURE_SIZE = 1024;
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
+const VEHICLE_CUSTOM_IMPORT_VALUE = '__custom_import__';
 const IMPORTED_PROP_MAX_HULL_POINTS = 480;
 const IMPORTED_PROP_MAX_HULL_PARTS = 18;
 const IMPORTED_PROP_COMPLEX_HULL_RADIUS = 0.01;
@@ -736,7 +739,10 @@ let objectScriptMenu, objectScriptTickActionBtn, objectScriptCollisionActionBtn;
 let objectScriptEditor, objectScriptEditorTitle, objectScriptEditorTarget, objectScriptEditorMode;
 let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBtn, objectScriptEditorClearBtn, objectScriptEditorCancelBtn;
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
-let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect, actorVehicleBodyTemplateSelect, actorVehicleWheelTemplateSelect;
+let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect, actorVehicleBodyTemplateSelect, actorVehicleWheelTemplateSelect, vehicleTemplateImportInput;
+// Tracks which vehicle slot ('body'|'wheel') triggered the file picker so the
+// import handler knows which select to update.
+let pendingVehicleTemplateImportSlot = null;
 let actorComponentCollisionInput, actorComponentPhysicsInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
 let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay, engineAudioDebugEl;
 let sceneUiPanel, sceneUiCount, sceneUiList;
@@ -3088,8 +3094,9 @@ async function importPhysicsProp(file, fileMap = {}) {
         }
 
         const collision = createImportedCollisionShape(root, collisionPreference.mode);
-        registerImportedPropTemplate(file.name, root, collision.mode, collision.shape, triangleCount);
+        const template = registerImportedPropTemplate(file.name, root, collision.mode, collision.shape, triangleCount);
         updatePropImportStatus();
+        return template;
     } catch (error) {
         console.error('Failed to import physics prop.', error);
         alert(error?.message === 'Unsupported file format'
@@ -3660,24 +3667,25 @@ function createDrivableCarVisual(bodyTemplateId = '', wheelTemplateId = '') {
         maxSteerAngle: 1.0,
         steerAngle: 0,
         spinAngle: 0,
+        lastWorldPosition: new THREE.Vector3(),
+        lastPositionInitialized: false,
     };
 
     return root;
 }
 
 function updateVehicleVisuals(delta) {
-    if (!physics.ready || !physics.dynamicBodies.length) return;
+    if (!physics.dynamicBodies?.length) return;
 
     const { bodyInterface } = physics;
     for (const prop of physics.dynamicBodies) {
-        if (prop?.kind !== 'vehicle' || !getActorRenderObject(prop)) continue;
+        const renderObject = getActorRenderObject(prop);
+        if (prop?.kind !== 'vehicle' || !renderObject) continue;
 
-        const visualState = getActorRenderObject(prop).userData?.vehicleVisual;
-        const body = getActorBody(prop);
-        if (!visualState || !body) continue;
+        const visualState = renderObject.userData?.vehicleVisual;
+        if (!visualState) continue;
 
-        const bodyId = body.GetID();
-        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(getActorRenderObject(prop).quaternion);
+        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(renderObject.quaternion);
         flatForward.y = 0;
         if (flatForward.lengthSq() < 1e-6) {
             flatForward.set(0, 0, -1);
@@ -3685,8 +3693,24 @@ function updateVehicleVisuals(delta) {
             flatForward.normalize();
         }
 
-        const linearVelocity = copyJoltVector(tempVectorB, bodyInterface.GetLinearVelocity(bodyId));
-        const forwardSpeed = linearVelocity.dot(flatForward);
+        // Prefer Jolt's authoritative velocity while physics is stepping; in
+        // edit/showcase mode physics is paused, so fall back to a frame-to-frame
+        // world-position delta so the wheels still spin when the user drags
+        // or scripts move the chassis.
+        const body = bodyInterface ? getActorBody(prop) : null;
+        let forwardSpeed = 0;
+        if (body && physics.ready && gameplay.active) {
+            const linearVelocity = copyJoltVector(tempVectorB, bodyInterface.GetLinearVelocity(body.GetID()));
+            forwardSpeed = linearVelocity.dot(flatForward);
+        } else {
+            const currentPos = renderObject.getWorldPosition(tempVectorB);
+            if (visualState.lastPositionInitialized && delta > 1e-5) {
+                const move = tempVectorC.subVectors(currentPos, visualState.lastWorldPosition);
+                forwardSpeed = move.dot(flatForward) / delta;
+            }
+            visualState.lastWorldPosition.copy(currentPos);
+            visualState.lastPositionInitialized = true;
+        }
 
         visualState.spinAngle -= (forwardSpeed / visualState.wheelRadius) * delta;
         const isActiveVehicle = gameplay.active && vehicleState.activePropId === prop.id;
@@ -4516,12 +4540,34 @@ function syncActorEditorTemplateOptions(selectedTemplateId = '', selectedVehicle
             option.textContent = template.displayName;
             select.appendChild(option);
         });
+        const customOption = document.createElement('option');
+        customOption.value = VEHICLE_CUSTOM_IMPORT_VALUE;
+        customOption.textContent = 'Custom… (import file)';
+        select.appendChild(customOption);
         select.value = selectedId && importedPropState.templates.some((template) => template.id === selectedId)
             ? selectedId
             : '';
     };
     populateVehicleSelect(actorVehicleBodyTemplateSelect, selectedVehicleBodyTemplateId, 'Default Sedan');
     populateVehicleSelect(actorVehicleWheelTemplateSelect, selectedVehicleWheelTemplateId, 'Default Wheel');
+}
+
+function handleVehicleTemplateSelectChange(slot) {
+    const select = slot === 'body' ? actorVehicleBodyTemplateSelect : actorVehicleWheelTemplateSelect;
+    if (!select) return;
+
+    if (select.value === VEHICLE_CUSTOM_IMPORT_VALUE) {
+        // Reset visible value back to default so the dropdown doesn't get
+        // stuck on "Custom…" if the user cancels the file picker.
+        select.value = '';
+        if (!vehicleTemplateImportInput) return;
+        pendingVehicleTemplateImportSlot = slot;
+        vehicleTemplateImportInput.value = '';
+        vehicleTemplateImportInput.click();
+        return;
+    }
+
+    syncActorEditorUi();
 }
 
 function syncActorEditorUi() {
@@ -4592,6 +4638,10 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '', vehicleBo
     if (actorScaleInput) {
         actorScaleInput.value = kind === 'cube' ? '2.0' : '0.5';
     }
+    const actorColorEnabledReset = document.getElementById('actor-color-enabled');
+    const actorColorInputReset = document.getElementById('actor-color-input');
+    if (actorColorEnabledReset) actorColorEnabledReset.checked = false;
+    if (actorColorInputReset) actorColorInputReset.disabled = true;
     if (actorComponentCollisionInput) {
         actorComponentCollisionInput.checked = true;
     }
@@ -4621,36 +4671,202 @@ function setActorColor(actor, hexColor) {
     });
 }
 
+function getObjectMaterialArray(object3D) {
+    if (!object3D?.isMesh || !object3D.material) return [];
+    return Array.isArray(object3D.material) ? object3D.material : [object3D.material];
+}
+
+function clampMaterialStateValue(value, fallback, min = 0, max = 1) {
+    const numericValue = Number.isFinite(value) ? value : fallback;
+    return THREE.MathUtils.clamp(numericValue, min, max);
+}
+
+function serializeMaterialSide(side) {
+    if (side === THREE.BackSide) return 'back';
+    if (side === THREE.DoubleSide) return 'double';
+    return 'front';
+}
+
+function deserializeMaterialSide(side) {
+    if (side === 'back') return THREE.BackSide;
+    if (side === 'double') return THREE.DoubleSide;
+    if (side === 'front') return THREE.FrontSide;
+    return null;
+}
+
+function serializeSingleMaterialState(material) {
+    if (!material) return null;
+
+    const state = {};
+
+    if (material.color) {
+        state.color = `#${material.color.getHexString()}`;
+    }
+    if (material.emissive) {
+        state.emissive = `#${material.emissive.getHexString()}`;
+    }
+    if ('emissiveIntensity' in material) {
+        state.emissiveIntensity = material.emissiveIntensity ?? 1;
+    }
+    if ('roughness' in material) {
+        state.roughness = material.roughness ?? 0.5;
+    }
+    if ('metalness' in material) {
+        state.metalness = material.metalness ?? 0;
+    }
+    if ('opacity' in material) {
+        state.opacity = material.opacity ?? 1;
+    }
+    if ('transparent' in material) {
+        state.transparent = material.transparent === true;
+    }
+    if ('alphaTest' in material) {
+        state.alphaTest = material.alphaTest ?? 0;
+    }
+    if ('envMapIntensity' in material) {
+        state.envMapIntensity = material.envMapIntensity ?? 1;
+    }
+    if ('transmission' in material) {
+        state.transmission = material.transmission ?? 0;
+    }
+    if ('thickness' in material) {
+        state.thickness = material.thickness ?? 0;
+    }
+    if ('ior' in material) {
+        state.ior = material.ior ?? 1.5;
+    }
+    if ('clearcoat' in material) {
+        state.clearcoat = material.clearcoat ?? 0;
+    }
+    if ('clearcoatRoughness' in material) {
+        state.clearcoatRoughness = material.clearcoatRoughness ?? 0;
+    }
+    if ('side' in material) {
+        state.side = serializeMaterialSide(material.side);
+    }
+
+    return Object.keys(state).length ? state : null;
+}
+
+function getObjectMaterialPreviewState(object3D) {
+    const material = getObjectMaterialArray(object3D)[0] ?? null;
+    return serializeSingleMaterialState(material);
+}
+
 function serializeObjectMaterialState(object3D) {
-    if (!object3D?.isMesh || !object3D.material) return null;
+    const materials = getObjectMaterialArray(object3D);
+    if (!materials.length) return null;
 
-    const materials = Array.isArray(object3D.material) ? object3D.material : [object3D.material];
-    const firstColorableMaterial = materials.find((material) => material?.color);
-    if (!firstColorableMaterial) return null;
+    const slots = materials.map((material) => serializeSingleMaterialState(material) ?? {});
+    const hasMaterialData = slots.some((slot) => Object.keys(slot).length > 0);
+    if (!hasMaterialData) return null;
 
-    return {
-        color: `#${firstColorableMaterial.color.getHexString()}`,
-        roughness: firstColorableMaterial.roughness ?? 0.5,
-        metalness: firstColorableMaterial.metalness ?? 0.0,
-    };
+    return slots.length === 1 ? slots[0] : { slots };
 }
 
 function applyObjectMaterialState(object3D, materialState) {
-    if (!object3D?.isMesh || !object3D.material || !materialState) return;
+    const materials = getObjectMaterialArray(object3D);
+    if (!materials.length || !materialState) return;
 
-    const color = materialState.color ? new THREE.Color(materialState.color) : null;
-    const materials = Array.isArray(object3D.material) ? object3D.material : [object3D.material];
+    const slotStates = Array.isArray(materialState?.slots) ? materialState.slots : null;
 
-    for (const material of materials) {
+    for (let index = 0; index < materials.length; index++) {
+        const material = materials[index];
         if (!material) continue;
+        const nextState = slotStates ? (slotStates[index] ?? slotStates[0] ?? null) : materialState;
+        if (!nextState) continue;
+        if (!Object.keys(nextState).length) continue;
+
+        const color = nextState.color ? new THREE.Color(nextState.color) : null;
+        const emissive = nextState.emissive ? new THREE.Color(nextState.emissive) : null;
+        const side = deserializeMaterialSide(nextState.side);
+        const roughness = nextState.roughness !== undefined
+            ? clampMaterialStateValue(nextState.roughness, 0.5, 0, 1)
+            : undefined;
+        const metalness = nextState.metalness !== undefined
+            ? clampMaterialStateValue(nextState.metalness, 0, 0, 1)
+            : undefined;
+        const emissiveIntensity = nextState.emissiveIntensity !== undefined
+            ? clampMaterialStateValue(nextState.emissiveIntensity, 1, 0, 8)
+            : undefined;
+        const opacity = nextState.opacity !== undefined
+            ? clampMaterialStateValue(nextState.opacity, 1, 0, 1)
+            : undefined;
+        const alphaTest = nextState.alphaTest !== undefined
+            ? clampMaterialStateValue(nextState.alphaTest, 0, 0, 1)
+            : undefined;
+        const envMapIntensity = nextState.envMapIntensity !== undefined
+            ? clampMaterialStateValue(nextState.envMapIntensity, 1, 0, 4)
+            : undefined;
+        const transmission = nextState.transmission !== undefined
+            ? clampMaterialStateValue(nextState.transmission, 0, 0, 1)
+            : undefined;
+        const thickness = nextState.thickness !== undefined
+            ? clampMaterialStateValue(nextState.thickness, 0, 0, 10)
+            : undefined;
+        const ior = nextState.ior !== undefined
+            ? clampMaterialStateValue(nextState.ior, 1.5, 1, 2.5)
+            : undefined;
+        const clearcoat = nextState.clearcoat !== undefined
+            ? clampMaterialStateValue(nextState.clearcoat, 0, 0, 1)
+            : undefined;
+        const clearcoatRoughness = nextState.clearcoatRoughness !== undefined
+            ? clampMaterialStateValue(nextState.clearcoatRoughness, 0, 0, 1)
+            : undefined;
+
         if (color && material.color) {
             material.color.copy(color);
         }
-        if ('roughness' in material && materialState.roughness !== undefined) {
-            material.roughness = materialState.roughness;
+        if (emissive && material.emissive) {
+            material.emissive.copy(emissive);
         }
-        if ('metalness' in material && materialState.metalness !== undefined) {
-            material.metalness = materialState.metalness;
+        if ('emissiveIntensity' in material && emissiveIntensity !== undefined) {
+            material.emissiveIntensity = emissiveIntensity;
+        }
+        if ('roughness' in material && roughness !== undefined) {
+            material.roughness = roughness;
+        }
+        if ('metalness' in material && metalness !== undefined) {
+            material.metalness = metalness;
+        }
+        if ('opacity' in material && opacity !== undefined) {
+            material.opacity = opacity;
+        }
+        if ('alphaTest' in material && alphaTest !== undefined) {
+            material.alphaTest = alphaTest;
+        }
+        const hasTransparencyState = nextState.transparent !== undefined
+            || opacity !== undefined
+            || transmission !== undefined;
+        if ('transparent' in material && hasTransparencyState) {
+            const shouldBeTransparent = nextState.transparent === true
+                || (opacity !== undefined && opacity < 0.999)
+                || (transmission !== undefined && transmission > 0);
+            material.transparent = shouldBeTransparent;
+        }
+        if ('depthWrite' in material && hasTransparencyState) {
+            material.depthWrite = !(material.transparent && (material.alphaTest ?? 0) <= 0);
+        }
+        if ('envMapIntensity' in material && envMapIntensity !== undefined) {
+            material.envMapIntensity = envMapIntensity;
+        }
+        if ('transmission' in material && transmission !== undefined) {
+            material.transmission = transmission;
+        }
+        if ('thickness' in material && thickness !== undefined) {
+            material.thickness = thickness;
+        }
+        if ('ior' in material && ior !== undefined) {
+            material.ior = ior;
+        }
+        if ('clearcoat' in material && clearcoat !== undefined) {
+            material.clearcoat = clearcoat;
+        }
+        if ('clearcoatRoughness' in material && clearcoatRoughness !== undefined) {
+            material.clearcoatRoughness = clearcoatRoughness;
+        }
+        if ('side' in material && side !== null) {
+            material.side = side;
         }
         material.needsUpdate = true;
     }
@@ -4748,7 +4964,8 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     }
 
     const actorColorInput = document.getElementById('actor-color-input');
-    if (actorColorInput) {
+    const actorColorEnabled = document.getElementById('actor-color-enabled');
+    if (actorColorInput && actorColorEnabled?.checked) {
         setActorColor(actor, actorColorInput.value);
     }
 
@@ -7238,6 +7455,7 @@ async function init() {
     actorImportedTemplateSelect = document.getElementById('actor-imported-template-select');
     actorVehicleBodyTemplateSelect = document.getElementById('actor-vehicle-body-template-select');
     actorVehicleWheelTemplateSelect = document.getElementById('actor-vehicle-wheel-template-select');
+    vehicleTemplateImportInput = document.getElementById('vehicle-template-import-input');
     actorComponentCollisionInput = document.getElementById('actor-component-collision');
     actorComponentPhysicsInput = document.getElementById('actor-component-physics');
     actorComponentScriptsInput = document.getElementById('actor-component-scripts');
@@ -7330,10 +7548,33 @@ async function init() {
     playTestSoundBtn?.addEventListener('click', () => {
         void playAudioTestCue();
     });
+    const actorColorEnabledEl = document.getElementById('actor-color-enabled');
+    const actorColorInputEl = document.getElementById('actor-color-input');
+    actorColorEnabledEl?.addEventListener('change', () => {
+        if (actorColorInputEl) actorColorInputEl.disabled = !actorColorEnabledEl.checked;
+    });
     actorKindSelect?.addEventListener('change', () => syncActorEditorUi());
     actorImportedTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
-    actorVehicleBodyTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
-    actorVehicleWheelTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
+    actorVehicleBodyTemplateSelect?.addEventListener('change', () => handleVehicleTemplateSelectChange('body'));
+    actorVehicleWheelTemplateSelect?.addEventListener('change', () => handleVehicleTemplateSelectChange('wheel'));
+    vehicleTemplateImportInput?.addEventListener('change', async (event) => {
+        const file = event.target.files?.[0];
+        const slot = pendingVehicleTemplateImportSlot;
+        pendingVehicleTemplateImportSlot = null;
+        event.target.value = '';
+        if (!file || !slot) return;
+
+        const template = await importPhysicsProp(file, {});
+        const select = slot === 'body' ? actorVehicleBodyTemplateSelect : actorVehicleWheelTemplateSelect;
+        if (template?.id && select) {
+            // populateVehicleSelect already re-ran via registerImportedPropTemplate;
+            // just select the freshly imported template.
+            select.value = template.id;
+        } else if (select) {
+            select.value = '';
+        }
+        syncActorEditorUi();
+    });
     actorComponentCollisionInput?.addEventListener('change', () => syncActorEditorUi());
     actorComponentPhysicsInput?.addEventListener('change', () => syncActorEditorUi());
     actorComponentScriptsInput?.addEventListener('change', () => syncActorEditorUi());
@@ -7439,6 +7680,21 @@ async function init() {
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
+
+    // ── Post-processing: bloom over the scene's emissive output ─────────────
+    // Uses an MRT pass so bloom only picks up materials with non-zero emissive
+    // (lights, headlights/taillights, accent stripes) instead of every bright
+    // pixel — keeps the world from looking hazy.
+    const scenePass = pass(scene, camera);
+    scenePass.setMRT(mrt({
+        output: output,
+        emissive: emissive,
+    }));
+    const sceneColor = scenePass.getTextureNode('output');
+    const sceneEmissive = scenePass.getTextureNode('emissive');
+    const bloomNode = bloom(sceneEmissive, 0.85, 0.6, 0.85);
+    postProcessing = new PostProcessing(renderer);
+    postProcessing.outputNode = sceneColor.add(bloomNode);
 
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
@@ -7596,8 +7852,8 @@ async function init() {
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
         if (gameplay.active) {
             physicsMetrics = stepPhysics(delta);
-            updateVehicleVisuals(delta);
         }
+        updateVehicleVisuals(delta);
         
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
         multiplayerController?.update(delta);
@@ -7614,7 +7870,11 @@ async function init() {
 
             const renderStart = performance.now();
             tickRaycastDebugLine();
-            renderer.renderAsync(scene, camera);
+            if (postProcessing) {
+                postProcessing.renderAsync();
+            } else {
+                renderer.renderAsync(scene, camera);
+            }
 
             recordDebugFrameMetrics({
                 frame: delta * 1000,
@@ -9670,12 +9930,21 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
             simulatePhysics: componentFlags.physics,
         });
     } else {
-        actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, {
+        // Spawn the primitive directly at the saved world position with no
+        // launch impulse. The default spawn path (camera-relative point +
+        // forward impulse) was creating a transient Jolt body whose contact
+        // pairs leaked across the play→showcase→play cycle, leaving stale
+        // manifolds that made the cube tunnel through terrain and then
+        // accelerate upward on the second play entry.
+        const savedPos = new THREE.Vector3().fromArray(actorData.transform.position);
+        actor = spawnDynamicPrimitive(actorData.kind, savedPos, scale, {
             includeScripts: componentFlags.scripts,
             userData: actorData.userData,
             returnActor: true,
             includeCollisionBody: componentFlags.collision,
             simulatePhysics: componentFlags.physics,
+            local: false,
+            skipImpulse: true,
         });
     }
 
@@ -9723,7 +9992,14 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
             applyObjectMaterialState(mesh, actorData.material);
         }
         mesh.updateMatrixWorld(true);
-        rebuildActorPhysics(actor);
+        // Primitive bodies were already created at the saved transform via
+        // spawnDynamicPrimitive(local:false, skipImpulse:true), so a rebuild
+        // is unnecessary and was leaving duplicate contact manifolds across
+        // play→showcase→play cycles. Imported actors still need the rebuild
+        // so the compound-shape children match the deserialized component tree.
+        if (actorData.kind === 'imported') {
+            rebuildActorPhysics(actor);
+        }
     }
 
     if (componentFlags.scripts) {
@@ -9791,24 +10067,19 @@ function clearSceneActors() {
     if (!sceneSystem) return;
     const actorsToDestroy = Array.from(sceneSystem.actors);
     for (const actor of actorsToDestroy) {
-        const body = getActorBody(actor);
-        if (body && physics.bodyInterface) {
-            physics.bodyInterface.RemoveBody(body.GetID());
-            physics.bodyInterface.DestroyBody(body.GetID());
-        }
-        
-        const mesh = getActorRenderObject(actor);
-        if (mesh && mesh.parent) {
-            mesh.parent.remove(mesh);
-            mesh.geometry?.dispose();
-            mesh.material?.dispose();
-        }
-        
+        // destroyDynamicPhysicsProp removes the mesh from its parent, calls
+        // physicsCore.unregisterBackFaceCulledBody so the terrain/static
+        // back-face cull list stays in sync, destroys the Jolt body, and
+        // clears any script drafts. Bypassing it (the previous inline body
+        // teardown did) leaves stale entries in physicsCore's cull list,
+        // which then breaks raycasts and edge-aware collision when the same
+        // actor is re-spawned by loadWorldFromJSON on showcase→play.
+        destroyDynamicPhysicsProp(actor);
         sceneSystem.removeActor(actor);
     }
-    
-    physics.dynamicBodies = [];
-    physics.staticBodies = [];
+
+    physics.dynamicBodies.length = 0;
+    physics.staticBodies.length = 0;
     selectShowcaseActor(null);
 }
 
@@ -10023,25 +10294,212 @@ function exitBlueprintEditor() {
         if (typeof transformControl !== 'undefined' && prop && getActorRenderObject(prop)) {
             transformControl.attach(getActorRenderObject(prop));
         }
-        rebuildActorPhysics(prop);
+        // Only rebuild physics for actor kinds whose collision shape depends
+        // on the component tree (imported props with multi-mesh compounds).
+        // Primitives have a single fixed shape — rebuilding them here was the
+        // same bug the play-mode round-trip had: stale duplicate manifolds in
+        // Jolt, causing "fall through floor then fly up and hover" the next
+        // time the user enters play.
+        if (prop?.kind === 'imported') {
+            rebuildActorPhysics(prop);
+        }
     }
     
     refreshSceneUI();
 }
 
-function syncBlueprintColorPicker() {
-    const picker = document.getElementById('bp-color-picker');
-    if (!picker) return;
+function formatBlueprintMaterialScalar(value, fallback = 0, min = 0, max = 1, decimals = 2) {
+    return clampMaterialStateValue(value, fallback, min, max).toFixed(decimals);
+}
+
+function getBlueprintMaterialEditorRefs() {
+    return {
+        target: document.getElementById('bp-material-target'),
+        status: document.getElementById('bp-material-status'),
+        color: document.getElementById('bp-material-color'),
+        emissive: document.getElementById('bp-material-emissive'),
+        roughness: document.getElementById('bp-material-roughness'),
+        roughnessNumber: document.getElementById('bp-material-roughness-number'),
+        metalness: document.getElementById('bp-material-metalness'),
+        metalnessNumber: document.getElementById('bp-material-metalness-number'),
+        emissiveIntensity: document.getElementById('bp-material-emissive-intensity'),
+        emissiveIntensityNumber: document.getElementById('bp-material-emissive-intensity-number'),
+        opacity: document.getElementById('bp-material-opacity'),
+        opacityNumber: document.getElementById('bp-material-opacity-number'),
+        alphaTest: document.getElementById('bp-material-alpha-test'),
+        alphaTestNumber: document.getElementById('bp-material-alpha-test-number'),
+        envIntensity: document.getElementById('bp-material-env-intensity'),
+        envIntensityNumber: document.getElementById('bp-material-env-intensity-number'),
+        side: document.getElementById('bp-material-side'),
+        applySelected: document.getElementById('btn-bp-apply-material-selected'),
+        applyActor: document.getElementById('btn-bp-apply-material-actor'),
+    };
+}
+
+function getBlueprintComponentDisplayName(object3D) {
+    if (!object3D) return 'Nothing selected';
+    if (object3D.name) return object3D.name;
+    if (object3D.isPointLight) return 'Point Light';
+    if (object3D.isLight) return object3D.type || 'Light';
+    if (object3D.isMesh) return object3D.geometry?.type || 'Mesh';
+    return object3D.type || 'Object3D';
+}
+
+function setBlueprintMaterialScalarPair(rangeInput, numberInput, value, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const formatted = formatBlueprintMaterialScalar(value, fallback, min, max, decimals);
+    if (rangeInput) rangeInput.value = formatted;
+    if (numberInput) numberInput.value = formatted;
+}
+
+function setBlueprintMaterialEditorEnabled(refs, enabled) {
+    [
+        refs.color,
+        refs.emissive,
+        refs.roughness,
+        refs.roughnessNumber,
+        refs.metalness,
+        refs.metalnessNumber,
+        refs.emissiveIntensity,
+        refs.emissiveIntensityNumber,
+        refs.opacity,
+        refs.opacityNumber,
+        refs.alphaTest,
+        refs.alphaTestNumber,
+        refs.envIntensity,
+        refs.envIntensityNumber,
+        refs.side,
+        refs.applySelected,
+        refs.applyActor,
+    ].forEach((element) => {
+        if (element) {
+            element.disabled = !enabled;
+        }
+    });
+}
+
+function syncBlueprintMaterialEditor(statusMessage = '') {
+    const refs = getBlueprintMaterialEditorRefs();
+    if (!refs.target || !refs.status) return;
+
     const comp = blueprintState.selectedComponent;
-    if (comp?.isMesh && comp.material) {
-        const mat = Array.isArray(comp.material) ? comp.material[0] : comp.material;
-        if (mat?.color) picker.value = '#' + mat.color.getHexString();
+    refs.target.textContent = `Target: ${getBlueprintComponentDisplayName(comp)}`;
+
+    const materialState = getObjectMaterialPreviewState(comp);
+    const isEditable = !!materialState;
+    setBlueprintMaterialEditorEnabled(refs, isEditable);
+
+    if (!isEditable) {
+        if (refs.color) refs.color.value = '#888888';
+        if (refs.emissive) refs.emissive.value = '#000000';
+        setBlueprintMaterialScalarPair(refs.roughness, refs.roughnessNumber, 0.5, 0.5);
+        setBlueprintMaterialScalarPair(refs.metalness, refs.metalnessNumber, 0, 0);
+        setBlueprintMaterialScalarPair(refs.emissiveIntensity, refs.emissiveIntensityNumber, 1, 1, 0, 8);
+        setBlueprintMaterialScalarPair(refs.opacity, refs.opacityNumber, 1, 1);
+        setBlueprintMaterialScalarPair(refs.alphaTest, refs.alphaTestNumber, 0, 0);
+        setBlueprintMaterialScalarPair(refs.envIntensity, refs.envIntensityNumber, 1, 1, 0, 4);
+        if (refs.side) refs.side.value = 'front';
+        refs.status.textContent = comp?.isLight
+            ? 'Selected component is a light. Material editor only applies to mesh components.'
+            : 'Select a mesh component to edit base color, emissive glow, reflectivity, opacity, and surface response.';
+        return;
     }
+
+    if (refs.color) refs.color.value = materialState.color || '#888888';
+    if (refs.emissive) refs.emissive.value = materialState.emissive || '#000000';
+    setBlueprintMaterialScalarPair(refs.roughness, refs.roughnessNumber, materialState.roughness, 0.5);
+    setBlueprintMaterialScalarPair(refs.metalness, refs.metalnessNumber, materialState.metalness, 0);
+    setBlueprintMaterialScalarPair(refs.emissiveIntensity, refs.emissiveIntensityNumber, materialState.emissiveIntensity, 1, 0, 8);
+    setBlueprintMaterialScalarPair(refs.opacity, refs.opacityNumber, materialState.opacity, 1);
+    setBlueprintMaterialScalarPair(refs.alphaTest, refs.alphaTestNumber, materialState.alphaTest, 0);
+    setBlueprintMaterialScalarPair(refs.envIntensity, refs.envIntensityNumber, materialState.envMapIntensity, 1, 0, 4);
+    if (refs.side) refs.side.value = materialState.side || 'front';
+
+    const materialCount = getObjectMaterialArray(comp).length;
+    const defaultStatus = materialCount > 1
+        ? `This mesh has ${materialCount} material slots. The editor previews slot 1, Apply stamps all slots, and save/load preserves per-slot data.`
+        : 'Selected mesh updates live and now persists richer material data with actor save/load.';
+    refs.status.textContent = statusMessage || defaultStatus;
+}
+
+function syncBlueprintMaterialScalarInput(sourceId, targetId, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const source = document.getElementById(sourceId);
+    const target = document.getElementById(targetId);
+    if (!source || !target) return;
+
+    const parsedValue = Number.parseFloat(source.value);
+    const formatted = formatBlueprintMaterialScalar(parsedValue, fallback, min, max, decimals);
+    source.value = formatted;
+    target.value = formatted;
+}
+
+function readBlueprintMaterialScalarInput(numberId, rangeId, fallback = 0, min = 0, max = 1) {
+    const numberInput = document.getElementById(numberId);
+    const rangeInput = document.getElementById(rangeId);
+    const rawValue = numberInput?.value ?? rangeInput?.value ?? `${fallback}`;
+    return clampMaterialStateValue(Number.parseFloat(rawValue), fallback, min, max);
+}
+
+function readBlueprintMaterialEditorState() {
+    const refs = getBlueprintMaterialEditorRefs();
+    const selectedComponent = blueprintState.selectedComponent;
+    if (!selectedComponent?.isMesh || !refs.color) return null;
+
+    return {
+        color: refs.color.value || '#888888',
+        emissive: refs.emissive?.value || '#000000',
+        roughness: readBlueprintMaterialScalarInput('bp-material-roughness-number', 'bp-material-roughness', 0.5, 0, 1),
+        metalness: readBlueprintMaterialScalarInput('bp-material-metalness-number', 'bp-material-metalness', 0, 0, 1),
+        emissiveIntensity: readBlueprintMaterialScalarInput('bp-material-emissive-intensity-number', 'bp-material-emissive-intensity', 1, 0, 8),
+        opacity: readBlueprintMaterialScalarInput('bp-material-opacity-number', 'bp-material-opacity', 1, 0, 1),
+        alphaTest: readBlueprintMaterialScalarInput('bp-material-alpha-test-number', 'bp-material-alpha-test', 0, 0, 1),
+        envMapIntensity: readBlueprintMaterialScalarInput('bp-material-env-intensity-number', 'bp-material-env-intensity', 1, 0, 4),
+        transparent: readBlueprintMaterialScalarInput('bp-material-opacity-number', 'bp-material-opacity', 1, 0, 1) < 0.999,
+        side: refs.side?.value || 'front',
+    };
+}
+
+function applyBlueprintMaterialEdits({ applyToActor = false, captureHistory = true, refresh = true, statusMessage = '' } = {}) {
+    const prop = blueprintState.targetActor;
+    const selectedComponent = blueprintState.selectedComponent;
+    const rootMesh = getActorRenderObject(prop);
+    const materialState = readBlueprintMaterialEditorState();
+    if (!rootMesh || !selectedComponent?.isMesh || !materialState) return;
+
+    if (captureHistory) {
+        editorHistory.captureState();
+    }
+
+    let nextStatus = statusMessage;
+    if (applyToActor) {
+        rootMesh.traverse((child) => {
+            if (child?.isMesh) {
+                applyObjectMaterialState(child, materialState);
+            }
+        });
+        nextStatus ||= 'Applied the current material settings to every mesh under the actor.';
+    } else {
+        applyObjectMaterialState(selectedComponent, materialState);
+        nextStatus ||= `Applied material to ${getBlueprintComponentDisplayName(selectedComponent)}.`;
+    }
+
+    if (refresh) {
+        refreshBlueprintComponents();
+    }
+    syncBlueprintMaterialEditor(nextStatus);
+}
+
+function previewBlueprintMaterialEdits() {
+    applyBlueprintMaterialEdits({
+        applyToActor: false,
+        captureHistory: false,
+        refresh: false,
+        statusMessage: 'Live preview active. Save Actor now captures the currently shown selected-mesh material values.',
+    });
 }
 
 function refreshBlueprintComponents() {
     updateBlueprintDetailsUI();
-    syncBlueprintColorPicker();
+    syncBlueprintMaterialEditor();
     const container = document.getElementById('selected-actor-components');
     if (!container) return;
     container.innerHTML = '';
@@ -10054,43 +10512,57 @@ function refreshBlueprintComponents() {
     if (!rootMesh) return;
     
     function renderComponentItem(object3D, depth, isRoot) {
-        const item = document.createElement('div');
-        item.style.padding = `4px 4px 4px ${4 + depth * 12}px`;
-        item.style.cursor = 'pointer';
-        item.style.borderRadius = '4px';
-        item.style.display = 'flex';
-        item.style.alignItems = 'center';
-        item.style.justifyContent = 'space-between';
-        item.style.background = blueprintState.selectedComponent === object3D ? 'rgba(112, 0, 255, 0.4)' : 'rgba(255,255,255,0.05)';
-        item.style.border = blueprintState.selectedComponent === object3D ? '1px solid rgba(112, 0, 255, 0.8)' : '1px solid transparent';
-        
-        const label = document.createElement('span');
-        let typeName = 'Mesh';
-        if (isRoot) typeName = 'Root Mesh';
-        else if (object3D.isPointLight) typeName = 'Point Light';
-        else if (object3D.geometry?.type === 'BoxGeometry') typeName = 'Cube Component';
-        else if (object3D.geometry?.type === 'SphereGeometry') typeName = 'Sphere Component';
-        
-        label.textContent = object3D.name || typeName;
-        label.style.fontSize = '13px';
-        item.appendChild(label);
-        
-        item.addEventListener('click', (e) => {
-            e.stopPropagation();
-            blueprintState.selectedComponent = object3D;
-            if (typeof transformControl !== 'undefined') transformControl.attach(object3D);
-            refreshBlueprintComponents();
-        });
-        
-        container.appendChild(item);
-        
+        // Hide internal scaffolding that should never be a material-edit target.
+        const isInternal = !!(object3D.userData?.vehicleVisual)
+            || object3D.name === 'vehicle-engine-wasm-audio'
+            || object3D.isAudio === true
+            || object3D.isPositionalAudio === true;
+        const showItem = isRoot || object3D.isMesh || object3D.isLight;
+
+        if (showItem && !isInternal) {
+            const item = document.createElement('div');
+            item.style.padding = `4px 4px 4px ${4 + depth * 12}px`;
+            item.style.cursor = 'pointer';
+            item.style.borderRadius = '4px';
+            item.style.display = 'flex';
+            item.style.alignItems = 'center';
+            item.style.justifyContent = 'space-between';
+            item.style.background = blueprintState.selectedComponent === object3D ? 'rgba(112, 0, 255, 0.4)' : 'rgba(255,255,255,0.05)';
+            item.style.border = blueprintState.selectedComponent === object3D ? '1px solid rgba(112, 0, 255, 0.8)' : '1px solid transparent';
+
+            const label = document.createElement('span');
+            let typeName = 'Group';
+            if (isRoot) typeName = 'Root';
+            else if (object3D.isPointLight) typeName = 'Point Light';
+            else if (object3D.isLight) typeName = 'Light';
+            else if (object3D.geometry?.type === 'BoxGeometry') typeName = 'Cube Mesh';
+            else if (object3D.geometry?.type === 'SphereGeometry') typeName = 'Sphere Mesh';
+            else if (object3D.geometry?.type === 'CylinderGeometry') typeName = 'Cylinder Mesh';
+            else if (object3D.geometry?.type === 'PlaneGeometry') typeName = 'Plane Mesh';
+            else if (object3D.geometry?.type) typeName = object3D.geometry.type.replace('Geometry', ' Mesh');
+            else if (object3D.isMesh) typeName = 'Mesh';
+
+            label.textContent = object3D.name || typeName;
+            label.style.fontSize = '13px';
+            item.appendChild(label);
+
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                blueprintState.selectedComponent = object3D;
+                if (typeof transformControl !== 'undefined') transformControl.attach(object3D);
+                refreshBlueprintComponents();
+            });
+
+            container.appendChild(item);
+        }
+
+        // Always recurse — vehicles wrap their meshes inside Group containers
+        // which would otherwise hide the body and wheel meshes from the editor.
         for (const child of object3D.children) {
-            if (child.isMesh || child.isLight) {
-                renderComponentItem(child, depth + 1, false);
-            }
+            renderComponentItem(child, depth + 1, false);
         }
     }
-    
+
     renderComponentItem(rootMesh, 0, true);
 }
 
@@ -10267,16 +10739,73 @@ function applyBlueprintDetailsFromUI() {
 });
 
 // Blueprint panel: Save/Load Actor buttons
-document.getElementById('btn-bp-apply-color')?.addEventListener('click', () => {
-    const prop = getDynamicPropById(objectScriptState.targetPropId);
-    if (!prop) return;
-    const picker = document.getElementById('bp-color-picker');
-    if (!picker) return;
-    setActorColor(prop, picker.value);
+document.getElementById('bp-material-color')?.addEventListener('input', () => {
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-emissive')?.addEventListener('input', () => {
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-roughness')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-roughness', 'bp-material-roughness-number', 0.5, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-roughness-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-roughness-number', 'bp-material-roughness', 0.5, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-metalness')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-metalness', 'bp-material-metalness-number', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-metalness-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-metalness-number', 'bp-material-metalness', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-emissive-intensity')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-emissive-intensity', 'bp-material-emissive-intensity-number', 1, 0, 8);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-emissive-intensity-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-emissive-intensity-number', 'bp-material-emissive-intensity', 1, 0, 8);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-opacity')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-opacity', 'bp-material-opacity-number', 1, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-opacity-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-opacity-number', 'bp-material-opacity', 1, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-alpha-test')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-alpha-test', 'bp-material-alpha-test-number', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-alpha-test-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-alpha-test-number', 'bp-material-alpha-test', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-env-intensity')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-env-intensity', 'bp-material-env-intensity-number', 1, 0, 4);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-env-intensity-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-env-intensity-number', 'bp-material-env-intensity', 1, 0, 4);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-side')?.addEventListener('change', () => {
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('btn-bp-apply-material-selected')?.addEventListener('click', () => {
+    applyBlueprintMaterialEdits({ applyToActor: false });
+});
+document.getElementById('btn-bp-apply-material-actor')?.addEventListener('click', () => {
+    applyBlueprintMaterialEdits({ applyToActor: true });
 });
 
 document.getElementById('btn-bp-save-actor')?.addEventListener('click', () => {
     if (blueprintState.targetActor) {
+        previewBlueprintMaterialEdits();
         exportActorToFile(blueprintState.targetActor);
     }
 });
@@ -10335,11 +10864,7 @@ function serializeComponentTree(object3D) {
                 children: serializeComponentTree(child)
             };
             if (child.isMesh && child.material) {
-                entry.material = {
-                    color: '#' + child.material.color.getHexString(),
-                    roughness: child.material.roughness ?? 0.5,
-                    metalness: child.material.metalness ?? 0.0
-                };
+                entry.material = serializeObjectMaterialState(child);
             }
             if (child.isPointLight) {
                 entry.light = {

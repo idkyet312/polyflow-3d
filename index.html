@@ -89,9 +89,12 @@
                                         max="6" step="0.1" value="0.5">
                                 </label>
                                 <label class="viewer-code-field" for="actor-color-input">
-                                    <span class="viewer-code-field-label">Color</span>
+                                    <span class="viewer-code-field-label">
+                                        <input id="actor-color-enabled" type="checkbox" style="margin-right: 0.4rem; vertical-align: middle;">
+                                        Custom Color
+                                    </span>
                                     <input id="actor-color-input" class="viewer-text-input" type="color" value="#888888"
-                                        style="height: 32px; padding: 2px; cursor: pointer;">
+                                        style="height: 32px; padding: 2px; cursor: pointer;" disabled>
                                 </label>
                                 <label class="viewer-code-field" for="actor-imported-template-select">
                                     <span class="viewer-code-field-label">Imported Source</span>
@@ -212,12 +215,66 @@
                             </div>
                         </div>
 
-                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Material Color:</div>
-                        <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
-                            <input type="color" id="bp-color-picker" value="#888888"
-                                style="width: 48px; height: 28px; padding: 1px; cursor: pointer; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; background: transparent;">
-                            <button class="btn viewer-menu-btn" id="btn-bp-apply-color"
-                                style="padding: 4px 10px; font-size: 11px; flex: 1;">Apply to All Materials</button>
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Material Editor:</div>
+                        <div class="bp-material-editor">
+                            <div class="bp-material-target" id="bp-material-target">Target: select a mesh component.</div>
+                            <div class="viewer-inline-note bp-material-status" id="bp-material-status">Select a mesh component to edit base color, emissive glow, reflectivity, opacity, and surface response.</div>
+                            <div class="bp-material-grid">
+                                <label class="bp-material-row" for="bp-material-color">
+                                    <span class="bp-material-label">Base Color</span>
+                                    <input type="color" id="bp-material-color" class="bp-material-color-input" value="#888888">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-material-emissive">
+                                    <span class="bp-material-label">Emissive</span>
+                                    <input type="color" id="bp-material-emissive" class="bp-material-color-input" value="#000000">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-material-roughness">
+                                    <span class="bp-material-label">Roughness</span>
+                                    <input type="range" id="bp-material-roughness" class="bp-material-range" min="0" max="1" step="0.01" value="0.50">
+                                    <input type="number" id="bp-material-roughness-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.50">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-metalness">
+                                    <span class="bp-material-label">Metalness</span>
+                                    <input type="range" id="bp-material-metalness" class="bp-material-range" min="0" max="1" step="0.01" value="0.00">
+                                    <input type="number" id="bp-material-metalness-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-emissive-intensity">
+                                    <span class="bp-material-label">Glow Power</span>
+                                    <input type="range" id="bp-material-emissive-intensity" class="bp-material-range" min="0" max="8" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-emissive-intensity-number" class="viewer-text-input bp-material-number" min="0" max="8" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-opacity">
+                                    <span class="bp-material-label">Opacity</span>
+                                    <input type="range" id="bp-material-opacity" class="bp-material-range" min="0" max="1" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-opacity-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-alpha-test">
+                                    <span class="bp-material-label">Alpha Test</span>
+                                    <input type="range" id="bp-material-alpha-test" class="bp-material-range" min="0" max="1" step="0.01" value="0.00">
+                                    <input type="number" id="bp-material-alpha-test-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-env-intensity">
+                                    <span class="bp-material-label">Env Light</span>
+                                    <input type="range" id="bp-material-env-intensity" class="bp-material-range" min="0" max="4" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-env-intensity-number" class="viewer-text-input bp-material-number" min="0" max="4" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-side">
+                                    <span class="bp-material-label">Render Side</span>
+                                    <select id="bp-material-side" class="viewer-text-input bp-material-select">
+                                        <option value="front">Front</option>
+                                        <option value="double">Double</option>
+                                        <option value="back">Back</option>
+                                    </select>
+                                    <span></span>
+                                </label>
+                            </div>
+                            <div class="viewer-inline-note bp-material-hint">Selected mesh updates live. Apply To Actor stamps the current settings across every mesh under this actor before saving.</div>
+                            <div class="viewer-menu-actions bp-material-actions">
+                                <button class="btn viewer-menu-btn" id="btn-bp-apply-material-selected" style="padding: 6px; font-size: 11px;">Apply To Selected</button>
+                                <button class="btn viewer-menu-btn" id="btn-bp-apply-material-actor" style="padding: 6px; font-size: 11px;">Apply To Actor</button>
+                            </div>
                         </div>
 
                         <div class="viewer-inline-note" style="margin-bottom: 8px;">Add Child Components:</div>
@@ -296,6 +353,8 @@
                                         <div class="viewer-prop-list" id="imported-prop-list"></div>
                                     </div>
                                     <input type="file" id="prop-file-input" accept=".glb,.gltf,.obj,.fbx"
+                                        style="display: none;">
+                                    <input type="file" id="vehicle-template-import-input" accept=".glb,.gltf,.obj,.fbx"
                                         style="display: none;">
                                 </div>
                             </details>

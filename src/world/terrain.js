@@ -27,40 +27,42 @@ function getTerrainHeightAtLocalPosition(x, y) {
     return basin + rolling + detail;
 }
 
-function createGrassTexture() {
+function createCheckerTexture() {
     const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 256;
+    canvas.width = 1024;
+    canvas.height = 1024;
     const ctx = canvas.getContext('2d');
 
-    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-    gradient.addColorStop(0, '#4f8e34');
-    gradient.addColorStop(0.45, '#3e7429');
-    gradient.addColorStop(1, '#2f5a1f');
-    ctx.fillStyle = gradient;
+    // Flat neutral grey base — Unreal world-grid look is one tone, not a checker.
+    ctx.fillStyle = '#52555a';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    for (let index = 0; index < 1800; index++) {
-        const x = Math.random() * canvas.width;
-        const y = Math.random() * canvas.height;
-        const width = 2 + Math.random() * 5;
-        const height = 4 + Math.random() * 10;
-        ctx.fillStyle = `hsla(${95 + Math.random() * 35}, ${40 + Math.random() * 30}%, ${28 + Math.random() * 28}%, ${0.08 + Math.random() * 0.18})`;
-        ctx.fillRect(x, y, width, height);
+    const minor = 64;          // 16 minor cells per repeat
+    const majorEvery = 4;      // every 4th line is bold (UE major-grid spacing)
+
+    // Minor grid lines — thin, low contrast.
+    ctx.strokeStyle = 'rgba(20, 22, 26, 0.32)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= canvas.width / minor; i++) {
+        const p = i * minor + 0.5;
+        ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(canvas.width, p); ctx.stroke();
     }
 
-    for (let index = 0; index < 650; index++) {
-        ctx.beginPath();
-        ctx.fillStyle = `hsla(${70 + Math.random() * 24}, ${25 + Math.random() * 35}%, ${42 + Math.random() * 18}%, ${0.08 + Math.random() * 0.16})`;
-        ctx.arc(Math.random() * canvas.width, Math.random() * canvas.height, Math.random() * 1.8, 0, Math.PI * 2);
-        ctx.fill();
+    // Major grid lines — thicker, higher contrast.
+    ctx.strokeStyle = 'rgba(20, 22, 26, 0.55)';
+    ctx.lineWidth = 2;
+    for (let i = 0; i <= canvas.width / minor; i += majorEvery) {
+        const p = i * minor + 0.5;
+        ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, canvas.height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(canvas.width, p); ctx.stroke();
     }
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.wrapS = THREE.RepeatWrapping;
     texture.wrapT = THREE.RepeatWrapping;
-    texture.repeat.set(TERRAIN_TEXTURE_REPEAT, TERRAIN_TEXTURE_REPEAT);
-    texture.anisotropy = 8;
+    texture.repeat.set(TERRAIN_TEXTURE_REPEAT * 0.5, TERRAIN_TEXTURE_REPEAT * 0.5);
+    texture.anisotropy = 16;
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
     return texture;
@@ -77,30 +79,8 @@ function configureTerrainTexture(texture, colorSpace = THREE.NoColorSpace) {
 }
 
 export async function applyTerrainTextures(terrain) {
-    if (!terrain?.material) return;
-
-    const loader = new THREE.TextureLoader();
-    const basePath = import.meta.env.BASE_URL || '/';
-    const material = terrain.material;
-
-    try {
-        const [colorMap, normalMap, roughnessMap, aoMap] = await Promise.all([
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.color}`),
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.normal}`),
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.roughness}`),
-            loader.loadAsync(`${basePath}${TERRAIN_TEXTURE_PATHS.ao}`),
-        ]);
-
-        material.map = configureTerrainTexture(colorMap, THREE.SRGBColorSpace);
-        material.normalMap = configureTerrainTexture(normalMap);
-        material.roughnessMap = configureTerrainTexture(roughnessMap);
-        material.aoMap = configureTerrainTexture(aoMap);
-        material.aoMapIntensity = 0.65;
-        material.normalScale.set(0.7, 0.7);
-        material.needsUpdate = true;
-    } catch (error) {
-        console.warn('Falling back to procedural terrain texture.', error);
-    }
+    // Floor is intentionally a flat dark grey — no grass textures applied.
+    return;
 }
 
 export function createTerrainMesh() {
@@ -117,10 +97,10 @@ export function createTerrainMesh() {
     geometry.setAttribute('uv2', new THREE.Float32BufferAttribute(geometry.attributes.uv.array, 2));
 
     const material = new THREE.MeshStandardMaterial({
-        color: 0x8abc63,
-        map: createGrassTexture(),
-        roughness: 0.97,
-        metalness: 0.02,
+        color: 0xffffff,
+        map: createCheckerTexture(),
+        roughness: 0.85,
+        metalness: 0.05,
     });
 
     const terrain = new THREE.Mesh(geometry, material);
