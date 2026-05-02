@@ -2,12 +2,7 @@ import * as THREE from 'three';
 import { WebGPURenderer, PostProcessing } from 'three/webgpu';
 import { pass, mrt, output, emissive } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
-import { TGALoader } from 'three/addons/loaders/TGALoader.js';
-import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
@@ -30,6 +25,15 @@ import {
     createCombustionDistortionCurve,
 } from './src/audio/synthesis.js';
 import { createDrivableCarVisual } from './src/vehicle/visual.js';
+import { createVehicleFx } from './src/vehicle/fx.js';
+import {
+    cloneDisposableObject,
+    formatImportedPropName,
+    normalizeObjectToDimension,
+    createLoadingManager,
+    convertLoadedObjectMaterials,
+    loadObjectFromFile,
+} from './src/io/objectLoader.js';
 import { createSocketMultiplayer } from './src/network/socketMultiplayer.js';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
 import { createPhysicsCore } from './src/physics/core.js';
@@ -504,20 +508,14 @@ const vehicleState = {
     brakeHeld: false,
     tailWhipLastFrame: false,
 };
-const VEHICLE_FX_SETTINGS = {
-    maxParticles: 260,
-    maxSkidMarks: 120,
-    dustSpeed: 4,
-    smokeSpeed: 6,
-    skidSpeed: 7,
-};
-const vehicleFxState = {
-    group: null,
-    particles: [],
-    skidMarks: [],
-    textures: {},
-    skidMaterial: null,
-};
+const vehicleFx = createVehicleFx({
+    getScene: () => scene,
+    vehicleSettings: VEHICLE_SETTINGS,
+});
+const emitVehicleParticle = vehicleFx.emitParticle;
+const emitVehicleSkidMark = vehicleFx.emitSkidMark;
+const emitVehicleSurfaceEffects = vehicleFx.emitSurfaceEffects;
+const updateVehicleSurfaceEffects = vehicleFx.updateSurfaceEffects;
 const vehicleEngineAudio = {
     activePropId: '',
     backend: 'none',
@@ -1906,218 +1904,6 @@ function disposeRenderableObject(root) {
     });
 }
 
-function cloneDisposableObject(root) {
-    const clone = root.clone(true);
-
-    clone.traverse((child) => {
-        if (!child.isMesh) return;
-
-        child.geometry = child.geometry.clone();
-        child.material = Array.isArray(child.material)
-            ? child.material.map((material) => material.clone())
-            : child.material.clone();
-        child.castShadow = true;
-        child.receiveShadow = true;
-    });
-
-    return clone;
-}
-
-function formatImportedPropName(name) {
-    const withoutExtension = name.replace(/\.[^.]+$/, '');
-    const collapsed = withoutExtension.replace(/[\-_]+/g, ' ').trim();
-    return collapsed || 'Imported Prop';
-}
-
-function normalizeObjectToDimension(root, targetDimension, centerOnFloor = true) {
-    if (!root) return;
-
-    root.updateWorldMatrix(true, true);
-    const box = new THREE.Box3().setFromObject(root);
-    const center = box.getCenter(tempVectorA);
-    const size = box.getSize(tempVectorB);
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    const targetScale = targetDimension / maxDim;
-
-    root.scale.setScalar(targetScale);
-    root.position.x = -center.x * targetScale;
-    root.position.z = -center.z * targetScale;
-    root.position.y = centerOnFloor ? -box.min.y * targetScale : -center.y * targetScale;
-    root.updateMatrixWorld(true);
-}
-
-function createLoadingManager(fileMap = {}) {
-    const manager = new THREE.LoadingManager();
-    manager.addHandler(/\.tga$/i, new TGALoader(manager));
-    manager.addHandler(/\.dds$/i, new DDSLoader(manager));
-    manager.onLoad = () => console.log('[TextureManager] All textures loaded');
-    manager.onError = (url) => console.warn('[TextureManager] Failed to load:', url);
-
-    manager.setURLModifier((originalUrl) => {
-        if (originalUrl.startsWith('data:') || originalUrl.startsWith('blob:')) {
-            return originalUrl;
-        }
-
-        const filename = originalUrl.split(/[\\/]/).pop().split('?')[0].split('#')[0].toLowerCase();
-        if (fileMap[filename]) {
-            console.log(`[TextureResolver] Resolved: ${filename}`);
-            return fileMap[filename].url;
-        }
-
-        const baseName = filename.replace(/\.[^.]+$/, '');
-        const possibleExts = ['.png', '.jpg', '.jpeg', '.tga', '.dds', '.bmp', '.webp'];
-
-        for (const ext of possibleExts) {
-            const possibleName = baseName + ext;
-            if (fileMap[possibleName]) {
-                console.log(`[TextureResolver] Resolved ${filename} -> ${possibleName}`);
-                return fileMap[possibleName].url;
-            }
-        }
-
-        if (Object.keys(fileMap).length > 0) {
-            console.warn(`[TextureResolver] Not found: ${filename}`);
-        }
-
-        return originalUrl;
-    });
-
-    return manager;
-}
-
-function convertLoadedObjectMaterials(root) {
-    root.traverse((child) => {
-        if (!child.isMesh) return;
-
-        child.castShadow = true;
-        child.receiveShadow = true;
-
-        if (!child.geometry.attributes.normal) {
-            child.geometry.computeVertexNormals();
-        }
-
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        child.material = materials.map((material) => {
-            if (!material) return material;
-
-            const hasAlphaMap = !!material.alphaMap;
-            const isActuallyTransparent = (material.transparent || false) && ((material.opacity ?? 1.0) < 1.0 || hasAlphaMap);
-
-            if (material.isMeshStandardMaterial || material.isMeshPhysicalMaterial) {
-                material.side = THREE.FrontSide;
-                material.envMapIntensity = Math.min(material.envMapIntensity ?? 0.6, 0.75);
-                material.metalness = Math.min(material.metalness ?? 0.0, 0.25);
-                material.roughness = Math.max(material.roughness ?? 0.5, 0.35);
-                material.transparent = isActuallyTransparent;
-                material.alphaTest = hasAlphaMap ? Math.max(material.alphaTest || 0, 0.5) : (material.alphaTest || 0);
-                material.depthWrite = !isActuallyTransparent || hasAlphaMap;
-                material.needsUpdate = true;
-                return material;
-            }
-
-            const shininess = material.shininess ?? 30;
-            const computedRoughness = Math.max(0.04, 1.0 - Math.sqrt(Math.min(shininess, 1000) / 1000));
-            const specularIntensity = material.specular ? (material.specular.r + material.specular.g + material.specular.b) / 3 : 0;
-            const computedMetalness = Math.min(0.5, specularIntensity * 0.5);
-
-            const standardMaterial = new THREE.MeshStandardMaterial({
-                name: material.name,
-                color: material.color ? material.color.clone() : new THREE.Color(0x888888),
-                map: material.map || null,
-                normalMap: material.normalMap || material.bumpMap || null,
-                emissive: material.emissive ? material.emissive.clone() : new THREE.Color(0x000000),
-                emissiveMap: material.emissiveMap || null,
-                emissiveIntensity: material.emissiveIntensity || 1.0,
-                alphaMap: material.alphaMap || null,
-                aoMap: material.aoMap || material.lightMap || null,
-                aoMapIntensity: 1.0,
-                roughness: material.specularMap ? 0.5 : computedRoughness,
-                roughnessMap: null,
-                metalness: computedMetalness,
-                metalnessMap: null,
-                transparent: isActuallyTransparent,
-                opacity: material.opacity !== undefined ? material.opacity : 1.0,
-                alphaTest: hasAlphaMap ? 0.5 : (material.alphaTest || 0),
-                depthWrite: !isActuallyTransparent || hasAlphaMap,
-                vertexColors: !!child.geometry.attributes.color,
-                side: THREE.FrontSide,
-                envMapIntensity: 0.6,
-            });
-
-            if (material.bumpMap && !material.normalMap) {
-                standardMaterial.bumpMap = null;
-                standardMaterial.bumpScale = 1.0;
-            }
-
-            if (standardMaterial.map) {
-                standardMaterial.map.colorSpace = THREE.SRGBColorSpace;
-                standardMaterial.map.needsUpdate = true;
-            }
-
-            if (standardMaterial.emissiveMap) {
-                standardMaterial.emissiveMap.colorSpace = THREE.SRGBColorSpace;
-                standardMaterial.emissiveMap.needsUpdate = true;
-            }
-
-            ['normalMap', 'alphaMap', 'roughnessMap', 'aoMap'].forEach((mapName) => {
-                if (standardMaterial[mapName]) {
-                    standardMaterial[mapName].colorSpace = THREE.NoColorSpace || '';
-                    standardMaterial[mapName].needsUpdate = true;
-                }
-            });
-
-            if (standardMaterial.color.getHex() === 0x000000 && !standardMaterial.map && !child.geometry.attributes.color) {
-                standardMaterial.color.setHex(0x888888);
-            }
-
-            return standardMaterial;
-        });
-
-        if (child.material.length === 1) {
-            child.material = child.material[0];
-        }
-    });
-}
-
-function loadObjectFromFile(file, fileMap = {}) {
-    const extension = file.name.split('.').pop().toLowerCase();
-    const url = URL.createObjectURL(file);
-    const manager = createLoadingManager(fileMap);
-
-    return new Promise((resolve, reject) => {
-        const cleanup = () => URL.revokeObjectURL(url);
-        const finishLoad = (object) => {
-            cleanup();
-            const root = object.scene || object;
-            convertLoadedObjectMaterials(root);
-            resolve(root);
-        };
-
-        const failLoad = (error) => {
-            cleanup();
-            reject(error);
-        };
-
-        try {
-            if (extension === 'glb' || extension === 'gltf') {
-                const loader = new GLTFLoader(manager);
-                loader.load(url, finishLoad, undefined, failLoad);
-            } else if (extension === 'obj') {
-                const loader = new OBJLoader(manager);
-                loader.load(url, finishLoad, undefined, failLoad);
-            } else if (extension === 'fbx') {
-                const loader = new FBXLoader(manager);
-                loader.load(url, finishLoad, undefined, failLoad);
-            } else {
-                cleanup();
-                reject(new Error('Unsupported file format'));
-            }
-        } catch (error) {
-            cleanup();
-            reject(error);
-        }
-    });
-}
 
 function enableOptimizationPipeline() {
     if (!processTrigger) return;
@@ -2896,198 +2682,6 @@ function ensureVehicleVisualState(root) {
     return nextState;
 }
 
-function createVehicleFxTexture(kind) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 64;
-    const ctx = canvas.getContext('2d');
-    const gradient = ctx.createRadialGradient(32, 32, 2, 32, 32, 31);
-    if (kind === 'spark') {
-        gradient.addColorStop(0, 'rgba(255,255,220,1)');
-        gradient.addColorStop(0.35, 'rgba(255,166,50,0.9)');
-        gradient.addColorStop(1, 'rgba(255,80,10,0)');
-    } else if (kind === 'dust') {
-        gradient.addColorStop(0, 'rgba(205,190,160,0.62)');
-        gradient.addColorStop(1, 'rgba(130,110,85,0)');
-    } else {
-        gradient.addColorStop(0, 'rgba(170,175,180,0.5)');
-        gradient.addColorStop(1, 'rgba(85,90,95,0)');
-    }
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, 64, 64);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    return texture;
-}
-
-function ensureVehicleFx() {
-    if (!scene) return null;
-    if (!vehicleFxState.group) {
-        vehicleFxState.group = new THREE.Group();
-        vehicleFxState.group.name = 'vehicle-surface-fx';
-        scene.add(vehicleFxState.group);
-    }
-    for (const kind of ['smoke', 'dust', 'spark']) {
-        if (!vehicleFxState.textures[kind]) {
-            vehicleFxState.textures[kind] = createVehicleFxTexture(kind);
-        }
-    }
-    if (!vehicleFxState.skidMaterial) {
-        vehicleFxState.skidMaterial = new THREE.MeshBasicMaterial({
-            color: 0x101010,
-            transparent: true,
-            opacity: 0.42,
-            depthWrite: false,
-            side: THREE.DoubleSide,
-        });
-    }
-    return vehicleFxState.group;
-}
-
-function emitVehicleParticle(kind, position, velocity, size = 0.35, life = 0.7) {
-    const group = ensureVehicleFx();
-    if (!group) return;
-
-    let particle = vehicleFxState.particles.find((entry) => entry.life <= 0);
-    if (!particle && vehicleFxState.particles.length < VEHICLE_FX_SETTINGS.maxParticles) {
-        const material = new THREE.SpriteMaterial({
-            map: vehicleFxState.textures[kind] || vehicleFxState.textures.smoke,
-            transparent: true,
-            depthWrite: false,
-            blending: kind === 'spark' ? THREE.AdditiveBlending : THREE.NormalBlending,
-        });
-        const sprite = new THREE.Sprite(material);
-        sprite.visible = false;
-        group.add(sprite);
-        particle = { sprite, velocity: new THREE.Vector3(), life: 0, maxLife: 1, baseSize: 1, kind };
-        vehicleFxState.particles.push(particle);
-    }
-    if (!particle) return;
-
-    particle.kind = kind;
-    particle.life = life;
-    particle.maxLife = life;
-    particle.baseSize = size;
-    particle.velocity.copy(velocity);
-    particle.sprite.position.copy(position);
-    particle.sprite.scale.setScalar(size);
-    particle.sprite.material.map = vehicleFxState.textures[kind] || vehicleFxState.textures.smoke;
-    particle.sprite.material.blending = kind === 'spark' ? THREE.AdditiveBlending : THREE.NormalBlending;
-    particle.sprite.material.opacity = kind === 'spark' ? 1 : 0.65;
-    particle.sprite.visible = true;
-}
-
-function emitVehicleSkidMark(position, forward, width, length, opacity) {
-    const group = ensureVehicleFx();
-    if (!group) return;
-
-    let mark = vehicleFxState.skidMarks.find((entry) => entry.life <= 0);
-    if (!mark) {
-        if (vehicleFxState.skidMarks.length >= VEHICLE_FX_SETTINGS.maxSkidMarks) {
-            mark = vehicleFxState.skidMarks.shift();
-            if (mark?.mesh?.parent) mark.mesh.parent.remove(mark.mesh);
-        }
-        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), vehicleFxState.skidMaterial.clone());
-        mesh.name = 'tire-skid-mark';
-        group.add(mesh);
-        mark = { mesh, life: 0, maxLife: 1 };
-        vehicleFxState.skidMarks.push(mark);
-    }
-
-    mark.life = 9;
-    mark.maxLife = 9;
-    mark.mesh.visible = true;
-    mark.mesh.position.copy(position);
-    mark.mesh.position.y += 0.012;
-    mark.mesh.scale.set(width, length, 1);
-    mark.mesh.rotation.set(-Math.PI * 0.5, 0, Math.atan2(forward.x, forward.z));
-    mark.mesh.material.opacity = opacity;
-}
-
-function emitVehicleSurfaceEffects(delta, data) {
-    if (!data.grounded) return;
-
-    const speed = Math.abs(data.forwardSpeed);
-    const lateral = Math.abs(data.lateralSpeed);
-    const slip = data.drifting || data.brakeHeld || lateral > 2.6;
-    const dustAmount = THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.dustSpeed) / 16, 0, 1);
-    const smokeAmount = THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.smokeSpeed) / 18 + lateral / 12, 0, 1);
-    const skidAmount = slip ? THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.skidSpeed) / 18 + lateral / 10, 0, 1) : 0;
-    const rearCorners = data.cornerSamples.slice(2);
-
-    rearCorners.forEach((corner) => {
-        if (corner.rideHeight === null) return;
-        const wheelPos = data.vehiclePosition.clone()
-            .addScaledVector(data.flatForward, corner.forward)
-            .addScaledVector(data.flatRight, corner.sideways);
-        wheelPos.y -= Math.min(corner.rideHeight, VEHICLE_SETTINGS.suspensionRideHeight);
-
-        if (dustAmount > 0 && Math.random() < dustAmount * 7 * delta) {
-            emitVehicleParticle(
-                'dust',
-                wheelPos,
-                data.flatForward.clone().multiplyScalar(-speed * 0.12).addScaledVector(upVector, 0.45 + Math.random() * 0.4),
-                0.28 + dustAmount * 0.42,
-                0.45 + Math.random() * 0.35
-            );
-        }
-        if (smokeAmount > 0.2 && slip && Math.random() < smokeAmount * 8 * delta) {
-            emitVehicleParticle(
-                'smoke',
-                wheelPos,
-                data.flatForward.clone().multiplyScalar(-0.6).addScaledVector(upVector, 0.75 + Math.random() * 0.35),
-                0.42 + smokeAmount * 0.55,
-                0.75 + Math.random() * 0.55
-            );
-        }
-        if (skidAmount > 0.05 && Math.random() < skidAmount * 18 * delta) {
-            emitVehicleSkidMark(wheelPos, data.flatForward, 0.18, 0.7 + speed * 0.025, 0.18 + skidAmount * 0.28);
-        }
-    });
-
-    const hardLanding = data.averageCompression > VEHICLE_SETTINGS.suspensionTravel * 0.7 && data.verticalSpeed < -2.4;
-    if (hardLanding && Math.random() < 18 * delta) {
-        const sparkPos = data.vehiclePosition.clone().addScaledVector(data.flatForward, -0.25);
-        sparkPos.y -= VEHICLE_SETTINGS.height * 0.4;
-        for (let i = 0; i < 3; i++) {
-            emitVehicleParticle(
-                'spark',
-                sparkPos,
-                data.flatRight.clone().multiplyScalar((Math.random() - 0.5) * 3).addScaledVector(upVector, 1.1 + Math.random() * 1.2),
-                0.13,
-                0.25 + Math.random() * 0.2
-            );
-        }
-    }
-}
-
-function updateVehicleSurfaceEffects(delta) {
-    if (!vehicleFxState.group) return;
-
-    for (const particle of vehicleFxState.particles) {
-        if (particle.life <= 0) continue;
-        particle.life -= delta;
-        if (particle.life <= 0) {
-            particle.sprite.visible = false;
-            continue;
-        }
-        const t = 1 - particle.life / particle.maxLife;
-        particle.velocity.y += particle.kind === 'spark' ? -9.5 * delta : 0.35 * delta;
-        particle.sprite.position.addScaledVector(particle.velocity, delta);
-        particle.sprite.scale.setScalar(particle.baseSize * (particle.kind === 'spark' ? 1 - t * 0.55 : 1 + t * 1.35));
-        particle.sprite.material.opacity = (particle.kind === 'spark' ? 1 : 0.65) * (1 - t);
-    }
-
-    for (const mark of vehicleFxState.skidMarks) {
-        if (mark.life <= 0) continue;
-        mark.life -= delta;
-        if (mark.life <= 0) {
-            mark.mesh.visible = false;
-            continue;
-        }
-        mark.mesh.material.opacity *= Math.pow(0.86, delta);
-    }
-}
 
 function updateVehicleVisuals(delta) {
     if (!physics.dynamicBodies?.length) return;
