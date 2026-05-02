@@ -12,6 +12,24 @@ import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
+import {
+    WidgetManager,
+    BaseWidget,
+    TextWidget,
+    ImageWidget,
+    ProgressBarWidget,
+    ButtonWidget,
+} from './src/ui/widgets.js';
+import {
+    sampleTestTone,
+    writeWaveAscii,
+    createTestSoundBuffer,
+    createMediaTestSoundUrl,
+    createEngineNoiseBuffer,
+    createCombustionPulseBuffer,
+    createCombustionDistortionCurve,
+} from './src/audio/synthesis.js';
+import { createDrivableCarVisual } from './src/vehicle/visual.js';
 import { createSocketMultiplayer } from './src/network/socketMultiplayer.js';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
 import { createPhysicsCore } from './src/physics/core.js';
@@ -54,471 +72,6 @@ import {
 
 installUePrototypeMethods();
 
-// --- Widget System (Unreal Engine Style) ---
-class WidgetManager {
-    constructor(container) {
-        this.container = container;
-        this.widgets = new Map();
-        this.nextId = 1;
-
-        // Create overlay container for UI widgets
-        this.overlay = document.createElement('div');
-        this.overlay.id = 'widget-overlay';
-        this.overlay.style.cssText = `
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 1000;
-        `;
-        // Append overlay on top of the canvas (which should be the last child)
-        this.container.appendChild(this.overlay);
-    }
-
-    createWidget(type, config = {}) {
-        const id = this.nextId++;
-        let widget;
-
-        switch (type) {
-            case 'text':
-                widget = new TextWidget(id, config);
-                break;
-            case 'image':
-                widget = new ImageWidget(id, config);
-                break;
-            case 'progress':
-                widget = new ProgressBarWidget(id, config);
-                break;
-            case 'button':
-                widget = new ButtonWidget(id, config);
-                break;
-            default:
-                throw new Error(`Unknown widget type: ${type}`);
-        }
-
-        this.widgets.set(id, widget);
-        this.overlay.appendChild(widget.element);
-        return id;
-    }
-
-    updateWidget(id, updates) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        widget.update(updates);
-        return true;
-    }
-
-    showWidget(id, visible = true) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        widget.element.style.display = visible ? 'block' : 'none';
-        return true;
-    }
-
-    removeWidget(id) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        this.overlay.removeChild(widget.element);
-        widget.dispose();
-        this.widgets.delete(id);
-        return true;
-    }
-
-    setWidgetPosition(id, position, space = 'screen') {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        if (space === 'screen') {
-            // Position as percentage of container
-            const x = (position.x * 100) + '%';
-            const y = (position.y * 100) + '%';
-            widget.element.style.left = x;
-            widget.element.style.top = y;
-            widget.element.style.transform = 'translate(-50%, -50%)';
-        } else {
-            // World space positioning would require 3D to screen conversion
-            console.warn('World space positioning not yet implemented for HTML widgets');
-        }
-        return true;
-    }
-
-    setWidgetScale(id, scale) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        const scaleValue = typeof scale === 'number' ? scale : scale.x || 1;
-        widget.element.style.transform = widget.element.style.transform.replace(/scale\([^)]*\)/, '') + ` scale(${scaleValue})`;
-        return true;
-    }
-
-    getWidget(id) {
-        return this.widgets.get(id);
-    }
-
-    getAllWidgets() {
-        return Array.from(this.widgets.values());
-    }
-
-    update(delta) {
-        // Kept to prevent breaking the main render loop
-    }
-
-    dispose() {
-        for (const widget of this.widgets.values()) {
-            widget.dispose();
-        }
-        this.widgets.clear();
-        if (this.overlay && this.overlay.parentNode) {
-            this.overlay.parentNode.removeChild(this.overlay);
-        }
-    }
-}
-
-// Base Widget Class
-class BaseWidget {
-    constructor(id, config = {}) {
-        this.id = id;
-        this.element = document.createElement('div');
-        this.element.className = 'widget';
-        this.element.style.cssText = `
-            position: absolute;
-            pointer-events: auto;
-            user-select: none;
-        `;
-
-        this.config = {
-            position: { x: 0.5, y: 0.5 }, // Normalized screen coordinates (0-1)
-            scale: 1,
-            visible: true,
-            zOrder: 0,
-            ...config
-        };
-
-        this.updatePosition();
-        this.element.style.display = this.config.visible ? 'block' : 'none';
-        this.element.style.zIndex = String(this.config.zOrder);
-    }
-
-    update(updates) {
-        if (updates.position) {
-            this.config.position = updates.position;
-            this.updatePosition();
-        }
-        if (updates.scale !== undefined) {
-            this.config.scale = updates.scale;
-            this.updateScale();
-        }
-        if (updates.visible !== undefined) {
-            this.config.visible = updates.visible;
-            this.element.style.display = updates.visible ? 'block' : 'none';
-        }
-        if (updates.zOrder !== undefined) {
-            this.config.zOrder = updates.zOrder;
-            this.element.style.zIndex = String(updates.zOrder);
-        }
-
-        Object.assign(this.config, updates);
-    }
-
-    updatePosition() {
-        const x = (this.config.position.x * 100) + '%';
-        const y = (this.config.position.y * 100) + '%';
-        this.element.style.left = x;
-        this.element.style.top = y;
-        this.element.style.transform = 'translate(-50%, -50%)';
-        this.updateScale();
-    }
-
-    updateScale() {
-        const currentTransform = this.element.style.transform;
-        const translateMatch = currentTransform.match(/translate\([^)]+\)/);
-        const translate = translateMatch ? translateMatch[0] : 'translate(-50%, -50%)';
-        this.element.style.transform = `${translate} scale(${this.config.scale})`;
-    }
-
-    dispose() {
-        if (this.element && this.element.parentNode) {
-            this.element.parentNode.removeChild(this.element);
-        }
-    }
-}
-
-// Text Widget
-class TextWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            text: 'Hello World',
-            fontSize: 24,
-            color: '#ffffff',
-            fontFamily: 'Arial, sans-serif',
-            textAlign: 'center',
-            backgroundColor: 'rgba(0, 0, 0, 0.5)',
-            padding: '8px 16px',
-            borderRadius: '4px',
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <div style="
-                font-size: ${this.config.fontSize}px;
-                color: ${this.config.color};
-                font-family: ${this.config.fontFamily};
-                text-align: ${this.config.textAlign};
-                background-color: ${this.config.backgroundColor};
-                padding: ${this.config.padding};
-                border-radius: ${this.config.borderRadius};
-                white-space: nowrap;
-            ">${this.config.text}</div>
-        `;
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.text !== undefined) {
-            this.config.text = updates.text;
-            this.element.querySelector('div').textContent = updates.text;
-        }
-        if (updates.fontSize !== undefined) {
-            this.config.fontSize = updates.fontSize;
-            this.element.querySelector('div').style.fontSize = updates.fontSize + 'px';
-        }
-        if (updates.color !== undefined) {
-            this.config.color = updates.color;
-            this.element.querySelector('div').style.color = updates.color;
-        }
-        if (updates.fontFamily !== undefined) {
-            this.config.fontFamily = updates.fontFamily;
-            this.element.querySelector('div').style.fontFamily = updates.fontFamily;
-        }
-        if (updates.textAlign !== undefined) {
-            this.config.textAlign = updates.textAlign;
-            this.element.querySelector('div').style.textAlign = updates.textAlign;
-        }
-        if (updates.backgroundColor !== undefined) {
-            this.config.backgroundColor = updates.backgroundColor;
-            this.element.querySelector('div').style.backgroundColor = updates.backgroundColor;
-        }
-        if (updates.padding !== undefined) {
-            this.config.padding = updates.padding;
-            this.element.querySelector('div').style.padding = updates.padding;
-        }
-        if (updates.borderRadius !== undefined) {
-            this.config.borderRadius = updates.borderRadius;
-            this.element.querySelector('div').style.borderRadius = updates.borderRadius;
-        }
-    }
-}
-
-// Image Widget
-class ImageWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            imageUrl: null,
-            width: 100,
-            height: 100,
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <img style="
-                width: ${this.config.width}px;
-                height: ${this.config.height}px;
-                object-fit: contain;
-                border-radius: 4px;
-            " src="${this.config.imageUrl || ''}" alt="Widget Image">
-        `;
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.imageUrl !== undefined) {
-            this.config.imageUrl = updates.imageUrl;
-            this.element.querySelector('img').src = updates.imageUrl;
-        }
-        if (updates.width !== undefined) {
-            this.config.width = updates.width;
-            this.element.querySelector('img').style.width = updates.width + 'px';
-        }
-        if (updates.height !== undefined) {
-            this.config.height = updates.height;
-            this.element.querySelector('img').style.height = updates.height + 'px';
-        }
-    }
-}
-
-// Progress Bar Widget
-class ProgressBarWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            progress: 0.5,
-            width: 200,
-            height: 20,
-            backgroundColor: '#333333',
-            fillColor: '#00ff00',
-            borderColor: '#ffffff',
-            borderWidth: '2px',
-            borderRadius: '4px',
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <div style="
-                width: ${this.config.width}px;
-                height: ${this.config.height}px;
-                background-color: ${this.config.backgroundColor};
-                border: ${this.config.borderWidth} solid ${this.config.borderColor};
-                border-radius: ${this.config.borderRadius};
-                overflow: hidden;
-            ">
-                <div style="
-                    width: ${this.config.progress * 100}%;
-                    height: 100%;
-                    background-color: ${this.config.fillColor};
-                    transition: width 0.3s ease;
-                "></div>
-            </div>
-        `;
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.progress !== undefined) {
-            this.config.progress = Math.max(0, Math.min(1, updates.progress));
-            this.element.querySelector('div > div').style.width = (this.config.progress * 100) + '%';
-        }
-        if (updates.width !== undefined) {
-            this.config.width = updates.width;
-            this.element.querySelector('div').style.width = updates.width + 'px';
-        }
-        if (updates.height !== undefined) {
-            this.config.height = updates.height;
-            this.element.querySelector('div').style.height = updates.height + 'px';
-        }
-        if (updates.backgroundColor !== undefined) {
-            this.config.backgroundColor = updates.backgroundColor;
-            this.element.querySelector('div').style.backgroundColor = updates.backgroundColor;
-        }
-        if (updates.fillColor !== undefined) {
-            this.config.fillColor = updates.fillColor;
-            this.element.querySelector('div > div').style.backgroundColor = updates.fillColor;
-        }
-        if (updates.borderColor !== undefined) {
-            this.config.borderColor = updates.borderColor;
-            this.element.querySelector('div').style.borderColor = updates.borderColor;
-        }
-        if (updates.borderWidth !== undefined) {
-            this.config.borderWidth = updates.borderWidth;
-            this.element.querySelector('div').style.borderWidth = updates.borderWidth;
-        }
-        if (updates.borderRadius !== undefined) {
-            this.config.borderRadius = updates.borderRadius;
-            this.element.querySelector('div').style.borderRadius = updates.borderRadius;
-        }
-    }
-}
-
-// Button Widget
-class ButtonWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            text: 'Button',
-            width: 120,
-            height: 40,
-            backgroundColor: '#444444',
-            hoverColor: '#666666',
-            textColor: '#ffffff',
-            borderRadius: '4px',
-            fontSize: 16,
-            onClick: null,
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <button style="
-                width: ${this.config.width}px;
-                height: ${this.config.height}px;
-                background-color: ${this.config.backgroundColor};
-                color: ${this.config.textColor};
-                border: none;
-                border-radius: ${this.config.borderRadius};
-                font-size: ${this.config.fontSize}px;
-                font-family: Arial, sans-serif;
-                cursor: pointer;
-                transition: background-color 0.2s ease;
-            ">${this.config.text}</button>
-        `;
-
-        this.buttonElement = this.element.querySelector('button');
-        this.buttonElement.addEventListener('click', () => {
-            if (this.config.onClick) {
-                this.config.onClick(this.id);
-            }
-        });
-
-        this.buttonElement.addEventListener('mouseenter', () => {
-            this.buttonElement.style.backgroundColor = this.config.hoverColor;
-        });
-
-        this.buttonElement.addEventListener('mouseleave', () => {
-            this.buttonElement.style.backgroundColor = this.config.backgroundColor;
-        });
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.text !== undefined) {
-            this.config.text = updates.text;
-            this.buttonElement.textContent = updates.text;
-        }
-        if (updates.width !== undefined) {
-            this.config.width = updates.width;
-            this.buttonElement.style.width = updates.width + 'px';
-        }
-        if (updates.height !== undefined) {
-            this.config.height = updates.height;
-            this.buttonElement.style.height = updates.height + 'px';
-        }
-        if (updates.backgroundColor !== undefined) {
-            this.config.backgroundColor = updates.backgroundColor;
-            this.buttonElement.style.backgroundColor = updates.backgroundColor;
-        }
-        if (updates.hoverColor !== undefined) {
-            this.config.hoverColor = updates.hoverColor;
-        }
-        if (updates.textColor !== undefined) {
-            this.config.textColor = updates.textColor;
-            this.buttonElement.style.color = updates.textColor;
-        }
-        if (updates.borderRadius !== undefined) {
-            this.config.borderRadius = updates.borderRadius;
-            this.buttonElement.style.borderRadius = updates.borderRadius;
-        }
-        if (updates.fontSize !== undefined) {
-            this.config.fontSize = updates.fontSize;
-            this.buttonElement.style.fontSize = updates.fontSize + 'px';
-        }
-        if (updates.onClick !== undefined) {
-            this.config.onClick = updates.onClick;
-        }
-    }
-}
 
 // Global widget manager instance
 let widgetManager;
@@ -951,6 +504,20 @@ const vehicleState = {
     brakeHeld: false,
     tailWhipLastFrame: false,
 };
+const VEHICLE_FX_SETTINGS = {
+    maxParticles: 260,
+    maxSkidMarks: 120,
+    dustSpeed: 4,
+    smokeSpeed: 6,
+    skidSpeed: 7,
+};
+const vehicleFxState = {
+    group: null,
+    particles: [],
+    skidMarks: [],
+    textures: {},
+    skidMaterial: null,
+};
 const vehicleEngineAudio = {
     activePropId: '',
     backend: 'none',
@@ -1076,68 +643,6 @@ const runtimeAudio = {
     },
 };
 
-function sampleTestTone(progress, sampleIndex, sampleRate) {
-    const attack = Math.min(1, progress / 0.06);
-    const release = Math.min(1, (1 - progress) / 0.24);
-    const envelope = Math.min(attack, release);
-    const frequency = THREE.MathUtils.lerp(880, 440, progress);
-    const omega = (Math.PI * 2 * frequency * sampleIndex) / sampleRate;
-    const overtone = (Math.PI * 2 * (frequency * 2.02) * sampleIndex) / sampleRate;
-    return (Math.sin(omega) * 0.34 + Math.sin(overtone) * 0.14) * envelope;
-}
-
-function writeWaveAscii(view, offset, value) {
-    for (let index = 0; index < value.length; index++) {
-        view.setUint8(offset + index, value.charCodeAt(index));
-    }
-}
-
-function createTestSoundBuffer(audioContext) {
-    const sampleRate = audioContext.sampleRate || 44100;
-    const duration = 0.6;
-    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
-    const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
-    const channelData = buffer.getChannelData(0);
-
-    for (let index = 0; index < frameCount; index++) {
-        const progress = index / frameCount;
-        channelData[index] = sampleTestTone(progress, index, sampleRate);
-    }
-
-    return buffer;
-}
-
-function createMediaTestSoundUrl() {
-    const sampleRate = 44100;
-    const duration = 0.6;
-    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
-    const dataBytes = frameCount * 2;
-    const waveBuffer = new ArrayBuffer(44 + dataBytes);
-    const view = new DataView(waveBuffer);
-
-    writeWaveAscii(view, 0, 'RIFF');
-    view.setUint32(4, 36 + dataBytes, true);
-    writeWaveAscii(view, 8, 'WAVE');
-    writeWaveAscii(view, 12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeWaveAscii(view, 36, 'data');
-    view.setUint32(40, dataBytes, true);
-
-    for (let index = 0; index < frameCount; index++) {
-        const progress = index / frameCount;
-        const sample = THREE.MathUtils.clamp(sampleTestTone(progress, index, sampleRate), -1, 1);
-        view.setInt16(44 + (index * 2), sample * 32767, true);
-    }
-
-    const blob = new Blob([waveBuffer], { type: 'audio/wav' });
-    return URL.createObjectURL(blob);
-}
 
 async function playSpeakerTestTone({ frequency = 660, duration = 0.55, volume = 0.22 } = {}) {
     const audioContext = runtimeAudio.listener?.context ?? null;
@@ -1240,71 +745,6 @@ function clampVehicleEngineRpm(value) {
     );
 }
 
-function createEngineNoiseBuffer(audioContext) {
-    const duration = 2.6;
-    const sampleRate = audioContext.sampleRate || 44100;
-    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
-    const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
-    const data = buffer.getChannelData(0);
-
-    // Paul Kellet's pink-noise filter — much more natural turbulence than RC-filtered white noise.
-    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-    for (let index = 0; index < frameCount; index++) {
-        const white = (Math.random() * 2) - 1;
-        b0 = 0.99886 * b0 + white * 0.0555179;
-        b1 = 0.99332 * b1 + white * 0.0750759;
-        b2 = 0.96900 * b2 + white * 0.1538520;
-        b3 = 0.86650 * b3 + white * 0.3104856;
-        b4 = 0.55000 * b4 + white * 0.5329522;
-        b5 = -0.7616 * b5 - white * 0.0168980;
-        const pink = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
-        b6 = white * 0.115926;
-        data[index] = THREE.MathUtils.clamp(pink, -1, 1);
-    }
-
-    return buffer;
-}
-
-function createCombustionPulseBuffer(audioContext) {
-    // Heavy-duty V8 cylinder firing impulse — Warthog flavor.
-    // Deep fundamental, long throaty tail, low-mid grit. Looped at firing frequency
-    // produces a chunky burble instead of a thin blat.
-    const sampleRate = audioContext.sampleRate || 44100;
-    const duration = 0.12;
-    const frameCount = Math.max(1, Math.floor(sampleRate * duration));
-    const buffer = audioContext.createBuffer(1, frameCount, sampleRate);
-    const data = buffer.getChannelData(0);
-
-    let lpState = 0;
-    for (let index = 0; index < frameCount; index++) {
-        const t = index / frameCount;
-        const attack = Math.min(1, t / 0.012);
-        const decay = Math.exp(-t * 7.5);
-        // Deep fundamental + chest-thump octave + low-mid harmonic
-        const fundamental = Math.sin(t * Math.PI * 2 * 38);
-        const sub = Math.sin(t * Math.PI * 2 * 19) * 0.6;
-        const overtone = Math.sin(t * Math.PI * 2 * 110) * 0.28;
-        // Grit — but lowpassed so it's "rumble", not "buzz"
-        const white = (Math.random() * 2) - 1;
-        lpState = lpState * 0.82 + white * 0.18;
-        const rumble = lpState * 0.22;
-        const sample = (fundamental + sub + overtone + rumble) * attack * decay * 0.6;
-        data[index] = THREE.MathUtils.clamp(sample, -1, 1);
-    }
-    return buffer;
-}
-
-function createCombustionDistortionCurve(amount = 0.18) {
-    // Very gentle soft-clip — just rounds peaks, doesn't add harmonic harshness.
-    const samples = 2048;
-    const curve = new Float32Array(samples);
-    const k = amount * 6;
-    for (let i = 0; i < samples; i++) {
-        const x = (i / (samples - 1)) * 2 - 1;
-        curve[i] = (1 + k) * x / (1 + k * Math.abs(x));
-    }
-    return curve;
-}
 
 function resetVehicleEngineAudioState() {
     vehicleEngineAudio.activePropId = '';
@@ -3412,330 +2852,6 @@ function exitVehicle() {
     return true;
 }
 
-function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wheelWidth, wheelTemplate = null, mirrorX = false }) {
-    const steeringPivot = new THREE.Group();
-    const spinGroup = new THREE.Group();
-    steeringPivot.userData.vehicleSteeringPivot = true;
-    spinGroup.userData.vehicleSpinGroup = true;
-
-    if (wheelTemplate?.root) {
-        const customWheel = cloneDisposableObject(wheelTemplate.root);
-        const bbox = new THREE.Box3().setFromObject(customWheel);
-        const size = bbox.getSize(new THREE.Vector3());
-        const center = bbox.getCenter(new THREE.Vector3());
-
-        // Detect axle as the smallest extent; the other two axes form the
-        // round face whose larger extent is the diameter.
-        const axes = [
-            { axis: 'x', size: size.x },
-            { axis: 'y', size: size.y },
-            { axis: 'z', size: size.z },
-        ].sort((a, b) => a.size - b.size);
-        const axleAxis = axes[0].axis;
-        const diameter = Math.max(axes[1].size, axes[2].size);
-        const targetDiameter = wheelRadius * 2.0;
-        const fit = diameter > 1e-4 ? targetDiameter / diameter : 1;
-
-        // Centre the wheel on its bbox, then orient so axle aligns with X
-        // (which is what spinGroup.rotation.x rotates around).
-        const orienter = new THREE.Group();
-        customWheel.position.set(-center.x, -center.y, -center.z);
-        orienter.add(customWheel);
-        if (axleAxis === 'y') {
-            orienter.rotation.z = Math.PI * 0.5;
-        } else if (axleAxis === 'z') {
-            orienter.rotation.y = Math.PI * 0.5;
-        }
-        orienter.scale.setScalar(fit);
-        if (mirrorX) {
-            orienter.scale.x *= -1;
-        }
-        customWheel.traverse((child) => {
-            if (!child.isMesh) return;
-            child.castShadow = true;
-            child.receiveShadow = true;
-            const mats = Array.isArray(child.material) ? child.material : [child.material];
-            mats.forEach((mat) => {
-                if (!mat) return;
-                mat.side = THREE.DoubleSide;
-                mat.needsUpdate = true;
-            });
-        });
-        spinGroup.add(orienter);
-        steeringPivot.add(spinGroup);
-        return { steeringPivot, spinGroup };
-    }
-
-    const wheelMesh = new THREE.Group();
-    wheelMesh.rotation.z = Math.PI * 0.5;
-
-    const tire = new THREE.Mesh(
-        new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 24, 1),
-        tireMaterial
-    );
-    tire.castShadow = true;
-    tire.receiveShadow = true;
-    wheelMesh.add(tire);
-
-    const innerRim = new THREE.Mesh(
-        new THREE.CylinderGeometry(wheelRadius * 0.65, wheelRadius * 0.65, wheelWidth * 1.05, 18, 1),
-        new THREE.MeshStandardMaterial({
-            color: 0x111111,
-            roughness: 0.9,
-            metalness: 0.1
-        })
-    );
-    wheelMesh.add(innerRim);
-
-    const spokeSize = wheelRadius * 1.35;
-    const spoke1 = new THREE.Mesh(
-        new THREE.BoxGeometry(spokeSize, wheelWidth * 1.1, wheelRadius * 0.25),
-        rimMaterial
-    );
-    spoke1.castShadow = true;
-    wheelMesh.add(spoke1);
-
-    const spoke2 = new THREE.Mesh(
-        new THREE.BoxGeometry(wheelRadius * 0.25, wheelWidth * 1.1, spokeSize),
-        rimMaterial
-    );
-    spoke2.castShadow = true;
-    wheelMesh.add(spoke2);
-
-    const hub = new THREE.Mesh(
-        new THREE.CylinderGeometry(wheelRadius * 0.2, wheelRadius * 0.2, wheelWidth * 1.15, 14, 1),
-        rimMaterial
-    );
-    wheelMesh.add(hub);
-
-    spinGroup.add(wheelMesh);
-    steeringPivot.add(spinGroup);
-
-    return { steeringPivot, spinGroup };
-}
-
-function createDrivableCarVisual(bodyTemplateId = '', wheelTemplateId = '') {
-    const root = new THREE.Group();
-    const W = VEHICLE_SETTINGS.width;
-    const L = VEHICLE_SETTINGS.length;
-    const H = VEHICLE_SETTINGS.height;
-
-    const visualGroup = new THREE.Group();
-    visualGroup.position.y = H * 0.28;
-    visualGroup.rotation.y = Math.PI;
-    root.add(visualGroup);
-
-    const tireMaterial = new THREE.MeshStandardMaterial({
-        color: 0x17191d, metalness: 0.02, roughness: 0.92,
-    });
-    const rimMaterial = new THREE.MeshStandardMaterial({
-        color: 0xc5ccd6, metalness: 0.86, roughness: 0.24,
-    });
-
-    const bodyTemplate = bodyTemplateId
-        ? importedPropState.templates.find((entry) => entry.id === bodyTemplateId)
-        : null;
-    const wheelTemplate = wheelTemplateId
-        ? importedPropState.templates.find((entry) => entry.id === wheelTemplateId)
-        : null;
-
-    const usingCustomBody = !!bodyTemplate?.root;
-
-    if (usingCustomBody) {
-        const customBody = cloneDisposableObject(bodyTemplate.root);
-        const bbox = new THREE.Box3().setFromObject(customBody);
-        const size = bbox.getSize(new THREE.Vector3());
-        const center = bbox.getCenter(new THREE.Vector3());
-        const targetW = W * 1.0;
-        const targetL = L * 1.0;
-        const sx = size.x > 1e-4 ? targetW / size.x : 1;
-        const sz = size.z > 1e-4 ? targetL / size.z : 1;
-        const fit = Math.min(sx, sz);
-        customBody.scale.setScalar(fit);
-        // Park bottom of model on chassis ground plane (chassis local y = -H/2,
-        // visualGroup local y = -H/2 - 0.28*H).
-        const groundLocal = -H * 0.5 - H * 0.28;
-        customBody.position.set(
-            -center.x * fit,
-            groundLocal - bbox.min.y * fit,
-            -center.z * fit - L * -0.04
-        );
-        customBody.traverse((child) => {
-            if (!child.isMesh) return;
-            child.castShadow = true;
-            child.receiveShadow = true;
-            const mats = Array.isArray(child.material) ? child.material : [child.material];
-            mats.forEach((mat) => {
-                if (!mat) return;
-                mat.side = THREE.DoubleSide;
-                mat.needsUpdate = true;
-            });
-        });
-        visualGroup.add(customBody);
-    } else {
-        const bodyMaterial = new THREE.MeshStandardMaterial({
-            color: 0xf7f7f5, metalness: 0.18, roughness: 0.34,
-        });
-        const trimMaterial = new THREE.MeshStandardMaterial({
-            color: 0x15171b, metalness: 0.42, roughness: 0.48,
-        });
-        const glassMaterial = new THREE.MeshStandardMaterial({
-            color: 0xdce8f5, metalness: 0.08, roughness: 0.16, transparent: true, opacity: 0.72,
-        });
-        const lightMaterial = new THREE.MeshStandardMaterial({
-            color: 0xf8f1d0, emissive: 0x8c6d1f, emissiveIntensity: 0.2, roughness: 0.28, metalness: 0.02,
-        });
-
-        const lowerBody = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.96, H * 0.38, L * 0.94),
-            bodyMaterial
-        );
-        lowerBody.position.y = -H * 0.08;
-        lowerBody.castShadow = true;
-        lowerBody.receiveShadow = true;
-        visualGroup.add(lowerBody);
-
-        const cabin = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.72, H * 0.32, L * 0.38),
-            glassMaterial
-        );
-        cabin.position.set(0, H * 0.22, -L * 0.06);
-        cabin.castShadow = true;
-        visualGroup.add(cabin);
-
-        const roof = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.68, H * 0.06, L * 0.32),
-            bodyMaterial
-        );
-        roof.position.set(0, H * 0.39, -L * 0.06);
-        roof.castShadow = true;
-        visualGroup.add(roof);
-
-        const hood = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.88, H * 0.1, L * 0.28),
-            bodyMaterial
-        );
-        hood.position.set(0, H * 0.06, L * 0.30);
-        hood.rotation.x = -0.06;
-        hood.castShadow = true;
-        hood.receiveShadow = true;
-        visualGroup.add(hood);
-
-        const trunk = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.84, H * 0.1, L * 0.18),
-            bodyMaterial
-        );
-        trunk.position.set(0, H * 0.06, -L * 0.36);
-        trunk.rotation.x = 0.04;
-        trunk.castShadow = true;
-        visualGroup.add(trunk);
-
-        const frontBumper = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.92, H * 0.12, L * 0.06),
-            trimMaterial
-        );
-        frontBumper.position.set(0, -H * 0.16, L * 0.48);
-        frontBumper.castShadow = true;
-        visualGroup.add(frontBumper);
-
-        const rearBumper = frontBumper.clone();
-        rearBumper.position.z = -L * 0.48;
-        visualGroup.add(rearBumper);
-
-        const skirtLeft = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.04, H * 0.1, L * 0.7),
-            trimMaterial
-        );
-        skirtLeft.position.set(-W * 0.48, -H * 0.2, 0);
-        visualGroup.add(skirtLeft);
-        const skirtRight = skirtLeft.clone();
-        skirtRight.position.x *= -1;
-        visualGroup.add(skirtRight);
-
-        const grille = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.5, H * 0.1, L * 0.03),
-            trimMaterial
-        );
-        grille.position.set(0, -H * 0.02, L * 0.49);
-        visualGroup.add(grille);
-
-        const headlightLeft = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.14, H * 0.06, L * 0.02),
-            lightMaterial
-        );
-        headlightLeft.position.set(-W * 0.32, H * 0.02, L * 0.49);
-        const headlightRight = headlightLeft.clone();
-        headlightRight.position.x *= -1;
-        visualGroup.add(headlightLeft, headlightRight);
-
-        const taillightMat = new THREE.MeshStandardMaterial({
-            color: 0xff2222, emissive: 0x991111, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.02,
-        });
-        const taillightLeft = new THREE.Mesh(
-            new THREE.BoxGeometry(W * 0.12, H * 0.05, L * 0.02),
-            taillightMat
-        );
-        taillightLeft.position.set(-W * 0.34, H * 0.02, -L * 0.49);
-        const taillightRight = taillightLeft.clone();
-        taillightRight.position.x *= -1;
-        visualGroup.add(taillightLeft, taillightRight);
-    }
-
-    const wheelRadius = usingCustomBody ? H * 0.62 : H * 0.36;
-    const wheelWidth = W * 0.16;
-    // For custom body, raise wheel-axle so fully sized wheels straddle the
-    // chassis ground plane (-H/2 in chassis local, -0.78H in visualGroup local).
-    const wheelY = usingCustomBody ? (-H * 0.78 + wheelRadius + H * 0.55) : -H * 0.42;
-    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * (usingCustomBody ? 0.86 : 0.5);
-    const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * (usingCustomBody ? 0.72 : 0.45);
-    const wheelOffsets = [
-        { x: -halfTrackWidth, z: halfWheelBase, steerable: true },
-        { x: halfTrackWidth, z: halfWheelBase, steerable: true },
-        { x: -halfTrackWidth, z: -halfWheelBase, steerable: false },
-        { x: halfTrackWidth, z: -halfWheelBase, steerable: false },
-    ];
-    const steeringPivots = [];
-    const spinGroups = [];
-
-    const usingCustomWheels = !!wheelTemplate?.root;
-    wheelOffsets.forEach((offset) => {
-        const wheel = createVehicleWheelAssembly({
-            tireMaterial,
-            rimMaterial,
-            wheelRadius,
-            wheelWidth,
-            wheelTemplate,
-            mirrorX: offset.x < 0,
-        });
-        wheel.steeringPivot.position.set(offset.x, wheelY, offset.z);
-        wheel.steeringPivot.userData.steerable = offset.steerable;
-        if (usingCustomBody && !usingCustomWheels) {
-            wheel.steeringPivot.visible = false;
-        }
-        visualGroup.add(wheel.steeringPivot);
-        steeringPivots.push(wheel.steeringPivot);
-        spinGroups.push(wheel.spinGroup);
-    });
-
-    visualGroup.traverse((object) => {
-        if (!object.isMesh) return;
-        object.castShadow = true;
-        object.receiveShadow = true;
-    });
-
-    root.userData.vehicleVisual = {
-        steeringPivots,
-        spinGroups,
-        wheelRadius,
-        maxSteerAngle: 1.0,
-        steerAngle: 0,
-        spinAngle: 0,
-        lastWorldPosition: new THREE.Vector3(),
-        lastPositionInitialized: false,
-    };
-
-    return root;
-}
 
 function ensureVehicleVisualState(root) {
     if (!root) return null;
@@ -3778,6 +2894,199 @@ function ensureVehicleVisualState(root) {
     };
     root.userData.vehicleVisual = nextState;
     return nextState;
+}
+
+function createVehicleFxTexture(kind) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    const gradient = ctx.createRadialGradient(32, 32, 2, 32, 32, 31);
+    if (kind === 'spark') {
+        gradient.addColorStop(0, 'rgba(255,255,220,1)');
+        gradient.addColorStop(0.35, 'rgba(255,166,50,0.9)');
+        gradient.addColorStop(1, 'rgba(255,80,10,0)');
+    } else if (kind === 'dust') {
+        gradient.addColorStop(0, 'rgba(205,190,160,0.62)');
+        gradient.addColorStop(1, 'rgba(130,110,85,0)');
+    } else {
+        gradient.addColorStop(0, 'rgba(170,175,180,0.5)');
+        gradient.addColorStop(1, 'rgba(85,90,95,0)');
+    }
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 64, 64);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return texture;
+}
+
+function ensureVehicleFx() {
+    if (!scene) return null;
+    if (!vehicleFxState.group) {
+        vehicleFxState.group = new THREE.Group();
+        vehicleFxState.group.name = 'vehicle-surface-fx';
+        scene.add(vehicleFxState.group);
+    }
+    for (const kind of ['smoke', 'dust', 'spark']) {
+        if (!vehicleFxState.textures[kind]) {
+            vehicleFxState.textures[kind] = createVehicleFxTexture(kind);
+        }
+    }
+    if (!vehicleFxState.skidMaterial) {
+        vehicleFxState.skidMaterial = new THREE.MeshBasicMaterial({
+            color: 0x101010,
+            transparent: true,
+            opacity: 0.42,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+        });
+    }
+    return vehicleFxState.group;
+}
+
+function emitVehicleParticle(kind, position, velocity, size = 0.35, life = 0.7) {
+    const group = ensureVehicleFx();
+    if (!group) return;
+
+    let particle = vehicleFxState.particles.find((entry) => entry.life <= 0);
+    if (!particle && vehicleFxState.particles.length < VEHICLE_FX_SETTINGS.maxParticles) {
+        const material = new THREE.SpriteMaterial({
+            map: vehicleFxState.textures[kind] || vehicleFxState.textures.smoke,
+            transparent: true,
+            depthWrite: false,
+            blending: kind === 'spark' ? THREE.AdditiveBlending : THREE.NormalBlending,
+        });
+        const sprite = new THREE.Sprite(material);
+        sprite.visible = false;
+        group.add(sprite);
+        particle = { sprite, velocity: new THREE.Vector3(), life: 0, maxLife: 1, baseSize: 1, kind };
+        vehicleFxState.particles.push(particle);
+    }
+    if (!particle) return;
+
+    particle.kind = kind;
+    particle.life = life;
+    particle.maxLife = life;
+    particle.baseSize = size;
+    particle.velocity.copy(velocity);
+    particle.sprite.position.copy(position);
+    particle.sprite.scale.setScalar(size);
+    particle.sprite.material.map = vehicleFxState.textures[kind] || vehicleFxState.textures.smoke;
+    particle.sprite.material.blending = kind === 'spark' ? THREE.AdditiveBlending : THREE.NormalBlending;
+    particle.sprite.material.opacity = kind === 'spark' ? 1 : 0.65;
+    particle.sprite.visible = true;
+}
+
+function emitVehicleSkidMark(position, forward, width, length, opacity) {
+    const group = ensureVehicleFx();
+    if (!group) return;
+
+    let mark = vehicleFxState.skidMarks.find((entry) => entry.life <= 0);
+    if (!mark) {
+        if (vehicleFxState.skidMarks.length >= VEHICLE_FX_SETTINGS.maxSkidMarks) {
+            mark = vehicleFxState.skidMarks.shift();
+            if (mark?.mesh?.parent) mark.mesh.parent.remove(mark.mesh);
+        }
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), vehicleFxState.skidMaterial.clone());
+        mesh.name = 'tire-skid-mark';
+        group.add(mesh);
+        mark = { mesh, life: 0, maxLife: 1 };
+        vehicleFxState.skidMarks.push(mark);
+    }
+
+    mark.life = 9;
+    mark.maxLife = 9;
+    mark.mesh.visible = true;
+    mark.mesh.position.copy(position);
+    mark.mesh.position.y += 0.012;
+    mark.mesh.scale.set(width, length, 1);
+    mark.mesh.rotation.set(-Math.PI * 0.5, 0, Math.atan2(forward.x, forward.z));
+    mark.mesh.material.opacity = opacity;
+}
+
+function emitVehicleSurfaceEffects(delta, data) {
+    if (!data.grounded) return;
+
+    const speed = Math.abs(data.forwardSpeed);
+    const lateral = Math.abs(data.lateralSpeed);
+    const slip = data.drifting || data.brakeHeld || lateral > 2.6;
+    const dustAmount = THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.dustSpeed) / 16, 0, 1);
+    const smokeAmount = THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.smokeSpeed) / 18 + lateral / 12, 0, 1);
+    const skidAmount = slip ? THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.skidSpeed) / 18 + lateral / 10, 0, 1) : 0;
+    const rearCorners = data.cornerSamples.slice(2);
+
+    rearCorners.forEach((corner) => {
+        if (corner.rideHeight === null) return;
+        const wheelPos = data.vehiclePosition.clone()
+            .addScaledVector(data.flatForward, corner.forward)
+            .addScaledVector(data.flatRight, corner.sideways);
+        wheelPos.y -= Math.min(corner.rideHeight, VEHICLE_SETTINGS.suspensionRideHeight);
+
+        if (dustAmount > 0 && Math.random() < dustAmount * 7 * delta) {
+            emitVehicleParticle(
+                'dust',
+                wheelPos,
+                data.flatForward.clone().multiplyScalar(-speed * 0.12).addScaledVector(upVector, 0.45 + Math.random() * 0.4),
+                0.28 + dustAmount * 0.42,
+                0.45 + Math.random() * 0.35
+            );
+        }
+        if (smokeAmount > 0.2 && slip && Math.random() < smokeAmount * 8 * delta) {
+            emitVehicleParticle(
+                'smoke',
+                wheelPos,
+                data.flatForward.clone().multiplyScalar(-0.6).addScaledVector(upVector, 0.75 + Math.random() * 0.35),
+                0.42 + smokeAmount * 0.55,
+                0.75 + Math.random() * 0.55
+            );
+        }
+        if (skidAmount > 0.05 && Math.random() < skidAmount * 18 * delta) {
+            emitVehicleSkidMark(wheelPos, data.flatForward, 0.18, 0.7 + speed * 0.025, 0.18 + skidAmount * 0.28);
+        }
+    });
+
+    const hardLanding = data.averageCompression > VEHICLE_SETTINGS.suspensionTravel * 0.7 && data.verticalSpeed < -2.4;
+    if (hardLanding && Math.random() < 18 * delta) {
+        const sparkPos = data.vehiclePosition.clone().addScaledVector(data.flatForward, -0.25);
+        sparkPos.y -= VEHICLE_SETTINGS.height * 0.4;
+        for (let i = 0; i < 3; i++) {
+            emitVehicleParticle(
+                'spark',
+                sparkPos,
+                data.flatRight.clone().multiplyScalar((Math.random() - 0.5) * 3).addScaledVector(upVector, 1.1 + Math.random() * 1.2),
+                0.13,
+                0.25 + Math.random() * 0.2
+            );
+        }
+    }
+}
+
+function updateVehicleSurfaceEffects(delta) {
+    if (!vehicleFxState.group) return;
+
+    for (const particle of vehicleFxState.particles) {
+        if (particle.life <= 0) continue;
+        particle.life -= delta;
+        if (particle.life <= 0) {
+            particle.sprite.visible = false;
+            continue;
+        }
+        const t = 1 - particle.life / particle.maxLife;
+        particle.velocity.y += particle.kind === 'spark' ? -9.5 * delta : 0.35 * delta;
+        particle.sprite.position.addScaledVector(particle.velocity, delta);
+        particle.sprite.scale.setScalar(particle.baseSize * (particle.kind === 'spark' ? 1 - t * 0.55 : 1 + t * 1.35));
+        particle.sprite.material.opacity = (particle.kind === 'spark' ? 1 : 0.65) * (1 - t);
+    }
+
+    for (const mark of vehicleFxState.skidMarks) {
+        if (mark.life <= 0) continue;
+        mark.life -= delta;
+        if (mark.life <= 0) {
+            mark.mesh.visible = false;
+            continue;
+        }
+        mark.mesh.material.opacity *= Math.pow(0.86, delta);
+    }
 }
 
 function updateVehicleVisuals(delta) {
@@ -3904,7 +3213,13 @@ function spawnDrivableCar(options = {}) {
     bodyInterface.SetMaxAngularVelocity(body.GetID(), VEHICLE_SETTINGS.maxAngularVelocity);
     const bodyTemplateId = options.bodyTemplateId || '';
     const wheelTemplateId = options.wheelTemplateId || '';
-    const chassis = createDrivableCarVisual(bodyTemplateId, wheelTemplateId);
+    const chassis = createDrivableCarVisual({
+        bodyTemplateId,
+        wheelTemplateId,
+        vehicleSettings: VEHICLE_SETTINGS,
+        importedPropState,
+        cloneDisposableObject,
+    });
     chassis.position.copy(spawnPosition);
     chassis.quaternion.copy(carRotation);
 
@@ -7989,6 +7304,7 @@ async function init() {
             physicsMetrics = stepPhysics(delta);
         }
         updateVehicleVisuals(delta);
+        updateVehicleSurfaceEffects(delta);
         
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
         multiplayerController?.update(delta);
@@ -9070,6 +8386,20 @@ function updateVehicleGameplay(delta) {
     if (throttle !== 0 || steer !== 0 || vehicleState.brakeHeld || horizontalVelocity.lengthSq() > 0.01) {
         bodyInterface.ActivateBody(bodyId);
     }
+
+    emitVehicleSurfaceEffects(delta, {
+        vehiclePosition,
+        flatForward,
+        flatRight,
+        cornerSamples,
+        grounded,
+        drifting,
+        brakeHeld: vehicleState.brakeHeld,
+        forwardSpeed: nextForwardSpeed,
+        lateralSpeed,
+        averageCompression,
+        verticalSpeed: linearVelocity.y,
+    });
 
     const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? 1 : 0.05));
     if (uprightCorrection.lengthSq() > 1e-6) {
