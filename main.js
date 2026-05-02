@@ -3415,6 +3415,8 @@ function exitVehicle() {
 function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wheelWidth, wheelTemplate = null, mirrorX = false }) {
     const steeringPivot = new THREE.Group();
     const spinGroup = new THREE.Group();
+    steeringPivot.userData.vehicleSteeringPivot = true;
+    spinGroup.userData.vehicleSpinGroup = true;
 
     if (wheelTemplate?.root) {
         const customWheel = cloneDisposableObject(wheelTemplate.root);
@@ -3735,6 +3737,49 @@ function createDrivableCarVisual(bodyTemplateId = '', wheelTemplateId = '') {
     return root;
 }
 
+function ensureVehicleVisualState(root) {
+    if (!root) return null;
+
+    const state = root.userData?.vehicleVisual ?? null;
+    const refsValid =
+        state?.lastWorldPosition instanceof THREE.Vector3
+        && Array.isArray(state.steeringPivots)
+        && state.steeringPivots.every((p) => p?.isObject3D)
+        && Array.isArray(state.spinGroups)
+        && state.spinGroups.every((g) => g?.isObject3D);
+    if (refsValid) return state;
+
+    const steeringPivots = [];
+    const spinGroups = [];
+    root.traverse((object) => {
+        const isSteeringPivot = object.userData?.vehicleSteeringPivot === true
+            || typeof object.userData?.steerable === 'boolean';
+        if (!isSteeringPivot) return;
+
+        const spinGroup = object.children.find((child) => child.userData?.vehicleSpinGroup === true)
+            ?? object.children.find((child) => child.isGroup || child.type === 'Group');
+        if (!spinGroup) return;
+
+        steeringPivots.push(object);
+        spinGroups.push(spinGroup);
+    });
+
+    if (!steeringPivots.length || steeringPivots.length !== spinGroups.length) return null;
+
+    const nextState = {
+        steeringPivots,
+        spinGroups,
+        wheelRadius: Number.isFinite(state?.wheelRadius) ? state.wheelRadius : VEHICLE_SETTINGS.height * 0.36,
+        maxSteerAngle: Number.isFinite(state?.maxSteerAngle) ? state.maxSteerAngle : 1.0,
+        steerAngle: Number.isFinite(state?.steerAngle) ? state.steerAngle : 0,
+        spinAngle: Number.isFinite(state?.spinAngle) ? state.spinAngle : 0,
+        lastWorldPosition: new THREE.Vector3(),
+        lastPositionInitialized: false,
+    };
+    root.userData.vehicleVisual = nextState;
+    return nextState;
+}
+
 function updateVehicleVisuals(delta) {
     if (!physics.dynamicBodies?.length) return;
 
@@ -3743,7 +3788,7 @@ function updateVehicleVisuals(delta) {
         const renderObject = getActorRenderObject(prop);
         if (prop?.kind !== 'vehicle' || !renderObject) continue;
 
-        const visualState = renderObject.userData?.vehicleVisual;
+        const visualState = ensureVehicleVisualState(renderObject);
         if (!visualState) continue;
 
         // If userData was JSON-roundtripped (e.g. via three.js Object3D.clone
@@ -3787,7 +3832,7 @@ function updateVehicleVisuals(delta) {
             visualState.lastPositionInitialized = true;
         }
 
-        visualState.spinAngle -= (forwardSpeed / visualState.wheelRadius) * delta;
+        visualState.spinAngle += (forwardSpeed / visualState.wheelRadius) * delta;
         const isActiveVehicle = gameplay.active && vehicleState.activePropId === prop.id;
         const inputSteer = isActiveVehicle
             ? ((gameplay.input.left ? 1 : 0) - (gameplay.input.right ? 1 : 0))
@@ -10301,6 +10346,26 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
             mesh.userData.hasMaterialOverrides = true;
         }
         mesh.updateMatrixWorld(true);
+        if (actorData.kind === 'vehicle') {
+            const body = getActorBody(actor);
+            if (body && physics.ready) {
+                const { Jolt, bodyInterface } = physics;
+                const joltPos = new Jolt.Vec3(mesh.position.x, mesh.position.y, mesh.position.z);
+                const joltRot = new Jolt.Quat(mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w);
+                bodyInterface.SetPositionAndRotation(body.GetID(), joltPos, joltRot, Jolt.EActivation_Activate);
+                bodyInterface.SetLinearVelocity(body.GetID(), Jolt.Vec3.prototype.sZero());
+                bodyInterface.SetAngularVelocity(body.GetID(), Jolt.Vec3.prototype.sZero());
+                bodyInterface.SetMaxAngularVelocity(body.GetID(), VEHICLE_SETTINGS.maxAngularVelocity);
+                Jolt.destroy(joltPos);
+                Jolt.destroy(joltRot);
+            }
+
+            const visualState = ensureVehicleVisualState(mesh);
+            if (visualState?.lastWorldPosition instanceof THREE.Vector3) {
+                mesh.getWorldPosition(visualState.lastWorldPosition);
+                visualState.lastPositionInitialized = true;
+            }
+        }
         // Primitive bodies were already created at the saved transform via
         // spawnDynamicPrimitive(local:false, skipImpulse:true), so a rebuild
         // is unnecessary and was leaving duplicate contact manifolds across
