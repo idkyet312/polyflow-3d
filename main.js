@@ -738,7 +738,7 @@ let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBt
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
 let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect, actorVehicleBodyTemplateSelect, actorVehicleWheelTemplateSelect;
 let actorComponentCollisionInput, actorComponentPhysicsInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
-let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
+let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay, engineAudioDebugEl;
 let sceneUiPanel, sceneUiCount, sceneUiList;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
@@ -1313,22 +1313,28 @@ function resetVehicleEngineAudioState() {
 }
 
 function createVehicleEngineWasmParameters() {
+    // Values cribbed from the upstream demo's stable preset
+    // (vendor/engine-sound-src/src/engine_sound_generator/sounds_worklet_wasm.htm:90).
+    // The waveguide simulation is sensitive to reflection-factor build-up;
+    // higher coefficients or longer guides cause the internal state to ring
+    // out into silence (or NaN) after a few seconds, which is what the
+    // "worked for 3 seconds then died" symptom looks like.
     return {
-        cylinders: 8,
-        intakeWaveguideLength: 120,
-        exhaustWaveguideLength: 180,
-        extractorWaveguideLength: 80,
-        intakeOpenReflectionFactor: 0.02,
-        intakeClosedReflectionFactor: 0.92,
-        exhaustOpenReflectionFactor: 0.02,
-        exhaustClosedReflectionFactor: 0.92,
-        ignitionTime: 0.014,
-        straightPipeWaveguideLength: 144,
-        straightPipeReflectionFactor: 0.03,
-        mufflerElementsLength: [16, 22, 28, 36],
-        action: 0.16,
-        outletWaveguideLength: 10,
-        outletReflectionFactor: 0.03,
+        cylinders: 4,
+        intakeWaveguideLength: 100,
+        exhaustWaveguideLength: 100,
+        extractorWaveguideLength: 100,
+        intakeOpenReflectionFactor: 0.01,
+        intakeClosedReflectionFactor: 0.95,
+        exhaustOpenReflectionFactor: 0.01,
+        exhaustClosedReflectionFactor: 0.95,
+        ignitionTime: 0.016,
+        straightPipeWaveguideLength: 128,
+        straightPipeReflectionFactor: 0.01,
+        mufflerElementsLength: [10, 15, 20, 25],
+        action: 0.1,
+        outletWaveguideLength: 5,
+        outletReflectionFactor: 0.01,
     };
 }
 
@@ -1475,6 +1481,30 @@ function shutdownVehicleEngineAudio() {
     shutdownVehicleEngineAudioWasm();
     shutdownLegacyVehicleEngineAudio();
     vehicleEngineAudio.backend = 'none';
+}
+
+// Soft-silence the engine audio without tearing down the wasm worklet.
+// Called when gameplay drops out so the worklet stays loaded for the next
+// drive session (avoids re-initialising the AudioWorklet on every reseat).
+function silenceVehicleEngineAudio() {
+    const ctx = runtimeAudio.listener?.context ?? null;
+    const now = ctx?.currentTime ?? 0;
+    const fadeOut = now + 0.12;
+
+    const generator = vehicleEngineAudio.wasmGenerator;
+    if (generator?.gain?.gain) {
+        const gain = generator.gain.gain;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+        gain.exponentialRampToValueAtTime(0.0001, fadeOut);
+    }
+    if (vehicleEngineAudio.outputGain) {
+        const gain = vehicleEngineAudio.outputGain.gain;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+        gain.exponentialRampToValueAtTime(0.0001, fadeOut);
+    }
+    resetVehicleEngineAudioState();
 }
 
 function ensureLegacyVehicleEngineAudio() {
@@ -1721,6 +1751,8 @@ function ensureVehicleEngineAudioWasm(vehicle) {
     const existingGenerator = vehicleEngineAudio.wasmGenerator;
     if (existingGenerator && vehicleEngineAudio.listener === listener) {
         if (existingGenerator.parent !== mesh) {
+            vehicleEngineAudio.wasmReattachCount = (vehicleEngineAudio.wasmReattachCount || 0) + 1;
+            console.warn('[wasm-engine] reparenting generator (count=', vehicleEngineAudio.wasmReattachCount, ')');
             try { existingGenerator.removeFromParent(); } catch (_) {}
             mesh.add(existingGenerator);
             existingGenerator.position.set(0, 0.45, 0);
@@ -1730,6 +1762,8 @@ function ensureVehicleEngineAudioWasm(vehicle) {
         return vehicleEngineAudio;
     }
 
+    vehicleEngineAudio.wasmCreateCount = (vehicleEngineAudio.wasmCreateCount || 0) + 1;
+    console.warn('[wasm-engine] creating new generator (count=', vehicleEngineAudio.wasmCreateCount, ')');
     shutdownLegacyVehicleEngineAudio();
     shutdownVehicleEngineAudioWasm();
 
@@ -1738,7 +1772,6 @@ function ensureVehicleEngineAudioWasm(vehicle) {
         generator = new WasmEngineSoundGenerator({
             listener,
             parameters: createVehicleEngineWasmParameters(),
-            clamp: true,
         });
     } catch (error) {
         markVehicleEngineWasmUnavailable(error);
@@ -1761,13 +1794,33 @@ function ensureVehicleEngineAudioWasm(vehicle) {
         return null;
     }
 
+    // Seed the AudioParams so the very first process() call has firing-range
+    // RPM. Defaults are 0/0 which produces silence and (with the previous
+    // clamp WaveShaper) caused the "beep then silence" symptom.
+    const ctxNow = audioContext.currentTime;
+    throttleParam.setValueAtTime(0, ctxNow);
+    rpmParam.setValueAtTime(vehicleEngineAudio.idleRpm, ctxNow);
+
+    // Surface worklet processor errors. AudioWorklet.process() throwing
+    // silently kills the node — browser stops calling process() forever and
+    // the result is "audio worked for N seconds then died" with no console
+    // output. Hook the error event so we know.
+    if (generator.worklet) {
+        generator.worklet.onprocessorerror = (event) => {
+            vehicleEngineAudio.wasmProcessorError = String(event?.message || event || 'processor error');
+            console.error('[wasm-engine] AudioWorklet processor error:', event);
+            markVehicleEngineWasmUnavailable(new Error(vehicleEngineAudio.wasmProcessorError));
+        };
+    }
+    console.info('[wasm-engine] generator created. sampleRate =', audioContext.sampleRate, 'state =', audioContext.state);
+
     generator.name = 'vehicle-engine-wasm-audio';
     generator.position.set(0, 0.45, 0);
     generator.setRefDistance(5);
     generator.setMaxDistance(120);
     generator.setRolloffFactor(0.85);
     generator.setDirectionalCone(200, 320, 0.72);
-    generator.gain.gain.value = 0.0001;
+    generator.gain.gain.value = 0.4;
     generator.gainIntake.gain.value = 0.16;
     generator.gainEngineBlockVibrations.gain.value = 0.22;
     generator.gainOutlet.gain.value = 0.3;
@@ -1975,7 +2028,9 @@ function updateVehicleEngineAudioWasm(delta, vehicle, telemetry) {
     const audioContext = runtimeAudio.listener?.context ?? null;
     const generator = engine?.wasmGenerator ?? null;
     if (!engine || !generator || !audioContext || !vehicle?.id || !vehicle?.mesh) {
-        shutdownVehicleEngineAudioWasm();
+        // Keep the worklet alive across transient vehicle drops; just skip
+        // this tick. Tearing down here was the source of "wasm engine doesn't
+        // stay" — every momentary gap recycled the AudioWorkletNode.
         return false;
     }
 
@@ -2060,14 +2115,70 @@ function updateVehicleEngineAudioWasm(delta, vehicle, telemetry) {
 function updateVehicleEngineAudio(delta, vehicle, telemetry) {
     primeVehicleEngineAudioWasm();
 
+    let backendUsed = 'legacy';
     if (vehicleEngineAudio.wasmModuleReady && !vehicleEngineAudio.wasmFailed) {
         const usedWasm = updateVehicleEngineAudioWasm(delta, vehicle, telemetry);
         if (usedWasm) {
-            return;
+            backendUsed = 'wasm';
         }
     }
+    if (backendUsed !== 'wasm') {
+        updateLegacyVehicleEngineAudio(delta, vehicle, telemetry);
+    }
+    updateEngineAudioDebugOverlay(backendUsed, vehicle, telemetry);
+}
 
-    updateLegacyVehicleEngineAudio(delta, vehicle, telemetry);
+function updateEngineAudioDebugOverlay(backendUsed, vehicle, telemetry) {
+    if (!engineAudioDebugEl) return;
+
+    const ready = vehicleEngineAudio.wasmModuleReady;
+    const failed = vehicleEngineAudio.wasmFailed;
+    const loading = !!vehicleEngineAudio.wasmLoadPromise;
+    const generator = vehicleEngineAudio.wasmGenerator;
+    const node = generator?.worklet ?? null;
+    const ctx = runtimeAudio.listener?.context ?? null;
+    const isActiveVehicle = !!vehicle?.id && gameplay.active && vehicleState.activePropId === vehicle.id;
+
+    let state;
+    if (failed) state = 'failed';
+    else if (loading) state = 'loading';
+    else if (ready && backendUsed === 'wasm') state = 'wasm';
+    else if (ready) state = 'wasm-idle';
+    else state = 'legacy';
+
+    const masterGainNow = generator?.gain?.gain?.value;
+    const intakeGainNow = generator?.gainIntake?.gain?.value;
+    const outletGainNow = generator?.gainOutlet?.gain?.value;
+    const wasmRpmParamNow = vehicleEngineAudio.wasmRpmParam?.value;
+    const wasmThrottleParamNow = vehicleEngineAudio.wasmThrottleParam?.value;
+    const lines = [
+        `Engine Audio: ${state.toUpperCase()}`,
+        `backend     : ${backendUsed}`,
+        `wasm ready  : ${ready ? 'yes' : 'no'}`,
+        `wasm failed : ${failed ? 'yes' : 'no'}`,
+        `worklet node: ${node ? 'attached' : 'none'}`,
+        `parented to : ${generator?.parent?.name || generator?.parent ? (generator.parent.name || 'mesh') : 'detached'}`,
+        `audio ctx   : ${ctx ? ctx.state : 'none'}`,
+        `active veh  : ${isActiveVehicle ? vehicle.id : 'none'}`,
+        `rpm/throttle: ${vehicleEngineAudio.rpm.toFixed(0)} / ${vehicleEngineAudio.throttle.toFixed(2)}`,
+        `wasm params : rpm=${(wasmRpmParamNow ?? -1).toFixed(0)} thr=${(wasmThrottleParamNow ?? -1).toFixed(2)}`,
+        `wasm gains  : m=${(masterGainNow ?? 0).toFixed(3)} i=${(intakeGainNow ?? 0).toFixed(2)} o=${(outletGainNow ?? 0).toFixed(2)}`,
+        `creates/reattaches: ${vehicleEngineAudio.wasmCreateCount || 0} / ${vehicleEngineAudio.wasmReattachCount || 0}`,
+        `sample rate : ${ctx?.sampleRate ?? '--'}`,
+    ];
+    if (vehicleEngineAudio.wasmProcessorError) {
+        lines.push(`processor err: ${vehicleEngineAudio.wasmProcessorError}`);
+    }
+    if (failed && vehicleEngineAudio.wasmFailureReason) {
+        lines.push(`reason      : ${vehicleEngineAudio.wasmFailureReason}`);
+    }
+    engineAudioDebugEl.textContent = lines.join('\n');
+
+    engineAudioDebugEl.classList.toggle('is-wasm-ok', state === 'wasm');
+    engineAudioDebugEl.classList.toggle('is-wasm-loading', state === 'loading');
+    engineAudioDebugEl.classList.toggle('is-wasm-failed', state === 'failed');
+    engineAudioDebugEl.classList.toggle('is-legacy', state === 'legacy');
+    engineAudioDebugEl.classList.toggle('is-idle', state === 'wasm-idle' || !isActiveVehicle);
 }
 
 function resolveRuntimeSoundBuffer(soundSpec) {
@@ -3105,7 +3216,7 @@ function getActiveVehicleProp() {
 function clearActiveVehicle({ updateUi = false } = {}) {
     const wasDriving = !!vehicleState.activePropId;
     if (wasDriving) {
-        shutdownVehicleEngineAudio();
+        silenceVehicleEngineAudio();
     }
     vehicleState.activePropId = '';
     vehicleState.brakeHeld = false;
@@ -7169,6 +7280,7 @@ async function init() {
     debugConsoleInput = document.getElementById('debug-console-input');
     debugConsoleFooter = document.getElementById('debug-console-footer');
     debugStatsOverlay = document.getElementById('debug-stats-overlay');
+    engineAudioDebugEl = document.getElementById('engine-audio-debug');
 
     renderDebugConsoleOutput();
     debugConsoleInput?.addEventListener('keydown', handleDebugConsoleInputKeydown);
@@ -7474,7 +7586,8 @@ async function init() {
         if (gameplay.active) {
             updateGameplay(delta);
         } else {
-            shutdownVehicleEngineAudio();
+            silenceVehicleEngineAudio();
+            updateEngineAudioDebugOverlay('idle', null, null);
             updateShowcaseCamera(delta);
         }
         updateGameplayDebugRay();
@@ -8759,7 +8872,8 @@ function updateGameplay(delta) {
         return;
     }
 
-    shutdownVehicleEngineAudio();
+    silenceVehicleEngineAudio();
+    updateEngineAudioDebugOverlay('idle', null, null);
 
     if (!physics.character) return;
 
