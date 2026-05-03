@@ -483,6 +483,18 @@
                             </details>
 
                             <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Performance</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Turns off DDGI global illumination, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full DDGI + fog + post-process active.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Multiplayer</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-input-stack">
