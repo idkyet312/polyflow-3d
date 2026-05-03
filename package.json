@@ -8,9 +8,13 @@
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "gh-pages -d dist",
-    "multiplayer:server": "node server/multiplayer-server.js"
+    "multiplayer:server": "node server/multiplayer-server.js",
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:headed": "playwright test --headed"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "gh-pages": "^6.3.0",
     "vite": "^8.0.4"
   },
