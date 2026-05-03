@@ -114,6 +114,38 @@ export function createVolumetricFog({ scene, camera, settings = {} }) {
         applyEnabled();
     }
 
+    // Live-edit support for the World Environment panel. Density updates the
+    // shared THREE.FogExp2 instance directly so the change is immediate.
+    function setDensity(value) {
+        const numeric = Number.isFinite(value) ? Math.max(0, value) : config.density;
+        config.density = numeric;
+        if (config.enabled && scene.fog && 'density' in scene.fog) {
+            scene.fog.density = numeric;
+        }
+    }
+
+    function setOpacity(value) {
+        const numeric = Number.isFinite(value) ? THREE.MathUtils.clamp(value, 0, 1) : config.opacity;
+        config.opacity = numeric;
+        for (let i = 0; i < state.layers.length; i++) {
+            const layer = state.layers[i];
+            const t = state.layers.length === 1 ? 0 : i / (state.layers.length - 1);
+            layer.material.opacity = numeric * THREE.MathUtils.lerp(0.35, 1.0, 1 - Math.abs(t - 0.45));
+        }
+    }
+
+    function setSceneFogColor(hex) {
+        if (!Number.isFinite(hex)) return;
+        config.sceneFogColor = hex;
+        if (config.enabled && scene.fog?.color) {
+            scene.fog.color.setHex(hex);
+        }
+    }
+
+    function getConfig() {
+        return { ...config };
+    }
+
     scene.add(state.group);
     applyEnabled();
 
@@ -122,5 +154,9 @@ export function createVolumetricFog({ scene, camera, settings = {} }) {
         update,
         setEnabled,
         isEnabled: () => config.enabled,
+        setDensity,
+        setOpacity,
+        setSceneFogColor,
+        getConfig,
     };
 }
