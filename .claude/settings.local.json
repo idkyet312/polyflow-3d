@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(node test-scene-io.mjs)",
-      "Bash(kill %1)"
+      "Bash(kill %1)",
+      "Bash(node -e ' *)",
+      "Bash(npm run *)",
+      "Bash(xargs grep *)",
+      "Bash(node -e \"const p=require\\('c:\\\\\\\\Users\\\\\\\\Bas\\\\\\\\.gemini\\\\\\\\antigravity\\\\\\\\scratch\\\\\\\\polyflow-3d\\\\\\\\node_modules\\\\\\\\three\\\\\\\\package.json'\\); console.log\\(p.version\\)\")",
+      "Bash(npx vite *)"
     ]
   }
 }

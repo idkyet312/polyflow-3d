@@ -42,6 +42,7 @@ import { createEnvironmentController } from './src/world/environment.js';
 import { createLightGridController } from './src/world/lightGrid.js';
 import { createVolumetricFog } from './src/world/volumetricFog.js';
 import { createPostProcessVolumeManager } from './src/world/postProcessVolume.js';
+import { getDDGIManager } from './src/world/gi/ddgiManager.js';
 import {
     createActor,
     createSceneSystem,
@@ -53,6 +54,7 @@ import {
     getScriptComponent,
     PhysicsComponent,
     TransformComponent,
+    DDGIVolumeComponent,
 } from './src/runtime/sceneRuntime.js';
 import {
     TERRAIN_Y_OFFSET,
@@ -250,7 +252,7 @@ const VEHICLE_SETTINGS = {
     wheelBase: 1.72,
     trackWidth: 1.18,
     spawnDistance: 4.8,
-    spawnLift: 0.15,
+    spawnLift: 0.02,
     interactionRadius: 4.5,
     seatHeight: 1.15,
     followDistance: 5.6,
@@ -275,7 +277,7 @@ const VEHICLE_SETTINGS = {
     uprightTorque: 40,
     rollTorque: 15,
     pitchTorque: 10,
-    suspensionRideHeight: 0.55,
+    suspensionRideHeight: 0.43,
     suspensionTravel: 0.25,
     suspensionSpring: 2.8,
     suspensionDamping: 12.0,
@@ -2936,10 +2938,7 @@ function spawnDrivableCar(options = {}) {
 
     const groundHit = getGroundHitAt(spawnPosition.x, spawnPosition.z, true, { cullBackFaces: true });
     if (groundHit?.point) {
-        spawnPosition.y = Math.max(
-            spawnPosition.y,
-            groundHit.point.y + VEHICLE_SETTINGS.height * 0.6 + VEHICLE_SETTINGS.spawnLift
-        );
+        spawnPosition.y = groundHit.point.y + VEHICLE_SETTINGS.height * 0.1 + VEHICLE_SETTINGS.spawnLift;
     }
 
     camera.getWorldDirection(tempVectorA);
@@ -4132,6 +4131,51 @@ function applyObjectMaterialOverrides(rootObject, overrides = []) {
     });
 }
 
+function spawnDDGIVolumeActor({ userData = null, position = null, size = null, options = {} } = {}) {
+    const camDir = camera ? new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion) : new THREE.Vector3(0, 0, -1);
+    const spawnPos = position
+        ? position.clone()
+        : (camera ? camera.position.clone().addScaledVector(camDir, 8) : new THREE.Vector3());
+    const dims = size ? size.clone() : new THREE.Vector3(32, 16, 32);
+    const geom = new THREE.BoxGeometry(dims.x, dims.y, dims.z);
+    const mat = new THREE.MeshBasicMaterial({
+        color: 0x4dffd2,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+        toneMapped: false,
+        fog: false,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.copy(spawnPos);
+    mesh.userData.ddgiSkipReceive = true;
+    mesh.userData.ignoreForcedSceneShadows = true;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+
+    const actor = createActor({
+        mesh,
+        kind: 'ddgiVolume',
+        userData,
+        name: userData?.label || 'ddgi-volume',
+    });
+    if (!actor.hasComponent(TransformComponent)) {
+        actor.addComponent(new TransformComponent());
+    }
+    const ddgi = new DDGIVolumeComponent(options);
+    actor.addComponent(ddgi);
+
+    sceneSystem?.addActor(actor);
+    ensureActorIdentity(actor);
+
+    // Trigger BeginPlay manually so the volume registers right now (the engine's
+    // gameplay-mode lifecycle would otherwise wait for play).
+    try { ddgi.beginPlay(); } catch (e) { console.warn('[DDGI] beginPlay failed', e); }
+
+    return actor;
+}
+
 function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     const kind = actorKindSelect?.value || 'sphere';
     const includeCollisionBody = kind === 'vehicle' ? true : !!actorComponentCollisionInput?.checked;
@@ -4147,6 +4191,8 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
         const bodyTemplateId = actorVehicleBodyTemplateSelect?.value || '';
         const wheelTemplateId = actorVehicleWheelTemplateSelect?.value || '';
         actor = spawnDrivableCar({ includeScripts, userData, bodyTemplateId, wheelTemplateId });
+    } else if (kind === 'ddgiVolume') {
+        actor = spawnDDGIVolumeActor({ userData });
     } else if (kind === 'imported') {
         const templateId = actorImportedTemplateSelect?.value || '';
         if (!templateId) {
@@ -7163,6 +7209,16 @@ async function init() {
     });
     syncPostProcessVolumeUi();
 
+    getDDGIManager().init({
+        scene,
+        renderer,
+        camera,
+        getDirectionalLight: () => mainDirectionalLight,
+    });
+    if (typeof window !== 'undefined') {
+        window.__ddgi = getDDGIManager();
+    }
+
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
     transformControl.setSize(1.5); // Make gizmo hit area larger
@@ -7327,6 +7383,10 @@ async function init() {
         updateVehicleSurfaceEffects(delta);
         volumetricFogController?.update(delta);
         postProcessVolumeManager?.update(delta);
+        const _ddgiStart = performance.now();
+        getDDGIManager().tick(delta);
+        const _ddgiMs = performance.now() - _ddgiStart;
+        if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
         tickForceAllSceneMeshShadows();
 
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());        multiplayerController?.update(delta);
@@ -9589,6 +9649,15 @@ function serializeActorData(actor) {
     // touched a material.
     const dirtyMaterials = mesh.userData.hasMaterialOverrides === true;
 
+    let userDataForSerialization = actor.entity.getComponent('metadata')?.userData || null;
+    if (actor.kind === 'ddgiVolume') {
+        const ddgi = actor.getComponentByClass?.(DDGIVolumeComponent)
+            || actor.GetComponent?.(DDGIVolumeComponent);
+        if (ddgi?.serialize) {
+            userDataForSerialization = { ...(userDataForSerialization || {}), ddgi: ddgi.serialize() };
+        }
+    }
+
     return {
         id: actor.id,
         kind: actor.kind,
@@ -9596,7 +9665,7 @@ function serializeActorData(actor) {
         templateId: actor.templateId,
         vehicleBodyTemplateId: actor.vehicleBodyTemplateId || null,
         vehicleWheelTemplateId: actor.vehicleWheelTemplateId || null,
-        userData: actor.entity.getComponent('metadata')?.userData || null,
+        userData: userDataForSerialization,
         transform: {
             position: mesh.position.toArray(),
             quaternion: mesh.quaternion.toArray(),
@@ -9659,6 +9728,18 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
             userData: actorData.userData,
             includeCollisionBody: componentFlags.collision,
             simulatePhysics: componentFlags.physics,
+        });
+    } else if (actorData.kind === 'ddgiVolume') {
+        const savedPos = new THREE.Vector3().fromArray(actorData.transform.position);
+        const savedScale = new THREE.Vector3().fromArray(actorData.transform.scale || [1, 1, 1]);
+        // Bake scale into box size so the spawned volume matches saved bounds.
+        const size = new THREE.Vector3(32, 16, 32).multiply(savedScale);
+        const ddgiOptions = actorData.userData?.ddgi || {};
+        actor = spawnDDGIVolumeActor({
+            userData: actorData.userData || null,
+            position: savedPos,
+            size,
+            options: ddgiOptions,
         });
     } else {
         // Spawn the primitive directly at the saved world position with no
@@ -10222,6 +10303,25 @@ function getBlueprintMaterialEditorRefs() {
     return {
         target: document.getElementById('bp-material-target'),
         status: document.getElementById('bp-material-status'),
+        materialGrid: document.getElementById('bp-material-grid'),
+        materialHint: document.querySelector('.bp-material-hint'),
+        materialActions: document.querySelector('.bp-material-actions'),
+        lightGrid: document.getElementById('bp-light-grid'),
+        lightColor: document.getElementById('bp-light-color'),
+        lightIntensity: document.getElementById('bp-light-intensity'),
+        lightIntensityNumber: document.getElementById('bp-light-intensity-number'),
+        lightDistance: document.getElementById('bp-light-distance'),
+        lightDistanceNumber: document.getElementById('bp-light-distance-number'),
+        lightDecay: document.getElementById('bp-light-decay'),
+        lightDecayNumber: document.getElementById('bp-light-decay-number'),
+        lightAngle: document.getElementById('bp-light-angle'),
+        lightAngleNumber: document.getElementById('bp-light-angle-number'),
+        lightPenumbra: document.getElementById('bp-light-penumbra'),
+        lightPenumbraNumber: document.getElementById('bp-light-penumbra-number'),
+        lightTargetX: document.getElementById('bp-light-target-x'),
+        lightTargetY: document.getElementById('bp-light-target-y'),
+        lightTargetZ: document.getElementById('bp-light-target-z'),
+        lightCastShadow: document.getElementById('bp-light-cast-shadow'),
         color: document.getElementById('bp-material-color'),
         emissive: document.getElementById('bp-material-emissive'),
         roughness: document.getElementById('bp-material-roughness'),
@@ -10245,6 +10345,7 @@ function getBlueprintMaterialEditorRefs() {
 function getBlueprintComponentDisplayName(object3D) {
     if (!object3D) return 'Nothing selected';
     if (object3D.name) return object3D.name;
+    if (object3D.isSpotLight) return 'Spot Light';
     if (object3D.isPointLight) return 'Point Light';
     if (object3D.isLight) return object3D.type || 'Light';
     if (object3D.isMesh) return object3D.geometry?.type || 'Mesh';
@@ -10279,6 +10380,71 @@ function setBlueprintMaterialScalarPair(rangeInput, numberInput, value, fallback
     if (numberInput) numberInput.value = formatted;
 }
 
+function setBlueprintDetailsMode(refs, mode) {
+    const lightMode = mode === 'light';
+    if (refs.materialGrid) refs.materialGrid.hidden = lightMode;
+    if (refs.materialHint) refs.materialHint.hidden = lightMode;
+    if (refs.materialActions) refs.materialActions.hidden = lightMode;
+    if (refs.lightGrid) refs.lightGrid.hidden = !lightMode;
+}
+
+function syncBlueprintLightScalarInput(sourceId, targetId, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const source = document.getElementById(sourceId);
+    const target = document.getElementById(targetId);
+    if (!source || !target) return;
+
+    const parsedValue = Number.parseFloat(source.value);
+    const formatted = formatBlueprintMaterialScalar(parsedValue, fallback, min, max, decimals);
+    source.value = formatted;
+    target.value = formatted;
+}
+
+function setBlueprintLightScalarPair(rangeInput, numberInput, value, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const formatted = formatBlueprintMaterialScalar(value, fallback, min, max, decimals);
+    if (rangeInput) rangeInput.value = formatted;
+    if (numberInput) numberInput.value = formatted;
+}
+
+function readBlueprintLightScalarInput(numberId, rangeId, fallback = 0, min = 0, max = 1) {
+    const numberInput = document.getElementById(numberId);
+    const rangeInput = document.getElementById(rangeId);
+    const rawValue = numberInput?.value ?? rangeInput?.value ?? `${fallback}`;
+    return clampMaterialStateValue(Number.parseFloat(rawValue), fallback, min, max);
+}
+
+function setBlueprintSpotRowsVisible(visible) {
+    document.querySelectorAll('.bp-light-spot-row').forEach((row) => {
+        row.hidden = !visible;
+    });
+}
+
+function syncBlueprintLightEditor(refs, light, statusMessage = '') {
+    setBlueprintDetailsMode(refs, 'light');
+    if (!light) return;
+
+    const isSpot = !!light.isSpotLight;
+    setBlueprintSpotRowsVisible(isSpot);
+    if (refs.target) refs.target.textContent = `Target: ${getBlueprintComponentDisplayName(light)}`;
+    if (refs.status) {
+        refs.status.textContent = statusMessage || (isSpot
+            ? 'Spot Light properties update live. Target is local to the light.'
+            : 'Point Light properties update live.');
+    }
+
+    if (refs.lightColor) refs.lightColor.value = `#${light.color.getHexString()}`;
+    setBlueprintLightScalarPair(refs.lightIntensity, refs.lightIntensityNumber, light.intensity, 1, 0, 20, 1);
+    setBlueprintLightScalarPair(refs.lightDistance, refs.lightDistanceNumber, light.distance ?? 0, 0, 0, 100, 1);
+    setBlueprintLightScalarPair(refs.lightDecay, refs.lightDecayNumber, light.decay ?? 2, 2, 0, 4, 1);
+    setBlueprintLightScalarPair(refs.lightAngle, refs.lightAngleNumber, THREE.MathUtils.radToDeg(light.angle ?? Math.PI / 6), 30, 1, 120, 0);
+    setBlueprintLightScalarPair(refs.lightPenumbra, refs.lightPenumbraNumber, light.penumbra ?? 0, 0, 0, 1, 2);
+    if (refs.lightCastShadow) refs.lightCastShadow.checked = !!light.castShadow;
+
+    const targetPosition = light.target?.position || tempVectorA.set(0, -1.5, 0);
+    if (refs.lightTargetX) refs.lightTargetX.value = (targetPosition.x || 0).toFixed(2);
+    if (refs.lightTargetY) refs.lightTargetY.value = (targetPosition.y || 0).toFixed(2);
+    if (refs.lightTargetZ) refs.lightTargetZ.value = (targetPosition.z || 0).toFixed(2);
+}
+
 function setBlueprintMaterialEditorEnabled(refs, enabled) {
     [
         refs.color,
@@ -10310,6 +10476,13 @@ function syncBlueprintMaterialEditor(statusMessage = '') {
     if (!refs.target || !refs.status) return;
 
     const comp = getBlueprintMaterialPreviewTarget() || blueprintState.selectedComponent;
+    if (comp?.isLight) {
+        syncBlueprintLightEditor(refs, comp, statusMessage);
+        return;
+    }
+
+    setBlueprintDetailsMode(refs, 'material');
+    setBlueprintSpotRowsVisible(false);
     const targets = getBlueprintMaterialTargets();
     refs.target.textContent = targets.length > 1
         ? `Targets: ${targets.length} meshes`
@@ -10436,6 +10609,55 @@ function previewBlueprintMaterialEdits() {
     });
 }
 
+function readBlueprintLightEditorState() {
+    const refs = getBlueprintMaterialEditorRefs();
+    if (!blueprintState.selectedComponent?.isLight || !refs.lightColor) return null;
+
+    return {
+        color: refs.lightColor.value || '#fff2cc',
+        intensity: readBlueprintLightScalarInput('bp-light-intensity-number', 'bp-light-intensity', 1, 0, 20),
+        distance: readBlueprintLightScalarInput('bp-light-distance-number', 'bp-light-distance', 0, 0, 100),
+        decay: readBlueprintLightScalarInput('bp-light-decay-number', 'bp-light-decay', 2, 0, 4),
+        angle: THREE.MathUtils.degToRad(readBlueprintLightScalarInput('bp-light-angle-number', 'bp-light-angle', 30, 1, 120)),
+        penumbra: readBlueprintLightScalarInput('bp-light-penumbra-number', 'bp-light-penumbra', 0, 0, 1),
+        castShadow: !!refs.lightCastShadow?.checked,
+        target: new THREE.Vector3(
+            Number.parseFloat(refs.lightTargetX?.value) || 0,
+            Number.parseFloat(refs.lightTargetY?.value) || 0,
+            Number.parseFloat(refs.lightTargetZ?.value) || 0
+        ),
+    };
+}
+
+function applyBlueprintLightEdits({ captureHistory = false, statusMessage = '' } = {}) {
+    const light = blueprintState.selectedComponent;
+    const state = readBlueprintLightEditorState();
+    if (!light?.isLight || !state) return;
+
+    if (captureHistory) {
+        editorHistory.captureState();
+    }
+
+    light.color.set(state.color);
+    light.intensity = state.intensity;
+    if ('distance' in light) light.distance = state.distance;
+    if ('decay' in light) light.decay = state.decay;
+    light.castShadow = state.castShadow;
+
+    if (light.isSpotLight) {
+        light.angle = state.angle;
+        light.penumbra = state.penumbra;
+        light.target.position.copy(state.target);
+        if (light.target.parent !== light) {
+            light.add(light.target);
+        }
+        light.target.updateMatrixWorld(true);
+    }
+
+    light.updateMatrixWorld(true);
+    syncBlueprintLightEditor(getBlueprintMaterialEditorRefs(), light, statusMessage || 'Light properties updated.');
+}
+
 function refreshBlueprintComponents() {
     updateBlueprintDetailsUI();
     syncBlueprintMaterialEditor();
@@ -10482,6 +10704,7 @@ function refreshBlueprintComponents() {
             const label = document.createElement('span');
             let typeName = 'Group';
             if (isRoot) typeName = 'Root';
+            else if (object3D.isSpotLight) typeName = 'Spot Light';
             else if (object3D.isPointLight) typeName = 'Point Light';
             else if (object3D.isLight) typeName = 'Light';
             else if (object3D.geometry?.type === 'BoxGeometry') typeName = 'Cube Mesh';
@@ -10585,6 +10808,26 @@ document.getElementById('btn-add-comp-light')?.addEventListener('click', () => {
     light.position.set(0, 2, 0);
     light.castShadow = true;
     light.name = 'Point Light';
+    parent.add(light);
+    blueprintState.selectedComponent = light;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
+    if (typeof transformControl !== 'undefined') transformControl.attach(light);
+    refreshBlueprintComponents();
+});
+
+document.getElementById('btn-add-comp-spot-light')?.addEventListener('click', () => {
+    editorHistory.captureState();
+    const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
+    if (!parent) return;
+
+    const light = new THREE.SpotLight(0xfff2cc, 6, 18, Math.PI / 6, 0.35, 2);
+    light.position.set(0, 2, 0);
+    light.castShadow = true;
+    light.shadow.mapSize.set(1024, 1024);
+    light.name = 'Spot Light';
+    light.target.position.set(0, -1.5, 0);
+    light.add(light.target);
     parent.add(light);
     blueprintState.selectedComponent = light;
     blueprintState.selectedComponents.clear();
@@ -10771,6 +11014,58 @@ document.getElementById('bp-material-env-intensity-number')?.addEventListener('c
 document.getElementById('bp-material-side')?.addEventListener('change', () => {
     previewBlueprintMaterialEdits();
 });
+
+document.getElementById('bp-light-color')?.addEventListener('input', () => {
+    applyBlueprintLightEdits({ statusMessage: 'Light color updated.' });
+});
+document.getElementById('bp-light-intensity')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-intensity', 'bp-light-intensity-number', 1, 0, 20, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-intensity-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-intensity-number', 'bp-light-intensity', 1, 0, 20, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-distance')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-distance', 'bp-light-distance-number', 0, 0, 100, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-distance-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-distance-number', 'bp-light-distance', 0, 0, 100, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-decay')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-decay', 'bp-light-decay-number', 2, 0, 4, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-decay-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-decay-number', 'bp-light-decay', 2, 0, 4, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-angle')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-angle', 'bp-light-angle-number', 30, 1, 120, 0);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-angle-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-angle-number', 'bp-light-angle', 30, 1, 120, 0);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-penumbra')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-penumbra', 'bp-light-penumbra-number', 0, 0, 1, 2);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-penumbra-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-penumbra-number', 'bp-light-penumbra', 0, 0, 1, 2);
+    applyBlueprintLightEdits();
+});
+['bp-light-target-x', 'bp-light-target-y', 'bp-light-target-z'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', () => {
+        applyBlueprintLightEdits({ statusMessage: 'Spot Light target updated.' });
+    });
+});
+document.getElementById('bp-light-cast-shadow')?.addEventListener('change', () => {
+    applyBlueprintLightEdits({ statusMessage: 'Light shadow setting updated.' });
+});
 document.getElementById('btn-bp-apply-material-selected')?.addEventListener('click', () => {
     applyBlueprintMaterialEdits({ applyToActor: false });
 });
@@ -10831,7 +11126,7 @@ function serializeComponentTree(object3D) {
     for (const child of object3D.children) {
         if (child.isMesh || child.isLight) {
             const entry = {
-                type: child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
+                type: child.isSpotLight ? 'SpotLight' : child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
                 name: child.name,
                 position: child.position.toArray(),
                 quaternion: child.quaternion.toArray(),
@@ -10845,7 +11140,21 @@ function serializeComponentTree(object3D) {
                 entry.light = {
                     color: '#' + child.color.getHexString(),
                     intensity: child.intensity,
-                    distance: child.distance
+                    distance: child.distance,
+                    decay: child.decay,
+                    castShadow: child.castShadow
+                };
+            }
+            if (child.isSpotLight) {
+                entry.light = {
+                    color: '#' + child.color.getHexString(),
+                    intensity: child.intensity,
+                    distance: child.distance,
+                    angle: child.angle,
+                    penumbra: child.penumbra,
+                    decay: child.decay,
+                    castShadow: child.castShadow,
+                    targetPosition: child.target?.position?.toArray?.() || [0, -1.5, 0],
                 };
             }
             comps.push(entry);
@@ -10863,7 +11172,19 @@ function deserializeComponentTree(parent, comps) {
         let comp = existingMatches ? existing : null;
 
         if (!comp) {
-            if (compData.type === 'PointLight') {
+            if (compData.type === 'SpotLight') {
+                const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xfff2cc;
+                const lightIntensity = compData.light?.intensity ?? 6;
+                const lightDistance = compData.light?.distance ?? 18;
+                const lightAngle = compData.light?.angle ?? Math.PI / 6;
+                const lightPenumbra = compData.light?.penumbra ?? 0.35;
+                const lightDecay = compData.light?.decay ?? 2;
+                comp = new THREE.SpotLight(lightColor, lightIntensity, lightDistance, lightAngle, lightPenumbra, lightDecay);
+                comp.castShadow = true;
+                comp.shadow.mapSize.set(1024, 1024);
+                comp.target.position.fromArray(compData.light?.targetPosition || [0, -1.5, 0]);
+                comp.add(comp.target);
+            } else if (compData.type === 'PointLight') {
                 const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
                 const lightIntensity = compData.light?.intensity ?? 2;
                 const lightDistance = compData.light?.distance ?? 10;
@@ -10894,6 +11215,23 @@ function deserializeComponentTree(parent, comps) {
             if (compData.light.color) comp.color = new THREE.Color(compData.light.color);
             if (Number.isFinite(compData.light.intensity)) comp.intensity = compData.light.intensity;
             if (Number.isFinite(compData.light.distance)) comp.distance = compData.light.distance;
+            if (Number.isFinite(compData.light.decay)) comp.decay = compData.light.decay;
+            if (typeof compData.light.castShadow === 'boolean') comp.castShadow = compData.light.castShadow;
+        }
+        if (comp.isSpotLight && compData.light) {
+            if (compData.light.color) comp.color = new THREE.Color(compData.light.color);
+            if (Number.isFinite(compData.light.intensity)) comp.intensity = compData.light.intensity;
+            if (Number.isFinite(compData.light.distance)) comp.distance = compData.light.distance;
+            if (Number.isFinite(compData.light.angle)) comp.angle = compData.light.angle;
+            if (Number.isFinite(compData.light.penumbra)) comp.penumbra = compData.light.penumbra;
+            if (Number.isFinite(compData.light.decay)) comp.decay = compData.light.decay;
+            if (typeof compData.light.castShadow === 'boolean') comp.castShadow = compData.light.castShadow;
+            if (Array.isArray(compData.light.targetPosition)) {
+                comp.target.position.fromArray(compData.light.targetPosition);
+            }
+            if (comp.target.parent !== comp) {
+                comp.add(comp.target);
+            }
         }
 
         deserializeComponentTree(comp, compData.children);

@@ -574,6 +574,16 @@ main {
   padding-bottom: 0.48rem;
 }
 
+.bp-light-target-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+}
+
+.bp-light-shadow-row {
+  margin-top: 0.35rem;
+}
+
 .bp-material-hint {
   margin-top: 0.65rem;
 }

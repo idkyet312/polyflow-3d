@@ -105,7 +105,7 @@ export function createDrivableCarVisual({ bodyTemplateId = '', wheelTemplateId =
     const H = vehicleSettings.height;
 
     const visualGroup = new THREE.Group();
-    visualGroup.position.y = H * 0.28;
+    visualGroup.position.y = H * 0.08;
     visualGroup.rotation.y = Math.PI;
     root.add(visualGroup);
 

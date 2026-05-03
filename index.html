@@ -76,6 +76,7 @@
                                         <option value="vehicle">Vehicle Actor</option>
                                         <option value="imported">Imported Actor</option>
                                         <option value="capsule">Simple AI Actor</option>
+                                        <option value="ddgiVolume">DDGI Volume</option>
                                     </select>
                                 </label>
                                 <label class="viewer-code-field" for="actor-label-input">
@@ -215,11 +216,11 @@
                             </div>
                         </div>
 
-                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Material Editor:</div>
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Component Details:</div>
                         <div class="bp-material-editor">
                             <div class="bp-material-target" id="bp-material-target">Target: select a mesh component.</div>
                             <div class="viewer-inline-note bp-material-status" id="bp-material-status">Select a mesh component to edit base color, emissive glow, reflectivity, opacity, and surface response.</div>
-                            <div class="bp-material-grid">
+                            <div class="bp-material-grid" id="bp-material-grid">
                                 <label class="bp-material-row" for="bp-material-color">
                                     <span class="bp-material-label">Base Color</span>
                                     <input type="color" id="bp-material-color" class="bp-material-color-input" value="#888888">
@@ -275,6 +276,51 @@
                                 <button class="btn viewer-menu-btn" id="btn-bp-apply-material-selected" style="padding: 6px; font-size: 11px;">Apply To Selected</button>
                                 <button class="btn viewer-menu-btn" id="btn-bp-apply-material-actor" style="padding: 6px; font-size: 11px;">Apply To Actor</button>
                             </div>
+                            <div class="bp-material-grid" id="bp-light-grid" hidden>
+                                <label class="bp-material-row" for="bp-light-color">
+                                    <span class="bp-material-label">Color</span>
+                                    <input type="color" id="bp-light-color" class="bp-material-color-input" value="#fff2cc">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-light-intensity">
+                                    <span class="bp-material-label">Intensity</span>
+                                    <input type="range" id="bp-light-intensity" class="bp-material-range" min="0" max="20" step="0.1" value="6.0">
+                                    <input type="number" id="bp-light-intensity-number" class="viewer-text-input bp-material-number" min="0" max="20" step="0.1" value="6.0">
+                                </label>
+                                <label class="bp-material-row" for="bp-light-distance">
+                                    <span class="bp-material-label">Distance</span>
+                                    <input type="range" id="bp-light-distance" class="bp-material-range" min="0" max="100" step="0.1" value="18.0">
+                                    <input type="number" id="bp-light-distance-number" class="viewer-text-input bp-material-number" min="0" max="100" step="0.1" value="18.0">
+                                </label>
+                                <label class="bp-material-row" for="bp-light-decay">
+                                    <span class="bp-material-label">Decay</span>
+                                    <input type="range" id="bp-light-decay" class="bp-material-range" min="0" max="4" step="0.1" value="2.0">
+                                    <input type="number" id="bp-light-decay-number" class="viewer-text-input bp-material-number" min="0" max="4" step="0.1" value="2.0">
+                                </label>
+                                <label class="bp-material-row bp-light-spot-row" for="bp-light-angle">
+                                    <span class="bp-material-label">Cone Angle</span>
+                                    <input type="range" id="bp-light-angle" class="bp-material-range" min="1" max="120" step="1" value="30">
+                                    <input type="number" id="bp-light-angle-number" class="viewer-text-input bp-material-number" min="1" max="120" step="1" value="30">
+                                </label>
+                                <label class="bp-material-row bp-light-spot-row" for="bp-light-penumbra">
+                                    <span class="bp-material-label">Penumbra</span>
+                                    <input type="range" id="bp-light-penumbra" class="bp-material-range" min="0" max="1" step="0.01" value="0.35">
+                                    <input type="number" id="bp-light-penumbra-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.35">
+                                </label>
+                                <div class="bp-material-row bp-light-spot-row">
+                                    <span class="bp-material-label">Target</span>
+                                    <div class="bp-light-target-grid">
+                                        <input type="number" id="bp-light-target-x" class="viewer-text-input bp-material-number" step="0.1" value="0">
+                                        <input type="number" id="bp-light-target-y" class="viewer-text-input bp-material-number" step="0.1" value="-1.5">
+                                        <input type="number" id="bp-light-target-z" class="viewer-text-input bp-material-number" step="0.1" value="0">
+                                    </div>
+                                    <span></span>
+                                </div>
+                                <label class="viewer-checkbox-row bp-light-shadow-row" for="bp-light-cast-shadow">
+                                    <input type="checkbox" id="bp-light-cast-shadow" checked>
+                                    <span>Cast Shadow</span>
+                                </label>
+                            </div>
                         </div>
 
                         <div class="viewer-inline-note" style="margin-bottom: 8px;">Add Child Components:</div>
@@ -285,6 +331,8 @@
                             <button class="btn viewer-menu-btn" id="btn-add-comp-sphere" style="padding: 6px;">Add
                                 Sphere</button>
                             <button class="btn viewer-menu-btn" id="btn-add-comp-light" style="padding: 6px;">Add Point
+                                Light</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-spot-light" style="padding: 6px;">Add Spot
                                 Light</button>
                             <button class="btn viewer-menu-btn" id="btn-delete-comp"
                                 style="padding: 6px; border-color: rgba(255,50,50,0.3);">Delete Selected</button>

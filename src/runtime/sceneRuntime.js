@@ -535,6 +535,7 @@ export { ActorComponent } from './components/ActorComponent.js';
 export { AudioComponent } from './components/AudioComponent.js';
 export { PhysicsComponent } from './components/PhysicsComponent.js';
 export { TransformComponent } from './components/TransformComponent.js';
+export { DDGIVolumeComponent } from './components/DDGIVolumeComponent.js';
 
 /**
  * Convenience factory: create an Actor with a PhysicsComponent already attached.
