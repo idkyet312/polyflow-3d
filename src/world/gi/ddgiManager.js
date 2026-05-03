@@ -286,6 +286,43 @@ export function createDDGIManager() {
         if (state.injectionEnabled) patchSceneMaterials(state.scene);
     }
 
+    // Live-edit setters used by the World Environment panel. These adjust the
+    // implicit-volume defaults; explicit DDGIVolume actors are unaffected.
+    function setProbesPerFrame(n) {
+        const numeric = Math.max(1, Math.min(64, Math.floor(Number.isFinite(n) ? n : state.probesPerFrame)));
+        state.probesPerFrame = numeric;
+        if (state._implicitVolume) state._implicitVolume.probesPerFrame = numeric;
+    }
+
+    function setIntensity(v) {
+        const numeric = Math.max(0, Math.min(2, Number.isFinite(v) ? v : state.intensity));
+        state.intensity = numeric;
+        if (state._implicitVolume) state._implicitVolume.intensity = numeric;
+    }
+
+    function setHysteresis(v) {
+        const numeric = Math.max(0, Math.min(0.999, Number.isFinite(v) ? v : state.hysteresis));
+        state.hysteresis = numeric;
+        if (state._implicitVolume) state._implicitVolume.hysteresis = numeric;
+    }
+
+    function setNormalBias(v) {
+        const numeric = Math.max(0, Math.min(2, Number.isFinite(v) ? v : state.normalBias));
+        state.normalBias = numeric;
+        if (state._implicitVolume) state._implicitVolume.normalBias = numeric;
+    }
+
+    function getSnapshot() {
+        return {
+            enabled: state.enabled,
+            injectionEnabled: state.injectionEnabled,
+            probesPerFrame: state.probesPerFrame,
+            intensity: state.intensity,
+            hysteresis: state.hysteresis,
+            normalBias: state.normalBias,
+        };
+    }
+
     function dispose() {
         state.debug?.dispose();
         state.debug = null;
@@ -311,6 +348,11 @@ export function createDDGIManager() {
         isDebugVisible,
         setEnabled,
         get enabled() { return state.enabled; },
+        setProbesPerFrame,
+        setIntensity,
+        setHysteresis,
+        setNormalBias,
+        getSnapshot,
         patchSceneMaterials,
         dispose,
         getGrid: () => state.grid,

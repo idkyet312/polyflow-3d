@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+// Side-effect import: registers the World Environment panel runtime. The panel
+// module polls window.__ddgi for the engine state once main.js has booted, then
+// wires up the panel in index.html. Loaded here because environment.js is the
+// natural seam — main.js imports it during init.
+import '../ui/worldEnvironmentPanel.js';
 
 const ENVIRONMENTS = {
     'sunny-sky': {
@@ -57,13 +62,29 @@ export function createEnvironmentController({ scene, getAmbientLight, getHemiLig
     let currentEnvironment = 'sunny-sky';
     let currentResolution = '1k';
 
+    // World Environment toggle state. When disabled, the HDR sky + IBL are
+    // cleared from the scene but the cached texture is preserved so re-enable
+    // restores the exact prior look without re-fetching.
+    let enabled = true;
+    let pendingTexture = null;
+    let pendingBlurriness = 0;
+
+    function applyTextureToScene(texture, blurriness) {
+        if (enabled) {
+            scene.environment = texture;
+            scene.background = texture;
+            scene.backgroundBlurriness = blurriness;
+        }
+        // Always remember what we'd apply, so re-enabling picks up the latest.
+        pendingTexture = texture;
+        pendingBlurriness = blurriness;
+    }
+
     function loadHdriIntoScene(url, blurriness) {
         console.log(`Loading HDRI: ${url}`);
 
         if (hdriCache[url]) {
-            scene.environment = hdriCache[url];
-            scene.background = hdriCache[url];
-            scene.backgroundBlurriness = blurriness;
+            applyTextureToScene(hdriCache[url], blurriness);
             return;
         }
 
@@ -71,9 +92,7 @@ export function createEnvironmentController({ scene, getAmbientLight, getHemiLig
         loader.load(url, (texture) => {
             texture.mapping = THREE.EquirectangularReflectionMapping;
             hdriCache[url] = texture;
-            scene.environment = texture;
-            scene.background = texture;
-            scene.backgroundBlurriness = blurriness;
+            applyTextureToScene(texture, blurriness);
             console.log(`Successfully loaded HDRI: ${url}`);
         }, undefined, (error) => {
             console.error('Failed to load HDRI:', url, error);
@@ -112,9 +131,41 @@ export function createEnvironmentController({ scene, getAmbientLight, getHemiLig
         switchEnvironment(currentEnvironment);
     }
 
+    // World Environment control: toggle the IBL/sky on/off without losing the
+    // active preset. When off, scene.environment + scene.background are cleared
+    // (so reflections go matte and the sky drops to the renderer clear color).
+    function setEnabled(next) {
+        const v = !!next;
+        if (enabled === v) return;
+        enabled = v;
+        if (enabled) {
+            if (pendingTexture) {
+                scene.environment = pendingTexture;
+                scene.background = pendingTexture;
+                scene.backgroundBlurriness = pendingBlurriness;
+            }
+        } else {
+            scene.environment = null;
+            scene.background = null;
+        }
+    }
+
+    function setBackgroundBlurriness(value) {
+        const numeric = Number.isFinite(value) ? value : pendingBlurriness;
+        pendingBlurriness = THREE.MathUtils.clamp(numeric, 0, 1);
+        if (enabled) {
+            scene.backgroundBlurriness = pendingBlurriness;
+        }
+    }
+
     return {
         switchEnvironment,
         setResolution,
+        setEnabled,
+        isEnabled: () => enabled,
+        setBackgroundBlurriness,
+        getBackgroundBlurriness: () => pendingBlurriness,
+        getEnvironmentList: () => Object.entries(ENVIRONMENTS).map(([key, env]) => ({ key, label: env.label })),
         getCurrentEnvironment: () => currentEnvironment,
         getCurrentResolution: () => currentResolution,
     };
