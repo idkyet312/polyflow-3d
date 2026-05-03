@@ -55,6 +55,7 @@ export function createVolumetricFog({ scene, camera, settings = {} }) {
     state.group.name = 'volumetric-fog';
     state.group.renderOrder = -10;
     state.group.userData.ignoreForcedSceneShadows = true;
+    state.group.userData.ddgiSkipCapture = true;
 
     const fogSheetColor = new THREE.Color(config.color).multiplyScalar(0.42);
     const material = new THREE.MeshBasicMaterial({

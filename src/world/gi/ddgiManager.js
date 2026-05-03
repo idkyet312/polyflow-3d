@@ -24,11 +24,11 @@ export function createDDGIManager() {
         debug: null,
         volumes: [],
         activeVolume: null,
-        enabled: true,
+        enabled: false,
         probesPerFrame: 4,
         hysteresis: 0.97,
         normalBias: 0.4,
-        intensity: 1.0,
+        intensity: 0.18,
         roundRobinCursor: 0,
         cubeRenderer: null,
         captureBudgetMs: 4.0,
@@ -37,10 +37,11 @@ export function createDDGIManager() {
         integrator: null,
         atlasProbeCount: 0,
         sampler: null,
-        // Material-injection is OFF by default until the TSL outputNode path is
-        // proven safe across all material types. Captures + atlas still build,
-        // so toggling on later picks up live data immediately.
-        injectionEnabled: false,
+        probeInitialized: null,
+        atlasNeedsClear: false,
+        // Apply the DDGI atlas to standard materials by default. Materials can
+        // still opt out with userData.ddgiSkipReceive.
+        injectionEnabled: true,
     };
 
     function init({ scene, renderer, camera, getDirectionalLight }) {
@@ -49,22 +50,21 @@ export function createDDGIManager() {
         state.camera = camera;
         state.getDirectionalLight = getDirectionalLight || null;
         state.grid = createProbeGrid({ dims: DEFAULT_GRID_DIMS, cellSize: DEFAULT_CELL_SIZE });
-        state.debug = createDDGIDebug({ scene });
+        state.debug = createDDGIDebug({ scene, layer: DDGI_CAPTURE_LAYER });
         state.cubeRenderer = createCubeRenderer({ renderer, scene, faceSize: 16 });
         state.integrator = createIntegrator({ renderer });
-        // Move debug viz onto excluded layer so probes don't capture themselves.
-        state.debug.group.traverse(o => o.layers.set(DDGI_CAPTURE_LAYER));
         ensureAtlasForGrid();
         state.sampler = createDDGISampler({
             getAtlas: () => state.irradianceAtlas,
             getGrid: () => state.grid,
-            getIntensity: () => (state.enabled ? state.intensity : 0),
+            getIntensity: () => (state.enabled && !state.atlasNeedsClear ? state.intensity : 0),
+            getNormalBias: () => state.normalBias,
         });
         // Implicit default volume — GI is active without user authoring.
         state._implicitVolume = {
             gridDims: { ...DEFAULT_GRID_DIMS },
             cellSize: DEFAULT_CELL_SIZE,
-            intensity: 1.0,
+            intensity: 0.18,
             hysteresis: 0.97,
             normalBias: 0.4,
             probesPerFrame: 4,
@@ -72,7 +72,7 @@ export function createDDGIManager() {
         };
         state.activeVolume = state._implicitVolume;
 
-        // Seed debug viz immediately so probes are visible from frame 0.
+        // Seed debug data immediately; actual gizmos stay hidden by default.
         state.grid.snapAnchorTo(state.camera?.position || new THREE.Vector3());
         state.debug.update(state.grid);
     }
@@ -89,6 +89,49 @@ export function createDDGIManager() {
             tilesPerRow,
         });
         state.atlasProbeCount = count;
+        state.probeInitialized = new Uint8Array(count);
+        state.atlasNeedsClear = true;
+        clearAtlas();
+    }
+
+    function clearAtlas() {
+        if (!state.renderer || !state.irradianceAtlas) return;
+        try {
+            const prevTarget = state.renderer.getRenderTarget();
+            const prevClearColor = state.renderer.getClearColor(new THREE.Color());
+            const prevClearAlpha = state.renderer.getClearAlpha?.() ?? 1;
+            state.renderer.setClearColor(0x000000, 0);
+            state.renderer.setRenderTarget(state.irradianceAtlas.front);
+            state.renderer.clear(true, false, false);
+            state.renderer.setRenderTarget(state.irradianceAtlas.back);
+            state.renderer.clear(true, false, false);
+            state.renderer.setRenderTarget(prevTarget);
+            state.renderer.setClearColor(prevClearColor, prevClearAlpha);
+            state.atlasNeedsClear = false;
+        } catch (e) {
+            state.atlasNeedsClear = true;
+        }
+    }
+
+    function markGridMoved() {
+        state.probeInitialized?.fill(0);
+        state.roundRobinCursor = 0;
+        clearAtlas();
+    }
+
+    function gridKey() {
+        if (!state.grid) return '';
+        const a = state.grid.anchor;
+        const d = state.grid.dims;
+        return `${a.x},${a.y},${a.z}|${d.x},${d.y},${d.z}|${state.grid.cellSize}`;
+    }
+
+    function activeVolumeAnchor(out) {
+        const mesh = state.activeVolume?.owner?.mesh || state.activeVolume?.owner?.root;
+        if (!mesh) return null;
+        const box = new THREE.Box3().setFromObject(mesh);
+        if (box.isEmpty()) return null;
+        return box.getCenter(out);
     }
 
     function registerVolume(volume) {
@@ -126,6 +169,7 @@ export function createDDGIManager() {
 
     function applyVolume(vol) {
         if (!vol || !state.grid) return;
+        const previousKey = gridKey();
         state.activeVolume = vol;
         state.grid.setDims(vol.gridDims);
         state.grid.setCellSize(vol.cellSize);
@@ -133,6 +177,7 @@ export function createDDGIManager() {
         state.normalBias = vol.normalBias;
         state.intensity = vol.intensity;
         ensureAtlasForGrid();
+        if (previousKey && gridKey() !== previousKey) markGridMoved();
     }
 
     const _tmpPos = new THREE.Vector3();
@@ -142,9 +187,16 @@ export function createDDGIManager() {
         if (!state.grid || !state.camera) return;
         chooseActiveVolume();
 
-        // Snap grid anchor to camera (cell-quanta) regardless of volume so the
-        // debug viz always tracks the camera.
-        state.grid.snapAnchorTo(state.camera.position);
+        const previousKey = gridKey();
+        if (state.activeVolume && state.activeVolume !== state._implicitVolume) {
+            const anchor = activeVolumeAnchor(_tmpPos);
+            if (anchor) state.grid.anchor.copy(anchor);
+        } else {
+            state.grid.snapAnchorTo(state.camera.position);
+        }
+        if (previousKey && gridKey() !== previousKey) {
+            markGridMoved();
+        }
 
         if (state.debug?.isVisible()) {
             state.debug.update(state.grid);
@@ -179,6 +231,8 @@ export function createDDGIManager() {
             try {
                 const cubeRT = await state.cubeRenderer.captureProbe(idx, _tmpPos, {
                     layersMask: DDGI_CAPTURE_MASK,
+                    hideBackground: true,
+                    hideFog: true,
                 });
                 integrateInto(idx, cubeRT);
             } catch (e) {
@@ -190,13 +244,16 @@ export function createDDGIManager() {
 
     function integrateInto(probeIndex, cubeRT) {
         if (!state.integrator || !state.irradianceAtlas) return;
+        if (state.atlasNeedsClear) clearAtlas();
+        const firstUpdate = !state.probeInitialized?.[probeIndex];
         state.integrator.integrateProbe({
             cubeTarget: cubeRT,
             atlas: state.irradianceAtlas,
             probeIndex,
-            intensity: state.intensity,
-            hysteresis: state.hysteresis,
+            intensity: 1.0,
+            hysteresis: firstUpdate ? 0 : state.hysteresis,
         });
+        if (state.probeInitialized) state.probeInitialized[probeIndex] = 1;
     }
 
     function getIrradianceAtlas() {

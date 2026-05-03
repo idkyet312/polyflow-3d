@@ -1,9 +1,10 @@
 import * as THREE from 'three';
 
-export function createDDGIDebug({ scene }) {
+export function createDDGIDebug({ scene, layer = 30 }) {
     const group = new THREE.Group();
     group.name = 'ddgi-debug';
     group.userData.ignoreForcedSceneShadows = true;
+    group.layers.set(layer);
     scene.add(group);
 
     const probeGeo = new THREE.SphereGeometry(0.15, 8, 8);
@@ -16,7 +17,7 @@ export function createDDGIDebug({ scene }) {
     let probeMesh = null;
     let boxMesh = null;
     const tmp = new THREE.Vector3();
-    let visible = true;
+    let visible = false;
 
     function ensureProbeMesh(count) {
         if (probeMesh && probeMesh.count === count) return probeMesh;
@@ -27,6 +28,7 @@ export function createDDGIDebug({ scene }) {
         probeMesh = new THREE.InstancedMesh(probeGeo, probeMat, count);
         probeMesh.frustumCulled = false;
         probeMesh.visible = visible;
+        probeMesh.layers.set(layer);
         group.add(probeMesh);
         return probeMesh;
     }
@@ -46,6 +48,7 @@ export function createDDGIDebug({ scene }) {
         boxMesh = new THREE.Mesh(geom, mat);
         boxMesh.renderOrder = 999;
         boxMesh.visible = visible;
+        boxMesh.layers.set(layer);
         group.add(boxMesh);
         return boxMesh;
     }

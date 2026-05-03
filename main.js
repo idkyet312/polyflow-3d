@@ -194,12 +194,14 @@ function createExampleWidgets() {
     // Initialize score system
     window.gameScore = 0;
 
-    console.log('Example widgets created:', window.exampleWidgets);
-    console.log('Widget API available at window.WidgetAPI');
-    console.log('Unreal widget API available at window.UnrealWidgetAPI');
-    console.log('Example usage:');
-    console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
-    console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
+    if (window.DEBUG_WIDGET_API) {
+        console.log('Example widgets created:', window.exampleWidgets);
+        console.log('Widget API available at window.WidgetAPI');
+        console.log('Unreal widget API available at window.UnrealWidgetAPI');
+        console.log('Example usage:');
+        console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
+        console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
+    }
 }
 
 // --- Configuration ---
@@ -258,6 +260,9 @@ const VEHICLE_SETTINGS = {
     followDistance: 5.6,
     followHeight: 2.4,
     lookAhead: 2.2,
+    cameraHorizontalSmoothing: 8.0,
+    cameraVerticalSmoothing: 2.2,
+    cameraLookSmoothing: 5.0,
     acceleration: 3.0,
     reverseAcceleration: 2.0,
     boostAcceleration: 4.5,
@@ -2010,21 +2015,6 @@ function applyPostProcessSettingsFromUi({ createVolumeIfNeeded = false, placeVol
 function getLocalMultiplayerSnapshot() {
     if (!camera) return null;
 
-    if (gameplay.active && isDrivingVehicle()) {
-        const vehicle = getActiveVehicleProp();
-        if (!vehicle?.body) return null;
-
-        const bodyId = vehicle.body.GetID();
-        const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(bodyId)).clone();
-        const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(bodyId)).clone();
-
-        return {
-            mode: 'vehicle',
-            position: serializeVector3(vehiclePosition),
-            quaternion: serializeQuaternion(vehicleRotation),
-        };
-    }
-
     let localPosition;
     let yaw;
 
@@ -2038,11 +2028,28 @@ function getLocalMultiplayerSnapshot() {
     }
 
     const localRotation = tempQuaternionB.setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ')).clone();
+    let vehicleStateSnapshot = { active: false };
+
+    if (gameplay.active && isDrivingVehicle()) {
+        const vehicle = getActiveVehicleProp();
+        if (vehicle?.body && physics.bodyInterface) {
+            const bodyId = vehicle.body.GetID();
+            const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(bodyId)).clone();
+            const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(bodyId)).clone();
+            vehicleStateSnapshot = {
+                active: true,
+                id: vehicle.id || '',
+                position: serializeVector3(vehiclePosition),
+                quaternion: serializeQuaternion(vehicleRotation),
+            };
+        }
+    }
 
     return {
-        mode: gameplay.active ? 'player' : 'showcase',
+        mode: vehicleStateSnapshot.active ? 'vehicle' : gameplay.active ? 'player' : 'showcase',
         position: serializeVector3(localPosition),
         quaternion: serializeQuaternion(localRotation),
+        vehicle: vehicleStateSnapshot,
     };
 }
 
@@ -2721,12 +2728,18 @@ function positionVehicleCamera(vehiclePosition, vehicleRotation, delta) {
         .copy(vehiclePosition)
         .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
         .addScaledVector(flatForward, VEHICLE_SETTINGS.lookAhead);
-    const cameraLerp = 1 - Math.exp(-delta * 8);
+    const cameraLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraHorizontalSmoothing);
+    const cameraVerticalLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraVerticalSmoothing);
+    const lookLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraLookSmoothing);
 
-    camera.position.lerp(chasePosition, cameraLerp);
-    camera.lookAt(lookTarget);
+    camera.position.x = THREE.MathUtils.lerp(camera.position.x, chasePosition.x, cameraLerp);
+    camera.position.z = THREE.MathUtils.lerp(camera.position.z, chasePosition.z, cameraLerp);
+    camera.position.y = THREE.MathUtils.lerp(camera.position.y, chasePosition.y, cameraVerticalLerp);
 
-    tempVectorE.copy(lookTarget).sub(camera.position);
+    gameplayLookTarget.lerp(lookTarget, lookLerp);
+    camera.lookAt(gameplayLookTarget);
+
+    tempVectorE.copy(gameplayLookTarget).sub(camera.position);
     const flatDistance = Math.max(0.001, Math.hypot(tempVectorE.x, tempVectorE.z));
     gameplay.yaw = Math.atan2(tempVectorE.x, tempVectorE.z);
     gameplay.pitch = THREE.MathUtils.clamp(
@@ -2769,6 +2782,11 @@ function enterVehicle(prop = getNearbyVehicle()) {
 
     const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(propBody.GetID())).clone();
     const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(propBody.GetID())).clone();
+    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
+    gameplayLookTarget
+        .copy(vehiclePosition)
+        .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
+        .addScaledVector(flatForward, VEHICLE_SETTINGS.lookAhead);
     positionVehicleCamera(vehiclePosition, vehicleRotation, 1 / 60);
 
     updateGameplayUI();
@@ -7185,6 +7203,7 @@ async function init() {
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
+    await renderer.init();
 
     // ── Post-processing: bloom over the scene's emissive output ─────────────
     // Uses an MRT pass so bloom only picks up materials with non-zero emissive
@@ -7404,9 +7423,9 @@ async function init() {
             const renderStart = performance.now();
             tickRaycastDebugLine();
             if (postProcessing) {
-                postProcessing.renderAsync();
+                postProcessing.render();
             } else {
-                renderer.renderAsync(scene, camera);
+                renderer.render(scene, camera);
             }
 
             recordDebugFrameMetrics({

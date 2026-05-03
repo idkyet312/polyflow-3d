@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RenderTarget } from 'three/webgpu';
 
 export const IRRADIANCE_TILE = 8;     // octahedral resolution per probe (irradiance)
 export const VISIBILITY_TILE = 16;    // octahedral resolution per probe (visibility)
@@ -44,8 +45,8 @@ export function createAtlasPair({ probeCount, tile, tilesPerRow, format = THREE.
         stencilBuffer: false,
         generateMipmaps: false,
     };
-    const a = new THREE.WebGLRenderTarget(w, h, opts);
-    const b = new THREE.WebGLRenderTarget(w, h, opts);
+    const a = new RenderTarget(w, h, opts);
+    const b = new RenderTarget(w, h, opts);
     a.texture.colorSpace = THREE.LinearSRGBColorSpace;
     b.texture.colorSpace = THREE.LinearSRGBColorSpace;
     return {

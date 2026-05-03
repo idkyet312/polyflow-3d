@@ -10,7 +10,7 @@ export class DDGIVolumeComponent extends ActorComponent {
     constructor({
         gridDims = DEFAULT_DIMS,
         cellSize = 4.0,
-        intensity = 1.0,
+        intensity = 0.58,
         hysteresis = 0.97,
         normalBias = 0.4,
         probesPerFrame = 4,

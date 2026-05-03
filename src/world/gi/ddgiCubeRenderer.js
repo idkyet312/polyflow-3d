@@ -1,13 +1,13 @@
 import * as THREE from 'three';
+import { CubeRenderTarget } from 'three/webgpu';
 
 /**
  * Round-robin CubeCamera capture.
  *
  * - Maintains a pool of low-res cube render targets (one per probe).
  * - Each tick captures `probesPerFrame` probes, advancing a round-robin cursor.
- * - WebGPU spike: r184 CubeCamera.update() calls renderer.render(). Under
- *   WebGPURenderer that path internally uses the async pipeline. We additionally
- *   guard with a manual six-face render fallback if needed.
+ * - WebGPU spike: r184 CubeCamera.update() calls renderer.render(). We
+ *   additionally guard with a manual six-face render fallback if needed.
  */
 
 const FACE_DIRS = [
@@ -27,11 +27,13 @@ export function createCubeRenderer({ renderer, scene, faceSize = 16 }) {
     const faceCamera = new THREE.PerspectiveCamera(90, 1, 0.1, 200);
 
     const tmpPos = new THREE.Vector3();
+    const hiddenTaggedObjects = [];
 
     function ensureTarget(index) {
         let rt = targets[index];
         if (rt) return rt;
-        rt = new THREE.WebGLCubeRenderTarget(faceSize, {
+        const TargetClass = renderer?.isWebGPURenderer ? CubeRenderTarget : THREE.WebGLCubeRenderTarget;
+        rt = new TargetClass(faceSize, {
             type: THREE.HalfFloatType,
             format: THREE.RGBAFormat,
             generateMipmaps: false,
@@ -58,7 +60,7 @@ export function createCubeRenderer({ renderer, scene, faceSize = 16 }) {
 
     /**
      * Capture a single probe. Best-effort: try cubeCamera.update first, fall
-     * back to manual six-face render via renderer.renderAsync.
+     * back to manual six-face render.
      */
     async function captureProbe(index, worldPos, opts = {}) {
         const rt = ensureTarget(index);
@@ -66,9 +68,12 @@ export function createCubeRenderer({ renderer, scene, faceSize = 16 }) {
         const overrideMaterial = opts.overrideMaterial || null;
         const prevOverride = scene.overrideMaterial;
         const prevBackground = opts.hideBackground ? scene.background : undefined;
+        const prevFog = opts.hideFog ? scene.fog : undefined;
 
         if (overrideMaterial) scene.overrideMaterial = overrideMaterial;
         if (opts.hideBackground) scene.background = null;
+        if (opts.hideFog) scene.fog = null;
+        if (opts.hideTaggedObjects !== false) hideTaggedObjects();
 
         try {
             // Path 1: CubeCamera.update — works under WebGL, attempt under WebGPU.
@@ -89,6 +94,8 @@ export function createCubeRenderer({ renderer, scene, faceSize = 16 }) {
         } finally {
             if (overrideMaterial) scene.overrideMaterial = prevOverride;
             if (opts.hideBackground) scene.background = prevBackground;
+            if (opts.hideFog) scene.fog = prevFog;
+            restoreTaggedObjects();
         }
         return rt;
     }
@@ -96,26 +103,44 @@ export function createCubeRenderer({ renderer, scene, faceSize = 16 }) {
     async function captureManual(rt, worldPos, layersMask) {
         const prevTarget = renderer.getRenderTarget();
         const prevActiveCubeFace = renderer.getActiveCubeFace?.() ?? 0;
+        const prevScissor = renderer.getScissor(new THREE.Vector4());
+        const prevScissorTest = renderer.getScissorTest();
+        const prevViewport = renderer.getViewport(new THREE.Vector4());
 
         faceCamera.position.copy(worldPos);
         if (layersMask !== undefined) faceCamera.layers.mask = layersMask;
 
-        for (let f = 0; f < 6; f++) {
-            const dir = FACE_DIRS[f];
-            tmpPos.copy(worldPos).add(dir.eye);
-            faceCamera.up.copy(dir.up);
-            faceCamera.lookAt(tmpPos);
-            faceCamera.updateMatrixWorld(true);
+        try {
+            for (let f = 0; f < 6; f++) {
+                const dir = FACE_DIRS[f];
+                tmpPos.copy(worldPos).add(dir.eye);
+                faceCamera.up.copy(dir.up);
+                faceCamera.lookAt(tmpPos);
+                faceCamera.updateMatrixWorld(true);
 
-            renderer.setRenderTarget(rt, f);
-            if (renderer.renderAsync) {
-                await renderer.renderAsync(scene, faceCamera);
-            } else {
+                renderer.setRenderTarget(rt, f);
                 renderer.render(scene, faceCamera);
             }
+        } finally {
+            renderer.setScissorTest(prevScissorTest);
+            renderer.setScissor(prevScissor);
+            renderer.setViewport(prevViewport);
+            renderer.setRenderTarget(prevTarget, prevActiveCubeFace);
         }
+    }
 
-        renderer.setRenderTarget(prevTarget, prevActiveCubeFace);
+    function hideTaggedObjects() {
+        hiddenTaggedObjects.length = 0;
+        scene.traverse((obj) => {
+            if (!obj.userData?.ddgiSkipCapture || !obj.visible) return;
+            obj.visible = false;
+            hiddenTaggedObjects.push(obj);
+        });
+    }
+
+    function restoreTaggedObjects() {
+        for (const obj of hiddenTaggedObjects) obj.visible = true;
+        hiddenTaggedObjects.length = 0;
     }
 
     function dispose() {
