@@ -1,0 +1,112 @@
+--- a/main.js
++++ b/main.js
+@@ -421,6 +421,13 @@
+     bloomRadius: uniform(0.95),
+     bloomThreshold: uniform(0.48)
+ };
++
++// Performance toggle: when on, skips DDGI tick, volumetric fog update, and the
++// post-process volume update. The three subsystems own their own state via
++// setEnabled, so flipping this back to false restores the default render path
++// without a reload. Defaults to off — engine ships unchanged.
++let perfModeEnabled = false;
++let perfModeUiRefs = null;
+ let physicsCore;
+ let physicsRuntime;
+ let multiplayerController;
+@@ -3549,6 +3556,47 @@
+     return result;
+ }
+ 
++function updatePerfModeUi() {
++    if (!perfModeUiRefs) return;
++    perfModeUiRefs.offBtn?.classList.toggle('viewer-toggle-btn-active', !perfModeEnabled);
++    perfModeUiRefs.onBtn?.classList.toggle('viewer-toggle-btn-active', perfModeEnabled);
++    if (perfModeUiRefs.status) {
++        perfModeUiRefs.status.textContent = perfModeEnabled
++            ? 'Performance mode on. DDGI, volumetric fog, and post-process bloom are paused.'
++            : 'Performance mode off. Full DDGI + fog + post-process active.';
++    }
++}
++
++// Performance toggle: turn DDGI, volumetric fog, and post-process bloom off
++// (or on) at runtime without changing engine defaults. Each subsystem owns its
++// own enabled flag — we flip those here AND also gate the per-frame update
++// calls in the main render loop, so flipping this saves both render work and
++// CPU update work.
++function setPerfModeEnabled(isEnabled) {
++    const next = !!isEnabled;
++    if (perfModeEnabled === next) {
++        updatePerfModeUi();
++        return;
++    }
++    perfModeEnabled = next;
++
++    // Volumetric fog: hides the layer group AND clears scene.fog when off.
++    volumetricFogController?.setEnabled(!perfModeEnabled);
++
++    // DDGI: tick() short-circuits when state.enabled is false; injectionEnabled
++    // controls the shader-injection patching loop, which we also pause so
++    // newly-added materials don't get patched while perf mode is on.
++    const ddgi = getDDGIManager();
++    ddgi?.setEnabled(!perfModeEnabled);
++    ddgi?.setInjectionEnabled(!perfModeEnabled);
++
++    // Post-process: clamps bloom uniforms to neutral so the MRT bloom pass
++    // becomes a no-op while still running (cheap once strength is 0).
++    postProcessVolumeManager?.setEnabled(!perfModeEnabled);
++
++    updatePerfModeUi();
++}
++
+ function tickForceAllSceneMeshShadows() {
+     if (!shadowDebugState.forceAllMeshes && !gameplay.active) return;
+     if ((performance.now() - shadowDebugState.lastAppliedAt) < shadowDebugState.autoApplyIntervalMs) return;
+@@ -4151,6 +4199,11 @@
+         applyBtn: document.getElementById('debug-apply-mesh-shadows'),
+         status: document.getElementById('debug-shadow-status'),
+     };
++    perfModeUiRefs = {
++        offBtn: document.getElementById('perf-mode-off'),
++        onBtn: document.getElementById('perf-mode-on'),
++        status: document.getElementById('perf-mode-status'),
++    };
+ 
+     renderDebugConsoleOutput();
+     debugConsoleInput?.addEventListener('keydown', handleDebugConsoleInputKeydown);
+@@ -4215,6 +4268,14 @@
+         forceAllSceneMeshShadows();
+     });
+     updateShadowDebugUi();
++
++    perfModeUiRefs?.offBtn?.addEventListener('click', () => {
++        setPerfModeEnabled(false);
++    });
++    perfModeUiRefs?.onBtn?.addEventListener('click', () => {
++        setPerfModeEnabled(true);
++    });
++    updatePerfModeUi();
+ 
+     if (browseModelBtn) {
+         browseModelBtn.addEventListener('click', () => {
+@@ -4600,10 +4661,17 @@
+         }
+         updateVehicleVisuals(delta);
+         updateVehicleSurfaceEffects(delta);
+-        volumetricFogController?.update(delta);
+-        postProcessVolumeManager?.update(delta);
++        // Performance toggle: skip the per-frame work entirely when on.
++        // setPerfModeEnabled has already called setEnabled(false) on each subsystem
++        // so visuals stay flat; we just skip the update/tick CPU cost here.
++        if (!perfModeEnabled) {
++            volumetricFogController?.update(delta);
++            postProcessVolumeManager?.update(delta);
++        }
+         const _ddgiStart = performance.now();
+-        getDDGIManager().tick(delta);
++        if (!perfModeEnabled) {
++            getDDGIManager().tick(delta);
++        }
+         const _ddgiMs = performance.now() - _ddgiStart;
+         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
+         tickForceAllSceneMeshShadows();

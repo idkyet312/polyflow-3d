@@ -8,6 +8,17 @@ const DEFAULT_POST_PROCESS_SETTINGS = {
     priority: 0,
 };
 
+// Settings used when the manager is force-disabled (Performance toggle).
+// Bloom strength of 0 effectively bypasses the bloom MRT pass; tone mapping
+// exposure stays neutral so the scene doesn't crush to black.
+const DISABLED_POST_PROCESS_SETTINGS = {
+    bloomStrength: 0.0,
+    bloomRadius: 0.0,
+    bloomThreshold: 1.0,
+    toneMappingExposure: 1.0,
+    priority: 0,
+};
+
 function clonePostProcessSettings(settings = {}) {
     return {
         bloomStrength: settings.bloomStrength ?? DEFAULT_POST_PROCESS_SETTINGS.bloomStrength,
@@ -45,6 +56,7 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
         defaultSettings: clonePostProcessSettings(DEFAULT_POST_PROCESS_SETTINGS),
         debugVisible: false,
         editorVolume: null,
+        enabled: true,
     };
 
     state.group.name = 'post-process-volumes';
@@ -184,6 +196,13 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
     function update(delta) {
         if (!camera) return;
 
+        // Performance toggle short-circuit: skip volume intersection + lerp work
+        // and clamp bloom uniforms to neutral so the post-process pass does no work.
+        if (!state.enabled) {
+            applyResolvedSettings(DISABLED_POST_PROCESS_SETTINGS);
+            return;
+        }
+
         const target = resolveTargetSettings();
         state.targetSettings = clonePostProcessSettings(target);
 
@@ -195,6 +214,17 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
         state.currentSettings.toneMappingExposure = THREE.MathUtils.lerp(state.currentSettings.toneMappingExposure, target.toneMappingExposure, t);
 
         applyResolvedSettings(state.currentSettings);
+    }
+
+    function setEnabled(enabled) {
+        const next = !!enabled;
+        if (state.enabled === next) return;
+        state.enabled = next;
+        if (!next) {
+            // Apply neutral settings immediately so the disable is visible this frame
+            // without waiting for the lerp.
+            applyResolvedSettings(DISABLED_POST_PROCESS_SETTINGS);
+        }
     }
 
     return {
@@ -210,6 +240,8 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
         },
         setTransitionSpeed,
         setDebugVisible,
+        setEnabled,
+        isEnabled: () => state.enabled,
         getSnapshot,
     };
 }
