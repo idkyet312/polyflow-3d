@@ -1,0 +1,547 @@
+// src/debug/console.js
+// Extracted from main.js lines 5985–6468.
+// Debug console + stats overlay: timing samples, stat panels, command registry,
+// keyboard handlers, and per-frame metric recording.
+
+import * as THREE from 'three';
+
+// ─── Module-scope deps populated by setupDebugConsole ─────────────────────────
+let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter,
+    debugStatsOverlay;
+
+// State objects passed by reference from main.js
+let debugConsoleState, mobileState, shadowDebugState, raycastDebugState,
+    gameplay, physics;
+
+// Constants passed from main.js
+let DEBUG_CONSOLE_LOG_LIMIT, DEBUG_CONSOLE_HISTORY_LIMIT, DEBUG_TIMING_SAMPLE_LIMIT;
+
+// Functions from main.js that the console commands call into
+let closeObjectScriptMenu, closeObjectScriptEditor, resetMovementInputState,
+    renderer, setRayDebugEnabled, forceAllSceneMeshShadows,
+    setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
+    resetMobileInputState, updateWorldPresentation, updateGameplayUI,
+    isEditableElement;
+
+export function setupDebugConsole(deps) {
+    ({
+        debugConsole,
+        debugConsoleOutput,
+        debugConsoleInput,
+        debugConsoleFooter,
+        debugStatsOverlay,
+        debugConsoleState,
+        mobileState,
+        shadowDebugState,
+        raycastDebugState,
+        gameplay,
+        physics,
+        DEBUG_CONSOLE_LOG_LIMIT,
+        DEBUG_CONSOLE_HISTORY_LIMIT,
+        DEBUG_TIMING_SAMPLE_LIMIT,
+        closeObjectScriptMenu,
+        closeObjectScriptEditor,
+        resetMovementInputState,
+        renderer,
+        setRayDebugEnabled,
+        forceAllSceneMeshShadows,
+        setForceAllSceneMeshShadowsEnabled,
+        updateMobileButtons,
+        resetMobileInputState,
+        updateWorldPresentation,
+        updateGameplayUI,
+        isEditableElement,
+    } = deps);
+}
+
+// ─── Timing samples ───────────────────────────────────────────────────────────────
+
+export function pushTimingSample(metric, value) {
+    const series = debugConsoleState.samples[metric];
+    if (!series) return;
+
+    series.push(value);
+    if (series.length > DEBUG_TIMING_SAMPLE_LIMIT) {
+        series.shift();
+    }
+}
+
+export function getAverageTiming(metric) {
+    const series = debugConsoleState.samples[metric];
+    if (!series || !series.length) return 0;
+    return series.reduce((sum, value) => sum + value, 0) / series.length;
+}
+
+export function formatTimingMs(value) {
+    return `${value.toFixed(value >= 10 ? 1 : 2)} ms`;
+}
+
+// ─── Console output ────────────────────────────────────────────────────────────────
+
+export function renderDebugConsoleOutput() {
+    if (!debugConsoleOutput) return;
+
+    const fragment = document.createDocumentFragment();
+    debugConsoleState.lines.forEach((line) => {
+        const row = document.createElement('div');
+        row.className = 'debug-console-line';
+        row.dataset.tone = line.tone || 'info';
+
+        const prefix = document.createElement('span');
+        prefix.className = 'debug-console-prefix';
+        prefix.textContent = line.prefix;
+
+        const text = document.createElement('span');
+        text.className = 'debug-console-text';
+        text.textContent = line.text;
+
+        row.append(prefix, text);
+        fragment.appendChild(row);
+    });
+
+    debugConsoleOutput.replaceChildren(fragment);
+    debugConsoleOutput.scrollTop = debugConsoleOutput.scrollHeight;
+}
+
+export function pushDebugConsoleLine(text, tone = 'info', prefix = 'sys') {
+    debugConsoleState.lines.push({ prefix, text, tone });
+    if (debugConsoleState.lines.length > DEBUG_CONSOLE_LOG_LIMIT) {
+        debugConsoleState.lines.shift();
+    }
+    renderDebugConsoleOutput();
+}
+
+export function focusDebugConsoleInput() {
+    if (!debugConsoleInput) return;
+    window.requestAnimationFrame(() => {
+        debugConsoleInput.focus();
+        debugConsoleInput.select();
+    });
+}
+
+export function setDebugConsoleVisible(isVisible, { focusInput = true } = {}) {
+    debugConsoleState.visible = !!isVisible;
+
+    if (debugConsole) {
+        debugConsole.hidden = !debugConsoleState.visible;
+    }
+
+    document.body.classList.toggle('console-open', debugConsoleState.visible);
+
+    if (debugConsoleState.visible) {
+        closeObjectScriptMenu();
+        closeObjectScriptEditor();
+        resetMovementInputState();
+
+        if (document.pointerLockElement === renderer?.domElement) {
+            document.exitPointerLock?.();
+        }
+
+        if (focusInput) {
+            focusDebugConsoleInput();
+        }
+        return;
+    }
+
+    debugConsoleInput?.blur();
+}
+
+// ─── Stat panels ─────────────────────────────────────────────────────────────────
+
+export function createDebugStatRow(label) {
+    const row = document.createElement('div');
+    row.className = 'debug-stat-row';
+
+    const title = document.createElement('div');
+    title.className = 'debug-stat-label';
+    title.textContent = label;
+
+    const value = document.createElement('div');
+    value.className = 'debug-stat-value';
+    value.textContent = '--';
+
+    row.append(title, value);
+    return { row, value };
+}
+
+export function createDebugStatPanel(name) {
+    if (!debugStatsOverlay) return null;
+
+    const panel = document.createElement('section');
+    panel.className = 'debug-stat-panel';
+    panel.dataset.panel = name;
+
+    const header = document.createElement('div');
+    header.className = 'debug-stat-header';
+
+    const titleWrap = document.createElement('div');
+    const title = document.createElement('div');
+    title.className = 'debug-stat-title';
+    title.textContent = name === 'unit' ? 'Stat Unit' : name === 'physics' ? 'Stat Physics' : 'Stat GPU';
+
+    const meta = document.createElement('div');
+    meta.className = 'debug-stat-meta';
+    meta.textContent = 'Waiting for frame samples...';
+    titleWrap.append(title, meta);
+    header.appendChild(titleWrap);
+
+    let badge = null;
+    if (name === 'gpu') {
+        badge = document.createElement('div');
+        badge.className = 'debug-stat-badge';
+        badge.textContent = 'Approx';
+        header.appendChild(badge);
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'debug-stat-grid';
+    const rows = {};
+
+    const labels = name === 'unit'
+        ? ['Frame', 'FPS', 'Update', 'Physics', 'Render', 'Scripts']
+        : name === 'physics'
+            ? ['Step', 'Sync', 'Collisions', 'Bodies', 'Passes', 'Delta']
+            : ['GPU', 'Render', 'Frame', 'FPS'];
+
+    labels.forEach((label) => {
+        const key = label.toLowerCase();
+        const rowRef = createDebugStatRow(label);
+        rows[key] = rowRef.value;
+        grid.appendChild(rowRef.row);
+    });
+
+    panel.append(header, grid);
+    debugStatsOverlay.appendChild(panel);
+
+    return { panel, meta, badge, rows };
+}
+
+export function syncDebugStatPanels() {
+    if (!debugStatsOverlay) return;
+
+    debugConsoleState.panelRefs.forEach((ref, name) => {
+        if (!debugConsoleState.panels.has(name)) {
+            ref.panel.remove();
+            debugConsoleState.panelRefs.delete(name);
+        }
+    });
+
+    Array.from(debugConsoleState.panels).forEach((name) => {
+        if (debugConsoleState.panelRefs.has(name)) return;
+        const ref = createDebugStatPanel(name);
+        if (ref) {
+            debugConsoleState.panelRefs.set(name, ref);
+        }
+    });
+}
+
+export function updateDebugStatPanels() {
+    if (!debugConsoleState.panels.size) return;
+
+    const averageFrame = getAverageTiming('frame');
+    const averageUpdate = getAverageTiming('update');
+    const averagePhysics = getAverageTiming('physics');
+    const averagePhysicsStep = getAverageTiming('physicsStep');
+    const averagePhysicsSync = getAverageTiming('physicsSync');
+    const averagePhysicsCollisions = getAverageTiming('physicsCollisions');
+    const averageScripts = getAverageTiming('scripts');
+    const averageRender = getAverageTiming('render');
+    const averageFps = averageFrame > 0 ? 1000 / averageFrame : 0;
+
+    debugConsoleState.panelRefs.forEach((ref, name) => {
+        if (name === 'unit') {
+            ref.meta.textContent = gameplay.active ? 'Play mode frame timings' : 'Showcase frame timings';
+            ref.rows.frame.textContent = formatTimingMs(averageFrame);
+            ref.rows.fps.textContent = `${averageFps.toFixed(1)} fps`;
+            ref.rows.update.textContent = formatTimingMs(averageUpdate);
+            ref.rows.physics.textContent = formatTimingMs(averagePhysics);
+            ref.rows.render.textContent = formatTimingMs(averageRender);
+            ref.rows.scripts.textContent = formatTimingMs(averageScripts);
+            return;
+        }
+
+        if (name === 'physics') {
+            ref.meta.textContent = physics.ready ? 'Jolt step vs. post-step overhead' : 'Physics still initializing';
+            ref.rows.step.textContent = formatTimingMs(averagePhysicsStep);
+            ref.rows.sync.textContent = formatTimingMs(averagePhysicsSync);
+            ref.rows.collisions.textContent = formatTimingMs(averagePhysicsCollisions);
+            ref.rows.bodies.textContent = `${physics.dynamicBodies.length}`;
+            ref.rows.passes.textContent = `${debugConsoleState.latest.collisionSteps}`;
+            ref.rows.delta.textContent = `${(debugConsoleState.latest.delta * 1000).toFixed(1)} ms`;
+            return;
+        }
+
+        ref.meta.textContent = 'WebGPU render submission timing';
+        if (ref.badge) {
+            ref.badge.textContent = debugConsoleState.gpuTimingMode === 'approximate' ? 'Approx' : 'GPU';
+        }
+        ref.rows.gpu.textContent = formatTimingMs(averageRender);
+        ref.rows.render.textContent = formatTimingMs(averageRender);
+        ref.rows.frame.textContent = formatTimingMs(averageFrame);
+        ref.rows.fps.textContent = `${averageFps.toFixed(1)} fps`;
+    });
+}
+
+export function setDebugStatPanel(name, isEnabled) {
+    if (isEnabled) {
+        debugConsoleState.panels.add(name);
+    } else {
+        debugConsoleState.panels.delete(name);
+    }
+
+    syncDebugStatPanels();
+}
+
+// ─── Commands ───────────────────────────────────────────────────────────────────
+
+export function runStatCommand(args) {
+    if (!args.length) {
+        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, none.', 'warn');
+        return;
+    }
+
+    const panel = args[0].toLowerCase();
+    const mode = args[1]?.toLowerCase() || 'on';
+    const disableTokens = new Set(['0', 'false', 'hide', 'none', 'off']);
+
+    if (disableTokens.has(panel) || panel === 'clear') {
+        debugConsoleState.panels.clear();
+        syncDebugStatPanels();
+        pushDebugConsoleLine('All stat panels hidden.', 'success');
+        return;
+    }
+
+    if (!['gpu', 'physics', 'unit'].includes(panel)) {
+        pushDebugConsoleLine(`Unknown stat target: ${panel}.`, 'error');
+        return;
+    }
+
+    const isEnabled = !disableTokens.has(mode);
+    setDebugStatPanel(panel, isEnabled);
+
+    if (panel === 'gpu' && isEnabled) {
+        pushDebugConsoleLine('Stat GPU enabled. This currently reports approximate WebGPU render submission time.', 'warn');
+        return;
+    }
+
+    pushDebugConsoleLine(`Stat ${panel} ${isEnabled ? 'enabled' : 'hidden'}.`, 'success');
+}
+
+export function applyMobileModeState() {
+    const nextEnabled = mobileState.detected || mobileState.forced;
+    const changed = mobileState.enabled !== nextEnabled;
+
+    mobileState.enabled = nextEnabled;
+    document.body.classList.toggle('is-mobile', nextEnabled);
+    document.body.classList.toggle('mobile-ui-preview', mobileState.forced && !mobileState.detected);
+
+    if (changed && nextEnabled && document.pointerLockElement === renderer?.domElement) {
+        document.exitPointerLock?.();
+    }
+
+    resetMobileInputState();
+    updateWorldPresentation();
+    updateGameplayUI();
+    updateMobileButtons();
+}
+
+export function runMobileCommand(args) {
+    const action = args[0]?.toLowerCase() || 'toggle';
+
+    if (mobileState.detected) {
+        pushDebugConsoleLine('Mobile UI is already active on this device.', 'warn');
+        return;
+    }
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        mobileState.forced = true;
+        applyMobileModeState();
+        pushDebugConsoleLine('Mobile UI preview enabled. Use `mobile off` to restore desktop mode.', 'success');
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        mobileState.forced = false;
+        applyMobileModeState();
+        pushDebugConsoleLine('Mobile UI preview disabled. Click the scene again if you want desktop pointer lock back.', 'success');
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        mobileState.forced = !mobileState.forced;
+        applyMobileModeState();
+        pushDebugConsoleLine(
+            `Mobile UI preview ${mobileState.forced ? 'enabled' : 'disabled'}.`,
+            'success'
+        );
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: mobile on, mobile off, or mobile toggle.', 'warn');
+}
+
+export function runRayDebugCommand(args) {
+    const action = args[0]?.toLowerCase() || 'toggle';
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        setRayDebugEnabled(true);
+        pushDebugConsoleLine('Ray debug enabled.', 'success');
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        setRayDebugEnabled(false);
+        pushDebugConsoleLine('Ray debug disabled.', 'success');
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        setRayDebugEnabled(!raycastDebugState.enabled);
+        pushDebugConsoleLine(`Ray debug ${raycastDebugState.enabled ? 'enabled' : 'disabled'}.`, 'success');
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: raydebug on, raydebug off, or raydebug toggle.', 'warn');
+}
+
+export function runMeshShadowsCommand(args) {
+    const action = args[0]?.toLowerCase() || 'apply';
+
+    if (['apply', 'now', 'once'].includes(action)) {
+        const result = forceAllSceneMeshShadows();
+        pushDebugConsoleLine(`Forced shadows on ${result.updatedCount}/${result.meshCount} meshes.`, 'success');
+        return;
+    }
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        const result = setForceAllSceneMeshShadowsEnabled(true) ?? { meshCount: 0 };
+        pushDebugConsoleLine(`Mesh shadow auto-force enabled. Watching ${result.meshCount} meshes.`, 'success');
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        setForceAllSceneMeshShadowsEnabled(false);
+        pushDebugConsoleLine('Mesh shadow auto-force disabled.', 'success');
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        const result = setForceAllSceneMeshShadowsEnabled(!shadowDebugState.forceAllMeshes) ?? { meshCount: shadowDebugState.lastMeshCount };
+        if (shadowDebugState.forceAllMeshes) {
+            pushDebugConsoleLine(`Mesh shadow auto-force enabled. Watching ${result.meshCount} meshes.`, 'success');
+        } else {
+            pushDebugConsoleLine('Mesh shadow auto-force disabled.', 'success');
+        }
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: meshshadows apply, meshshadows on, meshshadows off, or meshshadows toggle.', 'warn');
+}
+
+export const debugCommandRegistry = {
+    stat: runStatCommand,
+    mobile: runMobileCommand,
+    raydebug: runRayDebugCommand,
+    meshshadows: runMeshShadowsCommand,
+};
+
+export function executeDebugConsoleCommand(rawCommand) {
+    const commandText = rawCommand.trim();
+    if (!commandText) return;
+
+    debugConsoleState.history.push(commandText);
+    if (debugConsoleState.history.length > DEBUG_CONSOLE_HISTORY_LIMIT) {
+        debugConsoleState.history.shift();
+    }
+    debugConsoleState.historyIndex = debugConsoleState.history.length;
+
+    pushDebugConsoleLine(commandText, 'command', '>');
+
+    const [commandName, ...args] = commandText.split(/\s+/);
+    const handler = debugCommandRegistry[commandName.toLowerCase()];
+
+    if (!handler) {
+        pushDebugConsoleLine(`Unknown command: ${commandName}.`, 'error');
+        return;
+    }
+
+    handler(args);
+}
+
+export function handleDebugConsoleInputKeydown(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        executeDebugConsoleCommand(debugConsoleInput.value);
+        debugConsoleInput.value = '';
+        return;
+    }
+
+    if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (!debugConsoleState.history.length) return;
+        debugConsoleState.historyIndex = Math.max(0, debugConsoleState.historyIndex - 1);
+        debugConsoleInput.value = debugConsoleState.history[debugConsoleState.historyIndex] || '';
+        return;
+    }
+
+    if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (!debugConsoleState.history.length) return;
+        debugConsoleState.historyIndex = Math.min(debugConsoleState.history.length, debugConsoleState.historyIndex + 1);
+        debugConsoleInput.value = debugConsoleState.history[debugConsoleState.historyIndex] || '';
+        return;
+    }
+
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        setDebugConsoleVisible(false, { focusInput: false });
+    }
+}
+
+export function handleDebugConsoleKeydown(event) {
+    if (event.code === 'Backquote' && !event.repeat) {
+        if (!debugConsoleState.visible && isEditableElement(event.target) && event.target !== debugConsoleInput) {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        setDebugConsoleVisible(!debugConsoleState.visible);
+        return;
+    }
+
+    if (!debugConsoleState.visible) return;
+
+    if (event.code === 'Escape') {
+        event.preventDefault();
+        setDebugConsoleVisible(false, { focusInput: false });
+        return;
+    }
+
+    if (event.target !== debugConsoleInput) {
+        event.preventDefault();
+        focusDebugConsoleInput();
+    }
+}
+
+export function recordDebugFrameMetrics(metrics) {
+    debugConsoleState.latest.frame = metrics.frame;
+    debugConsoleState.latest.update = metrics.update;
+    debugConsoleState.latest.physics = metrics.physics;
+    debugConsoleState.latest.physicsStep = metrics.physicsStep;
+    debugConsoleState.latest.physicsSync = metrics.physicsSync;
+    debugConsoleState.latest.physicsCollisions = metrics.physicsCollisions;
+    debugConsoleState.latest.scripts = metrics.scripts;
+    debugConsoleState.latest.render = metrics.render;
+    debugConsoleState.latest.fps = metrics.frame > 0 ? 1000 / metrics.frame : 0;
+    debugConsoleState.latest.delta = metrics.delta;
+
+    pushTimingSample('frame', metrics.frame);
+    pushTimingSample('update', metrics.update);
+    pushTimingSample('physics', metrics.physics);
+    pushTimingSample('physicsStep', metrics.physicsStep);
+    pushTimingSample('physicsSync', metrics.physicsSync);
+    pushTimingSample('physicsCollisions', metrics.physicsCollisions);
+    pushTimingSample('scripts', metrics.scripts);
+    pushTimingSample('render', metrics.render);
+}
