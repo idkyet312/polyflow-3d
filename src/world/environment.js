@@ -1,5 +1,10 @@
 import * as THREE from 'three';
 import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+// Side-effect import: registers the World Environment panel runtime. The panel
+// module polls window.__ddgi for the engine state once main.js has booted, then
+// wires up the panel in index.html. Loaded here because environment.js is the
+// natural seam — main.js imports it during init.
+import '../ui/worldEnvironmentPanel.js';
 
 const ENVIRONMENTS = {
     'sunny-sky': {
