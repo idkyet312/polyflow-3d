@@ -9,9 +9,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-d_BiH0Rc.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-2GyDwxhy.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-g5EGZqhe.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-D60nX-TY.css">
 </head>
 
 <body>
@@ -350,6 +350,270 @@
                         </div>
                     </div>
 
+                    <details class="viewer-menu-card viewer-menu-sections-card viewer-terrain-card">
+                        <summary class="viewer-menu-sections-summary">
+                            <span class="viewer-menu-label viewer-menu-sections-label">Terrain Floor</span>
+                            <span class="viewer-menu-sections-value" id="terrain-summary-value">Grid · Grey</span>
+                        </summary>
+                        <div class="viewer-menu-sections-body">
+                            <div class="viewer-inline-note">Color, texture, and grass for the world floor.</div>
+
+                            <div class="viewer-menu-label" style="margin-top: 0.4rem;">Mode</div>
+                            <select id="terrain-mode" class="viewer-text-input">
+                                <option value="grid">UE Grid</option>
+                                <option value="solid">Solid Color</option>
+                                <option value="grass">Grass Texture (PBR)</option>
+                                <option value="custom">Custom Image…</option>
+                            </select>
+
+                            <div class="viewer-slider-group" style="margin-top: 0.6rem;">
+                                <div class="viewer-slider-label">Tint</div>
+                                <input id="terrain-color" type="color" value="#ffffff" class="viewer-text-input" style="height:32px; padding:2px;">
+                            </div>
+
+                            <div class="viewer-slider-group">
+                                <div class="viewer-slider-label">Texture Repeat</div>
+                                <input id="terrain-repeat" type="range" min="1" max="80" step="1" value="28">
+                                <div class="viewer-slider-value" id="terrain-repeat-value">28</div>
+                            </div>
+
+                            <div class="viewer-slider-group">
+                                <div class="viewer-slider-label">Roughness</div>
+                                <input id="terrain-roughness" type="range" min="0" max="1" step="0.01" value="0.85">
+                                <div class="viewer-slider-value" id="terrain-roughness-value">0.85</div>
+                            </div>
+
+                            <div class="viewer-menu-actions" style="margin-top:0.4rem;">
+                                <button class="btn viewer-menu-btn" id="terrain-load-image">⬆ Load Image…</button>
+                                <input type="file" id="terrain-image-input" accept="image/*" style="display:none;">
+                            </div>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Grass</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="grass-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="grass-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Base Color</div>
+                                        <input id="grass-base-color" type="color" value="#2f5a1c" class="viewer-text-input" style="height:32px; padding:2px;">
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Tip Color</div>
+                                        <input id="grass-tip-color" type="color" value="#a8d96b" class="viewer-text-input" style="height:32px; padding:2px;">
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Wind Strength</div>
+                                        <input id="grass-wind" type="range" min="0" max="1" step="0.01" value="0.18">
+                                        <div class="viewer-slider-value" id="grass-wind-value">0.18</div>
+                                    </div>
+
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Sprite</div>
+                                    <div class="viewer-menu-actions" style="display:flex; gap:8px;">
+                                        <button class="btn viewer-menu-btn" id="grass-sprite-load">⬆ Load Sprite…</button>
+                                        <button class="btn viewer-menu-btn" id="grass-sprite-clear">Clear</button>
+                                        <input type="file" id="grass-sprite-input" accept="image/*" style="display:none;">
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Sprite Tint Mix</div>
+                                        <input id="grass-sprite-tint" type="range" min="0" max="1" step="0.01" value="0.4">
+                                        <div class="viewer-slider-value" id="grass-sprite-tint-value">0.40</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Alpha Cutoff</div>
+                                        <input id="grass-alpha-cutoff" type="range" min="0" max="1" step="0.01" value="0.5">
+                                        <div class="viewer-slider-value" id="grass-alpha-cutoff-value">0.50</div>
+                                    </div>
+                                    <div class="viewer-inline-note" id="grass-sprite-status">Use a transparent PNG. Bottom of image = blade base, top = tip.</div>
+                                </div>
+                            </details>
+                        </div>
+                    </details>
+
+                    <details class="viewer-menu-card viewer-menu-sections-card viewer-world-env-card">
+                        <summary class="viewer-menu-sections-summary">
+                            <span class="viewer-menu-label viewer-menu-sections-label">World Environment</span>
+                            <span class="viewer-menu-sections-value" id="we-summary-value">Sky · GI · FX</span>
+                        </summary>
+                        <div class="viewer-menu-sections-body">
+                            <div class="viewer-inline-note">Godot-style WorldEnvironment. Enable or disable each subsystem and tune key values. Settings persist across reloads.</div>
+
+                            <div class="viewer-menu-label" style="margin-top: 0.4rem;">Master</div>
+                            <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-master-on">All On</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-off">All Off</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-perf">Performance</button>
+                            </div>
+                            <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off DDGI / Fog / Bloom in one click.</div>
+
+                            <details class="viewer-menu-section" open>
+                                <summary class="viewer-menu-section-summary">Background / Sky</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-sky-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-sky-on">On</button>
+                                    </div>
+                                    <label class="viewer-input-label" for="we-sky-preset">Preset</label>
+                                    <select id="we-sky-preset" class="viewer-text-input">
+                                        <option value="sunny-sky">Sunny Sky</option>
+                                        <option value="studio">Studio</option>
+                                        <option value="urban-street">Urban Street</option>
+                                        <option value="forest-trail">Forest Trail</option>
+                                        <option value="golden-sunset">Golden Sunset</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Sky Blurriness</div>
+                                        <input id="we-sky-blurriness" type="range" min="0" max="1" step="0.01" value="0.05">
+                                        <div class="viewer-slider-value" id="we-sky-blurriness-value">0.05</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Ambient Light</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-ambient-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ambient-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-ambient-intensity" type="range" min="0" max="3" step="0.05" value="1.0">
+                                        <div class="viewer-slider-value" id="we-ambient-intensity-value">1.00</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Hemisphere Light</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-hemi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-hemi-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-hemi-intensity" type="range" min="0" max="3" step="0.05" value="1.5">
+                                        <div class="viewer-slider-value" id="we-hemi-intensity-value">1.50</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Sun (Directional)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-sun-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-sun-on">On</button>
+                                    </div>
+                                    <label class="viewer-checkbox-row" for="we-sun-shadow">
+                                        <input type="checkbox" id="we-sun-shadow" checked>
+                                        <span>Cast Shadow</span>
+                                    </label>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-sun-intensity" type="range" min="0" max="6" step="0.05" value="2.5">
+                                        <div class="viewer-slider-value" id="we-sun-intensity-value">2.50</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Tonemap</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">ACES Filmic tonemap is always active. Adjust exposure to taste.</div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Exposure</div>
+                                        <input id="we-tonemap-exposure" type="range" min="0.1" max="2.5" step="0.01" value="1.00">
+                                        <div class="viewer-slider-value" id="we-tonemap-exposure-value">1.00</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Glow / Bloom</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-bloom-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-bloom-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Strength</div>
+                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="1.25">
+                                        <div class="viewer-slider-value" id="we-bloom-strength-value">1.25</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Radius</div>
+                                        <input id="we-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.95">
+                                        <div class="viewer-slider-value" id="we-bloom-radius-value">0.95</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Threshold</div>
+                                        <input id="we-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
+                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">0.48</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Fog (Volumetric)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-fog-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-fog-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Density</div>
+                                        <input id="we-fog-density" type="range" min="0" max="0.05" step="0.001" value="0.012">
+                                        <div class="viewer-slider-value" id="we-fog-density-value">0.012</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Layer Opacity</div>
+                                        <input id="we-fog-opacity" type="range" min="0" max="0.2" step="0.001" value="0.055">
+                                        <div class="viewer-slider-value" id="we-fog-opacity-value">0.055</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Global Illumination (DDGI)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ddgi-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Off by default — DDGI is the most expensive subsystem. Turn on for prettier indirect lighting.</div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probes / Frame</div>
+                                        <input id="we-ddgi-probes" type="range" min="1" max="32" step="1" value="4">
+                                        <div class="viewer-slider-value" id="we-ddgi-probes-value">4</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-ddgi-intensity" type="range" min="0" max="1.5" step="0.01" value="0.18">
+                                        <div class="viewer-slider-value" id="we-ddgi-intensity-value">0.18</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Shadows</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-shadows-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-shadows-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Toggles the renderer shadow pass globally. Per-light cast-shadow stays under each light section.</div>
+                                </div>
+                            </details>
+
+                            <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                                <button class="btn viewer-menu-btn" id="we-reset-defaults">Reset to Defaults</button>
+                            </div>
+                        </div>
+                    </details>
+
                     <details class="viewer-menu-card viewer-menu-sections-card">
                         <summary class="viewer-menu-sections-summary">
                             <span class="viewer-menu-label viewer-menu-sections-label">Menu Sections</span>
@@ -481,6 +745,18 @@
                                         <button class="btn viewer-menu-btn" id="debug-apply-mesh-shadows">Apply Now</button>
                                     </div>
                                     <div class="viewer-inline-note" id="debug-shadow-status">Auto force is off. Apply Now runs one scene-wide shadow pass without keeping it enabled.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Performance</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Turns off DDGI global illumination, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full DDGI + fog + post-process active.</div>
                                 </div>
                             </details>
 
