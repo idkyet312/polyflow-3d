@@ -138,6 +138,12 @@ export function createSocketMultiplayer({ scene, onStateChange }) {
             targetPosition: new THREE.Vector3(),
             currentQuaternion: new THREE.Quaternion(),
             targetQuaternion: new THREE.Quaternion(),
+            vehicleActive: false,
+            vehicleCurrentPosition: new THREE.Vector3(),
+            vehicleTargetPosition: new THREE.Vector3(),
+            vehicleCurrentQuaternion: new THREE.Quaternion(),
+            vehicleTargetQuaternion: new THREE.Quaternion(),
+            vehicleInitialized: false,
             initialized: false,
         };
         peers.set(peerId, peer);
@@ -151,6 +157,21 @@ export function createSocketMultiplayer({ scene, onStateChange }) {
         peer.mode = snapshot.mode || 'showcase';
         copyPlainVector(peer.targetPosition, snapshot.position);
         copyPlainQuaternion(peer.targetQuaternion, snapshot.quaternion);
+
+        const vehicleSnapshot = snapshot.vehicle;
+        const legacyVehicle = peer.mode === 'vehicle' && !vehicleSnapshot;
+        peer.vehicleActive = !!vehicleSnapshot?.active || legacyVehicle;
+        if (peer.vehicleActive) {
+            copyPlainVector(peer.vehicleTargetPosition, vehicleSnapshot?.position || snapshot.position);
+            copyPlainQuaternion(peer.vehicleTargetQuaternion, vehicleSnapshot?.quaternion || snapshot.quaternion);
+            if (!peer.vehicleInitialized) {
+                peer.vehicleCurrentPosition.copy(peer.vehicleTargetPosition);
+                peer.vehicleCurrentQuaternion.copy(peer.vehicleTargetQuaternion);
+                peer.vehicleInitialized = true;
+            }
+        } else {
+            peer.vehicleInitialized = false;
+        }
 
         if (!peer.initialized) {
             peer.currentPosition.copy(peer.targetPosition);
@@ -254,17 +275,19 @@ export function createSocketMultiplayer({ scene, onStateChange }) {
             peer.currentPosition.lerp(peer.targetPosition, blend);
             peer.currentQuaternion.slerp(peer.targetQuaternion, blend);
 
-            const renderTarget = peer.mode === 'vehicle' ? peer.vehicle : peer.avatar;
-            peer.avatar.visible = peer.mode !== 'vehicle';
-            peer.vehicle.visible = peer.mode === 'vehicle';
+            peer.avatar.visible = !peer.vehicleActive;
+            peer.vehicle.visible = peer.vehicleActive;
 
-            renderTarget.position.copy(peer.currentPosition);
-            renderTarget.quaternion.copy(peer.currentQuaternion);
-
-            if (peer.mode !== 'vehicle') {
+            if (peer.vehicleActive && peer.vehicleInitialized) {
+                peer.vehicleCurrentPosition.lerp(peer.vehicleTargetPosition, blend);
+                peer.vehicleCurrentQuaternion.slerp(peer.vehicleTargetQuaternion, blend);
+                peer.vehicle.position.copy(peer.vehicleCurrentPosition);
+                peer.vehicle.quaternion.copy(peer.vehicleCurrentQuaternion);
+            } else {
                 tempVector.copy(peer.currentPosition);
                 tempVector.y = Math.max(tempVector.y, 0);
                 peer.avatar.position.copy(tempVector);
+                peer.avatar.quaternion.copy(peer.currentQuaternion);
             }
         });
     }

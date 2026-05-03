@@ -50,6 +50,10 @@
                             <button class="btn btn-primary viewer-menu-btn" id="open-actor-editor">Add Actor</button>
                             <button class="btn viewer-menu-btn" id="load-actor-btn">⬆ Load Actor</button>
                         </div>
+                        <div class="viewer-menu-actions">
+                            <button class="btn viewer-menu-btn" id="play-test-sound-btn">Test 3D Sound</button>
+                        </div>
+                        <div class="viewer-inline-note" id="play-test-sound-status">Plays a short test cue at the selected actor or just ahead of the camera.</div>
                         <div class="viewer-inline-note">Create a new actor or load a saved .actor file. Importing props,
                             multiplayer, and input scripting now live under Menu Sections.</div>
                         <input type="file" id="actor-file-input" accept=".actor,.json" style="display: none;">
@@ -72,6 +76,7 @@
                                         <option value="vehicle">Vehicle Actor</option>
                                         <option value="imported">Imported Actor</option>
                                         <option value="capsule">Simple AI Actor</option>
+                                        <option value="ddgiVolume">DDGI Volume</option>
                                     </select>
                                 </label>
                                 <label class="viewer-code-field" for="actor-label-input">
@@ -85,14 +90,29 @@
                                         max="6" step="0.1" value="0.5">
                                 </label>
                                 <label class="viewer-code-field" for="actor-color-input">
-                                    <span class="viewer-code-field-label">Color</span>
+                                    <span class="viewer-code-field-label">
+                                        <input id="actor-color-enabled" type="checkbox" style="margin-right: 0.4rem; vertical-align: middle;">
+                                        Custom Color
+                                    </span>
                                     <input id="actor-color-input" class="viewer-text-input" type="color" value="#888888"
-                                        style="height: 32px; padding: 2px; cursor: pointer;">
+                                        style="height: 32px; padding: 2px; cursor: pointer;" disabled>
                                 </label>
                                 <label class="viewer-code-field" for="actor-imported-template-select">
                                     <span class="viewer-code-field-label">Imported Source</span>
                                     <select id="actor-imported-template-select" class="viewer-text-input">
                                         <option value="">No imported source available</option>
+                                    </select>
+                                </label>
+                                <label class="viewer-code-field" for="actor-vehicle-body-template-select">
+                                    <span class="viewer-code-field-label">Vehicle Body Source</span>
+                                    <select id="actor-vehicle-body-template-select" class="viewer-text-input">
+                                        <option value="">Default Sedan</option>
+                                    </select>
+                                </label>
+                                <label class="viewer-code-field" for="actor-vehicle-wheel-template-select">
+                                    <span class="viewer-code-field-label">Vehicle Wheel Source</span>
+                                    <select id="actor-vehicle-wheel-template-select" class="viewer-text-input">
+                                        <option value="">Default Wheel</option>
                                     </select>
                                 </label>
                             </div>
@@ -196,12 +216,111 @@
                             </div>
                         </div>
 
-                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Material Color:</div>
-                        <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center;">
-                            <input type="color" id="bp-color-picker" value="#888888"
-                                style="width: 48px; height: 28px; padding: 1px; cursor: pointer; border: 1px solid rgba(255,255,255,0.15); border-radius: 4px; background: transparent;">
-                            <button class="btn viewer-menu-btn" id="btn-bp-apply-color"
-                                style="padding: 4px 10px; font-size: 11px; flex: 1;">Apply to All Materials</button>
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Component Details:</div>
+                        <div class="bp-material-editor">
+                            <div class="bp-material-target" id="bp-material-target">Target: select a mesh component.</div>
+                            <div class="viewer-inline-note bp-material-status" id="bp-material-status">Select a mesh component to edit base color, emissive glow, reflectivity, opacity, and surface response.</div>
+                            <div class="bp-material-grid" id="bp-material-grid">
+                                <label class="bp-material-row" for="bp-material-color">
+                                    <span class="bp-material-label">Base Color</span>
+                                    <input type="color" id="bp-material-color" class="bp-material-color-input" value="#888888">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-material-emissive">
+                                    <span class="bp-material-label">Emissive</span>
+                                    <input type="color" id="bp-material-emissive" class="bp-material-color-input" value="#000000">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-material-roughness">
+                                    <span class="bp-material-label">Roughness</span>
+                                    <input type="range" id="bp-material-roughness" class="bp-material-range" min="0" max="1" step="0.01" value="0.50">
+                                    <input type="number" id="bp-material-roughness-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.50">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-metalness">
+                                    <span class="bp-material-label">Metalness</span>
+                                    <input type="range" id="bp-material-metalness" class="bp-material-range" min="0" max="1" step="0.01" value="0.00">
+                                    <input type="number" id="bp-material-metalness-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-emissive-intensity">
+                                    <span class="bp-material-label">Glow Power</span>
+                                    <input type="range" id="bp-material-emissive-intensity" class="bp-material-range" min="0" max="8" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-emissive-intensity-number" class="viewer-text-input bp-material-number" min="0" max="8" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-opacity">
+                                    <span class="bp-material-label">Opacity</span>
+                                    <input type="range" id="bp-material-opacity" class="bp-material-range" min="0" max="1" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-opacity-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-alpha-test">
+                                    <span class="bp-material-label">Alpha Test</span>
+                                    <input type="range" id="bp-material-alpha-test" class="bp-material-range" min="0" max="1" step="0.01" value="0.00">
+                                    <input type="number" id="bp-material-alpha-test-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-env-intensity">
+                                    <span class="bp-material-label">Env Light</span>
+                                    <input type="range" id="bp-material-env-intensity" class="bp-material-range" min="0" max="4" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-env-intensity-number" class="viewer-text-input bp-material-number" min="0" max="4" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-side">
+                                    <span class="bp-material-label">Render Side</span>
+                                    <select id="bp-material-side" class="viewer-text-input bp-material-select">
+                                        <option value="front">Front</option>
+                                        <option value="double">Double</option>
+                                        <option value="back">Back</option>
+                                    </select>
+                                    <span></span>
+                                </label>
+                            </div>
+                            <div class="viewer-inline-note bp-material-hint">Selected mesh updates live. Apply To Actor stamps the current settings across every mesh under this actor before saving.</div>
+                            <div class="viewer-menu-actions bp-material-actions">
+                                <button class="btn viewer-menu-btn" id="btn-bp-apply-material-selected" style="padding: 6px; font-size: 11px;">Apply To Selected</button>
+                                <button class="btn viewer-menu-btn" id="btn-bp-apply-material-actor" style="padding: 6px; font-size: 11px;">Apply To Actor</button>
+                            </div>
+                            <div class="bp-material-grid" id="bp-light-grid" hidden>
+                                <label class="bp-material-row" for="bp-light-color">
+                                    <span class="bp-material-label">Color</span>
+                                    <input type="color" id="bp-light-color" class="bp-material-color-input" value="#fff2cc">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-light-intensity">
+                                    <span class="bp-material-label">Intensity</span>
+                                    <input type="range" id="bp-light-intensity" class="bp-material-range" min="0" max="20" step="0.1" value="6.0">
+                                    <input type="number" id="bp-light-intensity-number" class="viewer-text-input bp-material-number" min="0" max="20" step="0.1" value="6.0">
+                                </label>
+                                <label class="bp-material-row" for="bp-light-distance">
+                                    <span class="bp-material-label">Distance</span>
+                                    <input type="range" id="bp-light-distance" class="bp-material-range" min="0" max="100" step="0.1" value="18.0">
+                                    <input type="number" id="bp-light-distance-number" class="viewer-text-input bp-material-number" min="0" max="100" step="0.1" value="18.0">
+                                </label>
+                                <label class="bp-material-row" for="bp-light-decay">
+                                    <span class="bp-material-label">Decay</span>
+                                    <input type="range" id="bp-light-decay" class="bp-material-range" min="0" max="4" step="0.1" value="2.0">
+                                    <input type="number" id="bp-light-decay-number" class="viewer-text-input bp-material-number" min="0" max="4" step="0.1" value="2.0">
+                                </label>
+                                <label class="bp-material-row bp-light-spot-row" for="bp-light-angle">
+                                    <span class="bp-material-label">Cone Angle</span>
+                                    <input type="range" id="bp-light-angle" class="bp-material-range" min="1" max="120" step="1" value="30">
+                                    <input type="number" id="bp-light-angle-number" class="viewer-text-input bp-material-number" min="1" max="120" step="1" value="30">
+                                </label>
+                                <label class="bp-material-row bp-light-spot-row" for="bp-light-penumbra">
+                                    <span class="bp-material-label">Penumbra</span>
+                                    <input type="range" id="bp-light-penumbra" class="bp-material-range" min="0" max="1" step="0.01" value="0.35">
+                                    <input type="number" id="bp-light-penumbra-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.35">
+                                </label>
+                                <div class="bp-material-row bp-light-spot-row">
+                                    <span class="bp-material-label">Target</span>
+                                    <div class="bp-light-target-grid">
+                                        <input type="number" id="bp-light-target-x" class="viewer-text-input bp-material-number" step="0.1" value="0">
+                                        <input type="number" id="bp-light-target-y" class="viewer-text-input bp-material-number" step="0.1" value="-1.5">
+                                        <input type="number" id="bp-light-target-z" class="viewer-text-input bp-material-number" step="0.1" value="0">
+                                    </div>
+                                    <span></span>
+                                </div>
+                                <label class="viewer-checkbox-row bp-light-shadow-row" for="bp-light-cast-shadow">
+                                    <input type="checkbox" id="bp-light-cast-shadow" checked>
+                                    <span>Cast Shadow</span>
+                                </label>
+                            </div>
                         </div>
 
                         <div class="viewer-inline-note" style="margin-bottom: 8px;">Add Child Components:</div>
@@ -212,6 +331,8 @@
                             <button class="btn viewer-menu-btn" id="btn-add-comp-sphere" style="padding: 6px;">Add
                                 Sphere</button>
                             <button class="btn viewer-menu-btn" id="btn-add-comp-light" style="padding: 6px;">Add Point
+                                Light</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-spot-light" style="padding: 6px;">Add Spot
                                 Light</button>
                             <button class="btn viewer-menu-btn" id="btn-delete-comp"
                                 style="padding: 6px; border-color: rgba(255,50,50,0.3);">Delete Selected</button>
@@ -257,9 +378,14 @@
                                             (.umap)</button>
                                         <button class="btn viewer-menu-btn" id="load-scene-btn">Load Scene</button>
                                     </div>
-                                    <div class="viewer-inline-note">Save your placed actors, physics bodies, and scripts
-                                        to a .umap file to load later.</div>
+                                    <div class="viewer-menu-actions" style="margin-top: 0.4rem;">
+                                        <button class="btn viewer-menu-btn" id="save-scene-folder-btn">Save Scene Folder</button>
+                                        <button class="btn viewer-menu-btn" id="load-scene-folder-btn">Load Scene Folder</button>
+                                    </div>
+                                    <div class="viewer-inline-note">A scene folder keeps source assets next to the .umap so loads stay fast even with many imported props.</div>
                                     <input type="file" id="scene-file-input" accept=".umap,.json"
+                                        style="display: none;">
+                                    <input type="file" id="scene-folder-input" webkitdirectory directory multiple
                                         style="display: none;">
                                 </div>
                             </details>
@@ -281,6 +407,78 @@
                                     </div>
                                     <input type="file" id="prop-file-input" accept=".glb,.gltf,.obj,.fbx"
                                         style="display: none;">
+                                    <input type="file" id="vehicle-template-import-input" accept=".glb,.gltf,.obj,.fbx"
+                                        style="display: none;">
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Post Process Volume</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Godot-style global grading plus one editable box volume that overrides bloom and exposure when the camera enters it.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="post-process-target-global">Global</button>
+                                        <button class="btn viewer-toggle-btn" id="post-process-target-volume">Volume</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Exposure</div>
+                                        <input id="post-process-exposure" type="range" min="0.1" max="2.5" step="0.01" value="1.00">
+                                        <div class="viewer-slider-value" id="post-process-exposure-value">1.00</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Strength</div>
+                                        <input id="post-process-bloom-strength" type="range" min="0" max="3" step="0.01" value="1.25">
+                                        <div class="viewer-slider-value" id="post-process-bloom-strength-value">1.25</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Radius</div>
+                                        <input id="post-process-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.95">
+                                        <div class="viewer-slider-value" id="post-process-bloom-radius-value">0.95</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Threshold</div>
+                                        <input id="post-process-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
+                                        <div class="viewer-slider-value" id="post-process-bloom-threshold-value">0.48</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Blend Speed</div>
+                                        <input id="post-process-blend-speed" type="range" min="0.1" max="10" step="0.1" value="2.5">
+                                        <div class="viewer-slider-value" id="post-process-blend-speed-value">2.5</div>
+                                    </div>
+                                    <div class="viewer-input-stack viewer-post-process-volume-stack">
+                                        <label class="viewer-input-label" for="post-process-priority">Volume Priority</label>
+                                        <input class="viewer-text-input" id="post-process-priority" type="number" step="1" value="0">
+                                        <label class="viewer-input-label" for="post-process-size-x">Volume Size</label>
+                                        <div class="viewer-post-process-size-grid">
+                                            <input class="viewer-text-input" id="post-process-size-x" type="number" min="0.5" step="0.5" value="12">
+                                            <input class="viewer-text-input" id="post-process-size-y" type="number" min="0.5" step="0.5" value="6">
+                                            <input class="viewer-text-input" id="post-process-size-z" type="number" min="0.5" step="0.5" value="12">
+                                        </div>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="post-process-place-volume">Place At Camera</button>
+                                        <button class="btn viewer-menu-btn" id="post-process-remove-volume">Remove Volume</button>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="post-process-toggle-bounds">Show Bounds</button>
+                                        <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="post-process-apply-settings">Apply Settings</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="post-process-status">Global defaults are active. Place a volume to override bloom and exposure inside a region.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Debug Shadows</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Force every live mesh in the scene to cast and receive shadows. Useful when imported actors come in with shadow flags off.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="debug-force-mesh-shadows-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="debug-force-mesh-shadows-on">On</button>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="debug-apply-mesh-shadows">Apply Now</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="debug-shadow-status">Auto force is off. Apply Now runs one scene-wide shadow pass without keeping it enabled.</div>
                                 </div>
                             </details>
 
@@ -350,8 +548,10 @@
                                 <textarea id="input-action-editor-input" class="viewer-code-textarea" rows="8"
                                     spellcheck="false"></textarea>
                             </label>
-                            <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, gameplay,
-                                showcase, physics, event, button, mode, spawnDynamicPrimitive(), spawnImportedProp()
+                            <div class="viewer-code-hint">Available in code: World, GetWorld(), GameMode,
+                                PlayerController, Pawn, Character, GameInstance, FVector, FRotator,
+                                UPrimitiveComponent, CreateWidget(), HUD, event, button, mode, plus raw globals like
+                                THREE, scene, camera, gameplay, physics, spawnDynamicPrimitive(), and spawnImportedProp().
                             </div>
                             <div class="viewer-inline-note viewer-script-editor-status"
                                 id="input-actions-editor-status">Input actions are loaded from local draft storage.
@@ -369,6 +569,7 @@
                 </div>
 
                 <div class="debug-stats-overlay" id="debug-stats-overlay" aria-live="polite"></div>
+                <div class="engine-audio-debug" id="engine-audio-debug" aria-live="polite">Engine: --</div>
 
                 <div class="debug-console" id="debug-console" hidden>
                     <div class="debug-console-header">
@@ -389,7 +590,7 @@
                 </div>
 
                 <div id="processing-overlay">
-                    <h2>Processing Asset</h2>
+                    <h2 id="processing-title">Processing Asset</h2>
                     <div class="loader-container">
                         <div class="loader-bar" id="loader-bar"></div>
                     </div>
@@ -429,23 +630,30 @@
                         <div class="viewer-modal-eyebrow">Showcase Actor Script</div>
                         <h2 class="viewer-modal-title" id="object-script-editor-title">Attach Script to Actor</h2>
                         <p class="viewer-modal-copy">Right-clicked authored actors in Showcase mode can run per-actor
-                            Three.js code on tick or on collision.</p>
+                            Unreal-style lifecycle scripts with BeginPlay, Tick, OnHit, and EndPlay.</p>
                         <div class="viewer-script-editor-target" id="object-script-editor-target">No prop selected</div>
-                        <div class="viewer-script-editor-mode" id="object-script-editor-mode">Event: Tick</div>
+                        <label class="viewer-script-editor-mode" for="object-script-editor-mode">
+                            <span class="viewer-script-editor-mode-label">Script Event</span>
+                            <select id="object-script-editor-mode" class="viewer-script-event-select">
+                                <option value="tick">Tick</option>
+                                <option value="collision">Collision</option>
+                            </select>
+                        </label>
                         <label class="viewer-checkbox-row" id="object-script-tick-toggle-row"
                             for="object-script-tick-toggle" hidden>
                             <input type="checkbox" id="object-script-tick-toggle">
                             <span>Enable this object's tick event in Play mode.</span>
                         </label>
                         <label class="viewer-code-field" for="object-script-editor-input">
-                            <span class="viewer-code-field-label">Three.js Code</span>
+                            <span class="viewer-code-field-label">Actor Script</span>
                             <textarea id="object-script-editor-input" class="viewer-code-textarea" rows="8"
                                 spellcheck="false"></textarea>
                         </label>
-                        <div class="viewer-code-hint">Available in code: THREE, scene, camera, renderer, currentMesh,
-                            gameplay, showcase, physics, prop, actor, object, body, eventType, deltaTime, collision,
-                            PhysicsComponent, TransformComponent, spawnDynamicPrimitive(), spawnImportedProp() — Use
-                            actor.GetComponent(PhysicsComponent).addForce(new THREE.Vector3(900000,0,0))</div>
+                        <div class="viewer-code-hint">Preferred UE-style API: BeginPlay(), Tick(), OnHit(), EndPlay(),
+                            World, GameMode, PlayerController, Pawn, Character, GameInstance, GetWorld(), FVector,
+                            FRotator, UPrimitiveComponent, UAudioComponent, HUD, CreateWidget(), WidgetAPI, and
+                            UnrealWidgetAPI. Raw globals like THREE, scene, camera, gameplay, physics,
+                            spawnDynamicPrimitive(), and spawnImportedProp() still work.</div>
                         <div class="viewer-inline-note viewer-script-editor-status" id="object-script-editor-status">
                             Pick a prop in Showcase mode to attach code.</div>
                         <div class="viewer-modal-actions">
@@ -468,7 +676,10 @@
 
                 <div id="crosshair" aria-hidden="true"></div>
 
+                <div class="desktop-version-badge" aria-label="Desktop app version">v0.0.1</div>
+
                 <div class="mobile-ui" aria-label="Mobile controls">
+                    <div class="mobile-version-badge" aria-label="App version">v0.0.1</div>
                     <div class="mobile-topbar">
                         <button class="btn mobile-chip" id="mobile-menu-toggle" type="button">Menu</button>
                         <button class="btn mobile-chip" id="mobile-mode-toggle" type="button">Play</button>

@@ -1,0 +1,59 @@
+{
+  "version": 2,
+  "actors": [
+    {
+      "id": "prop-1",
+      "kind": "cube",
+      "name": "cube-actor",
+      "templateId": "",
+      "userData": {
+        "sceneNodeName": "cube-actor",
+        "dynamicPropId": "prop-1"
+      },
+      "transform": {
+        "position": [
+          8.968188980120651,
+          7.463219868359665,
+          11.727631743234697
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "scale": [
+          2,
+          2,
+          2
+        ]
+      },
+      "material": {
+        "color": "#888888",
+        "roughness": 0.38,
+        "metalness": 0.12
+      },
+      "materialOverrides": [
+        {
+          "path": [],
+          "material": {
+            "color": "#888888",
+            "roughness": 0.38,
+            "metalness": 0.12
+          }
+        }
+      ],
+      "scripts": {
+        "tick": "",
+        "tickEnabled": false,
+        "collision": ""
+      },
+      "componentFlags": {
+        "collision": true,
+        "physics": true,
+        "scripts": true
+      },
+      "components": []
+    }
+  ]
+}

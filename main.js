@@ -1,31 +1,60 @@
 import * as THREE from 'three';
-import { WebGPURenderer } from 'three/webgpu';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { WebGPURenderer, PostProcessing } from 'three/webgpu';
+import { pass, mrt, output, emissive, uniform } from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
-import { TGALoader } from 'three/addons/loaders/TGALoader.js';
-import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
+import {
+    WidgetManager,
+    BaseWidget,
+    TextWidget,
+    ImageWidget,
+    ProgressBarWidget,
+    ButtonWidget,
+} from './src/ui/widgets.js';
+import {
+    sampleTestTone,
+    writeWaveAscii,
+    createTestSoundBuffer,
+    createMediaTestSoundUrl,
+    createEngineNoiseBuffer,
+    createCombustionPulseBuffer,
+    createCombustionDistortionCurve,
+} from './src/audio/synthesis.js';
+import { createDrivableCarVisual } from './src/vehicle/visual.js';
+import { createVehicleFx } from './src/vehicle/fx.js';
+import {
+    cloneDisposableObject,
+    formatImportedPropName,
+    normalizeObjectToDimension,
+    createLoadingManager,
+    convertLoadedObjectMaterials,
+    loadObjectFromFile,
+} from './src/io/objectLoader.js';
 import { createSocketMultiplayer } from './src/network/socketMultiplayer.js';
 import { runWebGPUBenchmark } from './webgpu_utils.js';
 import { createPhysicsCore } from './src/physics/core.js';
 import { createPhysicsRuntime } from './src/physics/runtime.js';
 import { createEnvironmentController } from './src/world/environment.js';
 import { createLightGridController } from './src/world/lightGrid.js';
+import { createVolumetricFog } from './src/world/volumetricFog.js';
+import { createPostProcessVolumeManager } from './src/world/postProcessVolume.js';
+import { getDDGIManager } from './src/world/gi/ddgiManager.js';
 import {
     createActor,
     createSceneSystem,
     ensureActorScriptComponent,
+    AudioComponent,
     getMetadataComponent,
     getPhysicsBodyComponent,
     getRenderComponent,
     getScriptComponent,
     PhysicsComponent,
     TransformComponent,
+    DDGIVolumeComponent,
 } from './src/runtime/sceneRuntime.js';
 import {
     TERRAIN_Y_OFFSET,
@@ -34,475 +63,27 @@ import {
     sampleTerrainHeightAt as sampleTerrainHeightAtWorldFloor,
 } from './src/world/terrain.js';
 import {
+    AHUD,
     installUePrototypeMethods,
     buildUeContext,
     detectsUeLifecycle,
+    UButtonWidget,
+    UImageWidget,
+    UProgressBarWidget,
+    UTextWidget,
+    UUserWidget,
 } from './src/scripting/ueApi.js';
+import {
+    SoundGeneratorAudioListener,
+    EngineSoundGenerator as WasmEngineSoundGenerator,
+} from './vendor/engine-sound/sound_generator_worklet_wasm.js';
 
 installUePrototypeMethods();
 
-// --- Widget System (Unreal Engine Style) ---
-class WidgetManager {
-    constructor(container) {
-        this.container = container;
-        this.widgets = new Map();
-        this.nextId = 1;
-
-        // Create overlay container for UI widgets
-        this.overlay = document.createElement('div');
-        this.overlay.id = 'widget-overlay';
-        this.overlay.style.cssText = `
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 1000;
-        `;
-        // Append overlay on top of the canvas (which should be the last child)
-        this.container.appendChild(this.overlay);
-    }
-
-    createWidget(type, config = {}) {
-        const id = this.nextId++;
-        let widget;
-
-        switch (type) {
-            case 'text':
-                widget = new TextWidget(id, config);
-                break;
-            case 'image':
-                widget = new ImageWidget(id, config);
-                break;
-            case 'progress':
-                widget = new ProgressBarWidget(id, config);
-                break;
-            case 'button':
-                widget = new ButtonWidget(id, config);
-                break;
-            default:
-                throw new Error(`Unknown widget type: ${type}`);
-        }
-
-        this.widgets.set(id, widget);
-        this.overlay.appendChild(widget.element);
-        return id;
-    }
-
-    updateWidget(id, updates) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        widget.update(updates);
-        return true;
-    }
-
-    showWidget(id, visible = true) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        widget.element.style.display = visible ? 'block' : 'none';
-        return true;
-    }
-
-    removeWidget(id) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        this.overlay.removeChild(widget.element);
-        widget.dispose();
-        this.widgets.delete(id);
-        return true;
-    }
-
-    setWidgetPosition(id, position, space = 'screen') {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        if (space === 'screen') {
-            // Position as percentage of container
-            const x = (position.x * 100) + '%';
-            const y = (position.y * 100) + '%';
-            widget.element.style.left = x;
-            widget.element.style.top = y;
-            widget.element.style.transform = 'translate(-50%, -50%)';
-        } else {
-            // World space positioning would require 3D to screen conversion
-            console.warn('World space positioning not yet implemented for HTML widgets');
-        }
-        return true;
-    }
-
-    setWidgetScale(id, scale) {
-        const widget = this.widgets.get(id);
-        if (!widget) return false;
-
-        const scaleValue = typeof scale === 'number' ? scale : scale.x || 1;
-        widget.element.style.transform = widget.element.style.transform.replace(/scale\([^)]*\)/, '') + ` scale(${scaleValue})`;
-        return true;
-    }
-
-    getWidget(id) {
-        return this.widgets.get(id);
-    }
-
-    getAllWidgets() {
-        return Array.from(this.widgets.values());
-    }
-
-    update(delta) {
-        // Kept to prevent breaking the main render loop
-    }
-
-    dispose() {
-        for (const widget of this.widgets.values()) {
-            widget.dispose();
-        }
-        this.widgets.clear();
-        if (this.overlay && this.overlay.parentNode) {
-            this.overlay.parentNode.removeChild(this.overlay);
-        }
-    }
-}
-
-// Base Widget Class
-class BaseWidget {
-    constructor(id, config = {}) {
-        this.id = id;
-        this.element = document.createElement('div');
-        this.element.className = 'widget';
-        this.element.style.cssText = `
-            position: absolute;
-            pointer-events: auto;
-            user-select: none;
-        `;
-
-        this.config = {
-            position: { x: 0.5, y: 0.5 }, // Normalized screen coordinates (0-1)
-            scale: 1,
-            visible: true,
-            ...config
-        };
-
-        this.updatePosition();
-        this.element.style.display = this.config.visible ? 'block' : 'none';
-    }
-
-    update(updates) {
-        if (updates.position) {
-            this.config.position = updates.position;
-            this.updatePosition();
-        }
-        if (updates.scale !== undefined) {
-            this.config.scale = updates.scale;
-            this.updateScale();
-        }
-        if (updates.visible !== undefined) {
-            this.config.visible = updates.visible;
-            this.element.style.display = updates.visible ? 'block' : 'none';
-        }
-
-        Object.assign(this.config, updates);
-    }
-
-    updatePosition() {
-        const x = (this.config.position.x * 100) + '%';
-        const y = (this.config.position.y * 100) + '%';
-        this.element.style.left = x;
-        this.element.style.top = y;
-        this.element.style.transform = 'translate(-50%, -50%)';
-        this.updateScale();
-    }
-
-    updateScale() {
-        const currentTransform = this.element.style.transform;
-        const translateMatch = currentTransform.match(/translate\([^)]+\)/);
-        const translate = translateMatch ? translateMatch[0] : 'translate(-50%, -50%)';
-        this.element.style.transform = `${translate} scale(${this.config.scale})`;
-    }
-
-    dispose() {
-        if (this.element && this.element.parentNode) {
-            this.element.parentNode.removeChild(this.element);
-        }
-    }
-}
-
-// Text Widget
-class TextWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            text: 'Hello World',
-            fontSize: 24,
-            color: '#ffffff',
-            fontFamily: 'Arial, sans-serif',
-            textAlign: 'center',
-            backgroundColor: 'rgba(0, 0, 0, 0.5)',
-            padding: '8px 16px',
-            borderRadius: '4px',
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <div style="
-                font-size: ${this.config.fontSize}px;
-                color: ${this.config.color};
-                font-family: ${this.config.fontFamily};
-                text-align: ${this.config.textAlign};
-                background-color: ${this.config.backgroundColor};
-                padding: ${this.config.padding};
-                border-radius: ${this.config.borderRadius};
-                white-space: nowrap;
-            ">${this.config.text}</div>
-        `;
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.text !== undefined) {
-            this.config.text = updates.text;
-            this.element.querySelector('div').textContent = updates.text;
-        }
-        if (updates.fontSize !== undefined) {
-            this.config.fontSize = updates.fontSize;
-            this.element.querySelector('div').style.fontSize = updates.fontSize + 'px';
-        }
-        if (updates.color !== undefined) {
-            this.config.color = updates.color;
-            this.element.querySelector('div').style.color = updates.color;
-        }
-        if (updates.fontFamily !== undefined) {
-            this.config.fontFamily = updates.fontFamily;
-            this.element.querySelector('div').style.fontFamily = updates.fontFamily;
-        }
-        if (updates.textAlign !== undefined) {
-            this.config.textAlign = updates.textAlign;
-            this.element.querySelector('div').style.textAlign = updates.textAlign;
-        }
-        if (updates.backgroundColor !== undefined) {
-            this.config.backgroundColor = updates.backgroundColor;
-            this.element.querySelector('div').style.backgroundColor = updates.backgroundColor;
-        }
-        if (updates.padding !== undefined) {
-            this.config.padding = updates.padding;
-            this.element.querySelector('div').style.padding = updates.padding;
-        }
-        if (updates.borderRadius !== undefined) {
-            this.config.borderRadius = updates.borderRadius;
-            this.element.querySelector('div').style.borderRadius = updates.borderRadius;
-        }
-    }
-}
-
-// Image Widget
-class ImageWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            imageUrl: null,
-            width: 100,
-            height: 100,
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <img style="
-                width: ${this.config.width}px;
-                height: ${this.config.height}px;
-                object-fit: contain;
-                border-radius: 4px;
-            " src="${this.config.imageUrl || ''}" alt="Widget Image">
-        `;
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.imageUrl !== undefined) {
-            this.config.imageUrl = updates.imageUrl;
-            this.element.querySelector('img').src = updates.imageUrl;
-        }
-        if (updates.width !== undefined) {
-            this.config.width = updates.width;
-            this.element.querySelector('img').style.width = updates.width + 'px';
-        }
-        if (updates.height !== undefined) {
-            this.config.height = updates.height;
-            this.element.querySelector('img').style.height = updates.height + 'px';
-        }
-    }
-}
-
-// Progress Bar Widget
-class ProgressBarWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            progress: 0.5,
-            width: 200,
-            height: 20,
-            backgroundColor: '#333333',
-            fillColor: '#00ff00',
-            borderColor: '#ffffff',
-            borderWidth: '2px',
-            borderRadius: '4px',
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <div style="
-                width: ${this.config.width}px;
-                height: ${this.config.height}px;
-                background-color: ${this.config.backgroundColor};
-                border: ${this.config.borderWidth} solid ${this.config.borderColor};
-                border-radius: ${this.config.borderRadius};
-                overflow: hidden;
-            ">
-                <div style="
-                    width: ${this.config.progress * 100}%;
-                    height: 100%;
-                    background-color: ${this.config.fillColor};
-                    transition: width 0.3s ease;
-                "></div>
-            </div>
-        `;
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.progress !== undefined) {
-            this.config.progress = Math.max(0, Math.min(1, updates.progress));
-            this.element.querySelector('div > div').style.width = (this.config.progress * 100) + '%';
-        }
-        if (updates.width !== undefined) {
-            this.config.width = updates.width;
-            this.element.querySelector('div').style.width = updates.width + 'px';
-        }
-        if (updates.height !== undefined) {
-            this.config.height = updates.height;
-            this.element.querySelector('div').style.height = updates.height + 'px';
-        }
-        if (updates.backgroundColor !== undefined) {
-            this.config.backgroundColor = updates.backgroundColor;
-            this.element.querySelector('div').style.backgroundColor = updates.backgroundColor;
-        }
-        if (updates.fillColor !== undefined) {
-            this.config.fillColor = updates.fillColor;
-            this.element.querySelector('div > div').style.backgroundColor = updates.fillColor;
-        }
-        if (updates.borderColor !== undefined) {
-            this.config.borderColor = updates.borderColor;
-            this.element.querySelector('div').style.borderColor = updates.borderColor;
-        }
-        if (updates.borderWidth !== undefined) {
-            this.config.borderWidth = updates.borderWidth;
-            this.element.querySelector('div').style.borderWidth = updates.borderWidth;
-        }
-        if (updates.borderRadius !== undefined) {
-            this.config.borderRadius = updates.borderRadius;
-            this.element.querySelector('div').style.borderRadius = updates.borderRadius;
-        }
-    }
-}
-
-// Button Widget
-class ButtonWidget extends BaseWidget {
-    constructor(id, config = {}) {
-        super(id, config);
-
-        this.config = {
-            text: 'Button',
-            width: 120,
-            height: 40,
-            backgroundColor: '#444444',
-            hoverColor: '#666666',
-            textColor: '#ffffff',
-            borderRadius: '4px',
-            fontSize: 16,
-            onClick: null,
-            ...this.config
-        };
-
-        this.element.innerHTML = `
-            <button style="
-                width: ${this.config.width}px;
-                height: ${this.config.height}px;
-                background-color: ${this.config.backgroundColor};
-                color: ${this.config.textColor};
-                border: none;
-                border-radius: ${this.config.borderRadius};
-                font-size: ${this.config.fontSize}px;
-                font-family: Arial, sans-serif;
-                cursor: pointer;
-                transition: background-color 0.2s ease;
-            ">${this.config.text}</button>
-        `;
-
-        this.buttonElement = this.element.querySelector('button');
-        this.buttonElement.addEventListener('click', () => {
-            if (this.config.onClick) {
-                this.config.onClick(this.id);
-            }
-        });
-
-        this.buttonElement.addEventListener('mouseenter', () => {
-            this.buttonElement.style.backgroundColor = this.config.hoverColor;
-        });
-
-        this.buttonElement.addEventListener('mouseleave', () => {
-            this.buttonElement.style.backgroundColor = this.config.backgroundColor;
-        });
-    }
-
-    update(updates) {
-        super.update(updates);
-
-        if (updates.text !== undefined) {
-            this.config.text = updates.text;
-            this.buttonElement.textContent = updates.text;
-        }
-        if (updates.width !== undefined) {
-            this.config.width = updates.width;
-            this.buttonElement.style.width = updates.width + 'px';
-        }
-        if (updates.height !== undefined) {
-            this.config.height = updates.height;
-            this.buttonElement.style.height = updates.height + 'px';
-        }
-        if (updates.backgroundColor !== undefined) {
-            this.config.backgroundColor = updates.backgroundColor;
-            this.buttonElement.style.backgroundColor = updates.backgroundColor;
-        }
-        if (updates.hoverColor !== undefined) {
-            this.config.hoverColor = updates.hoverColor;
-        }
-        if (updates.textColor !== undefined) {
-            this.config.textColor = updates.textColor;
-            this.buttonElement.style.color = updates.textColor;
-        }
-        if (updates.borderRadius !== undefined) {
-            this.config.borderRadius = updates.borderRadius;
-            this.buttonElement.style.borderRadius = updates.borderRadius;
-        }
-        if (updates.fontSize !== undefined) {
-            this.config.fontSize = updates.fontSize;
-            this.buttonElement.style.fontSize = updates.fontSize + 'px';
-        }
-        if (updates.onClick !== undefined) {
-            this.config.onClick = updates.onClick;
-        }
-    }
-}
 
 // Global widget manager instance
 let widgetManager;
+let runtimeHud;
 
 // Widget API functions (call these from Three.js commands)
 window.WidgetAPI = {
@@ -547,82 +128,95 @@ window.WidgetAPI = {
     }
 };
 
+function getRuntimeHud() {
+    if (!runtimeHud) {
+        runtimeHud = new AHUD({ widgetApi: window.WidgetAPI });
+    }
+    return runtimeHud;
+}
+
+window.UnrealWidgetAPI = {
+    AHUD,
+    UUserWidget,
+    UTextWidget,
+    UImageWidget,
+    UProgressBarWidget,
+    UButtonWidget,
+    CreateWidget: (WidgetClass = UUserWidget, config = {}) => getRuntimeHud().CreateWidget(WidgetClass, config),
+    GetHUD: () => getRuntimeHud(),
+};
+
 // Example widget creation function
 function createExampleWidgets() {
     if (!widgetManager) return;
 
-    // Create a score display widget
-    const scoreWidgetId = widgetManager.createWidget('text', {
-        text: 'Score: 0',
+    const hud = getRuntimeHud();
+
+    const scoreWidget = hud.CreateWidget(UTextWidget, {
+        Text: 'Score: 0',
         fontSize: 20,
         color: '#ffff00',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
         position: { x: 0.05, y: 0.9 }, // Top-left corner
-        visible: true
+        visible: true,
     });
+    scoreWidget.AddToViewport(20);
 
-    // Create a health bar
-    const healthBarId = widgetManager.createWidget('progress', {
-        progress: 1.0,
+    const healthBar = hud.CreateWidget(UProgressBarWidget, {
+        Percent: 1.0,
         width: 200,
         height: 20,
         fillColor: '#00ff00',
         backgroundColor: '#333333',
         position: { x: 0.05, y: 0.8 }, // Below score
-        visible: true
+        visible: true,
     });
+    healthBar.AddToViewport(19);
 
-    // Create a speed display
-    /*const speedWidgetId = widgetManager.createWidget('text', {
-        text: 'Speed: 0 km/h',
+    const speedWidget = hud.CreateWidget(UTextWidget, {
+        Text: 'Speed: 0 km/h',
         fontSize: 16,
         color: '#00ffff',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
         position: { x: 0.05, y: 0.7 }, // Below health bar
-        visible: true
+        visible: true,
     });
+    speedWidget.AddToViewport(18);
 
-    // Create a button widget
-    const buttonWidgetId = widgetManager.createWidget('button', {
-        text: 'Boost',
-        width: 80,
-        height: 30,
-        backgroundColor: '#444444',
-        hoverColor: '#666666',
-        position: { x: 0.85, y: 0.9 }, // Top-right corner
-        onClick: (id) => {
-            console.log('Boost button clicked!', id);
-            // Add boost logic here
-        },
-        visible: true
-    });*/
-
-    // Store widget IDs globally for easy access
+    // Store widget handles globally for easy access
     window.exampleWidgets = {
-        score: scoreWidgetId,
-        health: healthBarId,
-        //speed: speedWidgetId,
-        //boost: buttonWidgetId
+        score: scoreWidget,
+        health: healthBar,
+        speed: speedWidget,
     };
+    window.gameHud = hud;
 
     // Initialize score system
     window.gameScore = 0;
 
-    console.log('Example widgets created:', window.exampleWidgets);
-    console.log('Widget API available at window.WidgetAPI');
-    console.log('Example usage:');
-    console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
-    console.log('  WidgetAPI.updateWidget(widgetId, {text: "Updated text"})');
+    if (window.DEBUG_WIDGET_API) {
+        console.log('Example widgets created:', window.exampleWidgets);
+        console.log('Widget API available at window.WidgetAPI');
+        console.log('Unreal widget API available at window.UnrealWidgetAPI');
+        console.log('Example usage:');
+        console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
+        console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
+    }
 }
 
 // --- Configuration ---
-let scene, camera, renderer, currentMesh, transformControl;
+let scene, camera, renderer, currentMesh, transformControl, postProcessing, mainDirectionalLight;
 let originalTriCount = 0;
 let optimizedTriCount = 0;
 let scanPlane;
 let originalFileSize = 0;
 let optimizedBlobUrl = null;
-let environmentController;
+let environmentController, volumetricFogController, postProcessVolumeManager;
+const globalPostProcessUniforms = {
+    bloomStrength: uniform(1.25),
+    bloomRadius: uniform(0.95),
+    bloomThreshold: uniform(0.48)
+};
 let physicsCore;
 let physicsRuntime;
 let multiplayerController;
@@ -630,6 +224,7 @@ let sceneSystem;
 const EXPORT_MAX_TEXTURE_SIZE = 1024;
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
+const VEHICLE_CUSTOM_IMPORT_VALUE = '__custom_import__';
 const IMPORTED_PROP_MAX_HULL_POINTS = 480;
 const IMPORTED_PROP_MAX_HULL_PARTS = 18;
 const IMPORTED_PROP_COMPLEX_HULL_RADIUS = 0.01;
@@ -659,12 +254,15 @@ const VEHICLE_SETTINGS = {
     wheelBase: 1.72,
     trackWidth: 1.18,
     spawnDistance: 4.8,
-    spawnLift: 0.15,
+    spawnLift: 0.02,
     interactionRadius: 4.5,
     seatHeight: 1.15,
     followDistance: 5.6,
     followHeight: 2.4,
     lookAhead: 2.2,
+    cameraHorizontalSmoothing: 8.0,
+    cameraVerticalSmoothing: 2.2,
+    cameraLookSmoothing: 5.0,
     acceleration: 3.0,
     reverseAcceleration: 2.0,
     boostAcceleration: 4.5,
@@ -684,7 +282,7 @@ const VEHICLE_SETTINGS = {
     uprightTorque: 40,
     rollTorque: 15,
     pitchTorque: 10,
-    suspensionRideHeight: 0.55,
+    suspensionRideHeight: 0.43,
     suspensionTravel: 0.25,
     suspensionSpring: 2.8,
     suspensionDamping: 12.0,
@@ -698,21 +296,28 @@ const VEHICLE_SETTINGS = {
     maxAngularVelocity: 3.0,
 };
 const PHYSICS_COLLISION_STEPS = 2;
+const TEST_SOUND_ID = 'polyflow:test';
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
 let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
+let playTestSoundBtn, playTestSoundStatus;
 let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
 let importPropBtn, propFileInput, importedPropList, importedPropLibrary, propImportDefaultStatus, resetPropImportDefaultBtn;
+let postProcessUiRefs;
+let shadowDebugUiRefs;
 let propCollisionPrompt, propCollisionCopy, propCollisionRemember, propCollisionSimpleBtn, propCollisionComplexBtn, propCollisionCancelBtn;
 let inputActionsOpenBtn, inputActionsEditor, inputActionLeftBtn, inputActionRightBtn, inputActionMode, inputActionEditorInput, inputActionsEditorStatus, mouseActionApplyBtn, mouseActionResetBtn, inputActionsCloseBtn, mouseActionStatus;
 let objectScriptMenu, objectScriptTickActionBtn, objectScriptCollisionActionBtn;
 let objectScriptEditor, objectScriptEditorTitle, objectScriptEditorTarget, objectScriptEditorMode;
 let objectScriptEditorInput, objectScriptEditorStatus, objectScriptEditorApplyBtn, objectScriptEditorClearBtn, objectScriptEditorCancelBtn;
 let objectScriptTickToggleRow, objectScriptTickToggleInput;
-let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect;
+let actorEditor, actorEditorSummary, actorEditorStatus, actorKindSelect, actorLabelInput, actorScaleInput, actorImportedTemplateSelect, actorVehicleBodyTemplateSelect, actorVehicleWheelTemplateSelect, vehicleTemplateImportInput;
+// Tracks which vehicle slot ('body'|'wheel') triggered the file picker so the
+// import handler knows which select to update.
+let pendingVehicleTemplateImportSlot = null;
 let actorComponentCollisionInput, actorComponentPhysicsInput, actorComponentScriptsInput, actorEditorCreateBtn, actorEditorOpenScriptBtn, actorEditorCancelBtn;
-let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay;
+let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter, debugStatsOverlay, engineAudioDebugEl;
 let sceneUiPanel, sceneUiCount, sceneUiList;
 let mobileMenuToggleBtn, mobileModeToggleBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
@@ -741,6 +346,11 @@ const importedPropState = {
     templates: [],
     futureCollisionMode: null,
     promptResolver: null,
+    // Track the original imported File per template so "Save Scene Folder"
+    // can copy the raw asset alongside the .umap rather than inlining the
+    // mesh as a giant rootJson blob (which is what makes legacy .umap loads
+    // slow). Keyed by template.id.
+    sourceFiles: Object.create(null),
 };
 const actorEditorState = {
     open: false,
@@ -749,10 +359,15 @@ const blueprintState = {
     active: false,
     targetActor: null,
     selectedComponent: null,
+    selectedComponents: new Set(),
+    materialMultiSelectActive: false,
     floorMesh: null,
     savedCameraPosition: null,
     savedShowcaseAngles: null,
     savedBackground: null
+};
+const postProcessUiState = {
+    target: 'global',
 };
 const MOUSE_ACTION_STORAGE_KEY = 'polyflow-3d.mouse-actions.v1';
 const OBJECT_SCRIPT_STORAGE_KEY = 'polyflow-3d.object-scripts.v1';
@@ -760,32 +375,28 @@ const DEBUG_CONSOLE_LOG_LIMIT = 18;
 const DEBUG_CONSOLE_HISTORY_LIMIT = 24;
 const DEBUG_TIMING_SAMPLE_LIMIT = 30;
 const DEFAULT_MOUSE_ACTION_SCRIPTS = {
-    left: `const sphere = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, -1, 0), 0.5);
-if (sphere) {
-    physics.bodyInterface.SetMotionQuality(
-        sphere.GetID(),
-        physics.Jolt.EMotionQuality_LinearCast
-    );
+    left: `const direction = Character?.GetActorForwardVector?.()?.GetSafeNormal?.() ?? FVector.Forward();
+const playerLocation = Character?.GetActorLocation?.() ?? FVector.Zero();
+const spawnLocation = playerLocation
+    .Add(direction.Scale(1.8))
+    .Add(new FVector(0, -0.35, 0));
 
-    const direction = new THREE.Vector3();
-    camera.getWorldDirection(direction);
-    direction.normalize();
+const sphere = World.SpawnActor('Sphere', spawnLocation);
+const phys = sphere?.GetComponentByClass(UPrimitiveComponent);
 
-    const velocity = new physics.Jolt.Vec3(
-        direction.x * 36000,
-        direction.y * 36000,
-        direction.z * 36000
-    );
-
-    physics.bodyInterface.AddImpulse(sphere.GetID(), velocity);
-    physics.Jolt.destroy(velocity);
+if (phys) {
+    phys.AddImpulse(direction.Scale(36000));
 }`,
     right: `const cubesPerSide = 5;
 const totalCubes = 50;
-const cubeHalfExtent = 0.16;
-const spacing = cubeHalfExtent * 2;
+const spacing = 0.34;
 const baseYOffset = -0.8;
 let spawned = 0;
+const playerLocation = Character?.GetActorLocation?.() ?? new FVector(camera.position.x, camera.position.y, camera.position.z);
+const forward = Character?.GetActorForwardVector?.()?.GetSafeNormal?.() ?? new FVector(0, 0, -1);
+const right = Character?.GetActorRightVector?.()?.GetSafeNormal?.() ?? new FVector(1, 0, 0);
+const up = Character?.GetActorUpVector?.()?.GetSafeNormal?.() ?? new FVector(0, 1, 0);
+const baseCenter = playerLocation.Add(forward.Scale(2.6));
 
 for (let layer = 0; spawned < totalCubes; layer++) {
     for (let row = 0; row < cubesPerSide && spawned < totalCubes; row++) {
@@ -793,28 +404,11 @@ for (let layer = 0; spawned < totalCubes; layer++) {
             const xOffset = (col - (cubesPerSide - 1) * 0.5) * spacing;
             const yOffset = baseYOffset + layer * spacing;
             const zOffset = (row - (cubesPerSide - 1) * 0.5) * spacing;
-            const cube = spawnDynamicPrimitive(
-                'cube',
-                new THREE.Vector3(xOffset, yOffset, zOffset),
-                cubeHalfExtent,
-                {
-                    skipImpulse: true,
-                    activate: false,
-                    castShadow: false,
-                    receiveShadow: false,
-                    allowSleeping: true,
-                    linearDamping: 0.18,
-                    angularDamping: 0.22,
-                    motionQuality: physics.Jolt.EMotionQuality_Discrete,
-                }
-            );
-
-            if (cube) {
-                physics.bodyInterface.SetMotionQuality(
-                    cube.GetID(),
-                    physics.Jolt.EMotionQuality_Discrete
-                );
-            }
+            const spawnLocation = baseCenter
+                .Add(right.Scale(xOffset))
+                .Add(up.Scale(yOffset))
+                .Add(forward.Scale(zOffset));
+            World.SpawnActor('Cube', spawnLocation);
 
             spawned += 1;
         }
@@ -840,6 +434,7 @@ const objectScriptState = {
     menuScreenX: 0,
     menuScreenY: 0,
     targetPropId: '',
+    targetObjectUuid: '',
     targetEvent: 'tick',
 };
 const debugConsoleState = {
@@ -892,6 +487,8 @@ const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
+const mainDirectionalLightOffset = new THREE.Vector3(5, 10, 5);
+const mainDirectionalLightShadowFocus = new THREE.Vector3();
 const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
@@ -907,6 +504,14 @@ const raycastDebugState = {
 const collisionDebugState = {
     enabled: false,
     overlays: [],
+};
+const shadowDebugState = {
+    forceAllMeshes: false,
+    lastAppliedAt: 0,
+    lastMeshCount: 0,
+    lastUpdatedCount: 0,
+    lastLightCount: 0,
+    autoApplyIntervalMs: 500,
 };
 const gameplay = {
     canPlay: true,
@@ -931,6 +536,70 @@ const vehicleState = {
     activePropId: '',
     brakeHeld: false,
     tailWhipLastFrame: false,
+};
+const vehicleFx = createVehicleFx({
+    getScene: () => scene,
+    vehicleSettings: VEHICLE_SETTINGS,
+});
+const emitVehicleParticle = vehicleFx.emitParticle;
+const emitVehicleSurfaceEffects = vehicleFx.emitSurfaceEffects;
+const updateVehicleSurfaceEffects = vehicleFx.updateSurfaceEffects;
+const vehicleEngineAudio = {
+    activePropId: '',
+    backend: 'none',
+    listener: null,
+    wasmGenerator: null,
+    wasmLoadPromise: null,
+    wasmModuleReady: false,
+    wasmFailed: false,
+    wasmFailureReason: '',
+    wasmThrottleParam: null,
+    wasmRpmParam: null,
+    combustionNode: null,
+    harmonic2Node: null,
+    harmonic3Node: null,
+    bodyNode: null,
+    subNode: null,
+    whineNode: null,
+    noiseNode: null,
+    crackleNode: null,
+    idleLfo: null,
+    combustionGain: null,
+    harmonic2Gain: null,
+    harmonic3Gain: null,
+    bodyGain: null,
+    subGain: null,
+    whineGain: null,
+    intakeGain: null,
+    overrunGain: null,
+    crackleGain: null,
+    crackleEnvelope: null,
+    idleLfoGain: null,
+    idleLfoOffset: null,
+    outputGain: null,
+    compressor: null,
+    waveShaper: null,
+    exhaustFilter: null,
+    resonancePeak: null,
+    resonanceFilter: null,
+    intakeFilter: null,
+    hissFilter: null,
+    cabinFilter: null,
+    masterTone: null,
+    panner: null,
+    idleRpm: 540,
+    minRpm: 480,
+    maxRpm: 4200,
+    rpm: 540,
+    targetRpm: 540,
+    gear: 1,
+    throttle: 0,
+    lastThrottle: 0,
+    overrun: 0,
+    lastGrounded: false,
+    crackleCooldown: 0,
+    lastWorldPosition: new THREE.Vector3(),
+    velocity: new THREE.Vector3(),
 };
 const showcase = {
     looking: false,
@@ -976,6 +645,1126 @@ const physics = {
     jumpQueued: false,
     allowSliding: false,
 };
+const runtimeAudio = {
+    listener: null,
+    loader: new THREE.AudioLoader(),
+    unlocked: false,
+    testBuffer: null,
+    mediaTestUrl: null,
+    transientAnchors: new Set(),
+    resume() {
+        const context = this.listener?.context ?? null;
+        if (!context || context.state === 'running') {
+            this.unlocked = !!context;
+            return Promise.resolve();
+        }
+
+        return context.resume()
+            .then(() => {
+                this.unlocked = true;
+            })
+            .catch((error) => {
+                console.warn('Failed to resume audio context.', error);
+            });
+    },
+};
+
+
+async function playSpeakerTestTone({ frequency = 660, duration = 0.55, volume = 0.22 } = {}) {
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    if (!audioContext) {
+        return false;
+    }
+
+    await runtimeAudio.resume();
+
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const startTime = audioContext.currentTime + 0.01;
+    const endTime = startTime + Math.max(0.08, duration);
+
+    oscillator.type = 'square';
+    oscillator.frequency.setValueAtTime(frequency, startTime);
+    oscillator.frequency.exponentialRampToValueAtTime(Math.max(220, frequency * 0.72), endTime);
+
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.02, volume), startTime + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, endTime);
+
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+
+    oscillator.start(startTime);
+    oscillator.stop(endTime + 0.02);
+    oscillator.onended = () => {
+        oscillator.disconnect();
+        gain.disconnect();
+    };
+
+    return true;
+}
+
+async function playMediaElementTestSound() {
+    if (typeof Audio === 'undefined') {
+        return false;
+    }
+
+    if (!runtimeAudio.mediaTestUrl) {
+        runtimeAudio.mediaTestUrl = createMediaTestSoundUrl();
+    }
+
+    const audio = new Audio(runtimeAudio.mediaTestUrl);
+    audio.preload = 'auto';
+    audio.volume = 1;
+
+    try {
+        await audio.play();
+        return true;
+    } catch (error) {
+        console.warn('Failed to play media-element test sound.', error);
+        return false;
+    }
+}
+
+function resolveSoundLocation(location, fallbackDistance = 3) {
+    if (location?.isVector3) {
+        return location.clone();
+    }
+
+    if (location && typeof location === 'object' && Number.isFinite(location.x) && Number.isFinite(location.y) && Number.isFinite(location.z)) {
+        return new THREE.Vector3(location.x, location.y, location.z);
+    }
+
+    if (camera) {
+        const worldLocation = new THREE.Vector3();
+        const forward = new THREE.Vector3();
+        camera.getWorldPosition(worldLocation);
+        camera.getWorldDirection(forward);
+        worldLocation.addScaledVector(forward, fallbackDistance);
+        return worldLocation;
+    }
+
+    return new THREE.Vector3();
+}
+
+function cleanupTransientAudio(anchor, sound) {
+    if (!anchor) return;
+
+    runtimeAudio.transientAnchors.delete(anchor);
+    if (sound?.isPlaying) {
+        sound.stop();
+    }
+    if (sound?.parent === anchor) {
+        anchor.remove(sound);
+    }
+    sound?.disconnect?.();
+    if (anchor.parent === scene) {
+        scene.remove(anchor);
+    }
+}
+
+function clampVehicleEngineRpm(value) {
+    return THREE.MathUtils.clamp(
+        value,
+        vehicleEngineAudio.minRpm,
+        vehicleEngineAudio.maxRpm,
+    );
+}
+
+
+function resetVehicleEngineAudioState() {
+    vehicleEngineAudio.activePropId = '';
+    vehicleEngineAudio.rpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.targetRpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.gear = 1;
+    vehicleEngineAudio.throttle = 0;
+    vehicleEngineAudio.lastThrottle = 0;
+    vehicleEngineAudio.overrun = 0;
+    vehicleEngineAudio.lastGrounded = false;
+    vehicleEngineAudio.backend = vehicleEngineAudio.wasmGenerator
+        ? 'wasm'
+        : vehicleEngineAudio.outputGain
+            ? 'js'
+            : 'none';
+    vehicleEngineAudio.crackleCooldown = 0;
+    vehicleEngineAudio.lastWorldPosition.set(0, 0, 0);
+    vehicleEngineAudio.velocity.set(0, 0, 0);
+}
+
+function createVehicleEngineWasmParameters() {
+    // Values cribbed from the upstream demo's stable preset
+    // (vendor/engine-sound-src/src/engine_sound_generator/sounds_worklet_wasm.htm:90).
+    // The waveguide simulation is sensitive to reflection-factor build-up;
+    // higher coefficients or longer guides cause the internal state to ring
+    // out into silence (or NaN) after a few seconds, which is what the
+    // "worked for 3 seconds then died" symptom looks like.
+    return {
+        cylinders: 4,
+        intakeWaveguideLength: 100,
+        exhaustWaveguideLength: 100,
+        extractorWaveguideLength: 100,
+        intakeOpenReflectionFactor: 0.01,
+        intakeClosedReflectionFactor: 0.95,
+        exhaustOpenReflectionFactor: 0.01,
+        exhaustClosedReflectionFactor: 0.95,
+        ignitionTime: 0.016,
+        straightPipeWaveguideLength: 128,
+        straightPipeReflectionFactor: 0.01,
+        mufflerElementsLength: [10, 15, 20, 25],
+        action: 0.1,
+        outletWaveguideLength: 5,
+        outletReflectionFactor: 0.01,
+    };
+}
+
+function describeVehicleEngineWasmError(error) {
+    const message = error?.message ? String(error.message) : String(error ?? 'Unknown error');
+    if (
+        error?.name === 'AbortError'
+        || message.includes('Unable to load a worklet')
+        || message.includes('environment detection error')
+        || message.includes('Chrome v2147483647')
+    ) {
+        return 'The vendored engine-sound worklet is still built for shell-only Emscripten output, so AudioWorklet startup aborts before the wasm engine can run.';
+    }
+    return message;
+}
+
+function markVehicleEngineWasmUnavailable(error) {
+    const reason = describeVehicleEngineWasmError(error);
+    const shouldLog = !vehicleEngineAudio.wasmFailed || vehicleEngineAudio.wasmFailureReason !== reason;
+    vehicleEngineAudio.wasmModuleReady = false;
+    vehicleEngineAudio.wasmFailed = true;
+    vehicleEngineAudio.wasmFailureReason = reason;
+    if (shouldLog) {
+        console.warn('Vehicle engine wasm audio unavailable. Falling back to legacy engine audio.', reason, error);
+    }
+    shutdownVehicleEngineAudioWasm();
+}
+
+function shutdownVehicleEngineAudioWasm() {
+    const generator = vehicleEngineAudio.wasmGenerator;
+    vehicleEngineAudio.wasmGenerator = null;
+    vehicleEngineAudio.wasmThrottleParam = null;
+    vehicleEngineAudio.wasmRpmParam = null;
+
+    if (!generator) {
+        return;
+    }
+
+    try { generator.stop(); } catch (_) {}
+    try { generator.disconnect(); } catch (_) {}
+    try { generator.removeFromParent(); } catch (_) {}
+}
+
+function primeVehicleEngineAudioWasm() {
+    const listener = runtimeAudio.listener;
+    const audioContext = listener?.context ?? null;
+    if (!listener || !audioContext || vehicleEngineAudio.wasmModuleReady || vehicleEngineAudio.wasmFailed || vehicleEngineAudio.wasmLoadPromise) {
+        return vehicleEngineAudio.wasmLoadPromise;
+    }
+
+    const loadingManager = new THREE.LoadingManager();
+    vehicleEngineAudio.wasmLoadPromise = WasmEngineSoundGenerator.load(
+        loadingManager,
+        listener,
+    )
+        .then(() => {
+            vehicleEngineAudio.wasmModuleReady = true;
+            vehicleEngineAudio.wasmFailureReason = '';
+            return true;
+        })
+        .catch((error) => {
+            markVehicleEngineWasmUnavailable(error);
+            return false;
+        })
+        .finally(() => {
+            vehicleEngineAudio.wasmLoadPromise = null;
+        });
+
+    return vehicleEngineAudio.wasmLoadPromise;
+}
+
+function shutdownLegacyVehicleEngineAudio() {
+    const context = runtimeAudio.listener?.context ?? null;
+    const now = context?.currentTime ?? 0;
+    const fadeOutTime = now + 0.08;
+
+    if (vehicleEngineAudio.outputGain) {
+        const gain = vehicleEngineAudio.outputGain.gain;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+        gain.exponentialRampToValueAtTime(0.0001, fadeOutTime);
+    }
+
+    const sourceNodes = [
+        vehicleEngineAudio.combustionNode,
+        vehicleEngineAudio.harmonic2Node,
+        vehicleEngineAudio.harmonic3Node,
+        vehicleEngineAudio.bodyNode,
+        vehicleEngineAudio.subNode,
+        vehicleEngineAudio.whineNode,
+        vehicleEngineAudio.noiseNode,
+        vehicleEngineAudio.crackleNode,
+        vehicleEngineAudio.idleLfo,
+    ];
+    sourceNodes.forEach((node) => {
+        if (!node) return;
+        try { node.stop(fadeOutTime + 0.02); } catch (_) {}
+        try { node.disconnect(); } catch (_) {}
+    });
+
+    const otherNodes = [
+        vehicleEngineAudio.combustionGain,
+        vehicleEngineAudio.harmonic2Gain,
+        vehicleEngineAudio.harmonic3Gain,
+        vehicleEngineAudio.bodyGain,
+        vehicleEngineAudio.subGain,
+        vehicleEngineAudio.whineGain,
+        vehicleEngineAudio.intakeGain,
+        vehicleEngineAudio.overrunGain,
+        vehicleEngineAudio.crackleGain,
+        vehicleEngineAudio.crackleEnvelope,
+        vehicleEngineAudio.idleLfoGain,
+        vehicleEngineAudio.idleLfoOffset,
+        vehicleEngineAudio.outputGain,
+        vehicleEngineAudio.compressor,
+        vehicleEngineAudio.waveShaper,
+        vehicleEngineAudio.exhaustFilter,
+        vehicleEngineAudio.resonancePeak,
+        vehicleEngineAudio.resonanceFilter,
+        vehicleEngineAudio.intakeFilter,
+        vehicleEngineAudio.hissFilter,
+        vehicleEngineAudio.cabinFilter,
+        vehicleEngineAudio.masterTone,
+        vehicleEngineAudio.panner,
+    ];
+    otherNodes.forEach((node) => {
+        if (!node) return;
+        try { node.disconnect(); } catch (_) {}
+    });
+
+    [
+        'combustionNode', 'harmonic2Node', 'harmonic3Node', 'bodyNode', 'subNode', 'whineNode', 'noiseNode',
+        'crackleNode', 'idleLfo',
+        'combustionGain', 'harmonic2Gain', 'harmonic3Gain', 'bodyGain', 'subGain', 'whineGain',
+        'intakeGain', 'overrunGain', 'crackleGain', 'crackleEnvelope', 'idleLfoGain', 'idleLfoOffset',
+        'outputGain', 'compressor', 'waveShaper',
+        'exhaustFilter', 'resonancePeak', 'resonanceFilter', 'intakeFilter', 'hissFilter', 'cabinFilter', 'masterTone',
+        'panner', 'listener',
+    ].forEach((key) => { vehicleEngineAudio[key] = null; });
+    resetVehicleEngineAudioState();
+}
+
+function shutdownVehicleEngineAudio() {
+    shutdownVehicleEngineAudioWasm();
+    shutdownLegacyVehicleEngineAudio();
+    vehicleEngineAudio.backend = 'none';
+}
+
+// Soft-silence the engine audio without tearing down the wasm worklet.
+// Called when gameplay drops out so the worklet stays loaded for the next
+// drive session (avoids re-initialising the AudioWorklet on every reseat).
+function silenceVehicleEngineAudio() {
+    const ctx = runtimeAudio.listener?.context ?? null;
+    const now = ctx?.currentTime ?? 0;
+    const fadeOut = now + 0.12;
+
+    const generator = vehicleEngineAudio.wasmGenerator;
+    if (generator?.gain?.gain) {
+        const gain = generator.gain.gain;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+        gain.exponentialRampToValueAtTime(0.0001, fadeOut);
+    }
+    if (vehicleEngineAudio.outputGain) {
+        const gain = vehicleEngineAudio.outputGain.gain;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+        gain.exponentialRampToValueAtTime(0.0001, fadeOut);
+    }
+    resetVehicleEngineAudioState();
+}
+
+function ensureLegacyVehicleEngineAudio() {
+    const listener = runtimeAudio.listener;
+    const audioContext = listener?.context ?? null;
+    const listenerInput = typeof listener?.getInput === 'function' ? listener.getInput() : null;
+    if (!listener || !audioContext) {
+        return null;
+    }
+
+    if (vehicleEngineAudio.outputGain && vehicleEngineAudio.listener === listener) {
+        vehicleEngineAudio.backend = 'js';
+        return vehicleEngineAudio;
+    }
+
+    shutdownLegacyVehicleEngineAudio();
+
+    // ── Spatializer ──────────────────────────────────────────────────────────────
+    const panner = audioContext.createPanner();
+    panner.panningModel = 'HRTF';
+    panner.distanceModel = 'inverse';
+    panner.refDistance = 5;
+    panner.maxDistance = 120;
+    panner.rolloffFactor = 0.85;
+    panner.coneInnerAngle = 200;
+    panner.coneOuterAngle = 320;
+    panner.coneOuterGain = 0.72;
+
+    // ── Master output ────────────────────────────────────────────────────────────
+    const outputGain = audioContext.createGain();
+    outputGain.gain.value = 0.0001;
+
+    const compressor = audioContext.createDynamicsCompressor();
+    compressor.threshold.value = -22;
+    compressor.knee.value = 18;
+    compressor.ratio.value = 2.4;
+    compressor.attack.value = 0.012;
+    compressor.release.value = 0.22;
+
+    const waveShaper = audioContext.createWaveShaper();
+    waveShaper.curve = createCombustionDistortionCurve(0.15);
+    waveShaper.oversample = '4x';
+
+    // Master tone-tamer — rolls off upper harshness, keeps Warthog growl below ~1.6 kHz.
+    const masterTone = audioContext.createBiquadFilter();
+    masterTone.type = 'lowpass';
+    masterTone.frequency.value = 1600;
+    masterTone.Q.value = 0.5;
+
+    const cabinFilter = audioContext.createBiquadFilter();
+    cabinFilter.type = 'lowshelf';
+    cabinFilter.frequency.value = 280;
+    cabinFilter.gain.value = 8;
+
+    // ── Exhaust path (combustion thump + harmonics) ──────────────────────────────
+    const exhaustFilter = audioContext.createBiquadFilter();
+    exhaustFilter.type = 'lowpass';
+    exhaustFilter.frequency.value = 360;
+    exhaustFilter.Q.value = 0.9;
+
+    const resonancePeak = audioContext.createBiquadFilter();
+    resonancePeak.type = 'peaking';
+    resonancePeak.frequency.value = 130;
+    resonancePeak.Q.value = 3.0;
+    resonancePeak.gain.value = 6;
+
+    const resonanceFilter = audioContext.createBiquadFilter();
+    resonanceFilter.type = 'lowpass';
+    resonanceFilter.frequency.value = 800;
+    resonanceFilter.Q.value = 0.7;
+
+    // Combustion: looped pulse buffer at firing freq → throaty individual cylinder thumps.
+    const combustionBuffer = createCombustionPulseBuffer(audioContext);
+    const combustionNode = audioContext.createBufferSource();
+    combustionNode.buffer = combustionBuffer;
+    combustionNode.loop = true;
+    combustionNode.playbackRate.value = 1;
+    const combustionGain = audioContext.createGain();
+    combustionGain.gain.value = 0.0001;
+
+    // 2nd-order harmonic — triangle (gentler than saw, fewer high partials).
+    const harmonic2Node = audioContext.createOscillator();
+    harmonic2Node.type = 'triangle';
+    harmonic2Node.frequency.value = 90;
+    const harmonic2Gain = audioContext.createGain();
+    harmonic2Gain.gain.value = 0.0001;
+
+    // 3rd-order harmonic — sine (just adds gentle warmth, no buzz).
+    const harmonic3Node = audioContext.createOscillator();
+    harmonic3Node.type = 'sine';
+    harmonic3Node.frequency.value = 130;
+    const harmonic3Gain = audioContext.createGain();
+    harmonic3Gain.gain.value = 0.0001;
+
+    // Sub-octave for chest-thump body.
+    const subNode = audioContext.createOscillator();
+    subNode.type = 'sine';
+    subNode.frequency.value = 32;
+    const subGain = audioContext.createGain();
+    subGain.gain.value = 0.0001;
+
+    // Mid-body resonance (triangle).
+    const bodyNode = audioContext.createOscillator();
+    bodyNode.type = 'triangle';
+    bodyNode.frequency.value = 110;
+    const bodyGain = audioContext.createGain();
+    bodyGain.gain.value = 0.0001;
+
+    // ── Intake path (gear/belt rumble + soft turbulence) ─────────────────────────
+    const intakeFilter = audioContext.createBiquadFilter();
+    intakeFilter.type = 'bandpass';
+    intakeFilter.frequency.value = 420;
+    intakeFilter.Q.value = 0.9;
+
+    const hissFilter = audioContext.createBiquadFilter();
+    hissFilter.type = 'bandpass';
+    hissFilter.frequency.value = 800;
+    hissFilter.Q.value = 0.7;
+
+    const whineNode = audioContext.createOscillator();
+    whineNode.type = 'triangle';
+    whineNode.frequency.value = 140;
+    const whineGain = audioContext.createGain();
+    whineGain.gain.value = 0.0001;
+
+    const noiseBuffer = createEngineNoiseBuffer(audioContext);
+    const noiseNode = audioContext.createBufferSource();
+    noiseNode.buffer = noiseBuffer;
+    noiseNode.loop = true;
+
+    const intakeGain = audioContext.createGain();
+    intakeGain.gain.value = 0.0001;
+
+    const overrunGain = audioContext.createGain();
+    overrunGain.gain.value = 0.0001;
+
+    // Crackle/pop on overrun — separate noise tap with its own envelope.
+    const crackleNode = audioContext.createBufferSource();
+    crackleNode.buffer = noiseBuffer;
+    crackleNode.loop = true;
+    const crackleEnvelope = audioContext.createGain();
+    crackleEnvelope.gain.value = 0.0001;
+    const crackleGain = audioContext.createGain();
+    crackleGain.gain.value = 0.18;
+
+    // Idle LFO — slow wobble on combustion gain so idle isn't flat. Adds to combustionGain.gain.
+    const idleLfo = audioContext.createOscillator();
+    idleLfo.type = 'sine';
+    idleLfo.frequency.value = 4.6;
+    const idleLfoGain = audioContext.createGain();
+    idleLfoGain.gain.value = 0;
+    const idleLfoOffset = null;
+
+    // ── Wiring ───────────────────────────────────────────────────────────────────
+    // Combustion thump path
+    combustionNode.connect(combustionGain);
+    combustionGain.connect(exhaustFilter);
+    harmonic2Node.connect(harmonic2Gain);
+    harmonic2Gain.connect(exhaustFilter);
+    harmonic3Node.connect(harmonic3Gain);
+    harmonic3Gain.connect(exhaustFilter);
+    bodyNode.connect(bodyGain);
+    bodyGain.connect(resonancePeak);
+    exhaustFilter.connect(resonancePeak);
+    resonancePeak.connect(resonanceFilter);
+    resonanceFilter.connect(waveShaper);
+
+    // Sub thump goes around the saturator to keep low end clean.
+    subNode.connect(subGain);
+    subGain.connect(cabinFilter);
+
+    // Intake path
+    whineNode.connect(whineGain);
+    whineGain.connect(intakeFilter);
+    noiseNode.connect(intakeGain);
+    intakeGain.connect(intakeFilter);
+    intakeFilter.connect(panner);
+
+    // Overrun hiss
+    noiseNode.connect(overrunGain);
+    overrunGain.connect(hissFilter);
+    hissFilter.connect(panner);
+
+    // Crackle path — gated noise into hiss filter for snappy pops.
+    crackleNode.connect(crackleEnvelope);
+    crackleEnvelope.connect(crackleGain);
+    crackleGain.connect(hissFilter);
+
+    // Saturated combustion + clean sub merge into cabin lowshelf.
+    waveShaper.connect(cabinFilter);
+    cabinFilter.connect(panner);
+
+    // Idle LFO adds wobble directly to combustionGain.gain.
+    idleLfo.connect(idleLfoGain);
+    idleLfoGain.connect(combustionGain.gain);
+
+    panner.connect(compressor);
+    compressor.connect(masterTone);
+    masterTone.connect(outputGain);
+    outputGain.connect(listenerInput ?? audioContext.destination);
+
+    const startTime = audioContext.currentTime + 0.01;
+    combustionNode.start(startTime);
+    harmonic2Node.start(startTime);
+    harmonic3Node.start(startTime);
+    bodyNode.start(startTime);
+    subNode.start(startTime);
+    whineNode.start(startTime);
+    noiseNode.start(startTime);
+    crackleNode.start(startTime);
+    idleLfo.start(startTime);
+
+    Object.assign(vehicleEngineAudio, {
+        listener,
+        combustionNode, harmonic2Node, harmonic3Node, bodyNode, subNode, whineNode, noiseNode,
+        crackleNode, idleLfo,
+        combustionGain, harmonic2Gain, harmonic3Gain, bodyGain, subGain, whineGain,
+        intakeGain, overrunGain, crackleGain, crackleEnvelope, idleLfoGain, idleLfoOffset,
+        outputGain, compressor, waveShaper, masterTone,
+        exhaustFilter, resonancePeak, resonanceFilter, intakeFilter, hissFilter, cabinFilter,
+        panner,
+    });
+    vehicleEngineAudio.rpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.targetRpm = vehicleEngineAudio.idleRpm;
+    vehicleEngineAudio.gear = 1;
+    vehicleEngineAudio.throttle = 0;
+    vehicleEngineAudio.lastThrottle = 0;
+    vehicleEngineAudio.overrun = 0;
+    vehicleEngineAudio.crackleCooldown = 0;
+    vehicleEngineAudio.lastWorldPosition.set(0, 0, 0);
+    vehicleEngineAudio.velocity.set(0, 0, 0);
+    vehicleEngineAudio.backend = 'js';
+    return vehicleEngineAudio;
+}
+
+function ensureVehicleEngineAudioWasm(vehicle) {
+    const listener = runtimeAudio.listener;
+    const audioContext = listener?.context ?? null;
+    const mesh = vehicle?.mesh ?? null;
+    if (!listener || !audioContext || !mesh || !vehicleEngineAudio.wasmModuleReady || vehicleEngineAudio.wasmFailed) {
+        return null;
+    }
+
+    const existingGenerator = vehicleEngineAudio.wasmGenerator;
+    if (existingGenerator && vehicleEngineAudio.listener === listener) {
+        if (existingGenerator.parent !== mesh) {
+            vehicleEngineAudio.wasmReattachCount = (vehicleEngineAudio.wasmReattachCount || 0) + 1;
+            console.warn('[wasm-engine] reparenting generator (count=', vehicleEngineAudio.wasmReattachCount, ')');
+            try { existingGenerator.removeFromParent(); } catch (_) {}
+            mesh.add(existingGenerator);
+            existingGenerator.position.set(0, 0.45, 0);
+            existingGenerator.reset?.();
+        }
+        vehicleEngineAudio.backend = 'wasm';
+        return vehicleEngineAudio;
+    }
+
+    vehicleEngineAudio.wasmCreateCount = (vehicleEngineAudio.wasmCreateCount || 0) + 1;
+    console.warn('[wasm-engine] creating new generator (count=', vehicleEngineAudio.wasmCreateCount, ')');
+    shutdownLegacyVehicleEngineAudio();
+    shutdownVehicleEngineAudioWasm();
+
+    let generator;
+    try {
+        generator = new WasmEngineSoundGenerator({
+            listener,
+            parameters: createVehicleEngineWasmParameters(),
+        });
+    } catch (error) {
+        markVehicleEngineWasmUnavailable(error);
+        return null;
+    }
+
+    const throttleParam = generator.worklet?.parameters?.get('throttle') ?? null;
+    const rpmParam = generator.worklet?.parameters?.get('rpm') ?? null;
+
+    Object.assign(vehicleEngineAudio, {
+        listener,
+        wasmGenerator: generator,
+        wasmThrottleParam: throttleParam,
+        wasmRpmParam: rpmParam,
+        backend: 'wasm',
+    });
+
+    if (!throttleParam || !rpmParam) {
+        markVehicleEngineWasmUnavailable(new Error('The engine sound worklet did not expose the expected throttle/rpm parameters.'));
+        return null;
+    }
+
+    // Seed the AudioParams so the very first process() call has firing-range
+    // RPM. Defaults are 0/0 which produces silence and (with the previous
+    // clamp WaveShaper) caused the "beep then silence" symptom.
+    const ctxNow = audioContext.currentTime;
+    throttleParam.setValueAtTime(0, ctxNow);
+    rpmParam.setValueAtTime(vehicleEngineAudio.idleRpm, ctxNow);
+
+    // Surface worklet processor errors. AudioWorklet.process() throwing
+    // silently kills the node — browser stops calling process() forever and
+    // the result is "audio worked for N seconds then died" with no console
+    // output. Hook the error event so we know.
+    if (generator.worklet) {
+        generator.worklet.onprocessorerror = (event) => {
+            vehicleEngineAudio.wasmProcessorError = String(event?.message || event || 'processor error');
+            console.error('[wasm-engine] AudioWorklet processor error:', event);
+            markVehicleEngineWasmUnavailable(new Error(vehicleEngineAudio.wasmProcessorError));
+        };
+    }
+    console.info('[wasm-engine] generator created. sampleRate =', audioContext.sampleRate, 'state =', audioContext.state);
+
+    generator.name = 'vehicle-engine-wasm-audio';
+    generator.position.set(0, 0.45, 0);
+    generator.setRefDistance(5);
+    generator.setMaxDistance(120);
+    generator.setRolloffFactor(0.85);
+    generator.setDirectionalCone(200, 320, 0.72);
+    generator.gain.gain.value = 0.4;
+    generator.gainIntake.gain.value = 0.16;
+    generator.gainEngineBlockVibrations.gain.value = 0.22;
+    generator.gainOutlet.gain.value = 0.3;
+    mesh.add(generator);
+
+    try {
+        generator.play();
+    } catch (error) {
+        markVehicleEngineWasmUnavailable(error);
+        return null;
+    }
+
+    resetVehicleEngineAudioState();
+    return vehicleEngineAudio;
+}
+
+function ensureVehicleEngineAudio(vehicle = null) {
+    primeVehicleEngineAudioWasm();
+    return ensureVehicleEngineAudioWasm(vehicle) ?? ensureLegacyVehicleEngineAudio();
+}
+
+function updateLegacyVehicleEngineAudio(delta, vehicle, telemetry) {
+    const engine = ensureLegacyVehicleEngineAudio();
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    if (!engine || !audioContext || !vehicle?.id || !vehicle?.mesh) {
+        shutdownLegacyVehicleEngineAudio();
+        return;
+    }
+
+    const now = audioContext.currentTime;
+    const isActiveVehicle = gameplay.active && vehicleState.activePropId === vehicle.id;
+    const mesh = vehicle.mesh;
+    const body = getActorBody(vehicle);
+    const bodyId = body?.GetID?.() ?? null;
+
+    if (!isActiveVehicle || !bodyId) {
+        if (engine.outputGain) {
+            const gain = engine.outputGain.gain;
+            gain.cancelScheduledValues(now);
+            gain.setValueAtTime(Math.max(0.0001, gain.value || 0.0001), now);
+            gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+        }
+        resetVehicleEngineAudioState();
+        return;
+    }
+
+    runtimeAudio.resume();
+    engine.activePropId = vehicle.id;
+
+    const throttleInput = telemetry?.throttleInput ?? 0;
+    const brakeHeld = telemetry?.brakeHeld === true;
+    const grounded = telemetry?.grounded === true;
+    const forwardSpeed = telemetry?.forwardSpeed ?? 0;
+    const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
+    const throttleDemand = Math.abs(throttleInput);
+    const gearCount = 5;
+    const targetGear = THREE.MathUtils.clamp(
+        Math.floor(speedRatio * (gearCount - 0.15) + 1 + throttleDemand * 0.25),
+        1,
+        gearCount,
+    );
+    engine.gear = THREE.MathUtils.damp(engine.gear, targetGear, grounded ? 5.8 : 2.4, delta);
+    const gearIndex = THREE.MathUtils.clamp(Math.round(engine.gear), 1, gearCount);
+    const gearStartRatio = (gearIndex - 1) / gearCount;
+    const gearEndRatio = gearIndex / gearCount;
+    const gearBand = Math.max(0.0001, gearEndRatio - gearStartRatio);
+    const gearProgress = THREE.MathUtils.clamp((speedRatio - gearStartRatio) / gearBand, 0, 1);
+    const revKick = grounded ? throttleDemand * 1400 : throttleDemand * 650;
+    const brakeDip = brakeHeld ? 220 : 0;
+    const targetRpm = clampVehicleEngineRpm(
+        engine.idleRpm + gearProgress * (engine.maxRpm - engine.idleRpm * 1.08) + revKick - brakeDip
+    );
+    const rpmLambda = throttleDemand > 0.04
+        ? 6.5
+        : brakeHeld
+            ? 5.2
+            : 2.8;
+    engine.targetRpm = targetRpm;
+    engine.rpm = THREE.MathUtils.damp(engine.rpm, targetRpm, rpmLambda, delta);
+    engine.throttle = THREE.MathUtils.damp(engine.throttle, throttleDemand, grounded ? 7.5 : 3.5, delta);
+    const throttleDrop = Math.max(0, engine.lastThrottle - throttleDemand);
+    const overrunTarget = (!brakeHeld && throttleDemand < 0.08 && speedRatio > 0.18)
+        ? THREE.MathUtils.clamp(0.22 + speedRatio * 0.9 + throttleDrop * 1.8, 0, 1)
+        : 0;
+    engine.overrun = THREE.MathUtils.damp(engine.overrun, overrunTarget, overrunTarget > 0 ? 9.5 : 4.5, delta);
+    engine.lastThrottle = throttleDemand;
+    engine.lastGrounded = grounded;
+
+    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1600, 0, 1);
+    const rpmRatio = THREE.MathUtils.clamp((engine.rpm - engine.minRpm) / (engine.maxRpm - engine.minRpm), 0, 1);
+    // V8 4-stroke: 4 power strokes per rev → firing freq = rpm/60 * 4.
+    // Halved further to land in chunky 18–140 Hz burble range so each cylinder is audible.
+    const cylinders = 8;
+    const firingFrequency = THREE.MathUtils.clamp((engine.rpm / 60) * (cylinders / 2), 18, 160);
+    // Combustion buffer fundamental is 38 Hz; rate scales fundamental to firing freq.
+    const combustionPlaybackRate = THREE.MathUtils.clamp(firingFrequency / 38, 0.45, 3.6);
+
+    // Harmonic stack tracks combustion — kept low-mid, no top end.
+    const harmonic2Frequency = firingFrequency * 1.5;
+    const harmonic3Frequency = firingFrequency * 2.0;
+    const subFrequency = THREE.MathUtils.clamp(firingFrequency * 0.5, 16, 70);
+    const bodyFrequency = THREE.MathUtils.lerp(firingFrequency * 1.1, firingFrequency * 1.35, idleBlend);
+    // No turbo whine — Warthog is naturally aspirated. This becomes a subtle gear/belt whine
+    // that only appears under speed, low pitch.
+    const intakeWhineFrequency = THREE.MathUtils.lerp(120, 480, Math.pow(speedRatio, 0.9));
+
+    // ── Per-section levels — Warthog: massive low-end, throaty mids, no top whine ──
+    const masterGain = 0.12 + speedRatio * 0.10 + engine.throttle * 0.16 + engine.overrun * 0.03 + (grounded ? 0.02 : 0);
+    const combustionLevel = 0.36 + engine.throttle * 0.20 + speedRatio * 0.06 + idleBlend * 0.06;
+    const harmonic2Level = 0.04 + engine.throttle * 0.10 + rpmRatio * 0.05;
+    const harmonic3Level = 0.01 + engine.throttle * 0.05 + Math.pow(rpmRatio, 1.4) * 0.03;
+    const bodyLevel = 0.10 + idleBlend * 0.10 + speedRatio * 0.06 + engine.overrun * 0.03;
+    const subLevel = 0.32 + idleBlend * 0.12 + engine.throttle * 0.18;
+    const whineLevel = 0.0005 + Math.max(0, speedRatio - 0.2) * 0.012;
+    const intakeNoiseLevel = 0.004 + engine.throttle * 0.024 + speedRatio * 0.008;
+    const overrunNoiseLevel = 0.001 + engine.overrun * 0.04 + (brakeHeld ? 0.008 : 0);
+
+    // Filter frequencies — Warthog stays low-mid; only the upper roll-off opens with throttle.
+    const exhaustFilterFrequency = 260 + rpmRatio * 320 + engine.throttle * 180;
+    const resonancePeakFrequency = 110 + rpmRatio * 140 + idleBlend * 40;
+    const resonanceCutoff = 600 + idleBlend * 380 + engine.throttle * 720 + speedRatio * 220;
+    const intakeFilterFrequency = 360 + engine.throttle * 480 + speedRatio * 220;
+    const hissCutoff = 1800 + engine.overrun * 800 + speedRatio * 400;
+
+    // ── Apply ────────────────────────────────────────────────────────────────────
+    engine.combustionNode.playbackRate.cancelScheduledValues(now);
+    engine.combustionNode.playbackRate.setTargetAtTime(combustionPlaybackRate, now, 0.04);
+    engine.harmonic2Node.frequency.cancelScheduledValues(now);
+    engine.harmonic2Node.frequency.setTargetAtTime(harmonic2Frequency, now, 0.05);
+    engine.harmonic3Node.frequency.cancelScheduledValues(now);
+    engine.harmonic3Node.frequency.setTargetAtTime(harmonic3Frequency, now, 0.05);
+    engine.bodyNode.frequency.cancelScheduledValues(now);
+    engine.bodyNode.frequency.setTargetAtTime(bodyFrequency, now, 0.06);
+    engine.subNode.frequency.cancelScheduledValues(now);
+    engine.subNode.frequency.setTargetAtTime(subFrequency, now, 0.08);
+    engine.whineNode.frequency.cancelScheduledValues(now);
+    engine.whineNode.frequency.setTargetAtTime(intakeWhineFrequency, now, 0.06);
+
+    engine.outputGain.gain.cancelScheduledValues(now);
+    engine.outputGain.gain.setTargetAtTime(Math.max(0.0001, masterGain), now, grounded ? 0.06 : 0.12);
+    engine.combustionGain.gain.cancelScheduledValues(now);
+    engine.combustionGain.gain.setTargetAtTime(Math.max(0.0001, combustionLevel), now, 0.05);
+    // Idle wobble LFO sums on top of combustionGain.gain; depth shrinks with throttle and revs.
+    engine.idleLfoGain.gain.cancelScheduledValues(now);
+    engine.idleLfoGain.gain.setTargetAtTime(0.06 * (1 - engine.throttle) * (1 - rpmRatio * 0.6), now, 0.1);
+
+    engine.harmonic2Gain.gain.cancelScheduledValues(now);
+    engine.harmonic2Gain.gain.setTargetAtTime(Math.max(0.0001, harmonic2Level), now, 0.06);
+    engine.harmonic3Gain.gain.cancelScheduledValues(now);
+    engine.harmonic3Gain.gain.setTargetAtTime(Math.max(0.0001, harmonic3Level), now, 0.06);
+    engine.bodyGain.gain.cancelScheduledValues(now);
+    engine.bodyGain.gain.setTargetAtTime(Math.max(0.0001, bodyLevel), now, 0.06);
+    engine.subGain.gain.cancelScheduledValues(now);
+    engine.subGain.gain.setTargetAtTime(Math.max(0.0001, subLevel), now, 0.08);
+    engine.whineGain.gain.cancelScheduledValues(now);
+    engine.whineGain.gain.setTargetAtTime(Math.max(0.0001, whineLevel), now, 0.06);
+    engine.intakeGain.gain.cancelScheduledValues(now);
+    engine.intakeGain.gain.setTargetAtTime(Math.max(0.0001, intakeNoiseLevel), now, 0.07);
+    engine.overrunGain.gain.cancelScheduledValues(now);
+    engine.overrunGain.gain.setTargetAtTime(Math.max(0.0001, overrunNoiseLevel), now, 0.04);
+
+    engine.exhaustFilter.frequency.cancelScheduledValues(now);
+    engine.exhaustFilter.frequency.setTargetAtTime(exhaustFilterFrequency, now, 0.05);
+    engine.resonancePeak.frequency.cancelScheduledValues(now);
+    engine.resonancePeak.frequency.setTargetAtTime(resonancePeakFrequency, now, 0.08);
+    engine.resonancePeak.gain.cancelScheduledValues(now);
+    engine.resonancePeak.gain.setTargetAtTime(2 + engine.throttle * 2, now, 0.08);
+    engine.resonanceFilter.frequency.cancelScheduledValues(now);
+    engine.resonanceFilter.frequency.setTargetAtTime(resonanceCutoff, now, 0.08);
+    engine.intakeFilter.frequency.cancelScheduledValues(now);
+    engine.intakeFilter.frequency.setTargetAtTime(intakeFilterFrequency, now, 0.07);
+    engine.hissFilter.frequency.cancelScheduledValues(now);
+    engine.hissFilter.frequency.setTargetAtTime(hissCutoff, now, 0.05);
+
+    // ── Crackle / pop on lift-off — sparse and quiet, just texture ──────────────
+    engine.crackleCooldown = Math.max(0, engine.crackleCooldown - delta);
+    if (engine.overrun > 0.6 && engine.crackleCooldown <= 0 && Math.random() < 0.25) {
+        const popTime = now + 0.005;
+        const popDuration = 0.05 + Math.random() * 0.06;
+        const popPeak = 0.12 + engine.overrun * 0.12 + Math.random() * 0.08;
+        engine.crackleEnvelope.gain.cancelScheduledValues(popTime);
+        engine.crackleEnvelope.gain.setValueAtTime(0.0001, popTime);
+        engine.crackleEnvelope.gain.exponentialRampToValueAtTime(popPeak, popTime + 0.008);
+        engine.crackleEnvelope.gain.exponentialRampToValueAtTime(0.0001, popTime + popDuration);
+        engine.crackleCooldown = 0.18 + Math.random() * 0.32;
+    }
+
+    // ── Spatializer position + simple Doppler via velocity ──────────────────────
+    const worldPosition = mesh.getWorldPosition(new THREE.Vector3());
+    const worldForward = mesh.getWorldDirection(new THREE.Vector3()).normalize();
+    if (delta > 0 && engine.lastWorldPosition.lengthSq() > 0) {
+        engine.velocity.subVectors(worldPosition, engine.lastWorldPosition).divideScalar(delta);
+    }
+    engine.lastWorldPosition.copy(worldPosition);
+    engine.panner.positionX.setValueAtTime(worldPosition.x, now);
+    engine.panner.positionY.setValueAtTime(worldPosition.y + 0.45, now);
+    engine.panner.positionZ.setValueAtTime(worldPosition.z, now);
+    engine.panner.orientationX.setValueAtTime(worldForward.x, now);
+    engine.panner.orientationY.setValueAtTime(worldForward.y, now);
+    engine.panner.orientationZ.setValueAtTime(worldForward.z, now);
+}
+
+function updateVehicleEngineAudioWasm(delta, vehicle, telemetry) {
+    const engine = ensureVehicleEngineAudioWasm(vehicle);
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    const generator = engine?.wasmGenerator ?? null;
+    if (!engine || !generator || !audioContext || !vehicle?.id || !vehicle?.mesh) {
+        // Keep the worklet alive across transient vehicle drops; just skip
+        // this tick. Tearing down here was the source of "wasm engine doesn't
+        // stay" — every momentary gap recycled the AudioWorkletNode.
+        return false;
+    }
+
+    const now = audioContext.currentTime;
+    const isActiveVehicle = gameplay.active && vehicleState.activePropId === vehicle.id;
+    const body = getActorBody(vehicle);
+    const bodyId = body?.GetID?.() ?? null;
+
+    if (!isActiveVehicle || !bodyId) {
+        generator.gain.gain.cancelScheduledValues(now);
+        generator.gain.gain.setValueAtTime(Math.max(0.0001, generator.gain.gain.value || 0.0001), now);
+        generator.gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+        resetVehicleEngineAudioState();
+        return true;
+    }
+
+    runtimeAudio.resume();
+    engine.activePropId = vehicle.id;
+
+    const throttleInput = telemetry?.throttleInput ?? 0;
+    const brakeHeld = telemetry?.brakeHeld === true;
+    const grounded = telemetry?.grounded === true;
+    const forwardSpeed = telemetry?.forwardSpeed ?? 0;
+    const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
+    const throttleDemand = Math.abs(throttleInput);
+    const gearCount = 5;
+    const targetGear = THREE.MathUtils.clamp(
+        Math.floor(speedRatio * (gearCount - 0.15) + 1 + throttleDemand * 0.25),
+        1,
+        gearCount,
+    );
+    engine.gear = THREE.MathUtils.damp(engine.gear, targetGear, grounded ? 5.8 : 2.4, delta);
+    const gearIndex = THREE.MathUtils.clamp(Math.round(engine.gear), 1, gearCount);
+    const gearStartRatio = (gearIndex - 1) / gearCount;
+    const gearEndRatio = gearIndex / gearCount;
+    const gearBand = Math.max(0.0001, gearEndRatio - gearStartRatio);
+    const gearProgress = THREE.MathUtils.clamp((speedRatio - gearStartRatio) / gearBand, 0, 1);
+    const revKick = grounded ? throttleDemand * 1400 : throttleDemand * 650;
+    const brakeDip = brakeHeld ? 220 : 0;
+    const targetRpm = clampVehicleEngineRpm(
+        engine.idleRpm + gearProgress * (engine.maxRpm - engine.idleRpm * 1.08) + revKick - brakeDip
+    );
+    const rpmLambda = throttleDemand > 0.04
+        ? 6.5
+        : brakeHeld
+            ? 5.2
+            : 2.8;
+    engine.targetRpm = targetRpm;
+    engine.rpm = THREE.MathUtils.damp(engine.rpm, targetRpm, rpmLambda, delta);
+    engine.throttle = THREE.MathUtils.damp(engine.throttle, throttleDemand, grounded ? 7.5 : 3.5, delta);
+    const throttleDrop = Math.max(0, engine.lastThrottle - throttleDemand);
+    const overrunTarget = (!brakeHeld && throttleDemand < 0.08 && speedRatio > 0.18)
+        ? THREE.MathUtils.clamp(0.22 + speedRatio * 0.9 + throttleDrop * 1.8, 0, 1)
+        : 0;
+    engine.overrun = THREE.MathUtils.damp(engine.overrun, overrunTarget, overrunTarget > 0 ? 9.5 : 4.5, delta);
+    engine.lastThrottle = throttleDemand;
+    engine.lastGrounded = grounded;
+
+    const idleBlend = THREE.MathUtils.clamp((engine.rpm - engine.idleRpm) / 1600, 0, 1);
+    const masterGain = 0.05 + speedRatio * 0.04 + engine.throttle * 0.06 + engine.overrun * 0.015 + (grounded ? 0.01 : 0);
+    const intakeGain = 0.12 + engine.throttle * 0.16 + speedRatio * 0.04;
+    const blockGain = 0.18 + idleBlend * 0.06 + engine.throttle * 0.14 + engine.overrun * 0.03;
+    const outletGain = 0.24 + engine.throttle * 0.18 + speedRatio * 0.06 + engine.overrun * 0.04;
+
+    generator.gain.gain.cancelScheduledValues(now);
+    generator.gain.gain.setTargetAtTime(Math.max(0.0001, masterGain), now, grounded ? 0.06 : 0.12);
+    generator.gainIntake.gain.cancelScheduledValues(now);
+    generator.gainIntake.gain.setTargetAtTime(Math.max(0.0001, intakeGain), now, 0.08);
+    generator.gainEngineBlockVibrations.gain.cancelScheduledValues(now);
+    generator.gainEngineBlockVibrations.gain.setTargetAtTime(Math.max(0.0001, blockGain), now, 0.08);
+    generator.gainOutlet.gain.cancelScheduledValues(now);
+    generator.gainOutlet.gain.setTargetAtTime(Math.max(0.0001, outletGain), now, 0.08);
+
+    engine.wasmThrottleParam.cancelScheduledValues(now);
+    engine.wasmThrottleParam.setTargetAtTime(engine.throttle, now, grounded ? 0.04 : 0.09);
+    engine.wasmRpmParam.cancelScheduledValues(now);
+    engine.wasmRpmParam.setTargetAtTime(engine.rpm, now, 0.05);
+
+    return true;
+}
+
+function updateVehicleEngineAudio(delta, vehicle, telemetry) {
+    primeVehicleEngineAudioWasm();
+
+    let backendUsed = 'legacy';
+    if (vehicleEngineAudio.wasmModuleReady && !vehicleEngineAudio.wasmFailed) {
+        const usedWasm = updateVehicleEngineAudioWasm(delta, vehicle, telemetry);
+        if (usedWasm) {
+            backendUsed = 'wasm';
+        }
+    }
+    if (backendUsed !== 'wasm') {
+        updateLegacyVehicleEngineAudio(delta, vehicle, telemetry);
+    }
+    updateEngineAudioDebugOverlay(backendUsed, vehicle, telemetry);
+}
+
+function updateEngineAudioDebugOverlay(backendUsed, vehicle, telemetry) {
+    if (!engineAudioDebugEl) return;
+
+    const ready = vehicleEngineAudio.wasmModuleReady;
+    const failed = vehicleEngineAudio.wasmFailed;
+    const loading = !!vehicleEngineAudio.wasmLoadPromise;
+    const generator = vehicleEngineAudio.wasmGenerator;
+    const node = generator?.worklet ?? null;
+    const ctx = runtimeAudio.listener?.context ?? null;
+    const isActiveVehicle = !!vehicle?.id && gameplay.active && vehicleState.activePropId === vehicle.id;
+
+    let state;
+    if (failed) state = 'failed';
+    else if (loading) state = 'loading';
+    else if (ready && backendUsed === 'wasm') state = 'wasm';
+    else if (ready) state = 'wasm-idle';
+    else state = 'legacy';
+
+    const masterGainNow = generator?.gain?.gain?.value;
+    const intakeGainNow = generator?.gainIntake?.gain?.value;
+    const outletGainNow = generator?.gainOutlet?.gain?.value;
+    const wasmRpmParamNow = vehicleEngineAudio.wasmRpmParam?.value;
+    const wasmThrottleParamNow = vehicleEngineAudio.wasmThrottleParam?.value;
+    const lines = [
+        `Engine Audio: ${state.toUpperCase()}`,
+        `backend     : ${backendUsed}`,
+        `wasm ready  : ${ready ? 'yes' : 'no'}`,
+        `wasm failed : ${failed ? 'yes' : 'no'}`,
+        `worklet node: ${node ? 'attached' : 'none'}`,
+        `parented to : ${generator?.parent?.name || generator?.parent ? (generator.parent.name || 'mesh') : 'detached'}`,
+        `audio ctx   : ${ctx ? ctx.state : 'none'}`,
+        `active veh  : ${isActiveVehicle ? vehicle.id : 'none'}`,
+        `rpm/throttle: ${vehicleEngineAudio.rpm.toFixed(0)} / ${vehicleEngineAudio.throttle.toFixed(2)}`,
+        `wasm params : rpm=${(wasmRpmParamNow ?? -1).toFixed(0)} thr=${(wasmThrottleParamNow ?? -1).toFixed(2)}`,
+        `wasm gains  : m=${(masterGainNow ?? 0).toFixed(3)} i=${(intakeGainNow ?? 0).toFixed(2)} o=${(outletGainNow ?? 0).toFixed(2)}`,
+        `creates/reattaches: ${vehicleEngineAudio.wasmCreateCount || 0} / ${vehicleEngineAudio.wasmReattachCount || 0}`,
+        `sample rate : ${ctx?.sampleRate ?? '--'}`,
+    ];
+    if (vehicleEngineAudio.wasmProcessorError) {
+        lines.push(`processor err: ${vehicleEngineAudio.wasmProcessorError}`);
+    }
+    if (failed && vehicleEngineAudio.wasmFailureReason) {
+        lines.push(`reason      : ${vehicleEngineAudio.wasmFailureReason}`);
+    }
+    engineAudioDebugEl.textContent = lines.join('\n');
+
+    engineAudioDebugEl.classList.toggle('is-wasm-ok', state === 'wasm');
+    engineAudioDebugEl.classList.toggle('is-wasm-loading', state === 'loading');
+    engineAudioDebugEl.classList.toggle('is-wasm-failed', state === 'failed');
+    engineAudioDebugEl.classList.toggle('is-legacy', state === 'legacy');
+    engineAudioDebugEl.classList.toggle('is-idle', state === 'wasm-idle' || !isActiveVehicle);
+}
+
+function resolveRuntimeSoundBuffer(soundSpec) {
+    const audioContext = runtimeAudio.listener?.context ?? null;
+    if (!audioContext) {
+        return Promise.resolve(null);
+    }
+
+    if (typeof AudioBuffer !== 'undefined' && soundSpec instanceof AudioBuffer) {
+        return Promise.resolve(soundSpec);
+    }
+
+    if (!soundSpec || soundSpec === TEST_SOUND_ID || soundSpec === 'test' || soundSpec === 'default') {
+        if (!runtimeAudio.testBuffer) {
+            runtimeAudio.testBuffer = createTestSoundBuffer(audioContext);
+        }
+        return Promise.resolve(runtimeAudio.testBuffer);
+    }
+
+    const url = String(soundSpec);
+    return new Promise((resolve, reject) => {
+        runtimeAudio.loader.load(url, resolve, undefined, reject);
+    });
+}
+
+async function playSoundAtLocation(soundSpec = TEST_SOUND_ID, location = null, options = {}) {
+    if (!scene || !runtimeAudio.listener) {
+        return false;
+    }
+
+    await runtimeAudio.resume();
+
+    const buffer = await resolveRuntimeSoundBuffer(soundSpec);
+    if (!buffer) {
+        return false;
+    }
+
+    const anchor = new THREE.Object3D();
+    anchor.position.copy(resolveSoundLocation(location, options.fallbackDistance ?? 3));
+    anchor.name = 'transient-audio-anchor';
+    scene.add(anchor);
+    runtimeAudio.transientAnchors.add(anchor);
+
+    const sound = new THREE.PositionalAudio(runtimeAudio.listener);
+    anchor.add(sound);
+    sound.setBuffer(buffer);
+    sound.setLoop(!!options.loop);
+    sound.setVolume(Number.isFinite(options.volume) ? options.volume : 0.95);
+    sound.setPlaybackRate(Number.isFinite(options.playbackRate) ? options.playbackRate : 1);
+    sound.setRefDistance(Number.isFinite(options.refDistance) ? options.refDistance : 2.4);
+    sound.setMaxDistance(Number.isFinite(options.maxDistance) ? options.maxDistance : 42);
+    sound.setRolloffFactor(Number.isFinite(options.rolloffFactor) ? options.rolloffFactor : 1.2);
+
+    try {
+        sound.play(options.delay ?? 0);
+    } catch (error) {
+        cleanupTransientAudio(anchor, sound);
+        console.warn('Failed to play positional sound.', error);
+        return false;
+    }
+
+    if (!options.loop && sound.source) {
+        const previousOnEnded = sound.source.onended;
+        sound.source.onended = (...args) => {
+            previousOnEnded?.(...args);
+            cleanupTransientAudio(anchor, sound);
+        };
+    }
+
+    return { anchor, sound };
+}
+
+function getAudioTestLocation() {
+    const selectedActor = getDynamicPropById(objectScriptState.targetPropId);
+    const selectedMesh = getActorRenderObject(selectedActor);
+    if (selectedMesh) {
+        return selectedMesh.getWorldPosition(new THREE.Vector3());
+    }
+
+    return resolveSoundLocation(null, gameplay.active ? 4 : 3);
+}
+
+async function playAudioTestCue() {
+    const location = getAudioTestLocation();
+    const [positionalResult, speakerResult, mediaResult] = await Promise.allSettled([
+        playSoundAtLocation(TEST_SOUND_ID, location, {
+            volume: 1,
+            refDistance: 2.8,
+            maxDistance: 48,
+        }),
+        playSpeakerTestTone(),
+        playMediaElementTestSound(),
+    ]);
+    const didPlayPositional = positionalResult.status === 'fulfilled' && !!positionalResult.value;
+    const didPlaySpeaker = speakerResult.status === 'fulfilled' && !!speakerResult.value;
+    const didPlayMedia = mediaResult.status === 'fulfilled' && !!mediaResult.value;
+    const result = didPlayPositional || didPlaySpeaker || didPlayMedia;
+
+    if (playTestSoundStatus) {
+        playTestSoundStatus.textContent = result
+            ? `Played test sound at ${location.x.toFixed(1)}, ${location.y.toFixed(1)}, ${location.z.toFixed(1)}. WebAudio and media-element fallbacks also triggered.`
+            : 'Test sound failed. Click inside the app once to unlock audio and try again.';
+    }
+
+    return result;
+}
+
 physicsCore = createPhysicsCore({
     physics,
     playerSettings: PLAYER_SETTINGS,
@@ -1074,23 +1863,157 @@ function updateMultiplayerUiState({ statusText, playerCount, connected }) {
     }
 }
 
+function formatPostProcessValue(value, digits = 2) {
+    return Number.isFinite(value) ? value.toFixed(digits) : '--';
+}
+
+function clampPostProcessInput(value, fallback, min, max) {
+    const numericValue = Number.isFinite(value) ? value : fallback;
+    return THREE.MathUtils.clamp(numericValue, min, max);
+}
+
+function readPostProcessInputValue(element, fallback, min, max) {
+    const numericValue = Number.parseFloat(element?.value ?? '');
+    return clampPostProcessInput(numericValue, fallback, min, max);
+}
+
+function updatePostProcessSliderLabels() {
+    const refs = postProcessUiRefs;
+    if (!refs) return;
+
+    if (refs.exposureValue) refs.exposureValue.textContent = formatPostProcessValue(Number.parseFloat(refs.exposureInput?.value ?? '1'), 2);
+    if (refs.bloomStrengthValue) refs.bloomStrengthValue.textContent = formatPostProcessValue(Number.parseFloat(refs.bloomStrengthInput?.value ?? '1.25'), 2);
+    if (refs.bloomRadiusValue) refs.bloomRadiusValue.textContent = formatPostProcessValue(Number.parseFloat(refs.bloomRadiusInput?.value ?? '0.95'), 2);
+    if (refs.bloomThresholdValue) refs.bloomThresholdValue.textContent = formatPostProcessValue(Number.parseFloat(refs.bloomThresholdInput?.value ?? '0.48'), 2);
+    if (refs.blendSpeedValue) refs.blendSpeedValue.textContent = formatPostProcessValue(Number.parseFloat(refs.blendSpeedInput?.value ?? '2.5'), 1);
+}
+
+function updatePostProcessToggleUi() {
+    const refs = postProcessUiRefs;
+    if (!refs) return;
+
+    const editingVolume = postProcessUiState.target === 'volume';
+    refs.targetGlobalBtn?.classList.toggle('viewer-toggle-btn-active', !editingVolume);
+    refs.targetVolumeBtn?.classList.toggle('viewer-toggle-btn-active', editingVolume);
+
+    refs.priorityInput.disabled = !editingVolume;
+    refs.sizeXInput.disabled = !editingVolume;
+    refs.sizeYInput.disabled = !editingVolume;
+    refs.sizeZInput.disabled = !editingVolume;
+}
+
+function updatePostProcessStatusUi() {
+    const refs = postProcessUiRefs;
+    if (!refs?.status) return;
+
+    const snapshot = postProcessVolumeManager?.getSnapshot?.();
+    if (!snapshot) {
+        refs.status.textContent = 'Post processing is not ready yet.';
+        return;
+    }
+
+    const editorVolume = snapshot.editorVolume;
+    const current = snapshot.currentSettings;
+    const modeLabel = postProcessUiState.target === 'volume' ? 'Editing volume override.' : 'Editing global defaults.';
+
+    if (!editorVolume) {
+        refs.status.textContent = `${modeLabel} No box volume placed yet. Active exposure ${formatPostProcessValue(current.toneMappingExposure, 2)}, bloom ${formatPostProcessValue(current.bloomStrength, 2)} / ${formatPostProcessValue(current.bloomRadius, 2)} / ${formatPostProcessValue(current.bloomThreshold, 2)}.`;
+        return;
+    }
+
+    const size = editorVolume.size;
+    refs.status.textContent = `${modeLabel} 1 volume live. Size ${formatPostProcessValue(size.x, 1)} x ${formatPostProcessValue(size.y, 1)} x ${formatPostProcessValue(size.z, 1)}, priority ${editorVolume.priority}. Active exposure ${formatPostProcessValue(current.toneMappingExposure, 2)}, bloom ${formatPostProcessValue(current.bloomStrength, 2)} / ${formatPostProcessValue(current.bloomRadius, 2)} / ${formatPostProcessValue(current.bloomThreshold, 2)}.`;
+}
+
+function loadPostProcessInputsFromState() {
+    const refs = postProcessUiRefs;
+    if (!refs) return;
+
+    const snapshot = postProcessVolumeManager?.getSnapshot?.();
+    const defaults = snapshot?.defaultSettings ?? {
+        bloomStrength: globalPostProcessUniforms.bloomStrength.value,
+        bloomRadius: globalPostProcessUniforms.bloomRadius.value,
+        bloomThreshold: globalPostProcessUniforms.bloomThreshold.value,
+        toneMappingExposure: renderer?.toneMappingExposure ?? 1.0,
+        priority: 0,
+    };
+    const editorVolume = snapshot?.editorVolume;
+    const volumeSettings = editorVolume?.settings ?? defaults;
+    const selectedSettings = postProcessUiState.target === 'volume' ? volumeSettings : defaults;
+
+    if (refs.exposureInput) refs.exposureInput.value = formatPostProcessValue(selectedSettings.toneMappingExposure, 2);
+    if (refs.bloomStrengthInput) refs.bloomStrengthInput.value = formatPostProcessValue(selectedSettings.bloomStrength, 2);
+    if (refs.bloomRadiusInput) refs.bloomRadiusInput.value = formatPostProcessValue(selectedSettings.bloomRadius, 2);
+    if (refs.bloomThresholdInput) refs.bloomThresholdInput.value = formatPostProcessValue(selectedSettings.bloomThreshold, 2);
+    if (refs.blendSpeedInput) refs.blendSpeedInput.value = formatPostProcessValue(snapshot?.transitionSpeed ?? 2.5, 1);
+    if (refs.priorityInput) refs.priorityInput.value = String(Math.round(volumeSettings.priority ?? 0));
+    if (refs.sizeXInput) refs.sizeXInput.value = formatPostProcessValue(editorVolume?.size.x ?? 12, 1);
+    if (refs.sizeYInput) refs.sizeYInput.value = formatPostProcessValue(editorVolume?.size.y ?? 6, 1);
+    if (refs.sizeZInput) refs.sizeZInput.value = formatPostProcessValue(editorVolume?.size.z ?? 12, 1);
+
+    if (refs.placeVolumeBtn) refs.placeVolumeBtn.textContent = editorVolume ? 'Move To Camera' : 'Place At Camera';
+    if (refs.removeVolumeBtn) refs.removeVolumeBtn.disabled = !editorVolume;
+    if (refs.toggleBoundsBtn) {
+        refs.toggleBoundsBtn.textContent = snapshot?.debugVisible ? 'Hide Bounds' : 'Show Bounds';
+        refs.toggleBoundsBtn.classList.toggle('viewer-toggle-btn-active', !!snapshot?.debugVisible);
+    }
+
+    updatePostProcessSliderLabels();
+}
+
+function syncPostProcessVolumeUi({ reloadInputs = true } = {}) {
+    updatePostProcessToggleUi();
+    if (reloadInputs) {
+        loadPostProcessInputsFromState();
+    } else {
+        updatePostProcessSliderLabels();
+    }
+    updatePostProcessStatusUi();
+}
+
+function applyPostProcessSettingsFromUi({ createVolumeIfNeeded = false, placeVolumeAtCamera = false, reloadInputs = false } = {}) {
+    const refs = postProcessUiRefs;
+    const manager = postProcessVolumeManager;
+    if (!refs || !manager) return;
+
+    const settings = {
+        toneMappingExposure: readPostProcessInputValue(refs.exposureInput, 1.0, 0.1, 2.5),
+        bloomStrength: readPostProcessInputValue(refs.bloomStrengthInput, 1.25, 0, 3),
+        bloomRadius: readPostProcessInputValue(refs.bloomRadiusInput, 0.95, 0, 2),
+        bloomThreshold: readPostProcessInputValue(refs.bloomThresholdInput, 0.48, 0, 2),
+        priority: Math.round(readPostProcessInputValue(refs.priorityInput, 0, -100, 100)),
+    };
+    const transitionSpeed = readPostProcessInputValue(refs.blendSpeedInput, 2.5, 0.1, 10);
+    manager.setTransitionSpeed?.(transitionSpeed);
+
+    if (postProcessUiState.target === 'volume') {
+        const snapshot = manager.getSnapshot?.();
+        const existingVolume = snapshot?.editorVolume ?? null;
+        const size = new THREE.Vector3(
+            readPostProcessInputValue(refs.sizeXInput, 12, 0.5, 512),
+            readPostProcessInputValue(refs.sizeYInput, 6, 0.5, 512),
+            readPostProcessInputValue(refs.sizeZInput, 12, 0.5, 512)
+        );
+
+        if (existingVolume || createVolumeIfNeeded || placeVolumeAtCamera) {
+            const position = placeVolumeAtCamera || !existingVolume
+                ? (camera?.position?.clone?.() ?? new THREE.Vector3())
+                : existingVolume.position;
+            manager.ensureEditorVolume?.({ position, size, settings });
+            if (placeVolumeAtCamera) {
+                manager.setDebugVisible?.(true);
+            }
+        }
+    } else {
+        manager.setDefaultSettings?.(settings);
+    }
+
+    manager.update?.(1);
+    syncPostProcessVolumeUi({ reloadInputs });
+}
+
 function getLocalMultiplayerSnapshot() {
     if (!camera) return null;
-
-    if (gameplay.active && isDrivingVehicle()) {
-        const vehicle = getActiveVehicleProp();
-        if (!vehicle?.body) return null;
-
-        const bodyId = vehicle.body.GetID();
-        const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(bodyId)).clone();
-        const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(bodyId)).clone();
-
-        return {
-            mode: 'vehicle',
-            position: serializeVector3(vehiclePosition),
-            quaternion: serializeQuaternion(vehicleRotation),
-        };
-    }
 
     let localPosition;
     let yaw;
@@ -1105,11 +2028,28 @@ function getLocalMultiplayerSnapshot() {
     }
 
     const localRotation = tempQuaternionB.setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ')).clone();
+    let vehicleStateSnapshot = { active: false };
+
+    if (gameplay.active && isDrivingVehicle()) {
+        const vehicle = getActiveVehicleProp();
+        if (vehicle?.body && physics.bodyInterface) {
+            const bodyId = vehicle.body.GetID();
+            const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(bodyId)).clone();
+            const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(bodyId)).clone();
+            vehicleStateSnapshot = {
+                active: true,
+                id: vehicle.id || '',
+                position: serializeVector3(vehiclePosition),
+                quaternion: serializeQuaternion(vehicleRotation),
+            };
+        }
+    }
 
     return {
-        mode: gameplay.active ? 'player' : 'showcase',
+        mode: vehicleStateSnapshot.active ? 'vehicle' : gameplay.active ? 'player' : 'showcase',
         position: serializeVector3(localPosition),
         quaternion: serializeQuaternion(localRotation),
+        vehicle: vehicleStateSnapshot,
     };
 }
 
@@ -1143,218 +2083,6 @@ function disposeRenderableObject(root) {
     });
 }
 
-function cloneDisposableObject(root) {
-    const clone = root.clone(true);
-
-    clone.traverse((child) => {
-        if (!child.isMesh) return;
-
-        child.geometry = child.geometry.clone();
-        child.material = Array.isArray(child.material)
-            ? child.material.map((material) => material.clone())
-            : child.material.clone();
-        child.castShadow = true;
-        child.receiveShadow = true;
-    });
-
-    return clone;
-}
-
-function formatImportedPropName(name) {
-    const withoutExtension = name.replace(/\.[^.]+$/, '');
-    const collapsed = withoutExtension.replace(/[\-_]+/g, ' ').trim();
-    return collapsed || 'Imported Prop';
-}
-
-function normalizeObjectToDimension(root, targetDimension, centerOnFloor = true) {
-    if (!root) return;
-
-    root.updateWorldMatrix(true, true);
-    const box = new THREE.Box3().setFromObject(root);
-    const center = box.getCenter(tempVectorA);
-    const size = box.getSize(tempVectorB);
-    const maxDim = Math.max(size.x, size.y, size.z) || 1;
-    const targetScale = targetDimension / maxDim;
-
-    root.scale.setScalar(targetScale);
-    root.position.x = -center.x * targetScale;
-    root.position.z = -center.z * targetScale;
-    root.position.y = centerOnFloor ? -box.min.y * targetScale : -center.y * targetScale;
-    root.updateMatrixWorld(true);
-}
-
-function createLoadingManager(fileMap = {}) {
-    const manager = new THREE.LoadingManager();
-    manager.addHandler(/\.tga$/i, new TGALoader(manager));
-    manager.addHandler(/\.dds$/i, new DDSLoader(manager));
-    manager.onLoad = () => console.log('[TextureManager] All textures loaded');
-    manager.onError = (url) => console.warn('[TextureManager] Failed to load:', url);
-
-    manager.setURLModifier((originalUrl) => {
-        if (originalUrl.startsWith('data:') || originalUrl.startsWith('blob:')) {
-            return originalUrl;
-        }
-
-        const filename = originalUrl.split(/[\\/]/).pop().split('?')[0].split('#')[0].toLowerCase();
-        if (fileMap[filename]) {
-            console.log(`[TextureResolver] Resolved: ${filename}`);
-            return fileMap[filename].url;
-        }
-
-        const baseName = filename.replace(/\.[^.]+$/, '');
-        const possibleExts = ['.png', '.jpg', '.jpeg', '.tga', '.dds', '.bmp', '.webp'];
-
-        for (const ext of possibleExts) {
-            const possibleName = baseName + ext;
-            if (fileMap[possibleName]) {
-                console.log(`[TextureResolver] Resolved ${filename} -> ${possibleName}`);
-                return fileMap[possibleName].url;
-            }
-        }
-
-        if (Object.keys(fileMap).length > 0) {
-            console.warn(`[TextureResolver] Not found: ${filename}`);
-        }
-
-        return originalUrl;
-    });
-
-    return manager;
-}
-
-function convertLoadedObjectMaterials(root) {
-    root.traverse((child) => {
-        if (!child.isMesh) return;
-
-        child.castShadow = true;
-        child.receiveShadow = true;
-
-        if (!child.geometry.attributes.normal) {
-            child.geometry.computeVertexNormals();
-        }
-
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        child.material = materials.map((material) => {
-            if (!material) return material;
-
-            const hasAlphaMap = !!material.alphaMap;
-            const isActuallyTransparent = (material.transparent || false) && ((material.opacity ?? 1.0) < 1.0 || hasAlphaMap);
-
-            if (material.isMeshStandardMaterial || material.isMeshPhysicalMaterial) {
-                material.side = THREE.FrontSide;
-                material.envMapIntensity = Math.min(material.envMapIntensity ?? 0.6, 0.75);
-                material.metalness = Math.min(material.metalness ?? 0.0, 0.25);
-                material.roughness = Math.max(material.roughness ?? 0.5, 0.35);
-                material.transparent = isActuallyTransparent;
-                material.alphaTest = hasAlphaMap ? Math.max(material.alphaTest || 0, 0.5) : (material.alphaTest || 0);
-                material.depthWrite = !isActuallyTransparent || hasAlphaMap;
-                material.needsUpdate = true;
-                return material;
-            }
-
-            const shininess = material.shininess ?? 30;
-            const computedRoughness = Math.max(0.04, 1.0 - Math.sqrt(Math.min(shininess, 1000) / 1000));
-            const specularIntensity = material.specular ? (material.specular.r + material.specular.g + material.specular.b) / 3 : 0;
-            const computedMetalness = Math.min(0.5, specularIntensity * 0.5);
-
-            const standardMaterial = new THREE.MeshStandardMaterial({
-                name: material.name,
-                color: material.color ? material.color.clone() : new THREE.Color(0x888888),
-                map: material.map || null,
-                normalMap: material.normalMap || material.bumpMap || null,
-                emissive: material.emissive ? material.emissive.clone() : new THREE.Color(0x000000),
-                emissiveMap: material.emissiveMap || null,
-                emissiveIntensity: material.emissiveIntensity || 1.0,
-                alphaMap: material.alphaMap || null,
-                aoMap: material.aoMap || material.lightMap || null,
-                aoMapIntensity: 1.0,
-                roughness: material.specularMap ? 0.5 : computedRoughness,
-                roughnessMap: null,
-                metalness: computedMetalness,
-                metalnessMap: null,
-                transparent: isActuallyTransparent,
-                opacity: material.opacity !== undefined ? material.opacity : 1.0,
-                alphaTest: hasAlphaMap ? 0.5 : (material.alphaTest || 0),
-                depthWrite: !isActuallyTransparent || hasAlphaMap,
-                vertexColors: !!child.geometry.attributes.color,
-                side: THREE.FrontSide,
-                envMapIntensity: 0.6,
-            });
-
-            if (material.bumpMap && !material.normalMap) {
-                standardMaterial.bumpMap = null;
-                standardMaterial.bumpScale = 1.0;
-            }
-
-            if (standardMaterial.map) {
-                standardMaterial.map.colorSpace = THREE.SRGBColorSpace;
-                standardMaterial.map.needsUpdate = true;
-            }
-
-            if (standardMaterial.emissiveMap) {
-                standardMaterial.emissiveMap.colorSpace = THREE.SRGBColorSpace;
-                standardMaterial.emissiveMap.needsUpdate = true;
-            }
-
-            ['normalMap', 'alphaMap', 'roughnessMap', 'aoMap'].forEach((mapName) => {
-                if (standardMaterial[mapName]) {
-                    standardMaterial[mapName].colorSpace = THREE.NoColorSpace || '';
-                    standardMaterial[mapName].needsUpdate = true;
-                }
-            });
-
-            if (standardMaterial.color.getHex() === 0x000000 && !standardMaterial.map && !child.geometry.attributes.color) {
-                standardMaterial.color.setHex(0x888888);
-            }
-
-            return standardMaterial;
-        });
-
-        if (child.material.length === 1) {
-            child.material = child.material[0];
-        }
-    });
-}
-
-function loadObjectFromFile(file, fileMap = {}) {
-    const extension = file.name.split('.').pop().toLowerCase();
-    const url = URL.createObjectURL(file);
-    const manager = createLoadingManager(fileMap);
-
-    return new Promise((resolve, reject) => {
-        const cleanup = () => URL.revokeObjectURL(url);
-        const finishLoad = (object) => {
-            cleanup();
-            const root = object.scene || object;
-            convertLoadedObjectMaterials(root);
-            resolve(root);
-        };
-
-        const failLoad = (error) => {
-            cleanup();
-            reject(error);
-        };
-
-        try {
-            if (extension === 'glb' || extension === 'gltf') {
-                const loader = new GLTFLoader(manager);
-                loader.load(url, finishLoad, undefined, failLoad);
-            } else if (extension === 'obj') {
-                const loader = new OBJLoader(manager);
-                loader.load(url, finishLoad, undefined, failLoad);
-            } else if (extension === 'fbx') {
-                const loader = new FBXLoader(manager);
-                loader.load(url, finishLoad, undefined, failLoad);
-            } else {
-                cleanup();
-                reject(new Error('Unsupported file format'));
-            }
-        } catch (error) {
-            cleanup();
-            reject(error);
-        }
-    });
-}
 
 function enableOptimizationPipeline() {
     if (!processTrigger) return;
@@ -1621,18 +2349,44 @@ function registerImportedPropTemplate(fileName, root, collisionMode, shape, tria
     return template;
 }
 
-function registerImportedPropTemplateFromSerializedData(templateData) {
-    if (!templateData?.rootJson) return null;
+async function registerImportedPropTemplateFromSerializedData(templateData, { fileMap = null } = {}) {
+    if (!templateData) return null;
 
     const existingTemplate = importedPropState.templates.find((entry) => entry.id === templateData.id);
     if (existingTemplate) {
         return existingTemplate;
     }
 
-    const objectLoader = new THREE.ObjectLoader();
-    const root = objectLoader.parse(templateData.rootJson);
-    convertLoadedObjectMaterials(root);
-    normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+    let root = null;
+
+    // Folder-bundle path: the .umap stores assetPath instead of rootJson and
+    // the raw OBJ/GLB lives next to it. Resolve via the loaded fileMap and
+    // run the same importer the fresh-import flow uses — much faster than
+    // re-hydrating a THREE.ObjectLoader JSON blob.
+    if (templateData.assetPath && fileMap) {
+        const entry = lookupBundleAsset(fileMap, templateData.assetPath, templateData.fileName);
+        if (entry?.file) {
+            root = await loadObjectFromFile(entry.file, fileMap);
+            if (templateData.assetType !== 'glb') {
+                normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+            }
+        } else {
+            console.warn(`[scene] Asset "${templateData.assetPath}" missing from bundle; template will be skipped.`);
+            return null;
+        }
+    } else if (templateData.rootJson) {
+        const objectLoader = new THREE.ObjectLoader();
+        root = objectLoader.parse(templateData.rootJson);
+        convertLoadedObjectMaterials(root);
+        // Legacy serialized templates already carried the normalized transform
+        // applied at import time. Re-normalizing here mutates the source asset
+        // before any actor transform is restored.
+        if (templateData.normalized === false) {
+            normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
+        }
+    } else {
+        return null;
+    }
 
     const triangleCount = Number.isFinite(templateData.triangleCount)
         ? templateData.triangleCount
@@ -1650,6 +2404,15 @@ function registerImportedPropTemplateFromSerializedData(templateData) {
 
     importedPropState.templates.push(template);
 
+    // If we loaded from a folder bundle, retain the original File so the user
+    // can re-save the scene as a folder without re-inlining the geometry.
+    if (templateData.assetPath && fileMap) {
+        const entry = lookupBundleAsset(fileMap, templateData.assetPath, templateData.fileName);
+        if (entry?.file) {
+            importedPropState.sourceFiles[template.id] = entry.file;
+        }
+    }
+
     const matchedId = /imported-prop-(\d+)$/.exec(template.id || '');
     if (matchedId) {
         importedPropState.nextId = Math.max(importedPropState.nextId, Number(matchedId[1]) + 1);
@@ -1660,17 +2423,39 @@ function registerImportedPropTemplateFromSerializedData(templateData) {
     return template;
 }
 
-function serializeImportedPropTemplate(template) {
+function lookupBundleAsset(fileMap, assetPath, fileName) {
+    if (!fileMap) return null;
+    // fileMap is the same shape used by setupDropHandlers / createLoadingManager:
+    // { 'relative/path.ext': { file, url } } and/or { 'basename.ext': { file, url } }.
+    return fileMap[assetPath]
+        || (fileName ? fileMap[fileName] : null)
+        || (fileName ? fileMap[fileName.toLowerCase()] : null)
+        || null;
+}
+
+function serializeImportedPropTemplate(template, { preferAssetPath = false } = {}) {
     if (!template?.root) return null;
 
-    return {
+    const base = {
         id: template.id,
         fileName: template.fileName,
         displayName: template.displayName,
+        normalized: true,
         collisionMode: template.collisionMode,
         triangleCount: template.triangleCount,
-        rootJson: template.root.toJSON(),
     };
+
+    // When a scene is being saved as a folder bundle and we still have the
+    // original imported File, point at it via assetPath. Bundle loading then
+    // re-runs the OBJ/GLB importer on the raw file (fast) instead of parsing
+    // a serialized THREE.ObjectLoader blob (slow). Inline rootJson stays as
+    // the fallback for templates whose source file isn't available.
+    const sourceFile = importedPropState.sourceFiles?.[template.id];
+    if (preferAssetPath && sourceFile) {
+        return { ...base, assetPath: `assets/${template.fileName}` };
+    }
+
+    return { ...base, rootJson: template.root.toJSON() };
 }
 
 function spawnImportedProp(templateId, options = {}) {
@@ -1772,8 +2557,12 @@ async function importPhysicsProp(file, fileMap = {}) {
         }
 
         const collision = createImportedCollisionShape(root, collisionPreference.mode);
-        registerImportedPropTemplate(file.name, root, collision.mode, collision.shape, triangleCount);
+        const template = registerImportedPropTemplate(file.name, root, collision.mode, collision.shape, triangleCount);
+        if (template?.id && file instanceof File) {
+            importedPropState.sourceFiles[template.id] = file;
+        }
         updatePropImportStatus();
+        return template;
     } catch (error) {
         console.error('Failed to import physics prop.', error);
         alert(error?.message === 'Unsupported file format'
@@ -1801,6 +2590,10 @@ function destroyPhysicsBody(body) {
 function destroyDynamicPhysicsProp(prop) {
     if (!prop) return;
 
+    if (prop.id && vehicleEngineAudio.activePropId === prop.id) {
+        shutdownVehicleEngineAudio();
+    }
+
     if (vehicleState.activePropId && vehicleState.activePropId === prop.id) {
         vehicleState.activePropId = '';
         vehicleState.brakeHeld = false;
@@ -1812,6 +2605,8 @@ function destroyDynamicPhysicsProp(prop) {
         objectScriptState.menuOpen = false;
         objectScriptState.editorOpen = false;
     }
+
+    prop.destroyAllComponents?.();
 
     sceneSystem?.removeActor(prop);
 
@@ -1893,6 +2688,9 @@ function getActiveVehicleProp() {
 
 function clearActiveVehicle({ updateUi = false } = {}) {
     const wasDriving = !!vehicleState.activePropId;
+    if (wasDriving) {
+        silenceVehicleEngineAudio();
+    }
     vehicleState.activePropId = '';
     vehicleState.brakeHeld = false;
     vehicleState.tailWhipLastFrame = false;
@@ -1930,12 +2728,18 @@ function positionVehicleCamera(vehiclePosition, vehicleRotation, delta) {
         .copy(vehiclePosition)
         .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
         .addScaledVector(flatForward, VEHICLE_SETTINGS.lookAhead);
-    const cameraLerp = 1 - Math.exp(-delta * 8);
+    const cameraLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraHorizontalSmoothing);
+    const cameraVerticalLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraVerticalSmoothing);
+    const lookLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraLookSmoothing);
 
-    camera.position.lerp(chasePosition, cameraLerp);
-    camera.lookAt(lookTarget);
+    camera.position.x = THREE.MathUtils.lerp(camera.position.x, chasePosition.x, cameraLerp);
+    camera.position.z = THREE.MathUtils.lerp(camera.position.z, chasePosition.z, cameraLerp);
+    camera.position.y = THREE.MathUtils.lerp(camera.position.y, chasePosition.y, cameraVerticalLerp);
 
-    tempVectorE.copy(lookTarget).sub(camera.position);
+    gameplayLookTarget.lerp(lookTarget, lookLerp);
+    camera.lookAt(gameplayLookTarget);
+
+    tempVectorE.copy(gameplayLookTarget).sub(camera.position);
     const flatDistance = Math.max(0.001, Math.hypot(tempVectorE.x, tempVectorE.z));
     gameplay.yaw = Math.atan2(tempVectorE.x, tempVectorE.z);
     gameplay.pitch = THREE.MathUtils.clamp(
@@ -1978,6 +2782,11 @@ function enterVehicle(prop = getNearbyVehicle()) {
 
     const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(propBody.GetID())).clone();
     const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(propBody.GetID())).clone();
+    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
+    gameplayLookTarget
+        .copy(vehiclePosition)
+        .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
+        .addScaledVector(flatForward, VEHICLE_SETTINGS.lookAhead);
     positionVehicleCamera(vehiclePosition, vehicleRotation, 1 / 60);
 
     updateGameplayUI();
@@ -2019,241 +2828,77 @@ function exitVehicle() {
     return true;
 }
 
-function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wheelWidth }) {
-    const steeringPivot = new THREE.Group();
-    const spinGroup = new THREE.Group();
-    
-    const wheelMesh = new THREE.Group();
-    wheelMesh.rotation.z = Math.PI * 0.5;
 
-    const tire = new THREE.Mesh(
-        new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 24, 1),
-        tireMaterial
-    );
-    tire.castShadow = true;
-    tire.receiveShadow = true;
-    wheelMesh.add(tire);
+function ensureVehicleVisualState(root) {
+    if (!root) return null;
 
-    const innerRim = new THREE.Mesh(
-        new THREE.CylinderGeometry(wheelRadius * 0.65, wheelRadius * 0.65, wheelWidth * 1.05, 18, 1),
-        new THREE.MeshStandardMaterial({
-            color: 0x111111,
-            roughness: 0.9,
-            metalness: 0.1
-        })
-    );
-    wheelMesh.add(innerRim);
+    const state = root.userData?.vehicleVisual ?? null;
+    const refsValid =
+        state?.lastWorldPosition instanceof THREE.Vector3
+        && Array.isArray(state.steeringPivots)
+        && state.steeringPivots.every((p) => p?.isObject3D)
+        && Array.isArray(state.spinGroups)
+        && state.spinGroups.every((g) => g?.isObject3D);
+    if (refsValid) return state;
 
-    const spokeSize = wheelRadius * 1.35;
-    const spoke1 = new THREE.Mesh(
-        new THREE.BoxGeometry(spokeSize, wheelWidth * 1.1, wheelRadius * 0.25),
-        rimMaterial
-    );
-    spoke1.castShadow = true;
-    wheelMesh.add(spoke1);
-
-    const spoke2 = new THREE.Mesh(
-        new THREE.BoxGeometry(wheelRadius * 0.25, wheelWidth * 1.1, spokeSize),
-        rimMaterial
-    );
-    spoke2.castShadow = true;
-    wheelMesh.add(spoke2);
-
-    const hub = new THREE.Mesh(
-        new THREE.CylinderGeometry(wheelRadius * 0.2, wheelRadius * 0.2, wheelWidth * 1.15, 14, 1),
-        rimMaterial
-    );
-    wheelMesh.add(hub);
-
-    spinGroup.add(wheelMesh);
-    steeringPivot.add(spinGroup);
-
-    return { steeringPivot, spinGroup };
-}
-
-function createDrivableCarVisual() {
-    const root = new THREE.Group();
-    const W = VEHICLE_SETTINGS.width;
-    const L = VEHICLE_SETTINGS.length;
-    const H = VEHICLE_SETTINGS.height;
-
-    const visualGroup = new THREE.Group();
-    visualGroup.position.y = H * 0.28;
-    visualGroup.rotation.y = Math.PI;
-    root.add(visualGroup);
-
-    const bodyMaterial = new THREE.MeshStandardMaterial({
-        color: 0xf7f7f5, metalness: 0.18, roughness: 0.34,
-    });
-    const trimMaterial = new THREE.MeshStandardMaterial({
-        color: 0x15171b, metalness: 0.42, roughness: 0.48,
-    });
-    const glassMaterial = new THREE.MeshStandardMaterial({
-        color: 0xdce8f5, metalness: 0.08, roughness: 0.16, transparent: true, opacity: 0.72,
-    });
-    const tireMaterial = new THREE.MeshStandardMaterial({
-        color: 0x17191d, metalness: 0.02, roughness: 0.92,
-    });
-    const rimMaterial = new THREE.MeshStandardMaterial({
-        color: 0xc5ccd6, metalness: 0.86, roughness: 0.24,
-    });
-    const lightMaterial = new THREE.MeshStandardMaterial({
-        color: 0xf8f1d0, emissive: 0x8c6d1f, emissiveIntensity: 0.2, roughness: 0.28, metalness: 0.02,
-    });
-
-    const lowerBody = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.96, H * 0.38, L * 0.94),
-        bodyMaterial
-    );
-    lowerBody.position.y = -H * 0.08;
-    lowerBody.castShadow = true;
-    lowerBody.receiveShadow = true;
-    visualGroup.add(lowerBody);
-
-    const cabin = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.72, H * 0.32, L * 0.38),
-        glassMaterial
-    );
-    cabin.position.set(0, H * 0.22, -L * 0.06);
-    cabin.castShadow = true;
-    visualGroup.add(cabin);
-
-    const roof = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.68, H * 0.06, L * 0.32),
-        bodyMaterial
-    );
-    roof.position.set(0, H * 0.39, -L * 0.06);
-    roof.castShadow = true;
-    visualGroup.add(roof);
-
-    const hood = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.88, H * 0.1, L * 0.28),
-        bodyMaterial
-    );
-    hood.position.set(0, H * 0.06, L * 0.30);
-    hood.rotation.x = -0.06;
-    hood.castShadow = true;
-    hood.receiveShadow = true;
-    visualGroup.add(hood);
-
-    const trunk = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.84, H * 0.1, L * 0.18),
-        bodyMaterial
-    );
-    trunk.position.set(0, H * 0.06, -L * 0.36);
-    trunk.rotation.x = 0.04;
-    trunk.castShadow = true;
-    visualGroup.add(trunk);
-
-    const frontBumper = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.92, H * 0.12, L * 0.06),
-        trimMaterial
-    );
-    frontBumper.position.set(0, -H * 0.16, L * 0.48);
-    frontBumper.castShadow = true;
-    visualGroup.add(frontBumper);
-
-    const rearBumper = frontBumper.clone();
-    rearBumper.position.z = -L * 0.48;
-    visualGroup.add(rearBumper);
-
-    const skirtLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.04, H * 0.1, L * 0.7),
-        trimMaterial
-    );
-    skirtLeft.position.set(-W * 0.48, -H * 0.2, 0);
-    visualGroup.add(skirtLeft);
-    const skirtRight = skirtLeft.clone();
-    skirtRight.position.x *= -1;
-    visualGroup.add(skirtRight);
-
-    const grille = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.5, H * 0.1, L * 0.03),
-        trimMaterial
-    );
-    grille.position.set(0, -H * 0.02, L * 0.49);
-    visualGroup.add(grille);
-
-    const headlightLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.14, H * 0.06, L * 0.02),
-        lightMaterial
-    );
-    headlightLeft.position.set(-W * 0.32, H * 0.02, L * 0.49);
-    const headlightRight = headlightLeft.clone();
-    headlightRight.position.x *= -1;
-    visualGroup.add(headlightLeft, headlightRight);
-
-    const taillightMat = new THREE.MeshStandardMaterial({
-        color: 0xff2222, emissive: 0x991111, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.02,
-    });
-    const taillightLeft = new THREE.Mesh(
-        new THREE.BoxGeometry(W * 0.12, H * 0.05, L * 0.02),
-        taillightMat
-    );
-    taillightLeft.position.set(-W * 0.34, H * 0.02, -L * 0.49);
-    const taillightRight = taillightLeft.clone();
-    taillightRight.position.x *= -1;
-    visualGroup.add(taillightLeft, taillightRight);
-
-    const wheelRadius = H * 0.36;
-    const wheelWidth = W * 0.16;
-    const wheelY = -H * 0.42;
-    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
-    const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.45;
-    const wheelOffsets = [
-        { x: -halfTrackWidth, z: halfWheelBase, steerable: true },
-        { x: halfTrackWidth, z: halfWheelBase, steerable: true },
-        { x: -halfTrackWidth, z: -halfWheelBase, steerable: false },
-        { x: halfTrackWidth, z: -halfWheelBase, steerable: false },
-    ];
     const steeringPivots = [];
     const spinGroups = [];
+    root.traverse((object) => {
+        const isSteeringPivot = object.userData?.vehicleSteeringPivot === true
+            || typeof object.userData?.steerable === 'boolean';
+        if (!isSteeringPivot) return;
 
-    wheelOffsets.forEach((offset) => {
-        const wheel = createVehicleWheelAssembly({
-            tireMaterial,
-            rimMaterial,
-            wheelRadius,
-            wheelWidth,
-        });
-        wheel.steeringPivot.position.set(offset.x, wheelY, offset.z);
-        wheel.steeringPivot.userData.steerable = offset.steerable;
-        visualGroup.add(wheel.steeringPivot);
-        steeringPivots.push(wheel.steeringPivot);
-        spinGroups.push(wheel.spinGroup);
+        const spinGroup = object.children.find((child) => child.userData?.vehicleSpinGroup === true)
+            ?? object.children.find((child) => child.isGroup || child.type === 'Group');
+        if (!spinGroup) return;
+
+        steeringPivots.push(object);
+        spinGroups.push(spinGroup);
     });
 
-    visualGroup.traverse((object) => {
-        if (!object.isMesh) return;
-        object.castShadow = true;
-        object.receiveShadow = true;
-    });
+    if (!steeringPivots.length || steeringPivots.length !== spinGroups.length) return null;
 
-    root.userData.vehicleVisual = {
+    const nextState = {
         steeringPivots,
         spinGroups,
-        wheelRadius,
-        maxSteerAngle: 1.0,
-        steerAngle: 0,
-        spinAngle: 0,
+        wheelRadius: Number.isFinite(state?.wheelRadius) ? state.wheelRadius : VEHICLE_SETTINGS.height * 0.36,
+        maxSteerAngle: Number.isFinite(state?.maxSteerAngle) ? state.maxSteerAngle : 1.0,
+        steerAngle: Number.isFinite(state?.steerAngle) ? state.steerAngle : 0,
+        spinAngle: Number.isFinite(state?.spinAngle) ? state.spinAngle : 0,
+        lastWorldPosition: new THREE.Vector3(),
+        lastPositionInitialized: false,
     };
-
-    return root;
+    root.userData.vehicleVisual = nextState;
+    return nextState;
 }
 
+
 function updateVehicleVisuals(delta) {
-    if (!physics.ready || !physics.dynamicBodies.length) return;
+    if (!physics.dynamicBodies?.length) return;
 
     const { bodyInterface } = physics;
     for (const prop of physics.dynamicBodies) {
-        if (prop?.kind !== 'vehicle' || !getActorRenderObject(prop)) continue;
+        const renderObject = getActorRenderObject(prop);
+        if (prop?.kind !== 'vehicle' || !renderObject) continue;
 
-        const visualState = getActorRenderObject(prop).userData?.vehicleVisual;
-        const body = getActorBody(prop);
-        if (!visualState || !body) continue;
+        const visualState = ensureVehicleVisualState(renderObject);
+        if (!visualState) continue;
 
-        const bodyId = body.GetID();
-        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(getActorRenderObject(prop).quaternion);
+        // If userData was JSON-roundtripped (e.g. via three.js Object3D.clone
+        // on a serialized template), every live reference inside vehicleVisual
+        // is now a plain object: Vector3 has no .copy, steeringPivots / spinGroups
+        // entries have no .rotation/.userData. Rather than crash every frame,
+        // skip the broken state — the wheels won't animate but the editor stays
+        // usable.
+        const refsValid =
+            visualState.lastWorldPosition instanceof THREE.Vector3
+            && Array.isArray(visualState.steeringPivots)
+            && visualState.steeringPivots.every((p) => p?.isObject3D)
+            && Array.isArray(visualState.spinGroups)
+            && visualState.spinGroups.every((g) => g?.isObject3D);
+        if (!refsValid) continue;
+
+        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(renderObject.quaternion);
         flatForward.y = 0;
         if (flatForward.lengthSq() < 1e-6) {
             flatForward.set(0, 0, -1);
@@ -2261,10 +2906,26 @@ function updateVehicleVisuals(delta) {
             flatForward.normalize();
         }
 
-        const linearVelocity = copyJoltVector(tempVectorB, bodyInterface.GetLinearVelocity(bodyId));
-        const forwardSpeed = linearVelocity.dot(flatForward);
+        // Prefer Jolt's authoritative velocity while physics is stepping; in
+        // edit/showcase mode physics is paused, so fall back to a frame-to-frame
+        // world-position delta so the wheels still spin when the user drags
+        // or scripts move the chassis.
+        const body = bodyInterface ? getActorBody(prop) : null;
+        let forwardSpeed = 0;
+        if (body && physics.ready && gameplay.active) {
+            const linearVelocity = copyJoltVector(tempVectorB, bodyInterface.GetLinearVelocity(body.GetID()));
+            forwardSpeed = linearVelocity.dot(flatForward);
+        } else {
+            const currentPos = renderObject.getWorldPosition(tempVectorB);
+            if (visualState.lastPositionInitialized && delta > 1e-5) {
+                const move = tempVectorC.subVectors(currentPos, visualState.lastWorldPosition);
+                forwardSpeed = move.dot(flatForward) / delta;
+            }
+            visualState.lastWorldPosition.copy(currentPos);
+            visualState.lastPositionInitialized = true;
+        }
 
-        visualState.spinAngle -= (forwardSpeed / visualState.wheelRadius) * delta;
+        visualState.spinAngle += (forwardSpeed / visualState.wheelRadius) * delta;
         const isActiveVehicle = gameplay.active && vehicleState.activePropId === prop.id;
         const inputSteer = isActiveVehicle
             ? ((gameplay.input.left ? 1 : 0) - (gameplay.input.right ? 1 : 0))
@@ -2295,10 +2956,7 @@ function spawnDrivableCar(options = {}) {
 
     const groundHit = getGroundHitAt(spawnPosition.x, spawnPosition.z, true, { cullBackFaces: true });
     if (groundHit?.point) {
-        spawnPosition.y = Math.max(
-            spawnPosition.y,
-            groundHit.point.y + VEHICLE_SETTINGS.height * 0.6 + VEHICLE_SETTINGS.spawnLift
-        );
+        spawnPosition.y = groundHit.point.y + VEHICLE_SETTINGS.height * 0.1 + VEHICLE_SETTINGS.spawnLift;
     }
 
     camera.getWorldDirection(tempVectorA);
@@ -2334,7 +2992,15 @@ function spawnDrivableCar(options = {}) {
     }
 
     bodyInterface.SetMaxAngularVelocity(body.GetID(), VEHICLE_SETTINGS.maxAngularVelocity);
-    const chassis = createDrivableCarVisual();
+    const bodyTemplateId = options.bodyTemplateId || '';
+    const wheelTemplateId = options.wheelTemplateId || '';
+    const chassis = createDrivableCarVisual({
+        bodyTemplateId,
+        wheelTemplateId,
+        vehicleSettings: VEHICLE_SETTINGS,
+        importedPropState,
+        cloneDisposableObject,
+    });
     chassis.position.copy(spawnPosition);
     chassis.quaternion.copy(carRotation);
 
@@ -2345,6 +3011,8 @@ function spawnDrivableCar(options = {}) {
         userData: options.userData ?? { label: 'Car' },
         includeScripts: options.includeScripts !== false,
     });
+    vehicle.vehicleBodyTemplateId = bodyTemplateId || null;
+    vehicle.vehicleWheelTemplateId = wheelTemplateId || null;
     setActorComponentFlags(vehicle, {
         collision: true,
         physics: true,
@@ -2679,8 +3347,24 @@ function ensureObjectScriptDraftEntry(propId) {
     return objectScriptState.drafts[propId];
 }
 
+function syncRuntimePropIdCounter(propId) {
+    if (typeof propId !== 'string') return;
+
+    const match = /^prop-(\d+)$/.exec(propId);
+    if (!match) return;
+
+    const nextId = Number.parseInt(match[1], 10) + 1;
+    if (Number.isFinite(nextId)) {
+        objectScriptState.nextPropId = Math.max(objectScriptState.nextPropId, nextId);
+    }
+}
+
 function createRuntimePropId() {
-    const propId = `prop-${objectScriptState.nextPropId++}`;
+    let propId = '';
+    do {
+        propId = `prop-${objectScriptState.nextPropId++}`;
+    } while (getDynamicPropById(propId));
+
     ensureObjectScriptDraftEntry(propId);
     return propId;
 }
@@ -2693,11 +3377,39 @@ function getActorBody(prop) {
     return prop.body || getPhysicsBodyComponent(prop)?.body || null;
 }
 
-function selectShowcaseActor(actorId) {
+function isObjectWithinRoot(object, root) {
+    let current = object;
+    while (current) {
+        if (current === root) return true;
+        current = current.parent;
+    }
+    return false;
+}
+
+function getActorSelectionObject(prop, preferredObject = null) {
+    const root = getActorRenderObject(prop);
+    if (!root) return null;
+
+    if (preferredObject && isObjectWithinRoot(preferredObject, root)) {
+        return preferredObject;
+    }
+
+    if (objectScriptState.targetObjectUuid) {
+        const selectedObject = root.getObjectByProperty?.('uuid', objectScriptState.targetObjectUuid) ?? null;
+        if (selectedObject) {
+            return selectedObject;
+        }
+    }
+
+    return root;
+}
+
+function selectShowcaseActor(actorId, selectionObject = null) {
     if (gameplay.active) return; // Only allow selection in Showcase mode
     
     const previousTargetId = objectScriptState.targetPropId;
     objectScriptState.targetPropId = actorId || '';
+    objectScriptState.targetObjectUuid = '';
     
     if (blueprintState.active && actorId !== blueprintState.targetActor?.id) {
         exitBlueprintEditor();
@@ -2705,11 +3417,13 @@ function selectShowcaseActor(actorId) {
     
     if (actorId) {
         const prop = getDynamicPropById(actorId);
+        const targetObject = getActorSelectionObject(prop, selectionObject);
+        objectScriptState.targetObjectUuid = targetObject?.uuid || '';
         if (objectScriptEditorTarget) {
             objectScriptEditorTarget.textContent = prop?.rootNode?.name || actorId || 'Actor';
         }
-        if (transformControl && getActorRenderObject(prop)) {
-            transformControl.attach(getActorRenderObject(prop));
+        if (transformControl && targetObject) {
+            transformControl.attach(targetObject);
         }
     } else {
         if (objectScriptEditorTarget) {
@@ -2747,7 +3461,7 @@ function syncTransformControlState() {
     }
 
     const selectedActor = getDynamicPropById(objectScriptState.targetPropId);
-    const selectedMesh = getActorRenderObject(selectedActor);
+    const selectedMesh = getActorSelectionObject(selectedActor);
     if (selectedMesh) {
         transformControl.attach(selectedMesh);
         if (helper) helper.visible = true;
@@ -2767,7 +3481,11 @@ function syncTransformToPhysics() {
     if (!body || !physics.jolt) return;
 
     const mesh = transformControl.object;
-    if (mesh !== getActorRenderObject(prop)) return;
+    const rootMesh = getActorRenderObject(prop);
+    if (mesh !== rootMesh) {
+        rebuildActorPhysics(prop);
+        return;
+    }
 
     const pos = mesh.position;
     const rot = mesh.quaternion;
@@ -2821,6 +3539,7 @@ function rebuildActorPhysics(prop) {
     };
     
     const rootMesh = getActorRenderObject(prop);
+    rootMesh.updateMatrixWorld(true);
 
     if (useExactMeshCollision) {
         const newBody = createStaticMeshBody(rootMesh);
@@ -2937,6 +3656,7 @@ function ensureActorIdentity(prop) {
 
     const propId = prop.id || createRuntimePropId();
     prop.id = propId;
+    syncRuntimePropIdCounter(propId);
     const mesh = getActorRenderObject(prop);
     if (mesh?.userData) {
         mesh.userData.dynamicPropId = propId;
@@ -2999,30 +3719,71 @@ function buildPrimitiveActorMesh(kind) {
     }
 }
 
-function syncActorEditorTemplateOptions(selectedTemplateId = '') {
-    if (!actorImportedTemplateSelect) return;
+function syncActorEditorTemplateOptions(selectedTemplateId = '', selectedVehicleBodyTemplateId = '', selectedVehicleWheelTemplateId = '') {
+    if (actorImportedTemplateSelect) {
+        actorImportedTemplateSelect.innerHTML = '';
 
-    actorImportedTemplateSelect.innerHTML = '';
+        if (!importedPropState.templates.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No imported source available';
+            actorImportedTemplateSelect.appendChild(option);
+            actorImportedTemplateSelect.value = '';
+        } else {
+            importedPropState.templates.forEach((template) => {
+                const option = document.createElement('option');
+                option.value = template.id;
+                option.textContent = `${template.displayName} (${template.collisionMode})`;
+                actorImportedTemplateSelect.appendChild(option);
+            });
 
-    if (!importedPropState.templates.length) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = 'No imported source available';
-        actorImportedTemplateSelect.appendChild(option);
-        actorImportedTemplateSelect.value = '';
+            actorImportedTemplateSelect.value = selectedTemplateId && importedPropState.templates.some((template) => template.id === selectedTemplateId)
+                ? selectedTemplateId
+                : importedPropState.templates[0].id;
+        }
+    }
+
+    const populateVehicleSelect = (select, selectedId, defaultLabel) => {
+        if (!select) return;
+        select.innerHTML = '';
+        const defaultOption = document.createElement('option');
+        defaultOption.value = '';
+        defaultOption.textContent = defaultLabel;
+        select.appendChild(defaultOption);
+        importedPropState.templates.forEach((template) => {
+            const option = document.createElement('option');
+            option.value = template.id;
+            option.textContent = template.displayName;
+            select.appendChild(option);
+        });
+        const customOption = document.createElement('option');
+        customOption.value = VEHICLE_CUSTOM_IMPORT_VALUE;
+        customOption.textContent = 'Custom… (import file)';
+        select.appendChild(customOption);
+        select.value = selectedId && importedPropState.templates.some((template) => template.id === selectedId)
+            ? selectedId
+            : '';
+    };
+    populateVehicleSelect(actorVehicleBodyTemplateSelect, selectedVehicleBodyTemplateId, 'Default Sedan');
+    populateVehicleSelect(actorVehicleWheelTemplateSelect, selectedVehicleWheelTemplateId, 'Default Wheel');
+}
+
+function handleVehicleTemplateSelectChange(slot) {
+    const select = slot === 'body' ? actorVehicleBodyTemplateSelect : actorVehicleWheelTemplateSelect;
+    if (!select) return;
+
+    if (select.value === VEHICLE_CUSTOM_IMPORT_VALUE) {
+        // Reset visible value back to default so the dropdown doesn't get
+        // stuck on "Custom…" if the user cancels the file picker.
+        select.value = '';
+        if (!vehicleTemplateImportInput) return;
+        pendingVehicleTemplateImportSlot = slot;
+        vehicleTemplateImportInput.value = '';
+        vehicleTemplateImportInput.click();
         return;
     }
 
-    importedPropState.templates.forEach((template) => {
-        const option = document.createElement('option');
-        option.value = template.id;
-        option.textContent = `${template.displayName} (${template.collisionMode})`;
-        actorImportedTemplateSelect.appendChild(option);
-    });
-
-    actorImportedTemplateSelect.value = selectedTemplateId && importedPropState.templates.some((template) => template.id === selectedTemplateId)
-        ? selectedTemplateId
-        : importedPropState.templates[0].id;
+    syncActorEditorUi();
 }
 
 function syncActorEditorUi() {
@@ -3035,6 +3796,12 @@ function syncActorEditorUi() {
     const isVehicle = kind === 'vehicle';
 
     actorImportedTemplateSelect.disabled = !isImported;
+    if (actorVehicleBodyTemplateSelect) {
+        actorVehicleBodyTemplateSelect.disabled = !isVehicle;
+    }
+    if (actorVehicleWheelTemplateSelect) {
+        actorVehicleWheelTemplateSelect.disabled = !isVehicle;
+    }
     actorComponentCollisionInput.disabled = isVehicle;
     actorComponentPhysicsInput.disabled = isVehicle || !actorComponentCollisionInput.checked;
     if (isVehicle) {
@@ -3074,7 +3841,7 @@ function closeActorEditor() {
     }
 }
 
-function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
+function openActorEditor({ kind = 'cube', templateId = '', label = '', vehicleBodyTemplateId = '', vehicleWheelTemplateId = '' } = {}) {
     if (!actorEditor) return;
 
     actorEditorState.open = true;
@@ -3087,6 +3854,10 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
     if (actorScaleInput) {
         actorScaleInput.value = kind === 'cube' ? '2.0' : '0.5';
     }
+    const actorColorEnabledReset = document.getElementById('actor-color-enabled');
+    const actorColorInputReset = document.getElementById('actor-color-input');
+    if (actorColorEnabledReset) actorColorEnabledReset.checked = false;
+    if (actorColorInputReset) actorColorInputReset.disabled = true;
     if (actorComponentCollisionInput) {
         actorComponentCollisionInput.checked = true;
     }
@@ -3097,7 +3868,7 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '' } = {}) {
         actorComponentScriptsInput.checked = true;
     }
 
-    syncActorEditorTemplateOptions(templateId);
+    syncActorEditorTemplateOptions(templateId, vehicleBodyTemplateId, vehicleWheelTemplateId);
     syncActorEditorUi();
     actorEditor.hidden = false;
 }
@@ -3114,6 +3885,313 @@ function setActorColor(actor, hexColor) {
             }
         }
     });
+    // Mark this actor as having user-authored material edits so .actor save
+    // includes the per-mesh overrides instead of taking the fast path that
+    // relies on template defaults.
+    mesh.userData.hasMaterialOverrides = true;
+}
+
+function markActorMaterialDirty(actor) {
+    const mesh = getActorRenderObject(actor);
+    if (mesh) mesh.userData.hasMaterialOverrides = true;
+}
+
+function getObjectMaterialArray(object3D) {
+    if (!object3D?.isMesh || !object3D.material) return [];
+    return Array.isArray(object3D.material) ? object3D.material : [object3D.material];
+}
+
+function clampMaterialStateValue(value, fallback, min = 0, max = 1) {
+    const numericValue = Number.isFinite(value) ? value : fallback;
+    return THREE.MathUtils.clamp(numericValue, min, max);
+}
+
+function serializeMaterialSide(side) {
+    if (side === THREE.BackSide) return 'back';
+    if (side === THREE.DoubleSide) return 'double';
+    return 'front';
+}
+
+function deserializeMaterialSide(side) {
+    if (side === 'back') return THREE.BackSide;
+    if (side === 'double') return THREE.DoubleSide;
+    if (side === 'front') return THREE.FrontSide;
+    return null;
+}
+
+function serializeSingleMaterialState(material) {
+    if (!material) return null;
+
+    const state = {};
+
+    if (material.color) {
+        state.color = `#${material.color.getHexString()}`;
+    }
+    if (material.emissive) {
+        state.emissive = `#${material.emissive.getHexString()}`;
+    }
+    if ('emissiveIntensity' in material) {
+        state.emissiveIntensity = material.emissiveIntensity ?? 1;
+    }
+    if ('roughness' in material) {
+        state.roughness = material.roughness ?? 0.5;
+    }
+    if ('metalness' in material) {
+        state.metalness = material.metalness ?? 0;
+    }
+    if ('opacity' in material) {
+        state.opacity = material.opacity ?? 1;
+    }
+    if ('transparent' in material) {
+        state.transparent = material.transparent === true;
+    }
+    if ('alphaTest' in material) {
+        state.alphaTest = material.alphaTest ?? 0;
+    }
+    if ('envMapIntensity' in material) {
+        state.envMapIntensity = material.envMapIntensity ?? 1;
+    }
+    if ('transmission' in material) {
+        state.transmission = material.transmission ?? 0;
+    }
+    if ('thickness' in material) {
+        state.thickness = material.thickness ?? 0;
+    }
+    if ('ior' in material) {
+        state.ior = material.ior ?? 1.5;
+    }
+    if ('clearcoat' in material) {
+        state.clearcoat = material.clearcoat ?? 0;
+    }
+    if ('clearcoatRoughness' in material) {
+        state.clearcoatRoughness = material.clearcoatRoughness ?? 0;
+    }
+    if ('side' in material) {
+        state.side = serializeMaterialSide(material.side);
+    }
+
+    return Object.keys(state).length ? state : null;
+}
+
+function getObjectMaterialPreviewState(object3D) {
+    const material = getObjectMaterialArray(object3D)[0] ?? null;
+    return serializeSingleMaterialState(material);
+}
+
+function serializeObjectMaterialState(object3D) {
+    const materials = getObjectMaterialArray(object3D);
+    if (!materials.length) return null;
+
+    const slots = materials.map((material) => serializeSingleMaterialState(material) ?? {});
+    const hasMaterialData = slots.some((slot) => Object.keys(slot).length > 0);
+    if (!hasMaterialData) return null;
+
+    return slots.length === 1 ? slots[0] : { slots };
+}
+
+function applyObjectMaterialState(object3D, materialState) {
+    const materials = getObjectMaterialArray(object3D);
+    if (!materials.length || !materialState) return;
+
+    const slotStates = Array.isArray(materialState?.slots) ? materialState.slots : null;
+
+    for (let index = 0; index < materials.length; index++) {
+        const material = materials[index];
+        if (!material) continue;
+        const nextState = slotStates ? (slotStates[index] ?? slotStates[0] ?? null) : materialState;
+        if (!nextState) continue;
+        if (!Object.keys(nextState).length) continue;
+
+        const color = nextState.color ? new THREE.Color(nextState.color) : null;
+        const emissive = nextState.emissive ? new THREE.Color(nextState.emissive) : null;
+        const side = deserializeMaterialSide(nextState.side);
+        const roughness = nextState.roughness !== undefined
+            ? clampMaterialStateValue(nextState.roughness, 0.5, 0, 1)
+            : undefined;
+        const metalness = nextState.metalness !== undefined
+            ? clampMaterialStateValue(nextState.metalness, 0, 0, 1)
+            : undefined;
+        const emissiveIntensity = nextState.emissiveIntensity !== undefined
+            ? clampMaterialStateValue(nextState.emissiveIntensity, 1, 0, 8)
+            : undefined;
+        const opacity = nextState.opacity !== undefined
+            ? clampMaterialStateValue(nextState.opacity, 1, 0, 1)
+            : undefined;
+        const alphaTest = nextState.alphaTest !== undefined
+            ? clampMaterialStateValue(nextState.alphaTest, 0, 0, 1)
+            : undefined;
+        const envMapIntensity = nextState.envMapIntensity !== undefined
+            ? clampMaterialStateValue(nextState.envMapIntensity, 1, 0, 4)
+            : undefined;
+        const transmission = nextState.transmission !== undefined
+            ? clampMaterialStateValue(nextState.transmission, 0, 0, 1)
+            : undefined;
+        const thickness = nextState.thickness !== undefined
+            ? clampMaterialStateValue(nextState.thickness, 0, 0, 10)
+            : undefined;
+        const ior = nextState.ior !== undefined
+            ? clampMaterialStateValue(nextState.ior, 1.5, 1, 2.5)
+            : undefined;
+        const clearcoat = nextState.clearcoat !== undefined
+            ? clampMaterialStateValue(nextState.clearcoat, 0, 0, 1)
+            : undefined;
+        const clearcoatRoughness = nextState.clearcoatRoughness !== undefined
+            ? clampMaterialStateValue(nextState.clearcoatRoughness, 0, 0, 1)
+            : undefined;
+
+        if (color && material.color) {
+            material.color.copy(color);
+        }
+        if (emissive && material.emissive) {
+            material.emissive.copy(emissive);
+        }
+        if ('emissiveIntensity' in material && emissiveIntensity !== undefined) {
+            material.emissiveIntensity = emissiveIntensity;
+        }
+        if ('roughness' in material && roughness !== undefined) {
+            material.roughness = roughness;
+        }
+        if ('metalness' in material && metalness !== undefined) {
+            material.metalness = metalness;
+        }
+        if ('opacity' in material && opacity !== undefined) {
+            material.opacity = opacity;
+        }
+        if ('alphaTest' in material && alphaTest !== undefined) {
+            material.alphaTest = alphaTest;
+        }
+        const hasTransparencyState = nextState.transparent !== undefined
+            || opacity !== undefined
+            || transmission !== undefined;
+        if ('transparent' in material && hasTransparencyState) {
+            const shouldBeTransparent = nextState.transparent === true
+                || (opacity !== undefined && opacity < 0.999)
+                || (transmission !== undefined && transmission > 0);
+            material.transparent = shouldBeTransparent;
+        }
+        if ('depthWrite' in material && hasTransparencyState) {
+            material.depthWrite = !(material.transparent && (material.alphaTest ?? 0) <= 0);
+        }
+        if ('envMapIntensity' in material && envMapIntensity !== undefined) {
+            material.envMapIntensity = envMapIntensity;
+        }
+        if ('transmission' in material && transmission !== undefined) {
+            material.transmission = transmission;
+        }
+        if ('thickness' in material && thickness !== undefined) {
+            material.thickness = thickness;
+        }
+        if ('ior' in material && ior !== undefined) {
+            material.ior = ior;
+        }
+        if ('clearcoat' in material && clearcoat !== undefined) {
+            material.clearcoat = clearcoat;
+        }
+        if ('clearcoatRoughness' in material && clearcoatRoughness !== undefined) {
+            material.clearcoatRoughness = clearcoatRoughness;
+        }
+        if ('side' in material && side !== null) {
+            material.side = side;
+        }
+        // Intentionally not setting material.needsUpdate. The fields touched
+        // above (color, roughness, metalness, opacity, emissive, etc.) are
+        // uniform updates — none of them require a shader recompile. Marking
+        // every material dirty triggers re-link work on the next frame, which
+        // is the difference between "instant" and "multi-second hitch" when
+        // restoring a 100k-mesh actor. Side changes flip culling, also no
+        // recompile.
+    }
+}
+
+function serializeObjectMaterialOverrides(rootObject) {
+    if (!rootObject) return [];
+
+    const overrides = [];
+
+    function visit(node, path) {
+        const materialState = serializeObjectMaterialState(node);
+        if (materialState) {
+            overrides.push({
+                path,
+                material: materialState,
+            });
+        }
+
+        node.children.forEach((child, index) => {
+            visit(child, [...path, index]);
+        });
+    }
+
+    visit(rootObject, []);
+    return overrides;
+}
+
+function getObjectByHierarchyPath(rootObject, path = []) {
+    let current = rootObject;
+
+    for (const childIndex of path) {
+        if (!current?.children?.[childIndex]) {
+            return null;
+        }
+        current = current.children[childIndex];
+    }
+
+    return current;
+}
+
+function applyObjectMaterialOverrides(rootObject, overrides = []) {
+    if (!rootObject || !Array.isArray(overrides)) return;
+
+    overrides.forEach((entry) => {
+        const target = getObjectByHierarchyPath(rootObject, entry.path);
+        if (!target) return;
+        applyObjectMaterialState(target, entry.material);
+    });
+}
+
+function spawnDDGIVolumeActor({ userData = null, position = null, size = null, options = {} } = {}) {
+    const camDir = camera ? new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion) : new THREE.Vector3(0, 0, -1);
+    const spawnPos = position
+        ? position.clone()
+        : (camera ? camera.position.clone().addScaledVector(camDir, 8) : new THREE.Vector3());
+    const dims = size ? size.clone() : new THREE.Vector3(32, 16, 32);
+    const geom = new THREE.BoxGeometry(dims.x, dims.y, dims.z);
+    const mat = new THREE.MeshBasicMaterial({
+        color: 0x4dffd2,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+        toneMapped: false,
+        fog: false,
+    });
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.position.copy(spawnPos);
+    mesh.userData.ddgiSkipReceive = true;
+    mesh.userData.ignoreForcedSceneShadows = true;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+
+    const actor = createActor({
+        mesh,
+        kind: 'ddgiVolume',
+        userData,
+        name: userData?.label || 'ddgi-volume',
+    });
+    if (!actor.hasComponent(TransformComponent)) {
+        actor.addComponent(new TransformComponent());
+    }
+    const ddgi = new DDGIVolumeComponent(options);
+    actor.addComponent(ddgi);
+
+    sceneSystem?.addActor(actor);
+    ensureActorIdentity(actor);
+
+    // Trigger BeginPlay manually so the volume registers right now (the engine's
+    // gameplay-mode lifecycle would otherwise wait for play).
+    try { ddgi.beginPlay(); } catch (e) { console.warn('[DDGI] beginPlay failed', e); }
+
+    return actor;
 }
 
 function spawnActorFromEditor({ openScriptEditor = false } = {}) {
@@ -3128,7 +4206,11 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     let actor = null;
 
     if (kind === 'vehicle') {
-        actor = spawnDrivableCar({ includeScripts, userData });
+        const bodyTemplateId = actorVehicleBodyTemplateSelect?.value || '';
+        const wheelTemplateId = actorVehicleWheelTemplateSelect?.value || '';
+        actor = spawnDrivableCar({ includeScripts, userData, bodyTemplateId, wheelTemplateId });
+    } else if (kind === 'ddgiVolume') {
+        actor = spawnDDGIVolumeActor({ userData });
     } else if (kind === 'imported') {
         const templateId = actorImportedTemplateSelect?.value || '';
         if (!templateId) {
@@ -3160,7 +4242,8 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     }
 
     const actorColorInput = document.getElementById('actor-color-input');
-    if (actorColorInput) {
+    const actorColorEnabled = document.getElementById('actor-color-enabled');
+    if (actorColorInput && actorColorEnabled?.checked) {
         setActorColor(actor, actorColorInput.value);
     }
 
@@ -3192,7 +4275,7 @@ function compileObjectEventScript(source) {
         const wrapped = new ObjectEventFunction('api', `
             "use strict";
             const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp,
-                FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, UPrimitiveComponent, UTransformComponent, UWorld, Self, World, GetWorld, DeltaTime, Hit } = api;
+                FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, AHUD, UAudioComponent, UUserWidget, UTextWidget, UImageWidget, UProgressBarWidget, UButtonWidget, UPrimitiveComponent, UTransformComponent, UGameInstance, UWorld, AGameModeBase, AGameMode, APlayerController, APawn, ACharacter, Self, HUD, WidgetAPI, UnrealWidgetAPI, World, GameInstance, GameMode, PlayerController, Pawn, Character, CreateWidget, GetHUD, GetWorld, GetGameInstance, GetGameMode, GetPlayerController, GetPlayerPawn, GetPlayerCharacter, DeltaTime, Hit } = api;
             ${normalizedSource}
             return {
                 BeginPlay: typeof BeginPlay === 'function' ? BeginPlay : undefined,
@@ -3208,7 +4291,7 @@ function compileObjectEventScript(source) {
     const flat = new ObjectEventFunction('api', `
         "use strict";
         const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, prop, actor, object, body, physicsBody, localPosition, worldPosition, eventType, deltaTime, collision, renderComponent, physicsComponent, scriptComponent, metadataComponent, PhysicsComponent, TransformComponent, spawnDynamicPrimitive, spawnImportedProp,
-            FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, UPrimitiveComponent, UTransformComponent, UWorld, Self, World, GetWorld, DeltaTime, Hit } = api;
+            FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, AHUD, UAudioComponent, UUserWidget, UTextWidget, UImageWidget, UProgressBarWidget, UButtonWidget, UPrimitiveComponent, UTransformComponent, UGameInstance, UWorld, AGameModeBase, AGameMode, APlayerController, APawn, ACharacter, Self, HUD, WidgetAPI, UnrealWidgetAPI, World, GameInstance, GameMode, PlayerController, Pawn, Character, CreateWidget, GetHUD, GetWorld, GetGameInstance, GetGameMode, GetPlayerController, GetPlayerPawn, GetPlayerCharacter, DeltaTime, Hit } = api;
         ${normalizedSource}
     `);
     flat.__ueLifecycle = false;
@@ -3280,6 +4363,11 @@ function createDynamicPropActor({
         phys.setPhysicsContext(physics);
         if (body) phys.setBody(body);
         actor.addComponent(phys);
+    }
+    if (!actor.hasComponent(AudioComponent)) {
+        const audio = new AudioComponent();
+        audio.setAudioRuntime(runtimeAudio);
+        actor.addComponent(audio);
     }
 
     sceneSystem?.addActor(actor);
@@ -3465,7 +4553,7 @@ function syncObjectScriptEditor() {
     }
 
     if (objectScriptEditorMode) {
-        objectScriptEditorMode.textContent = `Event: ${getObjectScriptEventLabel(eventType)}`;
+        objectScriptEditorMode.value = eventType === 'collision' ? 'collision' : 'tick';
     }
 
     if (objectScriptTickToggleRow) {
@@ -3653,6 +4741,7 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
     const physicsComponent = getPhysicsBodyComponent(prop);
     const scriptComponent = getScriptComponent(prop);
     const metadataComponent = getMetadataComponent(prop);
+    const audioComponent = prop?.getComponentByClass?.(AudioComponent) ?? null;
     const object = renderComponent?.mesh || null;
     const body = physicsComponent?.body || null;
     const localPosition = object?.position?.clone?.() ?? null;
@@ -3680,8 +4769,13 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
         physicsComponent,
         scriptComponent,
         metadataComponent,
+        audioComponent,
+        audio: runtimeAudio,
+        playSoundAtLocation,
+        AudioComponent,
         PhysicsComponent,
         TransformComponent,
+        TEST_SOUND_ID,
         actor: prop,
         spawnDynamicPrimitive,
         spawnImportedProp,
@@ -3692,13 +4786,26 @@ function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision = null 
         {
             scene,
             camera,
+            renderer,
             sceneSystem,
             physics,
+            gameplay,
+            audio: runtimeAudio,
+            hud: getRuntimeHud(),
+            getHUD: getRuntimeHud,
+            widgetApi: window.WidgetAPI,
+            unrealWidgetApi: window.UnrealWidgetAPI,
+            playSoundAtLocation,
             raycastWorld: typeof raycastWorld === 'function' ? raycastWorld : null,
             spawnDynamicPrimitive,
             spawnImportedProp,
             spawnDrivableCar: typeof spawnDrivableCar === 'function' ? spawnDrivableCar : null,
             destroyActor: typeof destroyDynamicPhysicsProp === 'function' ? destroyDynamicPhysicsProp : null,
+            enterGameplay: typeof enterGameplay === 'function' ? enterGameplay : null,
+            exitGameplay: typeof exitGameplay === 'function' ? exitGameplay : null,
+            respawnPlayer: typeof respawnPlayer === 'function' ? respawnPlayer : null,
+            syncCameraToCharacter: typeof syncCameraToCharacter === 'function' ? syncCameraToCharacter : null,
+            applyGameplayCameraRotation: typeof applyGameplayCameraRotation === 'function' ? applyGameplayCameraRotation : null,
             deltaTime,
         },
         prop,
@@ -4160,6 +5267,120 @@ function setRayDebugEnabled(isEnabled) {
     }
 }
 
+function formatShadowDebugStatus() {
+    const lastPassSuffix = shadowDebugState.lastAppliedAt > 0
+        ? ` Last pass hit ${shadowDebugState.lastMeshCount} mesh${shadowDebugState.lastMeshCount === 1 ? '' : 'es'}, changed ${shadowDebugState.lastUpdatedCount}, armed ${shadowDebugState.lastLightCount} shadow light${shadowDebugState.lastLightCount === 1 ? '' : 's'}.`
+        : '';
+
+    if (shadowDebugState.forceAllMeshes) {
+        return `Auto force is on. New scene meshes get swept every ${Math.round(shadowDebugState.autoApplyIntervalMs)} ms.${lastPassSuffix}`;
+    }
+
+    if (shadowDebugState.lastAppliedAt > 0) {
+        return `Auto force is off.${lastPassSuffix}`;
+    }
+
+    return 'Auto force is off. Apply Now runs one scene-wide shadow pass without keeping it enabled.';
+}
+
+function updateShadowDebugUi() {
+    if (!shadowDebugUiRefs) return;
+
+    shadowDebugUiRefs.forceOffBtn?.classList.toggle('viewer-toggle-btn-active', !shadowDebugState.forceAllMeshes);
+    shadowDebugUiRefs.forceOnBtn?.classList.toggle('viewer-toggle-btn-active', shadowDebugState.forceAllMeshes);
+
+    if (shadowDebugUiRefs.status) {
+        shadowDebugUiRefs.status.textContent = formatShadowDebugStatus();
+    }
+}
+
+function isShadowForceExcludedObject(object) {
+    let current = object;
+    while (current) {
+        if (current.userData?.ignoreForcedSceneShadows) {
+            return true;
+        }
+        current = current.parent ?? null;
+    }
+
+    return object?.name === 'tire-skid-ribbon';
+}
+
+function forceAllSceneMeshShadows() {
+    if (!scene?.traverse) {
+        shadowDebugState.lastAppliedAt = performance.now();
+        shadowDebugState.lastMeshCount = 0;
+        shadowDebugState.lastUpdatedCount = 0;
+        shadowDebugState.lastLightCount = 0;
+        updateShadowDebugUi();
+        return {
+            meshCount: 0,
+            updatedCount: 0,
+            shadowLightCount: 0,
+        };
+    }
+
+    let meshCount = 0;
+    let updatedCount = 0;
+    let shadowLightCount = 0;
+
+    scene.traverse((object) => {
+        if (!object) return;
+
+        if (object.isMesh) {
+            if (isShadowForceExcludedObject(object)) {
+                return;
+            }
+
+            meshCount += 1;
+
+            if (!object.castShadow || !object.receiveShadow) {
+                updatedCount += 1;
+            }
+
+            object.castShadow = true;
+            object.receiveShadow = true;
+            return;
+        }
+
+        if (object.isDirectionalLight || object.isSpotLight || object.isPointLight) {
+            if (!object.castShadow) {
+                shadowLightCount += 1;
+            }
+            object.castShadow = true;
+        }
+    });
+
+    if (renderer?.shadowMap) {
+        renderer.shadowMap.enabled = true;
+    }
+
+    shadowDebugState.lastAppliedAt = performance.now();
+    shadowDebugState.lastMeshCount = meshCount;
+    shadowDebugState.lastUpdatedCount = updatedCount;
+    shadowDebugState.lastLightCount = shadowLightCount;
+    updateShadowDebugUi();
+
+    return {
+        meshCount,
+        updatedCount,
+        shadowLightCount,
+    };
+}
+
+function setForceAllSceneMeshShadowsEnabled(isEnabled) {
+    shadowDebugState.forceAllMeshes = !!isEnabled;
+    const result = shadowDebugState.forceAllMeshes ? forceAllSceneMeshShadows() : null;
+    updateShadowDebugUi();
+    return result;
+}
+
+function tickForceAllSceneMeshShadows() {
+    if (!shadowDebugState.forceAllMeshes && !gameplay.active) return;
+    if ((performance.now() - shadowDebugState.lastAppliedAt) < shadowDebugState.autoApplyIntervalMs) return;
+    forceAllSceneMeshShadows();
+}
+
 // ──────────────────────────────────────────────────────────
 //  Physgun (GMod-style grab/push/pull/fling tool)
 // ──────────────────────────────────────────────────────────
@@ -4313,47 +5534,117 @@ function registerCollisionForProp(contactMap, prop, collisionKey, collision) {
 
 function updateDynamicBodyCollisionScripts() {
     if (!gameplay.active || !physics.dynamicBodies.length || !hasEnabledDynamicPropEvent('collision')) return;
+    const COLLISION_SPEED_THRESHOLD = 0.1;
+
+    const isBodyAwake = (prop, body) => {
+        if (!body) return true;
+
+        const physicsComponent = getPhysicsBodyComponent(prop);
+        return physicsComponent?.isAwake?.()
+            ?? (typeof physics.bodyInterface?.IsActive === 'function'
+                ? physics.bodyInterface.IsActive(body.GetID())
+                : true);
+    };
+
+    const wakeBody = (prop, body) => {
+        if (!body || isBodyAwake(prop, body)) return;
+
+        const physicsComponent = getPhysicsBodyComponent(prop);
+        physicsComponent?.activate?.();
+        if (!physicsComponent?.activate && typeof physics.bodyInterface?.ActivateBody === 'function') {
+            physics.bodyInterface.ActivateBody(body.GetID());
+        }
+    };
+
+    const getBodySpeed = (body) => {
+        if (!body) return Number.POSITIVE_INFINITY;
+        const velocity = copyJoltVector(tempVectorA, physics.bodyInterface.GetLinearVelocity(body.GetID()));
+        return velocity.length();
+    };
+
+    const targetEntries = physics.dynamicBodies
+        .flatMap((prop) => {
+            const mesh = getActorRenderObject(prop);
+            if (!mesh) return [];
+
+            return [{
+                prop,
+                mesh,
+                body: getActorBody(prop),
+                bounds: new THREE.Box3().setFromObject(mesh),
+            }];
+        });
 
     const entries = physics.dynamicBodies
-        .filter((prop) => !!getActorRenderObject(prop))
-        .map((prop) => ({
-            prop,
-            mesh: getActorRenderObject(prop),
-            body: getActorBody(prop),
-            bounds: new THREE.Box3().setFromObject(getActorRenderObject(prop)),
-        }));
+        .flatMap((prop) => {
+            const scriptState = getActorScriptState(prop);
+            if (!scriptState?.collision?.enabled) return [];
+
+            const mesh = getActorRenderObject(prop);
+            if (!mesh) return [];
+
+            const body = getActorBody(prop);
+            if (!isBodyAwake(prop, body)) return [];
+
+            const speed = getBodySpeed(body);
+            if (speed <= COLLISION_SPEED_THRESHOLD) return [];
+
+            const bounds = new THREE.Box3().setFromObject(mesh);
+            const wakeBounds = bounds.clone();
+            if (prop.kind === 'vehicle') {
+                const wakePadding = THREE.MathUtils.clamp(speed * 0.05, 0.18, 0.75);
+                wakeBounds.expandByScalar(wakePadding);
+            }
+
+            return [{
+                prop,
+                mesh,
+                body,
+                bounds,
+                wakeBounds,
+            }];
+        });
 
     const contactMap = new Map();
+    const processedPairs = new Set();
 
     for (let index = 0; index < entries.length; index++) {
         const current = entries[index];
-        const groundHeight = getGroundHeightAt(current.mesh.position.x, current.mesh.position.z, true);
 
-        if (groundHeight !== null && current.bounds.min.y <= groundHeight + 0.08) {
-            registerCollisionForProp(contactMap, current.prop, `ground:${current.prop.id}`, {
-                type: 'ground',
-                groundHeight,
-                point: current.mesh.position.clone(),
-            });
-        }
+        for (let otherIndex = 0; otherIndex < targetEntries.length; otherIndex++) {
+            const other = targetEntries[otherIndex];
+            if (other.prop.id === current.prop.id) continue;
 
-        for (let otherIndex = index + 1; otherIndex < entries.length; otherIndex++) {
-            const other = entries[otherIndex];
-            if (!current.bounds.intersectsBox(other.bounds)) continue;
+            const directHit = current.bounds.intersectsBox(other.bounds);
+            const nearWakeHit = !directHit && current.wakeBounds?.intersectsBox(other.bounds);
+            if (!directHit && !nearWakeHit) continue;
+
+            if (nearWakeHit) {
+                wakeBody(other.prop, other.body);
+                continue;
+            }
 
             const collisionKey = [current.prop.id, other.prop.id].sort().join(':');
+            if (processedPairs.has(collisionKey)) continue;
+            processedPairs.add(collisionKey);
+
+            wakeBody(other.prop, other.body);
+
             registerCollisionForProp(contactMap, current.prop, collisionKey, {
                 type: 'prop',
                 otherProp: other.prop,
                 otherObject: other.mesh,
                 otherBody: other.body,
             });
-            registerCollisionForProp(contactMap, other.prop, collisionKey, {
-                type: 'prop',
-                otherProp: current.prop,
-                otherObject: current.mesh,
-                otherBody: current.body,
-            });
+
+            if (getActorScriptState(other.prop)?.collision?.enabled) {
+                registerCollisionForProp(contactMap, other.prop, collisionKey, {
+                    type: 'prop',
+                    otherProp: current.prop,
+                    otherObject: current.mesh,
+                    otherBody: current.body,
+                });
+            }
         }
     }
 
@@ -4503,13 +5794,14 @@ function compileMouseActionScript(source) {
 
     return new MouseActionFunction('api', `
         "use strict";
-        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive, spawnImportedProp } = api;
+        const { THREE, scene, camera, renderer, currentMesh, gameplay, showcase, physics, event, button, mode, spawnDynamicPrimitive, spawnImportedProp,
+            FVector, FRotator, FTransform, FHitResult, ECollisionChannel, AActor, AHUD, UAudioComponent, UUserWidget, UTextWidget, UImageWidget, UProgressBarWidget, UButtonWidget, UPrimitiveComponent, UTransformComponent, UGameInstance, UWorld, AGameModeBase, AGameMode, APlayerController, APawn, ACharacter, Self, HUD, WidgetAPI, UnrealWidgetAPI, World, GameInstance, GameMode, PlayerController, Pawn, Character, CreateWidget, GetHUD, GetWorld, GetGameInstance, GetGameMode, GetPlayerController, GetPlayerPawn, GetPlayerCharacter, DeltaTime, Hit } = api;
         ${normalizedSource}
     `);
 }
 
 function buildMouseActionApi(event, button) {
-    return {
+    const legacyApi = {
         THREE,
         scene,
         camera,
@@ -4524,6 +5816,35 @@ function buildMouseActionApi(event, button) {
         spawnDynamicPrimitive,
         spawnImportedProp,
     };
+
+    return buildUeContext(
+        legacyApi,
+        {
+            scene,
+            camera,
+            sceneSystem,
+            physics,
+            audio: runtimeAudio,
+            hud: getRuntimeHud(),
+            getHUD: getRuntimeHud,
+            widgetApi: window.WidgetAPI,
+            unrealWidgetApi: window.UnrealWidgetAPI,
+            playSoundAtLocation,
+            raycastWorld: typeof raycastWorld === 'function' ? raycastWorld : null,
+            spawnDynamicPrimitive,
+            spawnImportedProp,
+            spawnDrivableCar: typeof spawnDrivableCar === 'function' ? spawnDrivableCar : null,
+            destroyActor: typeof destroyDynamicPhysicsProp === 'function' ? destroyDynamicPhysicsProp : null,
+            enterGameplay: typeof enterGameplay === 'function' ? enterGameplay : null,
+            exitGameplay: typeof exitGameplay === 'function' ? exitGameplay : null,
+            respawnPlayer: typeof respawnPlayer === 'function' ? respawnPlayer : null,
+            syncCameraToCharacter: typeof syncCameraToCharacter === 'function' ? syncCameraToCharacter : null,
+            applyGameplayCameraRotation: typeof applyGameplayCameraRotation === 'function' ? applyGameplayCameraRotation : null,
+            deltaTime: 0,
+        },
+        null,
+        null,
+    );
 }
 
 function applyMouseActionScripts({ persist = true } = {}) {
@@ -5003,10 +6324,45 @@ function runRayDebugCommand(args) {
     pushDebugConsoleLine('Usage: raydebug on, raydebug off, or raydebug toggle.', 'warn');
 }
 
+function runMeshShadowsCommand(args) {
+    const action = args[0]?.toLowerCase() || 'apply';
+
+    if (['apply', 'now', 'once'].includes(action)) {
+        const result = forceAllSceneMeshShadows();
+        pushDebugConsoleLine(`Forced shadows on ${result.updatedCount}/${result.meshCount} meshes.`, 'success');
+        return;
+    }
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        const result = setForceAllSceneMeshShadowsEnabled(true) ?? { meshCount: 0 };
+        pushDebugConsoleLine(`Mesh shadow auto-force enabled. Watching ${result.meshCount} meshes.`, 'success');
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        setForceAllSceneMeshShadowsEnabled(false);
+        pushDebugConsoleLine('Mesh shadow auto-force disabled.', 'success');
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        const result = setForceAllSceneMeshShadowsEnabled(!shadowDebugState.forceAllMeshes) ?? { meshCount: shadowDebugState.lastMeshCount };
+        if (shadowDebugState.forceAllMeshes) {
+            pushDebugConsoleLine(`Mesh shadow auto-force enabled. Watching ${result.meshCount} meshes.`, 'success');
+        } else {
+            pushDebugConsoleLine('Mesh shadow auto-force disabled.', 'success');
+        }
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: meshshadows apply, meshshadows on, meshshadows off, or meshshadows toggle.', 'warn');
+}
+
 const debugCommandRegistry = {
     stat: runStatCommand,
     mobile: runMobileCommand,
     raydebug: runRayDebugCommand,
+    meshshadows: runMeshShadowsCommand,
 };
 
 function executeDebugConsoleCommand(rawCommand) {
@@ -5503,6 +6859,8 @@ async function init() {
     showcaseModeBtn = document.getElementById('camera-showcase');
     playModeBtn = document.getElementById('camera-play');
     openActorEditorBtn = document.getElementById('open-actor-editor');
+    playTestSoundBtn = document.getElementById('play-test-sound-btn');
+    playTestSoundStatus = document.getElementById('play-test-sound-status');
     multiplayerServerUrlInput = document.getElementById('multiplayer-server-url');
     multiplayerRoomInput = document.getElementById('multiplayer-room');
     multiplayerConnectBtn = document.getElementById('multiplayer-connect');
@@ -5522,6 +6880,9 @@ async function init() {
     actorLabelInput = document.getElementById('actor-label-input');
     actorScaleInput = document.getElementById('actor-scale-input');
     actorImportedTemplateSelect = document.getElementById('actor-imported-template-select');
+    actorVehicleBodyTemplateSelect = document.getElementById('actor-vehicle-body-template-select');
+    actorVehicleWheelTemplateSelect = document.getElementById('actor-vehicle-wheel-template-select');
+    vehicleTemplateImportInput = document.getElementById('vehicle-template-import-input');
     actorComponentCollisionInput = document.getElementById('actor-component-collision');
     actorComponentPhysicsInput = document.getElementById('actor-component-physics');
     actorComponentScriptsInput = document.getElementById('actor-component-scripts');
@@ -5564,9 +6925,100 @@ async function init() {
     debugConsoleInput = document.getElementById('debug-console-input');
     debugConsoleFooter = document.getElementById('debug-console-footer');
     debugStatsOverlay = document.getElementById('debug-stats-overlay');
+    engineAudioDebugEl = document.getElementById('engine-audio-debug');
+    postProcessUiRefs = {
+        targetGlobalBtn: document.getElementById('post-process-target-global'),
+        targetVolumeBtn: document.getElementById('post-process-target-volume'),
+        exposureInput: document.getElementById('post-process-exposure'),
+        exposureValue: document.getElementById('post-process-exposure-value'),
+        bloomStrengthInput: document.getElementById('post-process-bloom-strength'),
+        bloomStrengthValue: document.getElementById('post-process-bloom-strength-value'),
+        bloomRadiusInput: document.getElementById('post-process-bloom-radius'),
+        bloomRadiusValue: document.getElementById('post-process-bloom-radius-value'),
+        bloomThresholdInput: document.getElementById('post-process-bloom-threshold'),
+        bloomThresholdValue: document.getElementById('post-process-bloom-threshold-value'),
+        blendSpeedInput: document.getElementById('post-process-blend-speed'),
+        blendSpeedValue: document.getElementById('post-process-blend-speed-value'),
+        priorityInput: document.getElementById('post-process-priority'),
+        sizeXInput: document.getElementById('post-process-size-x'),
+        sizeYInput: document.getElementById('post-process-size-y'),
+        sizeZInput: document.getElementById('post-process-size-z'),
+        placeVolumeBtn: document.getElementById('post-process-place-volume'),
+        removeVolumeBtn: document.getElementById('post-process-remove-volume'),
+        toggleBoundsBtn: document.getElementById('post-process-toggle-bounds'),
+        applyBtn: document.getElementById('post-process-apply-settings'),
+        status: document.getElementById('post-process-status'),
+    };
+    shadowDebugUiRefs = {
+        forceOffBtn: document.getElementById('debug-force-mesh-shadows-off'),
+        forceOnBtn: document.getElementById('debug-force-mesh-shadows-on'),
+        applyBtn: document.getElementById('debug-apply-mesh-shadows'),
+        status: document.getElementById('debug-shadow-status'),
+    };
 
     renderDebugConsoleOutput();
     debugConsoleInput?.addEventListener('keydown', handleDebugConsoleInputKeydown);
+
+    postProcessUiRefs?.targetGlobalBtn?.addEventListener('click', () => {
+        postProcessUiState.target = 'global';
+        syncPostProcessVolumeUi();
+    });
+    postProcessUiRefs?.targetVolumeBtn?.addEventListener('click', () => {
+        postProcessUiState.target = 'volume';
+        syncPostProcessVolumeUi();
+    });
+
+    [
+        postProcessUiRefs?.exposureInput,
+        postProcessUiRefs?.bloomStrengthInput,
+        postProcessUiRefs?.bloomRadiusInput,
+        postProcessUiRefs?.bloomThresholdInput,
+        postProcessUiRefs?.blendSpeedInput,
+    ].forEach((input) => {
+        input?.addEventListener('input', () => {
+            updatePostProcessSliderLabels();
+            applyPostProcessSettingsFromUi({ reloadInputs: false });
+        });
+    });
+
+    [
+        postProcessUiRefs?.priorityInput,
+        postProcessUiRefs?.sizeXInput,
+        postProcessUiRefs?.sizeYInput,
+        postProcessUiRefs?.sizeZInput,
+    ].forEach((input) => {
+        input?.addEventListener('change', () => {
+            applyPostProcessSettingsFromUi({ reloadInputs: false });
+        });
+    });
+
+    postProcessUiRefs?.placeVolumeBtn?.addEventListener('click', () => {
+        postProcessUiState.target = 'volume';
+        applyPostProcessSettingsFromUi({ createVolumeIfNeeded: true, placeVolumeAtCamera: true, reloadInputs: true });
+    });
+    postProcessUiRefs?.removeVolumeBtn?.addEventListener('click', () => {
+        postProcessVolumeManager?.removeEditorVolume?.();
+        postProcessVolumeManager?.update?.(1);
+        syncPostProcessVolumeUi();
+    });
+    postProcessUiRefs?.toggleBoundsBtn?.addEventListener('click', () => {
+        const snapshot = postProcessVolumeManager?.getSnapshot?.();
+        postProcessVolumeManager?.setDebugVisible?.(!snapshot?.debugVisible);
+        syncPostProcessVolumeUi({ reloadInputs: false });
+    });
+    postProcessUiRefs?.applyBtn?.addEventListener('click', () => {
+        applyPostProcessSettingsFromUi({ createVolumeIfNeeded: postProcessUiState.target === 'volume', reloadInputs: true });
+    });
+    shadowDebugUiRefs?.forceOffBtn?.addEventListener('click', () => {
+        setForceAllSceneMeshShadowsEnabled(false);
+    });
+    shadowDebugUiRefs?.forceOnBtn?.addEventListener('click', () => {
+        setForceAllSceneMeshShadowsEnabled(true);
+    });
+    shadowDebugUiRefs?.applyBtn?.addEventListener('click', () => {
+        forceAllSceneMeshShadows();
+    });
+    updateShadowDebugUi();
 
     if (browseModelBtn) {
         browseModelBtn.addEventListener('click', () => {
@@ -5610,8 +7062,36 @@ async function init() {
     propCollisionCancelBtn?.addEventListener('click', () => resolvePropCollisionPrompt(null));
 
     openActorEditorBtn?.addEventListener('click', () => openActorEditor());
+    playTestSoundBtn?.addEventListener('click', () => {
+        void playAudioTestCue();
+    });
+    const actorColorEnabledEl = document.getElementById('actor-color-enabled');
+    const actorColorInputEl = document.getElementById('actor-color-input');
+    actorColorEnabledEl?.addEventListener('change', () => {
+        if (actorColorInputEl) actorColorInputEl.disabled = !actorColorEnabledEl.checked;
+    });
     actorKindSelect?.addEventListener('change', () => syncActorEditorUi());
     actorImportedTemplateSelect?.addEventListener('change', () => syncActorEditorUi());
+    actorVehicleBodyTemplateSelect?.addEventListener('change', () => handleVehicleTemplateSelectChange('body'));
+    actorVehicleWheelTemplateSelect?.addEventListener('change', () => handleVehicleTemplateSelectChange('wheel'));
+    vehicleTemplateImportInput?.addEventListener('change', async (event) => {
+        const file = event.target.files?.[0];
+        const slot = pendingVehicleTemplateImportSlot;
+        pendingVehicleTemplateImportSlot = null;
+        event.target.value = '';
+        if (!file || !slot) return;
+
+        const template = await importPhysicsProp(file, {});
+        const select = slot === 'body' ? actorVehicleBodyTemplateSelect : actorVehicleWheelTemplateSelect;
+        if (template?.id && select) {
+            // populateVehicleSelect already re-ran via registerImportedPropTemplate;
+            // just select the freshly imported template.
+            select.value = template.id;
+        } else if (select) {
+            select.value = '';
+        }
+        syncActorEditorUi();
+    });
     actorComponentCollisionInput?.addEventListener('change', () => syncActorEditorUi());
     actorComponentPhysicsInput?.addEventListener('change', () => syncActorEditorUi());
     actorComponentScriptsInput?.addEventListener('change', () => syncActorEditorUi());
@@ -5637,6 +7117,10 @@ async function init() {
     inputActionsCloseBtn?.addEventListener('click', () => closeInputActionsEditor());
     objectScriptTickActionBtn?.addEventListener('click', () => openObjectScriptEditor('tick'));
     objectScriptCollisionActionBtn?.addEventListener('click', () => openObjectScriptEditor('collision'));
+    objectScriptEditorMode?.addEventListener('change', () => {
+        objectScriptState.targetEvent = objectScriptEditorMode.value === 'collision' ? 'collision' : 'tick';
+        syncObjectScriptEditor();
+    });
     objectScriptEditorApplyBtn?.addEventListener('click', () => {
         const prop = getDynamicPropById(objectScriptState.targetPropId);
         if (!prop || !objectScriptEditorInput) return;
@@ -5702,14 +7186,57 @@ async function init() {
     camera.rotation.order = 'YXZ';
     syncShowcaseAnglesFromTarget(SHOWCASE_CAMERA_TARGET);
     applyShowcaseCameraRotation();
+    scene.add(camera);
+    volumetricFogController = createVolumetricFog({
+        scene,
+        camera,
+    });
+    runtimeAudio.listener = new SoundGeneratorAudioListener();
+    camera.add(runtimeAudio.listener);
 
     renderer = new WebGPURenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
+    await renderer.init();
+
+    // ── Post-processing: bloom over the scene's emissive output ─────────────
+    // Uses an MRT pass so bloom only picks up materials with non-zero emissive
+    // (lights, headlights/taillights, accent stripes) instead of every bright
+    // pixel — keeps the world from looking hazy.
+    const scenePass = pass(scene, camera);
+    scenePass.setMRT(mrt({
+        output: output,
+        emissive: emissive,
+    }));
+    const sceneColor = scenePass.getTextureNode('output');
+    const sceneEmissive = scenePass.getTextureNode('emissive');
+    const bloomNode = bloom(sceneEmissive, globalPostProcessUniforms.bloomStrength, globalPostProcessUniforms.bloomRadius, globalPostProcessUniforms.bloomThreshold);
+    postProcessing = new PostProcessing(renderer);
+    postProcessing.outputNode = sceneColor.add(bloomNode);
+
+    postProcessVolumeManager = createPostProcessVolumeManager({
+        scene,
+        camera,
+        renderer,
+        globalUniforms: globalPostProcessUniforms
+    });
+    syncPostProcessVolumeUi();
+
+    getDDGIManager().init({
+        scene,
+        renderer,
+        camera,
+        getDirectionalLight: () => mainDirectionalLight,
+    });
+    if (typeof window !== 'undefined') {
+        window.__ddgi = getDDGIManager();
+    }
 
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
@@ -5791,19 +7318,21 @@ async function init() {
     hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.5);
     scene.add(hemiLight);
 
-    const mainLight = new THREE.DirectionalLight(0xffffff, 2.5);
-    mainLight.position.set(5, 10, 5);
-    mainLight.castShadow = true;
-    mainLight.shadow.mapSize.width = 2048;
-    mainLight.shadow.mapSize.height = 2048;
-    mainLight.shadow.camera.near = 0.5;
-    mainLight.shadow.camera.far = 15;
-    mainLight.shadow.camera.left = -3;
-    mainLight.shadow.camera.right = 3;
-    mainLight.shadow.camera.top = 3;
-    mainLight.shadow.camera.bottom = -3;
-    mainLight.shadow.bias = -0.001;
-    scene.add(mainLight);
+    mainDirectionalLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    mainDirectionalLight.castShadow = true;
+    mainDirectionalLight.shadow.mapSize.width = 4096;
+    mainDirectionalLight.shadow.mapSize.height = 4096;
+    mainDirectionalLight.shadow.camera.near = 0.5;
+    mainDirectionalLight.shadow.camera.far = 60;
+    mainDirectionalLight.shadow.camera.left = -24;
+    mainDirectionalLight.shadow.camera.right = 24;
+    mainDirectionalLight.shadow.camera.top = 24;
+    mainDirectionalLight.shadow.camera.bottom = -24;
+    mainDirectionalLight.shadow.bias = -0.001;
+    mainDirectionalLight.shadow.normalBias = 0.02;
+    scene.add(mainDirectionalLight);
+    scene.add(mainDirectionalLight.target);
+    updateMainDirectionalLightShadowFocus();
 
     // Create example widgets
     createExampleWidgets();
@@ -5857,19 +7386,29 @@ async function init() {
         if (gameplay.active) {
             updateGameplay(delta);
         } else {
+            silenceVehicleEngineAudio();
+            updateEngineAudioDebugOverlay('idle', null, null);
             updateShowcaseCamera(delta);
         }
+        updateMainDirectionalLightShadowFocus();
         updateGameplayDebugRay();
         const updateDuration = performance.now() - updateStart;
 
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
         if (gameplay.active) {
             physicsMetrics = stepPhysics(delta);
-            updateVehicleVisuals(delta);
         }
-        
-        multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());
-        multiplayerController?.update(delta);
+        updateVehicleVisuals(delta);
+        updateVehicleSurfaceEffects(delta);
+        volumetricFogController?.update(delta);
+        postProcessVolumeManager?.update(delta);
+        const _ddgiStart = performance.now();
+        getDDGIManager().tick(delta);
+        const _ddgiMs = performance.now() - _ddgiStart;
+        if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
+        tickForceAllSceneMeshShadows();
+
+        multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());        multiplayerController?.update(delta);
 
         try {
             // Update widget system
@@ -5883,7 +7422,11 @@ async function init() {
 
             const renderStart = performance.now();
             tickRaycastDebugLine();
-            renderer.renderAsync(scene, camera);
+            if (postProcessing) {
+                postProcessing.render();
+            } else {
+                renderer.render(scene, camera);
+            }
 
             recordDebugFrameMetrics({
                 frame: delta * 1000,
@@ -6043,6 +7586,13 @@ function refreshGameplayWorld() {
 }
 
 function setupGameplayEvents() {
+    const resumeAudio = () => {
+        runtimeAudio.resume();
+    };
+
+    document.addEventListener('pointerdown', resumeAudio, { passive: true });
+    document.addEventListener('touchend', resumeAudio, { passive: true });
+    document.addEventListener('keydown', resumeAudio);
     document.addEventListener('pointerlockchange', handlePointerLockChange);
     document.addEventListener('mousemove', handleGameplayMouseMove);
     document.addEventListener('keydown', handleDebugConsoleKeydown, true);
@@ -6080,6 +7630,9 @@ function setupGameplayEvents() {
         if (hits.length > 0) {
             const hitObj = hits[0].object;
             blueprintState.selectedComponent = hitObj;
+            blueprintState.selectedComponents.clear();
+            blueprintState.materialMultiSelectActive = false;
+            if (hitObj.isMesh) blueprintState.selectedComponents.add(hitObj);
             if (typeof transformControl !== 'undefined') transformControl.attach(hitObj);
             refreshBlueprintComponents();
         }
@@ -6105,6 +7658,9 @@ function setupGameplayEvents() {
             if (hits.length > 0) {
                 const hitObj = hits[0].object;
                 blueprintState.selectedComponent = hitObj;
+                blueprintState.selectedComponents.clear();
+                blueprintState.materialMultiSelectActive = false;
+                if (hitObj.isMesh) blueprintState.selectedComponents.add(hitObj);
                 if (typeof transformControl !== 'undefined') transformControl.attach(hitObj);
                 refreshBlueprintComponents();
                 
@@ -6210,6 +7766,7 @@ function updateShowcaseInput(event, isDown) {
 
 function handleGameplayKeyEvent(event) {
     const isDown = event.type === 'keydown';
+    const eventTarget = event.target instanceof HTMLElement ? event.target : document.activeElement;
 
     if (debugConsoleState.visible) {
         if (gameplay.pointerLocked || gameplay.active) {
@@ -6220,6 +7777,12 @@ function handleGameplayKeyEvent(event) {
 
     if (isDown && !event.repeat && event.code === 'F8') {
         setCollisionDebugEnabled(!collisionDebugState.enabled);
+        event.preventDefault();
+        return;
+    }
+
+    if (isDown && !event.repeat && event.code === 'KeyL' && !isEditableElement(eventTarget)) {
+        void playAudioTestCue();
         event.preventDefault();
         return;
     }
@@ -6413,7 +7976,7 @@ function handleShowcaseMouseButton(event) {
             }
             const propHit = getDynamicPropHitFromEvent(event);
             if (propHit?.prop) {
-                selectShowcaseActor(propHit.prop.id);
+                selectShowcaseActor(propHit.prop.id, propHit.hit?.object ?? null);
             } else {
                 // Clicked empty space — deselect
                 selectShowcaseActor(null);
@@ -6421,14 +7984,7 @@ function handleShowcaseMouseButton(event) {
             return;
         }
         if (event.button !== 2) return;
-
-        const propHit = getDynamicPropHitFromEvent(event);
-        if (propHit?.prop) {
-            showcase.looking = false;
-            event.preventDefault();
-            return;
-        }
-
+        closeObjectScriptMenu();
         showcase.looking = true;
         event.preventDefault();
         return;
@@ -6450,13 +8006,6 @@ function handleShowcaseContextMenu(event) {
         return;
     }
 
-    const propHit = getDynamicPropHitFromEvent(event);
-    if (propHit?.prop) {
-        event.preventDefault();
-        openObjectScriptMenu(event, propHit.prop);
-        return;
-    }
-
     event.preventDefault();
     closeObjectScriptMenu();
 }
@@ -6474,6 +8023,7 @@ function handlePointerLockChange() {
     if (isLocked) {
         gameplay.pointerLocked = true;
         gameplay.active = true;
+        forceAllSceneMeshShadows();
         showcase.looking = false;
         syncTransformControlState();
         closeObjectScriptMenu();
@@ -6507,6 +8057,7 @@ function enterGameplay() {
     respawnPlayer(true);
     gameplay.pointerLocked = false;
     gameplay.active = true;
+    forceAllSceneMeshShadows();
     syncTransformControlState();
     resetAllScriptLifecycleHandles();
     applyMouseActionScripts({ persist: true });
@@ -6556,6 +8107,17 @@ function updateWorldPresentation() {
     if (pedestal) pedestal.visible = !gameplay.active;
     document.body.classList.toggle('play-ready', gameplay.canPlay);
     document.body.classList.toggle('play-active', gameplay.active);
+}
+
+function updateMainDirectionalLightShadowFocus() {
+    if (!mainDirectionalLight || !camera) return;
+
+    mainDirectionalLightShadowFocus.copy(camera.position);
+    mainDirectionalLightShadowFocus.y = worldFloor?.position?.y ?? 0;
+
+    mainDirectionalLight.position.copy(mainDirectionalLightShadowFocus).add(mainDirectionalLightOffset);
+    mainDirectionalLight.target.position.copy(mainDirectionalLightShadowFocus);
+    mainDirectionalLight.target.updateMatrixWorld();
 }
 
 function updateGameplayUI() {
@@ -6787,10 +8349,11 @@ function updateVehicleGameplay(delta) {
     const horizontalVelocity = tempVectorD.copy(linearVelocity).setY(0);
     const forwardSpeed = horizontalVelocity.dot(flatForward);
     const lateralSpeed = horizontalVelocity.dot(flatRight);
+    const throttleInput = throttle;
     const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
     const driftInput = Math.abs(steer) > 0.1 && speedRatio > VEHICLE_SETTINGS.driftBoostThreshold;
     const drifting = driftInput && (throttle !== 0 || Math.abs(lateralSpeed) > 1.2);
-    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 0.5;
+    const halfWheelBase = VEHICLE_SETTINGS.wheelBase * 1.0;
     const halfTrackWidth = VEHICLE_SETTINGS.trackWidth * 0.5;
     const rideState = vehicle.mesh.userData.vehicleRideState || {
         sampleRideHeights: [null, null, null, null],
@@ -6938,6 +8501,37 @@ function updateVehicleGameplay(delta) {
         bodyInterface.ActivateBody(bodyId);
     }
 
+    const vehicleRenderObject = getActorRenderObject(vehicle);
+    const vehicleVisualState = vehicleRenderObject ? ensureVehicleVisualState(vehicleRenderObject) : null;
+    const rearWheelWorldPositions = [];
+    if (vehicleVisualState?.steeringPivots?.length >= 4) {
+        const forwardOffset = VEHICLE_SETTINGS.wheelBase * 0.18;
+        for (let i = 2; i < 4; i++) {
+            const pivot = vehicleVisualState.steeringPivots[i];
+            if (!pivot?.isObject3D) { rearWheelWorldPositions.push(null); continue; }
+            const wheelPos = new THREE.Vector3();
+            pivot.getWorldPosition(wheelPos);
+            wheelPos.y -= vehicleVisualState.wheelRadius || 0;
+            wheelPos.addScaledVector(flatForward, forwardOffset);
+            rearWheelWorldPositions.push(wheelPos);
+        }
+    }
+
+    emitVehicleSurfaceEffects(delta, {
+        vehiclePosition,
+        flatForward,
+        flatRight,
+        cornerSamples,
+        grounded,
+        drifting,
+        brakeHeld: vehicleState.brakeHeld,
+        forwardSpeed: nextForwardSpeed,
+        lateralSpeed,
+        averageCompression,
+        verticalSpeed: linearVelocity.y,
+        rearWheelWorldPositions,
+    });
+
     const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? 1 : 0.05));
     if (uprightCorrection.lengthSq() > 1e-6) {
         const uprightTorque = new Jolt.Vec3(uprightCorrection.x, uprightCorrection.y, uprightCorrection.z);
@@ -6947,21 +8541,23 @@ function updateVehicleGameplay(delta) {
 
     vehicle.mesh.position.copy(vehiclePosition);
     vehicle.mesh.quaternion.copy(vehicleRotation);
+    updateVehicleEngineAudio(delta, vehicle, {
+        throttleInput,
+        brakeHeld: vehicleState.brakeHeld,
+        grounded,
+        forwardSpeed: nextForwardSpeed,
+    });
     positionVehicleCamera(vehiclePosition, vehicleRotation, delta);
     gameplay.grounded = grounded;
     physics.jumpQueued = false;
 
     // Update example widgets with vehicle data
-    if (window.exampleWidgets && widgetManager) {
+    if (window.exampleWidgets) {
         const speedKmh = Math.round(forwardSpeed * 3.6); // Convert m/s to km/h
-        widgetManager.updateWidget(window.exampleWidgets.speed, {
-            text: `Speed: ${speedKmh} km/h`
-        });
+        window.exampleWidgets.speed?.SetText(`Speed: ${speedKmh} km/h`);
 
         // Update health bar based on vehicle "health" (using contact ratio as proxy)
-        widgetManager.updateWidget(window.exampleWidgets.health, {
-            progress: Math.max(0.1, smoothedContactRatio)
-        });
+        window.exampleWidgets.health?.SetPercent(Math.max(0.1, smoothedContactRatio));
 
         // Update score
         if (window.gameScore !== undefined) {
@@ -6971,9 +8567,7 @@ function updateVehicleGameplay(delta) {
             if (forwardSpeed > 15) {
             }
 
-            widgetManager.updateWidget(window.exampleWidgets.score, {
-                text: `Score: ${Math.floor(window.gameScore)}`
-            });
+            window.exampleWidgets.score?.SetText(`Score: ${Math.floor(window.gameScore)}`);
         }
     }
 
@@ -7139,6 +8733,9 @@ function updateGameplay(delta) {
         updateVehicleGameplay(delta);
         return;
     }
+
+    silenceVehicleEngineAudio();
+    updateEngineAudioDebugOverlay('idle', null, null);
 
     if (!physics.character) return;
 
@@ -7778,6 +9375,207 @@ function exportWorldToUmap() {
     setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
+// === SCENE FOLDER BUNDLE ============================================
+// Folder layout:
+//   <picked-folder>/
+//     scene.umap          (slim — actor records + assetPath references)
+//     assets/
+//       <fileName>.obj    (raw imported source files)
+//
+// Loading any folder bundle is far faster than a legacy .umap because
+// importedTemplates no longer carry rootJson; the OBJ/GLB importer runs
+// against the raw bytes the same way a fresh import does.
+
+async function exportWorldToSceneFolder() {
+    const umap = exportWorldToJSON({ preferAssetPath: true });
+    const vehicleTemplateIds = new Set();
+    for (const actor of umap.actors || []) {
+        if (actor?.kind !== 'vehicle') continue;
+        if (actor.vehicleBodyTemplateId) vehicleTemplateIds.add(actor.vehicleBodyTemplateId);
+        if (actor.vehicleWheelTemplateId) vehicleTemplateIds.add(actor.vehicleWheelTemplateId);
+    }
+
+    // Build a parallel GLB cache for every imported template referenced by the
+    // bundle. GLB parses ~10x faster than text OBJ for huge models (e.g. a
+    // 300 MB car), so on next load registerImportedPropTemplateFromSerializedData
+    // can skip the OBJ path entirely. Fall back to the raw source file for any
+    // template whose GLB export fails.
+    const glbAssets = new Map(); // templateId -> { fileName, blob }
+    const rawFiles = new Map();  // templateId -> File (fallback only)
+
+    for (const t of umap.importedTemplates || []) {
+        const template = importedPropState.templates.find((entry) => entry.id === t.id);
+        if (!template?.root) continue;
+        const sourceFile = importedPropState.sourceFiles[t.id];
+
+        if (vehicleTemplateIds.has(t.id) && sourceFile) {
+            rawFiles.set(t.id, sourceFile);
+            t.assetPath = `assets/${sourceFile.name}`;
+            t.assetType = 'raw';
+            delete t.rootJson;
+            continue;
+        }
+
+        try {
+            const glbBlob = await exportRootToGlb(template.root);
+            const glbName = `${t.id}.glb`;
+            glbAssets.set(t.id, { fileName: glbName, blob: glbBlob });
+            t.assetPath = `assets/${glbName}`;
+            t.assetType = 'glb';
+        } catch (err) {
+            console.warn(`[scene] GLB export failed for template ${t.id}; falling back to raw source.`, err);
+            if (sourceFile) {
+                rawFiles.set(t.id, sourceFile);
+                t.assetPath = `assets/${sourceFile.name}`;
+                t.assetType = 'raw';
+            } else {
+                // No GLB and no raw file — re-inline rootJson so this template
+                // still loads (slower but correct).
+                delete t.assetPath;
+                delete t.assetType;
+                t.rootJson = template.root.toJSON();
+            }
+        }
+    }
+
+    const useFsAccess = typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
+    if (useFsAccess) {
+        let dirHandle;
+        try {
+            dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        } catch (err) {
+            if (err?.name === 'AbortError') return;
+            console.error('Folder picker failed; falling back to multi-file download.', err);
+            return downloadSceneFolderFallback(umap, glbAssets, rawFiles);
+        }
+        try {
+            await writeFileToDirectory(dirHandle, 'scene.umap', JSON.stringify(umap, null, 2));
+            if (glbAssets.size > 0 || rawFiles.size > 0) {
+                const assetsDir = await dirHandle.getDirectoryHandle('assets', { create: true });
+                for (const { fileName, blob } of glbAssets.values()) {
+                    await writeFileToDirectory(assetsDir, fileName, blob);
+                }
+                for (const file of rawFiles.values()) {
+                    await writeFileToDirectory(assetsDir, file.name, file);
+                }
+            }
+            console.info('[scene] Saved scene folder to picked directory.');
+        } catch (err) {
+            console.error('Failed to write scene folder.', err);
+            alert('Failed to write scene folder. See console for details.');
+        }
+        return;
+    }
+
+    // Fallback for browsers without File System Access API: drop separate
+    // downloads. The user reassembles the folder manually.
+    downloadSceneFolderFallback(umap, glbAssets, rawFiles);
+}
+
+function exportRootToGlb(root) {
+    return new Promise((resolve, reject) => {
+        const exporter = new GLTFExporter();
+        exporter.parse(
+            root,
+            (result) => {
+                if (result instanceof ArrayBuffer) {
+                    resolve(new Blob([result], { type: 'model/gltf-binary' }));
+                } else {
+                    // Defensive: caller asked for binary, but if a runtime
+                    // returns JSON anyway, ship it as a non-binary GLB blob.
+                    resolve(new Blob([JSON.stringify(result)], { type: 'model/gltf+json' }));
+                }
+            },
+            reject,
+            { binary: true, onlyVisible: false }
+        );
+    });
+}
+
+async function writeFileToDirectory(dirHandle, name, contents) {
+    const fileHandle = await dirHandle.getFileHandle(name, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(contents);
+    await writable.close();
+}
+
+function downloadSceneFolderFallback(umap, glbAssets, rawFiles) {
+    const triggerDownload = (blob, name) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+    };
+
+    triggerDownload(
+        new Blob([JSON.stringify(umap, null, 2)], { type: 'application/json' }),
+        'scene.umap'
+    );
+    if (glbAssets) {
+        for (const { fileName, blob } of glbAssets.values()) {
+            triggerDownload(blob, fileName);
+        }
+    }
+    if (rawFiles) {
+        for (const file of rawFiles.values()) {
+            triggerDownload(file, file.name);
+        }
+    }
+    alert('Saved scene.umap and its assets as separate downloads. Place them in a folder with assets/<file> next to scene.umap before loading.');
+}
+
+async function loadWorldFromSceneFolder(fileList) {
+    if (!fileList || fileList.length === 0) return;
+
+    // Build a fileMap keyed by both basename and the relative path the
+    // browser exposes via webkitRelativePath. registerImportedPropTemplate
+    // looks up either form via lookupBundleAsset().
+    const fileMap = Object.create(null);
+    let umapFile = null;
+
+    for (const file of fileList) {
+        const relPath = file.webkitRelativePath || file.name;
+        const idx = relPath.indexOf('/');
+        const inFolderPath = idx >= 0 ? relPath.slice(idx + 1) : relPath;
+        fileMap[inFolderPath] = { file, url: URL.createObjectURL(file) };
+        if (!fileMap[file.name]) {
+            fileMap[file.name] = { file, url: URL.createObjectURL(file) };
+        }
+        if (!fileMap[file.name.toLowerCase()]) {
+            fileMap[file.name.toLowerCase()] = fileMap[file.name];
+        }
+        if (inFolderPath === 'scene.umap' || file.name === 'scene.umap') {
+            umapFile = file;
+        }
+    }
+
+    if (!umapFile) {
+        alert('Pick a folder that contains scene.umap.');
+        return;
+    }
+
+    let umap;
+    try {
+        umap = JSON.parse(await umapFile.text());
+    } catch (err) {
+        console.error('Failed to parse scene.umap.', err);
+        alert('scene.umap is not valid JSON.');
+        return;
+    }
+
+    editorHistory.captureState();
+    try {
+        await loadWorldFromJSON(umap, { fileMap });
+    } catch (err) {
+        console.error('Failed to load scene folder.', err);
+        alert('Failed to load scene folder. See console for details.');
+    }
+}
+
 // === ACTOR EXPORT / IMPORT ===
 function getActorComponentFlags(actor) {
     if (!actor) {
@@ -7863,17 +9661,37 @@ function serializeActorData(actor) {
     const mesh = getActorRenderObject(actor);
     if (!mesh) return null;
 
+    // Fast path: an imported actor whose materials were never edited reuses
+    // the template's materials verbatim. Walking the (possibly 100k-node)
+    // mesh tree to emit per-node overrides — and re-applying them on load —
+    // burns seconds for nothing. Skip both sides unless the user actually
+    // touched a material.
+    const dirtyMaterials = mesh.userData.hasMaterialOverrides === true;
+
+    let userDataForSerialization = actor.entity.getComponent('metadata')?.userData || null;
+    if (actor.kind === 'ddgiVolume') {
+        const ddgi = actor.getComponentByClass?.(DDGIVolumeComponent)
+            || actor.GetComponent?.(DDGIVolumeComponent);
+        if (ddgi?.serialize) {
+            userDataForSerialization = { ...(userDataForSerialization || {}), ddgi: ddgi.serialize() };
+        }
+    }
+
     return {
         id: actor.id,
         kind: actor.kind,
         name: actor.rootNode?.name || 'Actor',
         templateId: actor.templateId,
-        userData: actor.entity.getComponent('metadata')?.userData || null,
+        vehicleBodyTemplateId: actor.vehicleBodyTemplateId || null,
+        vehicleWheelTemplateId: actor.vehicleWheelTemplateId || null,
+        userData: userDataForSerialization,
         transform: {
             position: mesh.position.toArray(),
             quaternion: mesh.quaternion.toArray(),
             scale: mesh.scale.toArray(),
         },
+        material: dirtyMaterials ? serializeObjectMaterialState(mesh) : null,
+        materialOverrides: dirtyMaterials ? serializeObjectMaterialOverrides(mesh) : [],
         scripts: objectScriptState.drafts[actor.id] || null,
         componentFlags: getActorComponentFlags(actor),
         components: serializeComponentTree(mesh),
@@ -7901,9 +9719,19 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
 
     let actor = null;
     if (actorData.kind === 'vehicle') {
+        const savedBodyTemplateId = actorData.vehicleBodyTemplateId
+            && importedPropState.templates.some((template) => template.id === actorData.vehicleBodyTemplateId)
+            ? actorData.vehicleBodyTemplateId
+            : '';
+        const savedWheelTemplateId = actorData.vehicleWheelTemplateId
+            && importedPropState.templates.some((template) => template.id === actorData.vehicleWheelTemplateId)
+            ? actorData.vehicleWheelTemplateId
+            : '';
         actor = spawnDrivableCar({
             includeScripts: componentFlags.scripts,
             userData: actorData.userData,
+            bodyTemplateId: savedBodyTemplateId,
+            wheelTemplateId: savedWheelTemplateId,
         });
     } else if (actorData.kind === 'imported') {
         if (!actorData.templateId || !importedPropState.templates.some((template) => template.id === actorData.templateId)) {
@@ -7920,13 +9748,34 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
             includeCollisionBody: componentFlags.collision,
             simulatePhysics: componentFlags.physics,
         });
+    } else if (actorData.kind === 'ddgiVolume') {
+        const savedPos = new THREE.Vector3().fromArray(actorData.transform.position);
+        const savedScale = new THREE.Vector3().fromArray(actorData.transform.scale || [1, 1, 1]);
+        // Bake scale into box size so the spawned volume matches saved bounds.
+        const size = new THREE.Vector3(32, 16, 32).multiply(savedScale);
+        const ddgiOptions = actorData.userData?.ddgi || {};
+        actor = spawnDDGIVolumeActor({
+            userData: actorData.userData || null,
+            position: savedPos,
+            size,
+            options: ddgiOptions,
+        });
     } else {
-        actor = spawnDynamicPrimitive(actorData.kind, undefined, scale, {
+        // Spawn the primitive directly at the saved world position with no
+        // launch impulse. The default spawn path (camera-relative point +
+        // forward impulse) was creating a transient Jolt body whose contact
+        // pairs leaked across the play→showcase→play cycle, leaving stale
+        // manifolds that made the cube tunnel through terrain and then
+        // accelerate upward on the second play entry.
+        const savedPos = new THREE.Vector3().fromArray(actorData.transform.position);
+        actor = spawnDynamicPrimitive(actorData.kind, savedPos, scale, {
             includeScripts: componentFlags.scripts,
             userData: actorData.userData,
             returnActor: true,
             includeCollisionBody: componentFlags.collision,
             simulatePhysics: componentFlags.physics,
+            local: false,
+            skipImpulse: true,
         });
     }
 
@@ -7940,6 +9789,7 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
     const previousId = actor.id;
     if (preserveId && actorData.id) {
         actor.id = actorData.id;
+        syncRuntimePropIdCounter(actor.id);
     }
 
     setActorComponentFlags(actor, componentFlags);
@@ -7967,7 +9817,45 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
         mesh.quaternion.fromArray(actorData.transform.quaternion);
         mesh.scale.fromArray(actorData.transform.scale);
         deserializeComponentTree(mesh, actorData.components);
-        rebuildActorPhysics(actor);
+        // Fast path: when an actor was saved with no material edits the
+        // template's materials are already on the spawned mesh — skip the
+        // (very expensive) per-node override walk and the root-level apply.
+        if (Array.isArray(actorData.materialOverrides) && actorData.materialOverrides.length > 0) {
+            applyObjectMaterialOverrides(mesh, actorData.materialOverrides);
+            mesh.userData.hasMaterialOverrides = true;
+        } else if (actorData.material) {
+            applyObjectMaterialState(mesh, actorData.material);
+            mesh.userData.hasMaterialOverrides = true;
+        }
+        mesh.updateMatrixWorld(true);
+        if (actorData.kind === 'vehicle') {
+            const body = getActorBody(actor);
+            if (body && physics.ready) {
+                const { Jolt, bodyInterface } = physics;
+                const joltPos = new Jolt.Vec3(mesh.position.x, mesh.position.y, mesh.position.z);
+                const joltRot = new Jolt.Quat(mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w);
+                bodyInterface.SetPositionAndRotation(body.GetID(), joltPos, joltRot, Jolt.EActivation_Activate);
+                bodyInterface.SetLinearVelocity(body.GetID(), Jolt.Vec3.prototype.sZero());
+                bodyInterface.SetAngularVelocity(body.GetID(), Jolt.Vec3.prototype.sZero());
+                bodyInterface.SetMaxAngularVelocity(body.GetID(), VEHICLE_SETTINGS.maxAngularVelocity);
+                Jolt.destroy(joltPos);
+                Jolt.destroy(joltRot);
+            }
+
+            const visualState = ensureVehicleVisualState(mesh);
+            if (visualState?.lastWorldPosition instanceof THREE.Vector3) {
+                mesh.getWorldPosition(visualState.lastWorldPosition);
+                visualState.lastPositionInitialized = true;
+            }
+        }
+        // Primitive bodies were already created at the saved transform via
+        // spawnDynamicPrimitive(local:false, skipImpulse:true), so a rebuild
+        // is unnecessary and was leaving duplicate contact manifolds across
+        // play→showcase→play cycles. Imported actors still need the rebuild
+        // so the compound-shape children match the deserialized component tree.
+        if (actorData.kind === 'imported') {
+            rebuildActorPhysics(actor);
+        }
     }
 
     if (componentFlags.scripts) {
@@ -7980,17 +9868,48 @@ function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
 function exportActorToFile(actor) {
     if (!actor) return;
 
+    const serializedActor = serializeActorData(actor);
+    if (!serializedActor) return;
+
+    const usedTemplateIds = new Set();
+    if (serializedActor.kind === 'imported' && serializedActor.templateId) {
+        usedTemplateIds.add(serializedActor.templateId);
+    }
+    if (serializedActor.kind === 'vehicle' && serializedActor.vehicleBodyTemplateId) {
+        usedTemplateIds.add(serializedActor.vehicleBodyTemplateId);
+    }
+    if (serializedActor.kind === 'vehicle' && serializedActor.vehicleWheelTemplateId) {
+        usedTemplateIds.add(serializedActor.vehicleWheelTemplateId);
+    }
+
+    const importedTemplates = [];
+    usedTemplateIds.forEach((templateId) => {
+        const template = importedPropState.templates.find((entry) => entry.id === templateId);
+        const serializedTemplate = serializeImportedPropTemplate(template, { preferAssetPath: false });
+        if (serializedTemplate) {
+            importedTemplates.push(serializedTemplate);
+        }
+    });
+
     const actorData = {
         version: 1,
         type: 'polyflow-actor',
-        actor: serializeActorData(actor)
+        actor: serializedActor
     };
+
+    if (importedTemplates.length > 0) {
+        actorData.importedTemplates = importedTemplates;
+    }
 
     const displayName = getDynamicPropDisplayName(actor)
         .replace(/[^a-zA-Z0-9_\- ]/g, '')
         .replace(/\s+/g, '_')
         .toLowerCase() || 'actor';
-    const blob = new Blob([JSON.stringify(actorData, null, 2)], { type: 'application/json' });
+    // Non-pretty stringify: indented JSON inflates large actor files (e.g. an
+    // imported car with thousands of components) by 3-5x and slows down both
+    // serialize and the JSON.parse on load. The file is meant to be loaded by
+    // the editor, not hand-edited.
+    const blob = new Blob([JSON.stringify(actorData)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -8001,68 +9920,160 @@ function exportActorToFile(actor) {
     setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
-function loadActorFromFile(file) {
+// === Progress overlay ============================================
+// Reuses the existing #processing-overlay panel for any long-running task
+// (asset import, actor load, scene load). Caller drives the bar manually.
+const progressOverlay = {
+    el: null,
+    titleEl: null,
+    barEl: null,
+    stepEl: null,
+    show(title, step = '') {
+        this.el ||= document.getElementById('processing-overlay');
+        this.titleEl ||= document.getElementById('processing-title');
+        this.barEl ||= document.getElementById('loader-bar');
+        this.stepEl ||= document.getElementById('processing-step');
+        if (!this.el) return;
+        if (this.titleEl) this.titleEl.textContent = title;
+        if (this.stepEl) this.stepEl.textContent = step;
+        if (this.barEl) this.barEl.style.width = '0%';
+        this.el.style.display = 'flex';
+    },
+    update(percent, step) {
+        if (this.barEl && Number.isFinite(percent)) {
+            this.barEl.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+        }
+        if (this.stepEl && step !== undefined) {
+            this.stepEl.textContent = step;
+        }
+    },
+    hide() {
+        if (this.el) {
+            this.el.style.display = 'none';
+            this.el.style.pointerEvents = 'none';
+        }
+    },
+};
+
+// Yield to the browser so the overlay actually repaints between heavy steps.
+// requestAnimationFrame + a microtask flush is enough — long sync work after
+// a style change otherwise blocks paint until it returns.
+function yieldToPaint() {
+    return new Promise((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+    });
+}
+
+async function loadActorFromFile(file) {
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const data = JSON.parse(e.target.result);
-            if (data.type !== 'polyflow-actor' || !data.actor) {
-                alert('This file is not a valid PolyFlow actor file.');
-                return;
-            }
+    const fileSizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    progressOverlay.show('Loading Actor', `Reading ${file.name} (${fileSizeMb} MB)...`);
+    await yieldToPaint();
 
-            const actorData = data.actor;
-            const actor = spawnActorFromSerializedData(actorData);
-
-            if (actor) {
-                saveObjectScriptDrafts();
-                refreshSceneUI();
-                selectShowcaseActor(actor.id);
-            } else {
-                alert('Failed to spawn the loaded actor. Physics may not be ready yet.');
+    try {
+        // Stream-read with progress so big .actor files (thousands of components)
+        // show a moving bar instead of looking frozen on large reads.
+        const text = await readFileAsTextWithProgress(file, (loaded, total) => {
+            if (total > 0) {
+                progressOverlay.update((loaded / total) * 60, `Reading ${(loaded / (1024 * 1024)).toFixed(1)} / ${fileSizeMb} MB`);
             }
-        } catch (err) {
-            console.error('Error loading actor file', err);
-            alert('Failed to load actor file. It may be corrupt or in an unsupported format.');
+        });
+
+        progressOverlay.update(65, 'Parsing JSON...');
+        await yieldToPaint();
+
+        const data = JSON.parse(text);
+        if (data.type !== 'polyflow-actor' || !data.actor) {
+            alert('This file is not a valid PolyFlow actor file.');
+            return;
         }
-    };
-    reader.readAsText(file);
+
+        if (data.importedTemplates && Array.isArray(data.importedTemplates)) {
+            progressOverlay.update(70, 'Loading templates...');
+            await yieldToPaint();
+            for (const templateData of data.importedTemplates) {
+                try {
+                    await registerImportedPropTemplateFromSerializedData(templateData);
+                } catch (e) {
+                    console.error('Failed to load template for actor:', e);
+                }
+            }
+        }
+
+        progressOverlay.update(75, 'Spawning actor...');
+        await yieldToPaint();
+
+        const actorData = data.actor;
+        const actor = spawnActorFromSerializedData(actorData);
+
+        if (!actor) {
+            alert('Failed to spawn the loaded actor. Physics may not be ready yet.');
+            return;
+        }
+
+        progressOverlay.update(92, 'Restoring scripts...');
+        await yieldToPaint();
+        saveObjectScriptDrafts();
+
+        progressOverlay.update(98, 'Refreshing scene UI...');
+        await yieldToPaint();
+        refreshSceneUI();
+        selectShowcaseActor(actor.id);
+
+        progressOverlay.update(100, 'Done.');
+    } catch (err) {
+        console.error('Error loading actor file', err);
+        alert('Failed to load actor file. It may be corrupt or in an unsupported format.');
+    } finally {
+        // Always hide so a thrown error or early return can't leave the
+        // overlay covering the viewer (it has z-index:20 and would block
+        // every click in the scene).
+        progressOverlay.hide();
+    }
+}
+
+function readFileAsTextWithProgress(file, onProgress) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onprogress = (e) => {
+            if (e.lengthComputable && typeof onProgress === 'function') {
+                onProgress(e.loaded, e.total);
+            }
+        };
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = () => reject(reader.error || new Error('FileReader failed'));
+        reader.readAsText(file);
+    });
 }
 
 function clearSceneActors() {
     if (!sceneSystem) return;
     const actorsToDestroy = Array.from(sceneSystem.actors);
     for (const actor of actorsToDestroy) {
-        const body = getActorBody(actor);
-        if (body && physics.bodyInterface) {
-            physics.bodyInterface.RemoveBody(body.GetID());
-            physics.bodyInterface.DestroyBody(body.GetID());
-        }
-        
-        const mesh = getActorRenderObject(actor);
-        if (mesh && mesh.parent) {
-            mesh.parent.remove(mesh);
-            mesh.geometry?.dispose();
-            mesh.material?.dispose();
-        }
-        
+        // destroyDynamicPhysicsProp removes the mesh from its parent, calls
+        // physicsCore.unregisterBackFaceCulledBody so the terrain/static
+        // back-face cull list stays in sync, destroys the Jolt body, and
+        // clears any script drafts. Bypassing it (the previous inline body
+        // teardown did) leaves stale entries in physicsCore's cull list,
+        // which then breaks raycasts and edge-aware collision when the same
+        // actor is re-spawned by loadWorldFromJSON on showcase→play.
+        destroyDynamicPhysicsProp(actor);
         sceneSystem.removeActor(actor);
     }
-    
-    physics.dynamicBodies = [];
-    physics.staticBodies = [];
+
+    physics.dynamicBodies.length = 0;
+    physics.staticBodies.length = 0;
     selectShowcaseActor(null);
 }
 
 function loadWorldFromUmap(file) {
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
         try {
             const umap = JSON.parse(e.target.result);
             editorHistory.captureState();
-            loadWorldFromJSON(umap);
+            await loadWorldFromJSON(umap);
         } catch (err) {
             console.error('Error loading scene file', err);
             alert('Failed to load scene file.');
@@ -8079,6 +10090,24 @@ document.getElementById('scene-file-input')?.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) {
         loadWorldFromUmap(file);
+        e.target.value = '';
+    }
+});
+
+document.getElementById('save-scene-folder-btn')?.addEventListener('click', () => {
+    exportWorldToSceneFolder().catch((err) => {
+        console.error('Save Scene Folder failed.', err);
+    });
+});
+document.getElementById('load-scene-folder-btn')?.addEventListener('click', () => {
+    document.getElementById('scene-folder-input')?.click();
+});
+document.getElementById('scene-folder-input')?.addEventListener('change', (e) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+        loadWorldFromSceneFolder(files).catch((err) => {
+            console.error('Load Scene Folder failed.', err);
+        });
         e.target.value = '';
     }
 });
@@ -8118,6 +10147,8 @@ function enterBlueprintEditor() {
     if (typeof updateBlueprintTransformUI === 'function') updateBlueprintTransformUI();
     blueprintState.targetActor = prop;
     blueprintState.selectedComponent = getActorRenderObject(prop);
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
     
     blueprintState.savedCameraPosition = camera.position.clone();
     blueprintState.savedShowcaseAngles = { yaw: showcase.yaw, pitch: showcase.pitch };
@@ -8210,6 +10241,8 @@ function exitBlueprintEditor() {
     blueprintState.active = false;
     blueprintState.targetActor = null;
     blueprintState.selectedComponent = null;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
     
     if (typeof sceneSystem !== 'undefined') {
         for (const actor of sceneSystem.actors) {
@@ -8267,25 +10300,386 @@ function exitBlueprintEditor() {
         if (typeof transformControl !== 'undefined' && prop && getActorRenderObject(prop)) {
             transformControl.attach(getActorRenderObject(prop));
         }
-        rebuildActorPhysics(prop);
+        // Only rebuild physics for actor kinds whose collision shape depends
+        // on the component tree (imported props with multi-mesh compounds).
+        // Primitives have a single fixed shape — rebuilding them here was the
+        // same bug the play-mode round-trip had: stale duplicate manifolds in
+        // Jolt, causing "fall through floor then fly up and hover" the next
+        // time the user enters play.
+        if (prop?.kind === 'imported') {
+            rebuildActorPhysics(prop);
+        }
     }
     
     refreshSceneUI();
 }
 
-function syncBlueprintColorPicker() {
-    const picker = document.getElementById('bp-color-picker');
-    if (!picker) return;
-    const comp = blueprintState.selectedComponent;
-    if (comp?.isMesh && comp.material) {
-        const mat = Array.isArray(comp.material) ? comp.material[0] : comp.material;
-        if (mat?.color) picker.value = '#' + mat.color.getHexString();
+function formatBlueprintMaterialScalar(value, fallback = 0, min = 0, max = 1, decimals = 2) {
+    return clampMaterialStateValue(value, fallback, min, max).toFixed(decimals);
+}
+
+function getBlueprintMaterialEditorRefs() {
+    return {
+        target: document.getElementById('bp-material-target'),
+        status: document.getElementById('bp-material-status'),
+        materialGrid: document.getElementById('bp-material-grid'),
+        materialHint: document.querySelector('.bp-material-hint'),
+        materialActions: document.querySelector('.bp-material-actions'),
+        lightGrid: document.getElementById('bp-light-grid'),
+        lightColor: document.getElementById('bp-light-color'),
+        lightIntensity: document.getElementById('bp-light-intensity'),
+        lightIntensityNumber: document.getElementById('bp-light-intensity-number'),
+        lightDistance: document.getElementById('bp-light-distance'),
+        lightDistanceNumber: document.getElementById('bp-light-distance-number'),
+        lightDecay: document.getElementById('bp-light-decay'),
+        lightDecayNumber: document.getElementById('bp-light-decay-number'),
+        lightAngle: document.getElementById('bp-light-angle'),
+        lightAngleNumber: document.getElementById('bp-light-angle-number'),
+        lightPenumbra: document.getElementById('bp-light-penumbra'),
+        lightPenumbraNumber: document.getElementById('bp-light-penumbra-number'),
+        lightTargetX: document.getElementById('bp-light-target-x'),
+        lightTargetY: document.getElementById('bp-light-target-y'),
+        lightTargetZ: document.getElementById('bp-light-target-z'),
+        lightCastShadow: document.getElementById('bp-light-cast-shadow'),
+        color: document.getElementById('bp-material-color'),
+        emissive: document.getElementById('bp-material-emissive'),
+        roughness: document.getElementById('bp-material-roughness'),
+        roughnessNumber: document.getElementById('bp-material-roughness-number'),
+        metalness: document.getElementById('bp-material-metalness'),
+        metalnessNumber: document.getElementById('bp-material-metalness-number'),
+        emissiveIntensity: document.getElementById('bp-material-emissive-intensity'),
+        emissiveIntensityNumber: document.getElementById('bp-material-emissive-intensity-number'),
+        opacity: document.getElementById('bp-material-opacity'),
+        opacityNumber: document.getElementById('bp-material-opacity-number'),
+        alphaTest: document.getElementById('bp-material-alpha-test'),
+        alphaTestNumber: document.getElementById('bp-material-alpha-test-number'),
+        envIntensity: document.getElementById('bp-material-env-intensity'),
+        envIntensityNumber: document.getElementById('bp-material-env-intensity-number'),
+        side: document.getElementById('bp-material-side'),
+        applySelected: document.getElementById('btn-bp-apply-material-selected'),
+        applyActor: document.getElementById('btn-bp-apply-material-actor'),
+    };
+}
+
+function getBlueprintComponentDisplayName(object3D) {
+    if (!object3D) return 'Nothing selected';
+    if (object3D.name) return object3D.name;
+    if (object3D.isSpotLight) return 'Spot Light';
+    if (object3D.isPointLight) return 'Point Light';
+    if (object3D.isLight) return object3D.type || 'Light';
+    if (object3D.isMesh) return object3D.geometry?.type || 'Mesh';
+    return object3D.type || 'Object3D';
+}
+
+function isBlueprintMaterialTarget(object3D) {
+    return !!object3D?.isMesh;
+}
+
+function getBlueprintMaterialTargets() {
+    const selectedMeshes = Array.from(blueprintState.selectedComponents || [])
+        .filter(isBlueprintMaterialTarget);
+    if (blueprintState.materialMultiSelectActive || selectedMeshes.length > 0) {
+        return selectedMeshes;
     }
+    return isBlueprintMaterialTarget(blueprintState.selectedComponent)
+        ? [blueprintState.selectedComponent]
+        : [];
+}
+
+function getBlueprintMaterialPreviewTarget() {
+    if (isBlueprintMaterialTarget(blueprintState.selectedComponent)) {
+        return blueprintState.selectedComponent;
+    }
+    return getBlueprintMaterialTargets()[0] || null;
+}
+
+function setBlueprintMaterialScalarPair(rangeInput, numberInput, value, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const formatted = formatBlueprintMaterialScalar(value, fallback, min, max, decimals);
+    if (rangeInput) rangeInput.value = formatted;
+    if (numberInput) numberInput.value = formatted;
+}
+
+function setBlueprintDetailsMode(refs, mode) {
+    const lightMode = mode === 'light';
+    if (refs.materialGrid) refs.materialGrid.hidden = lightMode;
+    if (refs.materialHint) refs.materialHint.hidden = lightMode;
+    if (refs.materialActions) refs.materialActions.hidden = lightMode;
+    if (refs.lightGrid) refs.lightGrid.hidden = !lightMode;
+}
+
+function syncBlueprintLightScalarInput(sourceId, targetId, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const source = document.getElementById(sourceId);
+    const target = document.getElementById(targetId);
+    if (!source || !target) return;
+
+    const parsedValue = Number.parseFloat(source.value);
+    const formatted = formatBlueprintMaterialScalar(parsedValue, fallback, min, max, decimals);
+    source.value = formatted;
+    target.value = formatted;
+}
+
+function setBlueprintLightScalarPair(rangeInput, numberInput, value, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const formatted = formatBlueprintMaterialScalar(value, fallback, min, max, decimals);
+    if (rangeInput) rangeInput.value = formatted;
+    if (numberInput) numberInput.value = formatted;
+}
+
+function readBlueprintLightScalarInput(numberId, rangeId, fallback = 0, min = 0, max = 1) {
+    const numberInput = document.getElementById(numberId);
+    const rangeInput = document.getElementById(rangeId);
+    const rawValue = numberInput?.value ?? rangeInput?.value ?? `${fallback}`;
+    return clampMaterialStateValue(Number.parseFloat(rawValue), fallback, min, max);
+}
+
+function setBlueprintSpotRowsVisible(visible) {
+    document.querySelectorAll('.bp-light-spot-row').forEach((row) => {
+        row.hidden = !visible;
+    });
+}
+
+function syncBlueprintLightEditor(refs, light, statusMessage = '') {
+    setBlueprintDetailsMode(refs, 'light');
+    if (!light) return;
+
+    const isSpot = !!light.isSpotLight;
+    setBlueprintSpotRowsVisible(isSpot);
+    if (refs.target) refs.target.textContent = `Target: ${getBlueprintComponentDisplayName(light)}`;
+    if (refs.status) {
+        refs.status.textContent = statusMessage || (isSpot
+            ? 'Spot Light properties update live. Target is local to the light.'
+            : 'Point Light properties update live.');
+    }
+
+    if (refs.lightColor) refs.lightColor.value = `#${light.color.getHexString()}`;
+    setBlueprintLightScalarPair(refs.lightIntensity, refs.lightIntensityNumber, light.intensity, 1, 0, 20, 1);
+    setBlueprintLightScalarPair(refs.lightDistance, refs.lightDistanceNumber, light.distance ?? 0, 0, 0, 100, 1);
+    setBlueprintLightScalarPair(refs.lightDecay, refs.lightDecayNumber, light.decay ?? 2, 2, 0, 4, 1);
+    setBlueprintLightScalarPair(refs.lightAngle, refs.lightAngleNumber, THREE.MathUtils.radToDeg(light.angle ?? Math.PI / 6), 30, 1, 120, 0);
+    setBlueprintLightScalarPair(refs.lightPenumbra, refs.lightPenumbraNumber, light.penumbra ?? 0, 0, 0, 1, 2);
+    if (refs.lightCastShadow) refs.lightCastShadow.checked = !!light.castShadow;
+
+    const targetPosition = light.target?.position || tempVectorA.set(0, -1.5, 0);
+    if (refs.lightTargetX) refs.lightTargetX.value = (targetPosition.x || 0).toFixed(2);
+    if (refs.lightTargetY) refs.lightTargetY.value = (targetPosition.y || 0).toFixed(2);
+    if (refs.lightTargetZ) refs.lightTargetZ.value = (targetPosition.z || 0).toFixed(2);
+}
+
+function setBlueprintMaterialEditorEnabled(refs, enabled) {
+    [
+        refs.color,
+        refs.emissive,
+        refs.roughness,
+        refs.roughnessNumber,
+        refs.metalness,
+        refs.metalnessNumber,
+        refs.emissiveIntensity,
+        refs.emissiveIntensityNumber,
+        refs.opacity,
+        refs.opacityNumber,
+        refs.alphaTest,
+        refs.alphaTestNumber,
+        refs.envIntensity,
+        refs.envIntensityNumber,
+        refs.side,
+        refs.applySelected,
+        refs.applyActor,
+    ].forEach((element) => {
+        if (element) {
+            element.disabled = !enabled;
+        }
+    });
+}
+
+function syncBlueprintMaterialEditor(statusMessage = '') {
+    const refs = getBlueprintMaterialEditorRefs();
+    if (!refs.target || !refs.status) return;
+
+    const comp = getBlueprintMaterialPreviewTarget() || blueprintState.selectedComponent;
+    if (comp?.isLight) {
+        syncBlueprintLightEditor(refs, comp, statusMessage);
+        return;
+    }
+
+    setBlueprintDetailsMode(refs, 'material');
+    setBlueprintSpotRowsVisible(false);
+    const targets = getBlueprintMaterialTargets();
+    refs.target.textContent = targets.length > 1
+        ? `Targets: ${targets.length} meshes`
+        : `Target: ${getBlueprintComponentDisplayName(comp)}`;
+
+    const materialState = getObjectMaterialPreviewState(comp);
+    const isEditable = targets.length > 0 && !!materialState;
+    setBlueprintMaterialEditorEnabled(refs, isEditable);
+
+    if (!isEditable) {
+        if (refs.color) refs.color.value = '#888888';
+        if (refs.emissive) refs.emissive.value = '#000000';
+        setBlueprintMaterialScalarPair(refs.roughness, refs.roughnessNumber, 0.5, 0.5);
+        setBlueprintMaterialScalarPair(refs.metalness, refs.metalnessNumber, 0, 0);
+        setBlueprintMaterialScalarPair(refs.emissiveIntensity, refs.emissiveIntensityNumber, 1, 1, 0, 8);
+        setBlueprintMaterialScalarPair(refs.opacity, refs.opacityNumber, 1, 1);
+        setBlueprintMaterialScalarPair(refs.alphaTest, refs.alphaTestNumber, 0, 0);
+        setBlueprintMaterialScalarPair(refs.envIntensity, refs.envIntensityNumber, 1, 1, 0, 4);
+        if (refs.side) refs.side.value = 'front';
+        refs.status.textContent = blueprintState.materialMultiSelectActive && targets.length === 0
+            ? 'No mesh material targets selected. Ctrl/Shift-click mesh components to add them.'
+            : comp?.isLight
+            ? 'Selected component is a light. Material editor only applies to mesh components.'
+            : 'Select a mesh component to edit base color, emissive glow, reflectivity, opacity, and surface response.';
+        return;
+    }
+
+    if (refs.color) refs.color.value = materialState.color || '#888888';
+    if (refs.emissive) refs.emissive.value = materialState.emissive || '#000000';
+    setBlueprintMaterialScalarPair(refs.roughness, refs.roughnessNumber, materialState.roughness, 0.5);
+    setBlueprintMaterialScalarPair(refs.metalness, refs.metalnessNumber, materialState.metalness, 0);
+    setBlueprintMaterialScalarPair(refs.emissiveIntensity, refs.emissiveIntensityNumber, materialState.emissiveIntensity, 1, 0, 8);
+    setBlueprintMaterialScalarPair(refs.opacity, refs.opacityNumber, materialState.opacity, 1);
+    setBlueprintMaterialScalarPair(refs.alphaTest, refs.alphaTestNumber, materialState.alphaTest, 0);
+    setBlueprintMaterialScalarPair(refs.envIntensity, refs.envIntensityNumber, materialState.envMapIntensity, 1, 0, 4);
+    if (refs.side) refs.side.value = materialState.side || 'front';
+
+    const materialCount = getObjectMaterialArray(comp).length;
+    const defaultStatus = targets.length > 1
+        ? `Editing ${targets.length} selected meshes. Values preview from ${getBlueprintComponentDisplayName(comp)}.`
+        : materialCount > 1
+        ? `This mesh has ${materialCount} material slots. The editor previews slot 1, Apply stamps all slots, and save/load preserves per-slot data.`
+        : 'Selected mesh updates live and now persists richer material data with actor save/load.';
+    refs.status.textContent = statusMessage || defaultStatus;
+}
+
+function syncBlueprintMaterialScalarInput(sourceId, targetId, fallback = 0, min = 0, max = 1, decimals = 2) {
+    const source = document.getElementById(sourceId);
+    const target = document.getElementById(targetId);
+    if (!source || !target) return;
+
+    const parsedValue = Number.parseFloat(source.value);
+    const formatted = formatBlueprintMaterialScalar(parsedValue, fallback, min, max, decimals);
+    source.value = formatted;
+    target.value = formatted;
+}
+
+function readBlueprintMaterialScalarInput(numberId, rangeId, fallback = 0, min = 0, max = 1) {
+    const numberInput = document.getElementById(numberId);
+    const rangeInput = document.getElementById(rangeId);
+    const rawValue = numberInput?.value ?? rangeInput?.value ?? `${fallback}`;
+    return clampMaterialStateValue(Number.parseFloat(rawValue), fallback, min, max);
+}
+
+function readBlueprintMaterialEditorState() {
+    const refs = getBlueprintMaterialEditorRefs();
+    if (!getBlueprintMaterialTargets().length || !refs.color) return null;
+
+    return {
+        color: refs.color.value || '#888888',
+        emissive: refs.emissive?.value || '#000000',
+        roughness: readBlueprintMaterialScalarInput('bp-material-roughness-number', 'bp-material-roughness', 0.5, 0, 1),
+        metalness: readBlueprintMaterialScalarInput('bp-material-metalness-number', 'bp-material-metalness', 0, 0, 1),
+        emissiveIntensity: readBlueprintMaterialScalarInput('bp-material-emissive-intensity-number', 'bp-material-emissive-intensity', 1, 0, 8),
+        opacity: readBlueprintMaterialScalarInput('bp-material-opacity-number', 'bp-material-opacity', 1, 0, 1),
+        alphaTest: readBlueprintMaterialScalarInput('bp-material-alpha-test-number', 'bp-material-alpha-test', 0, 0, 1),
+        envMapIntensity: readBlueprintMaterialScalarInput('bp-material-env-intensity-number', 'bp-material-env-intensity', 1, 0, 4),
+        transparent: readBlueprintMaterialScalarInput('bp-material-opacity-number', 'bp-material-opacity', 1, 0, 1) < 0.999,
+        side: refs.side?.value || 'front',
+    };
+}
+
+function applyBlueprintMaterialEdits({ applyToActor = false, captureHistory = true, refresh = true, statusMessage = '' } = {}) {
+    const prop = blueprintState.targetActor;
+    const rootMesh = getActorRenderObject(prop);
+    const targets = getBlueprintMaterialTargets();
+    const materialState = readBlueprintMaterialEditorState();
+    if (!rootMesh || (!applyToActor && !targets.length) || !materialState) return;
+
+    if (captureHistory) {
+        editorHistory.captureState();
+    }
+
+    let nextStatus = statusMessage;
+    if (applyToActor) {
+        rootMesh.traverse((child) => {
+            if (child?.isMesh) {
+                applyObjectMaterialState(child, materialState);
+            }
+        });
+        nextStatus ||= 'Applied the current material settings to every mesh under the actor.';
+    } else {
+        targets.forEach((target) => applyObjectMaterialState(target, materialState));
+        nextStatus ||= targets.length > 1
+            ? `Applied material to ${targets.length} selected meshes.`
+            : `Applied material to ${getBlueprintComponentDisplayName(targets[0])}.`;
+    }
+    rootMesh.userData.hasMaterialOverrides = true;
+
+    if (refresh) {
+        refreshBlueprintComponents();
+    }
+    syncBlueprintMaterialEditor(nextStatus);
+}
+
+function previewBlueprintMaterialEdits() {
+    applyBlueprintMaterialEdits({
+        applyToActor: false,
+        captureHistory: false,
+        refresh: false,
+        statusMessage: getBlueprintMaterialTargets().length > 1
+            ? `Live preview active on ${getBlueprintMaterialTargets().length} selected meshes.`
+            : 'Live preview active. Save Actor now captures the currently shown selected-mesh material values.',
+    });
+}
+
+function readBlueprintLightEditorState() {
+    const refs = getBlueprintMaterialEditorRefs();
+    if (!blueprintState.selectedComponent?.isLight || !refs.lightColor) return null;
+
+    return {
+        color: refs.lightColor.value || '#fff2cc',
+        intensity: readBlueprintLightScalarInput('bp-light-intensity-number', 'bp-light-intensity', 1, 0, 20),
+        distance: readBlueprintLightScalarInput('bp-light-distance-number', 'bp-light-distance', 0, 0, 100),
+        decay: readBlueprintLightScalarInput('bp-light-decay-number', 'bp-light-decay', 2, 0, 4),
+        angle: THREE.MathUtils.degToRad(readBlueprintLightScalarInput('bp-light-angle-number', 'bp-light-angle', 30, 1, 120)),
+        penumbra: readBlueprintLightScalarInput('bp-light-penumbra-number', 'bp-light-penumbra', 0, 0, 1),
+        castShadow: !!refs.lightCastShadow?.checked,
+        target: new THREE.Vector3(
+            Number.parseFloat(refs.lightTargetX?.value) || 0,
+            Number.parseFloat(refs.lightTargetY?.value) || 0,
+            Number.parseFloat(refs.lightTargetZ?.value) || 0
+        ),
+    };
+}
+
+function applyBlueprintLightEdits({ captureHistory = false, statusMessage = '' } = {}) {
+    const light = blueprintState.selectedComponent;
+    const state = readBlueprintLightEditorState();
+    if (!light?.isLight || !state) return;
+
+    if (captureHistory) {
+        editorHistory.captureState();
+    }
+
+    light.color.set(state.color);
+    light.intensity = state.intensity;
+    if ('distance' in light) light.distance = state.distance;
+    if ('decay' in light) light.decay = state.decay;
+    light.castShadow = state.castShadow;
+
+    if (light.isSpotLight) {
+        light.angle = state.angle;
+        light.penumbra = state.penumbra;
+        light.target.position.copy(state.target);
+        if (light.target.parent !== light) {
+            light.add(light.target);
+        }
+        light.target.updateMatrixWorld(true);
+    }
+
+    light.updateMatrixWorld(true);
+    syncBlueprintLightEditor(getBlueprintMaterialEditorRefs(), light, statusMessage || 'Light properties updated.');
 }
 
 function refreshBlueprintComponents() {
     updateBlueprintDetailsUI();
-    syncBlueprintColorPicker();
+    syncBlueprintMaterialEditor();
     const container = document.getElementById('selected-actor-components');
     if (!container) return;
     container.innerHTML = '';
@@ -8298,43 +10692,83 @@ function refreshBlueprintComponents() {
     if (!rootMesh) return;
     
     function renderComponentItem(object3D, depth, isRoot) {
-        const item = document.createElement('div');
-        item.style.padding = `4px 4px 4px ${4 + depth * 12}px`;
-        item.style.cursor = 'pointer';
-        item.style.borderRadius = '4px';
-        item.style.display = 'flex';
-        item.style.alignItems = 'center';
-        item.style.justifyContent = 'space-between';
-        item.style.background = blueprintState.selectedComponent === object3D ? 'rgba(112, 0, 255, 0.4)' : 'rgba(255,255,255,0.05)';
-        item.style.border = blueprintState.selectedComponent === object3D ? '1px solid rgba(112, 0, 255, 0.8)' : '1px solid transparent';
-        
-        const label = document.createElement('span');
-        let typeName = 'Mesh';
-        if (isRoot) typeName = 'Root Mesh';
-        else if (object3D.isPointLight) typeName = 'Point Light';
-        else if (object3D.geometry?.type === 'BoxGeometry') typeName = 'Cube Component';
-        else if (object3D.geometry?.type === 'SphereGeometry') typeName = 'Sphere Component';
-        
-        label.textContent = object3D.name || typeName;
-        label.style.fontSize = '13px';
-        item.appendChild(label);
-        
-        item.addEventListener('click', (e) => {
-            e.stopPropagation();
-            blueprintState.selectedComponent = object3D;
-            if (typeof transformControl !== 'undefined') transformControl.attach(object3D);
-            refreshBlueprintComponents();
-        });
-        
-        container.appendChild(item);
-        
+        // Hide internal scaffolding that should never be a material-edit target.
+        const isInternal = !!(object3D.userData?.vehicleVisual)
+            || object3D.name === 'vehicle-engine-wasm-audio'
+            || object3D.isAudio === true
+            || object3D.isPositionalAudio === true;
+        const showItem = isRoot || object3D.isMesh || object3D.isLight;
+
+        if (showItem && !isInternal) {
+            const item = document.createElement('div');
+            const isPrimarySelected = blueprintState.selectedComponent === object3D;
+            const isMultiSelected = blueprintState.selectedComponents?.has(object3D);
+            item.style.padding = `4px 4px 4px ${4 + depth * 12}px`;
+            item.style.cursor = 'pointer';
+            item.style.borderRadius = '4px';
+            item.style.display = 'flex';
+            item.style.alignItems = 'center';
+            item.style.justifyContent = 'space-between';
+            item.style.background = isPrimarySelected
+                ? 'rgba(112, 0, 255, 0.4)'
+                : isMultiSelected
+                    ? 'rgba(112, 0, 255, 0.22)'
+                    : 'rgba(255,255,255,0.05)';
+            item.style.border = isPrimarySelected
+                ? '1px solid rgba(112, 0, 255, 0.8)'
+                : isMultiSelected
+                    ? '1px solid rgba(112, 0, 255, 0.55)'
+                    : '1px solid transparent';
+
+            const label = document.createElement('span');
+            let typeName = 'Group';
+            if (isRoot) typeName = 'Root';
+            else if (object3D.isSpotLight) typeName = 'Spot Light';
+            else if (object3D.isPointLight) typeName = 'Point Light';
+            else if (object3D.isLight) typeName = 'Light';
+            else if (object3D.geometry?.type === 'BoxGeometry') typeName = 'Cube Mesh';
+            else if (object3D.geometry?.type === 'SphereGeometry') typeName = 'Sphere Mesh';
+            else if (object3D.geometry?.type === 'CylinderGeometry') typeName = 'Cylinder Mesh';
+            else if (object3D.geometry?.type === 'PlaneGeometry') typeName = 'Plane Mesh';
+            else if (object3D.geometry?.type) typeName = object3D.geometry.type.replace('Geometry', ' Mesh');
+            else if (object3D.isMesh) typeName = 'Mesh';
+
+            label.textContent = object3D.name || typeName;
+            label.style.fontSize = '13px';
+            item.appendChild(label);
+
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const additiveSelection = (e.ctrlKey || e.metaKey || e.shiftKey) && object3D.isMesh;
+                if (additiveSelection) {
+                    blueprintState.materialMultiSelectActive = true;
+                    if (blueprintState.selectedComponents.has(object3D)) {
+                        blueprintState.selectedComponents.delete(object3D);
+                    } else {
+                        blueprintState.selectedComponents.add(object3D);
+                    }
+                } else {
+                    blueprintState.selectedComponents.clear();
+                    blueprintState.materialMultiSelectActive = false;
+                    if (object3D.isMesh) {
+                        blueprintState.selectedComponents.add(object3D);
+                    }
+                }
+                blueprintState.selectedComponent = object3D;
+                if (typeof transformControl !== 'undefined') transformControl.attach(object3D);
+                refreshBlueprintComponents();
+            });
+
+            container.appendChild(item);
+        }
+
+        // Always recurse — vehicles wrap their meshes inside Group containers
+        // which would otherwise hide the body and wheel meshes from the editor.
         for (const child of object3D.children) {
-            if (child.isMesh || child.isLight) {
-                renderComponentItem(child, depth + 1, false);
-            }
+            renderComponentItem(child, depth + 1, false);
         }
     }
-    
+
     renderComponentItem(rootMesh, 0, true);
 }
 
@@ -8358,6 +10792,9 @@ document.getElementById('btn-add-comp-cube')?.addEventListener('click', () => {
     mesh.name = 'Cube Component';
     parent.add(mesh);
     blueprintState.selectedComponent = mesh;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
+    blueprintState.selectedComponents.add(mesh);
     if (typeof transformControl !== 'undefined') transformControl.attach(mesh);
     refreshBlueprintComponents();
 });
@@ -8374,6 +10811,9 @@ document.getElementById('btn-add-comp-sphere')?.addEventListener('click', () => 
     mesh.name = 'Sphere Component';
     parent.add(mesh);
     blueprintState.selectedComponent = mesh;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
+    blueprintState.selectedComponents.add(mesh);
     if (typeof transformControl !== 'undefined') transformControl.attach(mesh);
     refreshBlueprintComponents();
 });
@@ -8389,6 +10829,28 @@ document.getElementById('btn-add-comp-light')?.addEventListener('click', () => {
     light.name = 'Point Light';
     parent.add(light);
     blueprintState.selectedComponent = light;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
+    if (typeof transformControl !== 'undefined') transformControl.attach(light);
+    refreshBlueprintComponents();
+});
+
+document.getElementById('btn-add-comp-spot-light')?.addEventListener('click', () => {
+    editorHistory.captureState();
+    const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
+    if (!parent) return;
+
+    const light = new THREE.SpotLight(0xfff2cc, 6, 18, Math.PI / 6, 0.35, 2);
+    light.position.set(0, 2, 0);
+    light.castShadow = true;
+    light.shadow.mapSize.set(1024, 1024);
+    light.name = 'Spot Light';
+    light.target.position.set(0, -1.5, 0);
+    light.add(light.target);
+    parent.add(light);
+    blueprintState.selectedComponent = light;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
     if (typeof transformControl !== 'undefined') transformControl.attach(light);
     refreshBlueprintComponents();
 });
@@ -8410,6 +10872,9 @@ document.getElementById('btn-delete-comp')?.addEventListener('click', () => {
         if (selected.material) selected.material.dispose();
         
         blueprintState.selectedComponent = rootMesh;
+        blueprintState.selectedComponents.delete(selected);
+        blueprintState.selectedComponents.clear();
+        blueprintState.materialMultiSelectActive = false;
         if (typeof transformControl !== 'undefined') transformControl.attach(rootMesh);
         refreshBlueprintComponents();
     }
@@ -8511,16 +10976,125 @@ function applyBlueprintDetailsFromUI() {
 });
 
 // Blueprint panel: Save/Load Actor buttons
-document.getElementById('btn-bp-apply-color')?.addEventListener('click', () => {
-    const prop = getDynamicPropById(objectScriptState.targetPropId);
-    if (!prop) return;
-    const picker = document.getElementById('bp-color-picker');
-    if (!picker) return;
-    setActorColor(prop, picker.value);
+document.getElementById('bp-material-color')?.addEventListener('input', () => {
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-emissive')?.addEventListener('input', () => {
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-roughness')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-roughness', 'bp-material-roughness-number', 0.5, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-roughness-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-roughness-number', 'bp-material-roughness', 0.5, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-metalness')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-metalness', 'bp-material-metalness-number', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-metalness-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-metalness-number', 'bp-material-metalness', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-emissive-intensity')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-emissive-intensity', 'bp-material-emissive-intensity-number', 1, 0, 8);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-emissive-intensity-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-emissive-intensity-number', 'bp-material-emissive-intensity', 1, 0, 8);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-opacity')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-opacity', 'bp-material-opacity-number', 1, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-opacity-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-opacity-number', 'bp-material-opacity', 1, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-alpha-test')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-alpha-test', 'bp-material-alpha-test-number', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-alpha-test-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-alpha-test-number', 'bp-material-alpha-test', 0, 0, 1);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-env-intensity')?.addEventListener('input', () => {
+    syncBlueprintMaterialScalarInput('bp-material-env-intensity', 'bp-material-env-intensity-number', 1, 0, 4);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-env-intensity-number')?.addEventListener('change', () => {
+    syncBlueprintMaterialScalarInput('bp-material-env-intensity-number', 'bp-material-env-intensity', 1, 0, 4);
+    previewBlueprintMaterialEdits();
+});
+document.getElementById('bp-material-side')?.addEventListener('change', () => {
+    previewBlueprintMaterialEdits();
+});
+
+document.getElementById('bp-light-color')?.addEventListener('input', () => {
+    applyBlueprintLightEdits({ statusMessage: 'Light color updated.' });
+});
+document.getElementById('bp-light-intensity')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-intensity', 'bp-light-intensity-number', 1, 0, 20, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-intensity-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-intensity-number', 'bp-light-intensity', 1, 0, 20, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-distance')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-distance', 'bp-light-distance-number', 0, 0, 100, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-distance-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-distance-number', 'bp-light-distance', 0, 0, 100, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-decay')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-decay', 'bp-light-decay-number', 2, 0, 4, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-decay-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-decay-number', 'bp-light-decay', 2, 0, 4, 1);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-angle')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-angle', 'bp-light-angle-number', 30, 1, 120, 0);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-angle-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-angle-number', 'bp-light-angle', 30, 1, 120, 0);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-penumbra')?.addEventListener('input', () => {
+    syncBlueprintLightScalarInput('bp-light-penumbra', 'bp-light-penumbra-number', 0, 0, 1, 2);
+    applyBlueprintLightEdits();
+});
+document.getElementById('bp-light-penumbra-number')?.addEventListener('change', () => {
+    syncBlueprintLightScalarInput('bp-light-penumbra-number', 'bp-light-penumbra', 0, 0, 1, 2);
+    applyBlueprintLightEdits();
+});
+['bp-light-target-x', 'bp-light-target-y', 'bp-light-target-z'].forEach((id) => {
+    document.getElementById(id)?.addEventListener('change', () => {
+        applyBlueprintLightEdits({ statusMessage: 'Spot Light target updated.' });
+    });
+});
+document.getElementById('bp-light-cast-shadow')?.addEventListener('change', () => {
+    applyBlueprintLightEdits({ statusMessage: 'Light shadow setting updated.' });
+});
+document.getElementById('btn-bp-apply-material-selected')?.addEventListener('click', () => {
+    applyBlueprintMaterialEdits({ applyToActor: false });
+});
+document.getElementById('btn-bp-apply-material-actor')?.addEventListener('click', () => {
+    applyBlueprintMaterialEdits({ applyToActor: true });
 });
 
 document.getElementById('btn-bp-save-actor')?.addEventListener('click', () => {
     if (blueprintState.targetActor) {
+        previewBlueprintMaterialEdits();
         exportActorToFile(blueprintState.targetActor);
     }
 });
@@ -8542,81 +11116,24 @@ let pieSceneSnapshot = null;
 
 function snapshotSceneState() {
     if (!sceneSystem) return;
-    const snapshot = [];
-    for (const actor of sceneSystem.actors) {
-        const mesh = getActorRenderObject(actor);
-        if (!mesh) continue;
-        
-        const actorSnap = {
-            id: actor.id,
-            position: mesh.position.toArray(),
-            quaternion: mesh.quaternion.toArray(),
-            scale: mesh.scale.toArray(),
-            children: []
-        };
-        
-        // Snapshot child component transforms recursively
-        function snapChildren(parent, arr) {
-            for (const child of parent.children) {
-                if (child.isMesh || child.isLight) {
-                    const childSnap = {
-                        uuid: child.uuid,
-                        position: child.position.toArray(),
-                        quaternion: child.quaternion.toArray(),
-                        scale: child.scale.toArray(),
-                        children: []
-                    };
-                    snapChildren(child, childSnap.children);
-                    arr.push(childSnap);
-                }
-            }
-        }
-        snapChildren(mesh, actorSnap.children);
-        snapshot.push(actorSnap);
-    }
-    pieSceneSnapshot = snapshot;
+
+    pieSceneSnapshot = {
+        activeActorId: objectScriptState.targetPropId || '',
+        scene: exportWorldToJSON(),
+    };
 }
 
 function restoreSceneState() {
     if (!pieSceneSnapshot || !sceneSystem) return;
 
-    const snapshotIds = new Set(pieSceneSnapshot.map(s => s.id));
-    for (const actor of Array.from(sceneSystem.actors)) {
-        if (!snapshotIds.has(actor.id)) {
-            destroyDynamicPhysicsProp(actor);
-        }
+    loadWorldFromJSON(pieSceneSnapshot.scene);
+
+    if (pieSceneSnapshot.activeActorId) {
+        selectShowcaseActor(pieSceneSnapshot.activeActorId);
+    } else {
+        selectShowcaseActor(null);
     }
 
-    for (const actorSnap of pieSceneSnapshot) {
-        const actor = getDynamicPropById(actorSnap.id);
-        if (!actor) continue;
-        
-        const mesh = getActorRenderObject(actor);
-        if (!mesh) continue;
-        
-        mesh.position.fromArray(actorSnap.position);
-        mesh.quaternion.fromArray(actorSnap.quaternion);
-        mesh.scale.fromArray(actorSnap.scale);
-        
-        // Restore child component transforms
-        function restoreChildren(parent, snapArr) {
-            for (const childSnap of snapArr) {
-                const child = parent.children.find(c => c.uuid === childSnap.uuid);
-                if (child) {
-                    child.position.fromArray(childSnap.position);
-                    child.quaternion.fromArray(childSnap.quaternion);
-                    child.scale.fromArray(childSnap.scale);
-                    restoreChildren(child, childSnap.children);
-                }
-            }
-        }
-        restoreChildren(mesh, actorSnap.children);
-
-        // Rebuild collision from the restored mesh state so static collision bodies
-        // reset with the level instead of staying behind at their previous pose.
-        rebuildActorPhysics(actor);
-    }
-    
     pieSceneSnapshot = null;
 }
 
@@ -8628,7 +11145,7 @@ function serializeComponentTree(object3D) {
     for (const child of object3D.children) {
         if (child.isMesh || child.isLight) {
             const entry = {
-                type: child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
+                type: child.isSpotLight ? 'SpotLight' : child.isPointLight ? 'PointLight' : (child.geometry?.type || 'Mesh'),
                 name: child.name,
                 position: child.position.toArray(),
                 quaternion: child.quaternion.toArray(),
@@ -8636,17 +11153,27 @@ function serializeComponentTree(object3D) {
                 children: serializeComponentTree(child)
             };
             if (child.isMesh && child.material) {
-                entry.material = {
-                    color: '#' + child.material.color.getHexString(),
-                    roughness: child.material.roughness ?? 0.5,
-                    metalness: child.material.metalness ?? 0.0
-                };
+                entry.material = serializeObjectMaterialState(child);
             }
             if (child.isPointLight) {
                 entry.light = {
                     color: '#' + child.color.getHexString(),
                     intensity: child.intensity,
-                    distance: child.distance
+                    distance: child.distance,
+                    decay: child.decay,
+                    castShadow: child.castShadow
+                };
+            }
+            if (child.isSpotLight) {
+                entry.light = {
+                    color: '#' + child.color.getHexString(),
+                    intensity: child.intensity,
+                    distance: child.distance,
+                    angle: child.angle,
+                    penumbra: child.penumbra,
+                    decay: child.decay,
+                    castShadow: child.castShadow,
+                    targetPosition: child.target?.position?.toArray?.() || [0, -1.5, 0],
                 };
             }
             comps.push(entry);
@@ -8658,36 +11185,76 @@ function serializeComponentTree(object3D) {
 
 function deserializeComponentTree(parent, comps) {
     if (!comps || !comps.length) return;
-    for (const compData of comps) {
-        let comp = null;
-        if (compData.type === 'PointLight') {
-            const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
-            const lightIntensity = compData.light?.intensity ?? 2;
-            const lightDistance = compData.light?.distance ?? 10;
-            comp = new THREE.PointLight(lightColor, lightIntensity, lightDistance);
-            comp.castShadow = true;
-        } else if (compData.type === 'BoxGeometry') {
-            comp = buildPrimitiveActorMesh('cube');
-        } else if (compData.type === 'SphereGeometry') {
-            comp = buildPrimitiveActorMesh('sphere');
+    comps.forEach((compData, index) => {
+        const existing = parent.children[index];
+        const existingMatches = existing && (existing.isMesh || existing.isLight);
+        let comp = existingMatches ? existing : null;
+
+        if (!comp) {
+            if (compData.type === 'SpotLight') {
+                const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xfff2cc;
+                const lightIntensity = compData.light?.intensity ?? 6;
+                const lightDistance = compData.light?.distance ?? 18;
+                const lightAngle = compData.light?.angle ?? Math.PI / 6;
+                const lightPenumbra = compData.light?.penumbra ?? 0.35;
+                const lightDecay = compData.light?.decay ?? 2;
+                comp = new THREE.SpotLight(lightColor, lightIntensity, lightDistance, lightAngle, lightPenumbra, lightDecay);
+                comp.castShadow = true;
+                comp.shadow.mapSize.set(1024, 1024);
+                comp.target.position.fromArray(compData.light?.targetPosition || [0, -1.5, 0]);
+                comp.add(comp.target);
+            } else if (compData.type === 'PointLight') {
+                const lightColor = compData.light?.color ? new THREE.Color(compData.light.color) : 0xffddaa;
+                const lightIntensity = compData.light?.intensity ?? 2;
+                const lightDistance = compData.light?.distance ?? 10;
+                comp = new THREE.PointLight(lightColor, lightIntensity, lightDistance);
+                comp.castShadow = true;
+            } else if (compData.type === 'BoxGeometry') {
+                comp = buildPrimitiveActorMesh('cube');
+            } else if (compData.type === 'SphereGeometry') {
+                comp = buildPrimitiveActorMesh('sphere');
+            }
+
+            if (comp) {
+                parent.add(comp);
+            }
         }
 
-        if (comp) {
-            comp.name = compData.name;
-            comp.position.fromArray(compData.position);
-            comp.quaternion.fromArray(compData.quaternion);
-            comp.scale.fromArray(compData.scale);
-            if (comp.isMesh && compData.material) {
-                comp.material = new THREE.MeshStandardMaterial({
-                    color: new THREE.Color(compData.material.color),
-                    roughness: compData.material.roughness ?? 0.5,
-                    metalness: compData.material.metalness ?? 0.0
-                });
-            }
-            parent.add(comp);
-            deserializeComponentTree(comp, compData.children);
+        if (!comp) return;
+
+        if (compData.name) comp.name = compData.name;
+        if (Array.isArray(compData.position)) comp.position.fromArray(compData.position);
+        if (Array.isArray(compData.quaternion)) comp.quaternion.fromArray(compData.quaternion);
+        if (Array.isArray(compData.scale)) comp.scale.fromArray(compData.scale);
+
+        if (comp.isMesh && compData.material) {
+            applyObjectMaterialState(comp, compData.material);
         }
-    }
+        if (comp.isPointLight && compData.light) {
+            if (compData.light.color) comp.color = new THREE.Color(compData.light.color);
+            if (Number.isFinite(compData.light.intensity)) comp.intensity = compData.light.intensity;
+            if (Number.isFinite(compData.light.distance)) comp.distance = compData.light.distance;
+            if (Number.isFinite(compData.light.decay)) comp.decay = compData.light.decay;
+            if (typeof compData.light.castShadow === 'boolean') comp.castShadow = compData.light.castShadow;
+        }
+        if (comp.isSpotLight && compData.light) {
+            if (compData.light.color) comp.color = new THREE.Color(compData.light.color);
+            if (Number.isFinite(compData.light.intensity)) comp.intensity = compData.light.intensity;
+            if (Number.isFinite(compData.light.distance)) comp.distance = compData.light.distance;
+            if (Number.isFinite(compData.light.angle)) comp.angle = compData.light.angle;
+            if (Number.isFinite(compData.light.penumbra)) comp.penumbra = compData.light.penumbra;
+            if (Number.isFinite(compData.light.decay)) comp.decay = compData.light.decay;
+            if (typeof compData.light.castShadow === 'boolean') comp.castShadow = compData.light.castShadow;
+            if (Array.isArray(compData.light.targetPosition)) {
+                comp.target.position.fromArray(compData.light.targetPosition);
+            }
+            if (comp.target.parent !== comp) {
+                comp.add(comp.target);
+            }
+        }
+
+        deserializeComponentTree(comp, compData.children);
+    });
 }
 
 
@@ -8843,7 +11410,7 @@ const editorHistory = {
     }
 };
 
-function exportWorldToJSON() {
+function exportWorldToJSON({ preferAssetPath = false } = {}) {
     const umap = { version: 2, actors: [], importedTemplates: [] };
     const usedTemplateIds = new Set();
     for (const actor of (sceneSystem?.actors || [])) {
@@ -8853,11 +11420,17 @@ function exportWorldToJSON() {
         if (serializedActor.kind === 'imported' && serializedActor.templateId) {
             usedTemplateIds.add(serializedActor.templateId);
         }
+        if (serializedActor.kind === 'vehicle' && serializedActor.vehicleBodyTemplateId) {
+            usedTemplateIds.add(serializedActor.vehicleBodyTemplateId);
+        }
+        if (serializedActor.kind === 'vehicle' && serializedActor.vehicleWheelTemplateId) {
+            usedTemplateIds.add(serializedActor.vehicleWheelTemplateId);
+        }
     }
 
     usedTemplateIds.forEach((templateId) => {
         const template = importedPropState.templates.find((entry) => entry.id === templateId);
-        const serializedTemplate = serializeImportedPropTemplate(template);
+        const serializedTemplate = serializeImportedPropTemplate(template, { preferAssetPath });
         if (serializedTemplate) {
             umap.importedTemplates.push(serializedTemplate);
         }
@@ -8870,18 +11443,21 @@ function exportWorldToJSON() {
     return umap;
 }
 
-function loadWorldFromJSON(umap) {
+async function loadWorldFromJSON(umap, { fileMap = null } = {}) {
     if (umap.version !== 1 && umap.version !== 2) console.warn('Unknown umap version', umap.version);
     clearSceneActors();
 
     if (Array.isArray(umap.importedTemplates)) {
-        umap.importedTemplates.forEach((templateData) => {
+        // Run sequentially so registration errors land in the console with the
+        // matching template, and so loadObjectFromFile (used by the bundle
+        // path) doesn't fight itself for the LoadingManager fileMap.
+        for (const templateData of umap.importedTemplates) {
             try {
-                registerImportedPropTemplateFromSerializedData(templateData);
+                await registerImportedPropTemplateFromSerializedData(templateData, { fileMap });
             } catch (error) {
                 console.error('Failed to restore imported template from .umap.', error, templateData);
             }
-        });
+        }
     }
 
     for (const actorData of umap.actors) {

@@ -53,6 +53,37 @@ const io = new Server(httpServer, {
     },
 });
 
+function normalizeTransformState(value) {
+    if (!value || typeof value !== 'object') return null;
+    return {
+        x: Number.isFinite(value.x) ? value.x : 0,
+        y: Number.isFinite(value.y) ? value.y : 0,
+        z: Number.isFinite(value.z) ? value.z : 0,
+    };
+}
+
+function normalizeQuaternionState(value) {
+    if (!value || typeof value !== 'object') return null;
+    return {
+        x: Number.isFinite(value.x) ? value.x : 0,
+        y: Number.isFinite(value.y) ? value.y : 0,
+        z: Number.isFinite(value.z) ? value.z : 0,
+        w: Number.isFinite(value.w) ? value.w : 1,
+    };
+}
+
+function normalizeVehicleState(value) {
+    if (!value || typeof value !== 'object') return { active: false };
+    const position = normalizeTransformState(value.position);
+    const quaternion = normalizeQuaternionState(value.quaternion);
+    return {
+        active: !!value.active && !!position && !!quaternion,
+        id: typeof value.id === 'string' ? value.id.slice(0, 64) : '',
+        position,
+        quaternion,
+    };
+}
+
 io.on('connection', (socket) => {
     socket.on('multiplayer:join', (payload = {}) => {
         leaveRoom(io, socket);
@@ -90,8 +121,9 @@ io.on('connection', (socket) => {
 
         const normalizedState = {
             mode: typeof state.mode === 'string' ? state.mode : 'showcase',
-            position: state.position,
-            quaternion: state.quaternion,
+            position: normalizeTransformState(state.position),
+            quaternion: normalizeQuaternionState(state.quaternion),
+            vehicle: normalizeVehicleState(state.vehicle),
             updatedAt: Date.now(),
         };
 
