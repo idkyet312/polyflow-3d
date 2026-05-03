@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { DDGIVolumeComponent } from '../runtime/sceneRuntime.js';
 
 // Module-scope deps — populated by setupSceneSerialization, assigned once.
-let scene, sceneSystem, physics, importedPropState, objectScriptState, VEHICLE_SETTINGS;
+let scene, camera, sceneSystem, physics, importedPropState, objectScriptState, VEHICLE_SETTINGS;
 let getActorBody, getActorRenderObject, getActorScriptState;
 let serializeObjectMaterialState, serializeObjectMaterialOverrides;
 let applyObjectMaterialState, applyObjectMaterialOverrides;
@@ -24,6 +24,7 @@ let editorHistory, loadWorldFromJSON;
 export function setupSceneSerialization(deps) {
     ({
         scene,
+        camera,
         sceneSystem,
         physics,
         importedPropState,
@@ -231,7 +232,16 @@ export function serializeActorData(actor) {
 
 // ─── lines 9701–9866 ─────────────────────────────────────────────────────────────────────
 
-export function spawnActorFromSerializedData(actorData, { preserveId = false } = {}) {
+function computeCameraFrontSpawn(distance = 4.5, up = 1.2) {
+    if (!camera) return new THREE.Vector3();
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    if (Math.abs(dir.y) > 0.72) dir.y *= 0.35;
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
+    else dir.normalize();
+    return camera.position.clone().addScaledVector(dir, distance).addScaledVector(new THREE.Vector3(0, 1, 0), up);
+}
+
+export function spawnActorFromSerializedData(actorData, { preserveId = false, spawnInFrontOfPlayer = false } = {}) {
     if (!actorData) return null;
 
     const componentFlags = normalizeSerializedActorComponentFlags(actorData);
@@ -282,7 +292,9 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false } =
             simulatePhysics: componentFlags.physics,
         });
     } else if (actorData.kind === 'ddgiVolume') {
-        const savedPos = new THREE.Vector3().fromArray(actorData.transform.position);
+        const savedPos = spawnInFrontOfPlayer
+            ? computeCameraFrontSpawn(8, 0)
+            : new THREE.Vector3().fromArray(actorData.transform.position);
         const savedScale = new THREE.Vector3().fromArray(actorData.transform.scale || [1, 1, 1]);
         const size = new THREE.Vector3(32, 16, 32).multiply(savedScale);
         const ddgiOptions = actorData.userData?.ddgi || {};
@@ -293,7 +305,9 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false } =
             options: ddgiOptions,
         });
     } else {
-        const savedPos = new THREE.Vector3().fromArray(actorData.transform.position);
+        const savedPos = spawnInFrontOfPlayer
+            ? computeCameraFrontSpawn()
+            : new THREE.Vector3().fromArray(actorData.transform.position);
         actor = spawnDynamicPrimitive(actorData.kind, savedPos, scale, {
             includeScripts: componentFlags.scripts,
             userData: actorData.userData,
@@ -339,7 +353,11 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false } =
     const mesh = getActorRenderObject(actor);
     if (mesh) {
         mesh.userData.dynamicPropId = actor.id;
-        mesh.position.fromArray(actorData.transform.position);
+        if (spawnInFrontOfPlayer) {
+            mesh.position.copy(computeCameraFrontSpawn());
+        } else {
+            mesh.position.fromArray(actorData.transform.position);
+        }
         mesh.quaternion.fromArray(actorData.transform.quaternion);
         mesh.scale.fromArray(actorData.transform.scale);
         deserializeComponentTree(mesh, actorData.components);
@@ -518,7 +536,13 @@ export async function loadActorFromFile(file) {
         await yieldToPaint();
 
         const actorData = data.actor;
-        const actor = spawnActorFromSerializedData(actorData);
+        // OK = saved location, Cancel = in front of camera.
+        const useSavedLocation = window.confirm(
+            'Spawn actor at its saved location?\n\nOK  = Saved location\nCancel = In front of camera'
+        );
+        const actor = spawnActorFromSerializedData(actorData, {
+            spawnInFrontOfPlayer: !useSavedLocation,
+        });
 
         if (!actor) {
             alert('Failed to spawn the loaded actor. Physics may not be ready yet.');

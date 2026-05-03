@@ -1381,6 +1381,19 @@ body.play-active .play-status {
   border-color: rgba(0, 255, 170, 0.25);
 }
 
+/* Play mode: hide all editor UI except widgets, crosshair, mobile dock, play-hud */
+body.play-active .scene-ui-panel,
+body.play-active .viewer-menu,
+body.play-active .viewer-modal,
+body.play-active .viewer-context-menu,
+body.play-active .desktop-version-badge,
+body.play-active .mobile-version-badge,
+body.play-active .mobile-topbar,
+body.play-active .debug-stats-overlay,
+body.play-active .engine-audio-debug {
+  display: none !important;
+}
+
 body.console-open #crosshair {
   opacity: 0.18;
 }

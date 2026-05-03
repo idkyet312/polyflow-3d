@@ -4034,11 +4034,13 @@ function refreshSceneUI() {
 
 // --- Initialization ---
 async function init() {
-    // Mobile Detection
+    // Mobile Detection (full applyMobileModeState runs after wireExtractedModules
+    // because it depends on injected refs in src/debug/console.js)
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.matchMedia('(pointer: coarse)').matches;
     mobileState.detected = isMobile;
     mobileState.forced = false;
-    applyMobileModeState();
+    mobileState.enabled = isMobile;
+    document.body.classList.toggle('is-mobile', isMobile);
 
     // Add listeners immediately so UI is responsive even if WASM is loading
     document.getElementById('load-sample').addEventListener('click', (e) => {
@@ -4339,7 +4341,6 @@ async function init() {
     playModeBtn?.addEventListener('click', () => setCameraMode('play'));
 
     setupDropHandlers();
-    setupMobileControls();
 
     // Slider listener
     const slider = document.getElementById('ratio-slider');
@@ -4450,6 +4451,11 @@ async function init() {
         }
     });
     scene.add(transformControl.getHelper());
+
+    // Wire extracted modules now that scene/camera/renderer/transformControl/sceneSystem
+    // and DOM refs all exist. Must happen before any module-bound helper is called.
+    wireExtractedModules();
+
     syncTransformControlState();
 
     // Initialize widget system AFTER renderer is set up
@@ -5300,7 +5306,12 @@ function exitGameplay() {
 function updateWorldPresentation() {
     if (pedestal) pedestal.visible = !gameplay.active;
     document.body.classList.toggle('play-ready', gameplay.canPlay);
+    const wasActive = document.body.classList.contains('play-active');
     document.body.classList.toggle('play-active', gameplay.active);
+    if (wasActive !== gameplay.active && renderer && camera && container) {
+        // Layout shifts when scene panel hides; resync canvas/aspect.
+        requestAnimationFrame(onWindowResize);
+    }
 }
 
 function updateMainDirectionalLightShadowFocus() {
@@ -6682,7 +6693,9 @@ document.getElementById('btn-delete-comp')?.addEventListener('click', () => {
     }
 });
 
-init().then(() => wireExtractedModules()).catch((err) => console.error('init failed', err));
+init().then(() => {
+    applyMobileModeState();
+}).catch((err) => console.error('init failed', err));
 
 // Blueprint Transform Controls
 // === extracted: blueprintEditor (block 2) (was lines 10886-10972 of original main.js) ===
@@ -6914,7 +6927,7 @@ function wireExtractedModules() {
     });
 
     setupSceneSerialization({
-        scene, sceneSystem, physics, importedPropState, objectScriptState,
+        scene, camera, sceneSystem, physics, importedPropState, objectScriptState,
         VEHICLE_SETTINGS,
         getActorBody, getActorRenderObject, getActorScriptState,
         serializeObjectMaterialState, serializeObjectMaterialOverrides,
