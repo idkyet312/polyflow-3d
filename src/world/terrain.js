@@ -83,6 +83,99 @@ export async function applyTerrainTextures(terrain) {
     return;
 }
 
+const _textureLoader = new THREE.TextureLoader();
+
+function _loadTexture(url, colorSpace = THREE.NoColorSpace) {
+    return new Promise((resolve, reject) => {
+        _textureLoader.load(url, (tex) => {
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.RepeatWrapping;
+            tex.repeat.set(TERRAIN_TEXTURE_REPEAT, TERRAIN_TEXTURE_REPEAT);
+            tex.anisotropy = 8;
+            tex.colorSpace = colorSpace;
+            tex.needsUpdate = true;
+            resolve(tex);
+        }, undefined, reject);
+    });
+}
+
+export async function setTerrainModeGrid(terrain) {
+    if (!terrain) return;
+    const old = terrain.material.map;
+    terrain.material.map = createCheckerTexture();
+    terrain.material.normalMap = null;
+    terrain.material.roughnessMap = null;
+    terrain.material.aoMap = null;
+    terrain.material.needsUpdate = true;
+    if (old && old !== terrain.material.map) old.dispose?.();
+}
+
+export function setTerrainModeSolid(terrain) {
+    if (!terrain) return;
+    const old = terrain.material.map;
+    terrain.material.map = null;
+    terrain.material.normalMap = null;
+    terrain.material.roughnessMap = null;
+    terrain.material.aoMap = null;
+    terrain.material.needsUpdate = true;
+    if (old) old.dispose?.();
+}
+
+export async function setTerrainModeGrassPBR(terrain) {
+    if (!terrain) return;
+    const [color, normal, rough, ao] = await Promise.all([
+        _loadTexture(TERRAIN_TEXTURE_PATHS.color, THREE.SRGBColorSpace),
+        _loadTexture(TERRAIN_TEXTURE_PATHS.normal),
+        _loadTexture(TERRAIN_TEXTURE_PATHS.roughness),
+        _loadTexture(TERRAIN_TEXTURE_PATHS.ao),
+    ]);
+    const old = terrain.material.map;
+    terrain.material.map = color;
+    terrain.material.normalMap = normal;
+    terrain.material.roughnessMap = rough;
+    terrain.material.aoMap = ao;
+    terrain.material.needsUpdate = true;
+    if (old) old.dispose?.();
+}
+
+export function setTerrainCustomImage(terrain, dataUrl) {
+    if (!terrain || !dataUrl) return;
+    _textureLoader.load(dataUrl, (tex) => {
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(TERRAIN_TEXTURE_REPEAT, TERRAIN_TEXTURE_REPEAT);
+        tex.anisotropy = 8;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.needsUpdate = true;
+        const old = terrain.material.map;
+        terrain.material.map = tex;
+        terrain.material.normalMap = null;
+        terrain.material.roughnessMap = null;
+        terrain.material.aoMap = null;
+        terrain.material.needsUpdate = true;
+        if (old) old.dispose?.();
+    });
+}
+
+export function setTerrainTint(terrain, hexColor) {
+    if (!terrain) return;
+    terrain.material.color.set(hexColor);
+}
+
+export function setTerrainRepeat(terrain, repeat) {
+    if (!terrain) return;
+    const r = Math.max(1, repeat);
+    for (const key of ['map', 'normalMap', 'roughnessMap', 'aoMap']) {
+        const tex = terrain.material[key];
+        if (tex) tex.repeat.set(r, r);
+    }
+}
+
+export function setTerrainRoughness(terrain, value) {
+    if (!terrain) return;
+    terrain.material.roughness = THREE.MathUtils.clamp(value, 0, 1);
+}
+
 export function createTerrainMesh() {
     const geometry = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
     const positions = geometry.attributes.position;

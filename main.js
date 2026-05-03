@@ -61,7 +61,17 @@ import {
     applyTerrainTextures,
     createTerrainMesh,
     sampleTerrainHeightAt as sampleTerrainHeightAtWorldFloor,
+    setTerrainModeGrid,
+    setTerrainModeSolid,
+    setTerrainModeGrassPBR,
+    setTerrainCustomImage,
+    setTerrainTint,
+    setTerrainRepeat,
+    setTerrainRoughness,
 } from './src/world/terrain.js';
+import { createGrassField } from './src/world/grass.js';
+import { createWater } from './src/world/water.js';
+import { createLitePhysicsPool } from './src/physics/litePool.js';
 import {
     AHUD,
     installUePrototypeMethods,
@@ -532,6 +542,9 @@ const TEST_SOUND_ID = 'polyflow:test';
 
 // Module-level refs so switchEnvironment can update them
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
+let grassField = null;
+let water = null;
+const litePools = [];
 let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
 let playTestSoundBtn, playTestSoundStatus;
 let multiplayerServerUrlInput, multiplayerRoomInput, multiplayerConnectBtn, multiplayerDisconnectBtn, multiplayerStatusValue, multiplayerPlayerCountValue;
@@ -619,33 +632,8 @@ const phys = sphere?.GetComponentByClass(UPrimitiveComponent);
 if (phys) {
     phys.AddImpulse(direction.Scale(36000));
 }`,
-    right: `const cubesPerSide = 5;
-const totalCubes = 50;
-const spacing = 0.34;
-const baseYOffset = -0.8;
-let spawned = 0;
-const playerLocation = Character?.GetActorLocation?.() ?? new FVector(camera.position.x, camera.position.y, camera.position.z);
-const forward = Character?.GetActorForwardVector?.()?.GetSafeNormal?.() ?? new FVector(0, 0, -1);
-const right = Character?.GetActorRightVector?.()?.GetSafeNormal?.() ?? new FVector(1, 0, 0);
-const up = Character?.GetActorUpVector?.()?.GetSafeNormal?.() ?? new FVector(0, 1, 0);
-const baseCenter = playerLocation.Add(forward.Scale(2.6));
-
-for (let layer = 0; spawned < totalCubes; layer++) {
-    for (let row = 0; row < cubesPerSide && spawned < totalCubes; row++) {
-        for (let col = 0; col < cubesPerSide && spawned < totalCubes; col++) {
-            const xOffset = (col - (cubesPerSide - 1) * 0.5) * spacing;
-            const yOffset = baseYOffset + layer * spacing;
-            const zOffset = (row - (cubesPerSide - 1) * 0.5) * spacing;
-            const spawnLocation = baseCenter
-                .Add(right.Scale(xOffset))
-                .Add(up.Scale(yOffset))
-                .Add(forward.Scale(zOffset));
-            World.SpawnActor('Cube', spawnLocation);
-
-            spawned += 1;
-        }
-    }
-}`,
+    right: `spawnLiteCubeStorm({ count: 100, halfExtent: 0.2, spacing: 0.55 })
+`,
 };
 const MouseActionFunction = Object.getPrototypeOf(async function () {}).constructor;
 const ObjectEventFunction = MouseActionFunction;
@@ -2407,6 +2395,66 @@ function stepPhysics(delta) {
     };
 }
 
+function updateLitePhysicsPools() {
+    for (let i = 0; i < litePools.length; i++) litePools[i].update();
+}
+
+/**
+ * Lightweight bulk physics path. No actor, no scripts, no scene graph entry —
+ * one InstancedMesh, one shared shape, parallel body array. Designed for
+ * spawning thousands of small dynamic boxes.
+ */
+function createLiteBoxPool(options = {}) {
+    if (!physics?.ready) {
+        console.warn('createLiteBoxPool: physics not ready yet');
+        return null;
+    }
+    const pool = createLitePhysicsPool({
+        physics,
+        scene,
+        ...options,
+    });
+    litePools.push(pool);
+    return pool;
+}
+
+function spawnLiteCubeStorm({
+    count = 3000,
+    halfExtent = 0.2,
+    spacing = 0.6,
+    origin = null,
+    color = 0x99bbff,
+    jitter = 0.05,
+} = {}) {
+    const pool = createLiteBoxPool({
+        capacity: count,
+        halfExtent,
+        color,
+    });
+    if (!pool) return null;
+
+    const dim = Math.ceil(Math.cbrt(count));
+    const baseOrigin = origin ?? {
+        x: (camera?.position?.x ?? 0),
+        y: (worldFloor?.position?.y ?? 0) + 5,
+        z: (camera?.position?.z ?? 0) - 4,
+    };
+    pool.spawnGrid({
+        origin: baseOrigin,
+        dimsX: dim,
+        dimsY: dim,
+        dimsZ: dim,
+        spacing,
+        jitter,
+    });
+    return pool;
+}
+
+if (typeof window !== 'undefined') {
+    window.spawnLiteCubeStorm = spawnLiteCubeStorm;
+    window.createLiteBoxPool = createLiteBoxPool;
+}
+
 function createDefaultObjectEventState(eventName) {
     return {
         source: '',
@@ -3823,7 +3871,7 @@ function resetWorldEnvDefaults() {
 }
 
 function tickForceAllSceneMeshShadows() {
-    if (!shadowDebugState.forceAllMeshes && !gameplay.active) return;
+    if (!shadowDebugState.forceAllMeshes) return;
     if ((performance.now() - shadowDebugState.lastAppliedAt) < shadowDebugState.autoApplyIntervalMs) return;
     forceAllSceneMeshShadows();
 }
@@ -4929,6 +4977,11 @@ async function init() {
     buildLightGrid();
     rebuildTerrainPhysicsBody();
 
+    grassField = createGrassField({ worldFloor });
+
+    water = createWater({ level: TERRAIN_Y_OFFSET - 0.25 });
+    scene.add(water.mesh);
+
     // Removed shadow plane to eliminate 'double blur' artifacts
 
     // Subtle rim
@@ -5004,6 +5057,7 @@ async function init() {
     renderImportedPropButtons();
     initializeMouseActionScripts();
     setupGameplayEvents();
+    setupTerrainPanel();
     updateGameplayUI();
 
     renderer.setAnimationLoop(() => {
@@ -5024,9 +5078,12 @@ async function init() {
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
         if (gameplay.active) {
             physicsMetrics = stepPhysics(delta);
+            updateLitePhysicsPools();
         }
         updateVehicleVisuals(delta);
         updateVehicleSurfaceEffects(delta);
+        grassField?.update(delta);
+        water?.update(delta);
         // Performance toggle: skip the per-frame work entirely when on.
         // setPerfModeEnabled has already called setEnabled(false) on each subsystem
         // so visuals stay flat; we just skip the update/tick CPU cost here.
@@ -5217,6 +5274,138 @@ function refreshGameplayWorld() {
     updateWorldPresentation();
     resetShowcaseCamera(false);
     updateGameplayUI();
+}
+
+function setupTerrainPanel() {
+    const modeSel = document.getElementById('terrain-mode');
+    const colorIn = document.getElementById('terrain-color');
+    const repeatIn = document.getElementById('terrain-repeat');
+    const repeatVal = document.getElementById('terrain-repeat-value');
+    const roughIn = document.getElementById('terrain-roughness');
+    const roughVal = document.getElementById('terrain-roughness-value');
+    const summary = document.getElementById('terrain-summary-value');
+    const loadBtn = document.getElementById('terrain-load-image');
+    const loadInput = document.getElementById('terrain-image-input');
+
+    const grassOff = document.getElementById('grass-off');
+    const grassOn = document.getElementById('grass-on');
+    const grassBase = document.getElementById('grass-base-color');
+    const grassTip = document.getElementById('grass-tip-color');
+    const grassWind = document.getElementById('grass-wind');
+    const grassWindVal = document.getElementById('grass-wind-value');
+
+    const updateSummary = () => {
+        if (!summary) return;
+        const mode = modeSel?.value ?? 'grid';
+        summary.textContent = `${mode} · ${colorIn?.value ?? '#fff'}`;
+    };
+
+    modeSel?.addEventListener('change', async () => {
+        const mode = modeSel.value;
+        if (mode === 'grid') await setTerrainModeGrid(worldFloor);
+        else if (mode === 'solid') setTerrainModeSolid(worldFloor);
+        else if (mode === 'grass') await setTerrainModeGrassPBR(worldFloor);
+        else if (mode === 'custom') loadInput?.click();
+        setTerrainRepeat(worldFloor, parseFloat(repeatIn?.value ?? 28));
+        updateSummary();
+    });
+
+    colorIn?.addEventListener('input', () => {
+        setTerrainTint(worldFloor, colorIn.value);
+        updateSummary();
+    });
+
+    repeatIn?.addEventListener('input', () => {
+        const v = parseFloat(repeatIn.value);
+        if (repeatVal) repeatVal.textContent = String(v);
+        setTerrainRepeat(worldFloor, v);
+    });
+
+    roughIn?.addEventListener('input', () => {
+        const v = parseFloat(roughIn.value);
+        if (roughVal) roughVal.textContent = v.toFixed(2);
+        setTerrainRoughness(worldFloor, v);
+    });
+
+    loadBtn?.addEventListener('click', () => loadInput?.click());
+    loadInput?.addEventListener('change', () => {
+        const file = loadInput.files?.[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            setTerrainCustomImage(worldFloor, reader.result);
+            if (modeSel) modeSel.value = 'custom';
+            updateSummary();
+        };
+        reader.readAsDataURL(file);
+    });
+
+    const setGrassEnabled = (enabled) => {
+        if (grassField?.mesh) grassField.mesh.visible = enabled;
+        grassOn?.classList.toggle('viewer-toggle-btn-active', enabled);
+        grassOff?.classList.toggle('viewer-toggle-btn-active', !enabled);
+    };
+    grassOn?.addEventListener('click', () => setGrassEnabled(true));
+    grassOff?.addEventListener('click', () => setGrassEnabled(false));
+
+    const applyGrassColors = () => {
+        if (!grassField) return;
+        const base = new THREE.Color(grassBase?.value ?? '#2f5a1c');
+        const tip = new THREE.Color(grassTip?.value ?? '#a8d96b');
+        grassField.setColors?.(base, tip);
+    };
+    grassBase?.addEventListener('input', applyGrassColors);
+    grassTip?.addEventListener('input', applyGrassColors);
+
+    grassWind?.addEventListener('input', () => {
+        const v = parseFloat(grassWind.value);
+        if (grassWindVal) grassWindVal.textContent = v.toFixed(2);
+        grassField?.setWind?.(1, 0.3, v);
+    });
+
+    const spriteLoadBtn = document.getElementById('grass-sprite-load');
+    const spriteClearBtn = document.getElementById('grass-sprite-clear');
+    const spriteInput = document.getElementById('grass-sprite-input');
+    const spriteStatus = document.getElementById('grass-sprite-status');
+    const spriteTintIn = document.getElementById('grass-sprite-tint');
+    const spriteTintVal = document.getElementById('grass-sprite-tint-value');
+    const alphaCutoffIn = document.getElementById('grass-alpha-cutoff');
+    const alphaCutoffVal = document.getElementById('grass-alpha-cutoff-value');
+
+    spriteLoadBtn?.addEventListener('click', () => spriteInput?.click());
+    spriteInput?.addEventListener('change', () => {
+        const file = spriteInput.files?.[0];
+        if (!file || !grassField) return;
+        const reader = new FileReader();
+        reader.onload = async () => {
+            try {
+                await grassField.setSpriteFromUrl?.(reader.result);
+                if (spriteStatus) spriteStatus.textContent = `Loaded: ${file.name}`;
+            } catch (err) {
+                console.error('Grass sprite load failed', err);
+                if (spriteStatus) spriteStatus.textContent = `Failed to load ${file.name}`;
+            }
+        };
+        reader.readAsDataURL(file);
+    });
+    spriteClearBtn?.addEventListener('click', () => {
+        grassField?.clearSprite?.();
+        if (spriteStatus) spriteStatus.textContent = 'Sprite cleared — using procedural blades.';
+    });
+
+    spriteTintIn?.addEventListener('input', () => {
+        const v = parseFloat(spriteTintIn.value);
+        if (spriteTintVal) spriteTintVal.textContent = v.toFixed(2);
+        grassField?.setSpriteTint?.(v);
+    });
+
+    alphaCutoffIn?.addEventListener('input', () => {
+        const v = parseFloat(alphaCutoffIn.value);
+        if (alphaCutoffVal) alphaCutoffVal.textContent = v.toFixed(2);
+        grassField?.setAlphaTest?.(v);
+    });
+
+    updateSummary();
 }
 
 function setupGameplayEvents() {
@@ -5657,7 +5846,6 @@ function handlePointerLockChange() {
     if (isLocked) {
         gameplay.pointerLocked = true;
         gameplay.active = true;
-        forceAllSceneMeshShadows();
         showcase.looking = false;
         syncTransformControlState();
         closeObjectScriptMenu();
@@ -5691,7 +5879,6 @@ function enterGameplay() {
     respawnPlayer(true);
     gameplay.pointerLocked = false;
     gameplay.active = true;
-    forceAllSceneMeshShadows();
     syncTransformControlState();
     resetAllScriptLifecycleHandles();
     applyMouseActionScripts({ persist: true });
