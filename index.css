@@ -233,13 +233,15 @@ main {
   position: absolute;
   top: 1.25rem;
   right: 1.25rem;
+  bottom: 1.25rem;
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
   width: min(440px, calc(100% - 2.5rem));
-  max-height: calc(100dvh - 2.5rem);
+  max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
+  padding-bottom: 3rem;
   z-index: 16;
 }
 

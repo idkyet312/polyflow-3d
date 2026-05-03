@@ -421,6 +421,34 @@ const globalPostProcessUniforms = {
     bloomRadius: uniform(0.95),
     bloomThreshold: uniform(0.48)
 };
+
+// Performance toggle: when on, skips DDGI tick, volumetric fog update, and the
+// post-process volume update. The three subsystems own their own state via
+// setEnabled, so flipping this back to false restores the default render path
+// without a reload. Defaults to off — engine ships unchanged.
+let perfModeEnabled = false;
+let perfModeUiRefs = null;
+
+// World Environment panel state — Godot-style WorldEnvironment node mirror.
+// Each section can be toggled on/off independently, and key values are tunable
+// via sliders. State persists to localStorage so reloads keep the last config.
+// Defaults match the engine's out-of-box look — DDGI off (heavy), everything
+// else on. Changing the master "All Off" or "Performance" preset rewrites the
+// `enabled` fields but preserves slider values.
+const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v1';
+const WORLD_ENV_DEFAULTS = Object.freeze({
+    sky: { enabled: true, preset: 'sunny-sky', blurriness: 0.05 },
+    ambient: { enabled: true, intensity: 1.0 },
+    hemi: { enabled: true, intensity: 1.5 },
+    sun: { enabled: true, castShadow: true, intensity: 2.5 },
+    tonemap: { exposure: 1.0 },
+    bloom: { enabled: true, strength: 1.25, radius: 0.95, threshold: 0.48 },
+    fog: { enabled: true, density: 0.012, opacity: 0.055 },
+    ddgi: { enabled: false, probesPerFrame: 4, intensity: 0.18 },
+    shadows: { enabled: true },
+});
+let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
+let worldEnvUiRefs = null;
 let physicsCore;
 let physicsRuntime;
 let multiplayerController;
@@ -3549,6 +3577,251 @@ function setForceAllSceneMeshShadowsEnabled(isEnabled) {
     return result;
 }
 
+function updatePerfModeUi() {
+    if (!perfModeUiRefs) return;
+    perfModeUiRefs.offBtn?.classList.toggle('viewer-toggle-btn-active', !perfModeEnabled);
+    perfModeUiRefs.onBtn?.classList.toggle('viewer-toggle-btn-active', perfModeEnabled);
+    if (perfModeUiRefs.status) {
+        perfModeUiRefs.status.textContent = perfModeEnabled
+            ? 'Performance mode on. DDGI, volumetric fog, and post-process bloom are paused.'
+            : 'Performance mode off. Full DDGI + fog + post-process active.';
+    }
+}
+
+// Performance toggle: turn DDGI, volumetric fog, and post-process bloom off
+// (or on) at runtime without changing engine defaults. Each subsystem owns its
+// own enabled flag — we flip those here AND also gate the per-frame update
+// calls in the main render loop, so flipping this saves both render work and
+// CPU update work.
+function setPerfModeEnabled(isEnabled) {
+    const next = !!isEnabled;
+    if (perfModeEnabled === next) {
+        updatePerfModeUi();
+        return;
+    }
+    perfModeEnabled = next;
+
+    // Volumetric fog: hides the layer group AND clears scene.fog when off.
+    volumetricFogController?.setEnabled(!perfModeEnabled);
+
+    // DDGI: tick() short-circuits when state.enabled is false; injectionEnabled
+    // controls the shader-injection patching loop, which we also pause so
+    // newly-added materials don't get patched while perf mode is on.
+    const ddgi = getDDGIManager();
+    ddgi?.setEnabled(!perfModeEnabled);
+    ddgi?.setInjectionEnabled(!perfModeEnabled);
+
+    // Post-process: clamps bloom uniforms to neutral so the MRT bloom pass
+    // becomes a no-op while still running (cheap once strength is 0).
+    postProcessVolumeManager?.setEnabled(!perfModeEnabled);
+
+    updatePerfModeUi();
+}
+
+// ──────────────────────────────────────────────────────────
+//  World Environment panel — Godot-style global graphics inspector
+// ──────────────────────────────────────────────────────────
+
+function loadWorldEnvFromStorage() {
+    try {
+        const raw = localStorage.getItem(WORLD_ENV_STORAGE_KEY);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        // Shallow-merge each section so we don't lose newly-added defaults
+        // when an older saved blob is read.
+        for (const key of Object.keys(WORLD_ENV_DEFAULTS)) {
+            if (parsed[key] && typeof parsed[key] === 'object') {
+                worldEnvState[key] = { ...WORLD_ENV_DEFAULTS[key], ...parsed[key] };
+            }
+        }
+    } catch (e) {
+        // Corrupt storage — fall back to defaults silently.
+    }
+}
+
+function saveWorldEnvToStorage() {
+    try {
+        localStorage.setItem(WORLD_ENV_STORAGE_KEY, JSON.stringify(worldEnvState));
+    } catch (e) { /* private mode / quota — ignore */ }
+}
+
+function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
+    const s = worldEnvState;
+
+    // Sky / Background
+    if (environmentController) {
+        environmentController.setEnabled?.(s.sky.enabled);
+        environmentController.setBackgroundBlurriness?.(s.sky.blurriness);
+        if (switchSky && environmentController.getCurrentEnvironment?.() !== s.sky.preset) {
+            environmentController.switchEnvironment?.(s.sky.preset);
+        }
+    }
+
+    // Ambient + Hemi + Sun — direct property writes since they're THREE lights.
+    if (ambientLight) {
+        ambientLight.visible = s.ambient.enabled;
+        ambientLight.intensity = s.ambient.intensity;
+    }
+    if (hemiLight) {
+        hemiLight.visible = s.hemi.enabled;
+        hemiLight.intensity = s.hemi.intensity;
+    }
+    if (mainDirectionalLight) {
+        mainDirectionalLight.visible = s.sun.enabled;
+        mainDirectionalLight.castShadow = s.sun.enabled && s.sun.castShadow;
+        mainDirectionalLight.intensity = s.sun.intensity;
+    }
+
+    // Tonemap exposure — write to renderer immediately AND record as the
+    // post-process volume default so the lerp doesn't drag it back.
+    if (renderer) {
+        renderer.toneMappingExposure = s.tonemap.exposure;
+    }
+    postProcessVolumeManager?.setDefaultSettings?.({ toneMappingExposure: s.tonemap.exposure });
+
+    // Bloom — when off, postProcessVolumeManager.setEnabled clamps uniforms
+    // to neutral. When on, push the user's slider values through both the
+    // shader uniforms AND the volume defaults so volume-based grading still works.
+    if (s.bloom.enabled) {
+        postProcessVolumeManager?.setEnabled?.(true);
+        if (globalPostProcessUniforms.bloomStrength) globalPostProcessUniforms.bloomStrength.value = s.bloom.strength;
+        if (globalPostProcessUniforms.bloomRadius) globalPostProcessUniforms.bloomRadius.value = s.bloom.radius;
+        if (globalPostProcessUniforms.bloomThreshold) globalPostProcessUniforms.bloomThreshold.value = s.bloom.threshold;
+        postProcessVolumeManager?.setDefaultSettings?.({
+            bloomStrength: s.bloom.strength,
+            bloomRadius: s.bloom.radius,
+            bloomThreshold: s.bloom.threshold,
+        });
+    } else {
+        postProcessVolumeManager?.setEnabled?.(false);
+    }
+
+    // Fog
+    if (volumetricFogController) {
+        volumetricFogController.setEnabled?.(s.fog.enabled);
+        volumetricFogController.setDensity?.(s.fog.density);
+        volumetricFogController.setOpacity?.(s.fog.opacity);
+    }
+
+    // DDGI
+    const ddgi = getDDGIManager();
+    ddgi?.setEnabled?.(s.ddgi.enabled);
+    ddgi?.setInjectionEnabled?.(s.ddgi.enabled);
+    ddgi?.setProbesPerFrame?.(s.ddgi.probesPerFrame);
+    ddgi?.setIntensity?.(s.ddgi.intensity);
+
+    // Shadows
+    if (renderer?.shadowMap) {
+        renderer.shadowMap.enabled = s.shadows.enabled;
+    }
+
+    if (persist) saveWorldEnvToStorage();
+    updateWorldEnvUi();
+}
+
+function updateWorldEnvUi() {
+    if (!worldEnvUiRefs) return;
+    const s = worldEnvState;
+    const setToggle = (offBtn, onBtn, on) => {
+        offBtn?.classList.toggle('viewer-toggle-btn-active', !on);
+        onBtn?.classList.toggle('viewer-toggle-btn-active', on);
+    };
+    const setSlider = (input, valueEl, value, decimals) => {
+        if (input) input.value = value;
+        if (valueEl) valueEl.textContent = Number(value).toFixed(decimals);
+    };
+
+    setToggle(worldEnvUiRefs.skyOff, worldEnvUiRefs.skyOn, s.sky.enabled);
+    if (worldEnvUiRefs.skyPreset) worldEnvUiRefs.skyPreset.value = s.sky.preset;
+    setSlider(worldEnvUiRefs.skyBlurriness, worldEnvUiRefs.skyBlurrinessValue, s.sky.blurriness, 2);
+
+    setToggle(worldEnvUiRefs.ambientOff, worldEnvUiRefs.ambientOn, s.ambient.enabled);
+    setSlider(worldEnvUiRefs.ambientIntensity, worldEnvUiRefs.ambientIntensityValue, s.ambient.intensity, 2);
+
+    setToggle(worldEnvUiRefs.hemiOff, worldEnvUiRefs.hemiOn, s.hemi.enabled);
+    setSlider(worldEnvUiRefs.hemiIntensity, worldEnvUiRefs.hemiIntensityValue, s.hemi.intensity, 2);
+
+    setToggle(worldEnvUiRefs.sunOff, worldEnvUiRefs.sunOn, s.sun.enabled);
+    if (worldEnvUiRefs.sunShadow) worldEnvUiRefs.sunShadow.checked = s.sun.castShadow;
+    setSlider(worldEnvUiRefs.sunIntensity, worldEnvUiRefs.sunIntensityValue, s.sun.intensity, 2);
+
+    setSlider(worldEnvUiRefs.exposure, worldEnvUiRefs.exposureValue, s.tonemap.exposure, 2);
+
+    setToggle(worldEnvUiRefs.bloomOff, worldEnvUiRefs.bloomOn, s.bloom.enabled);
+    setSlider(worldEnvUiRefs.bloomStrength, worldEnvUiRefs.bloomStrengthValue, s.bloom.strength, 2);
+    setSlider(worldEnvUiRefs.bloomRadius, worldEnvUiRefs.bloomRadiusValue, s.bloom.radius, 2);
+    setSlider(worldEnvUiRefs.bloomThreshold, worldEnvUiRefs.bloomThresholdValue, s.bloom.threshold, 2);
+
+    setToggle(worldEnvUiRefs.fogOff, worldEnvUiRefs.fogOn, s.fog.enabled);
+    setSlider(worldEnvUiRefs.fogDensity, worldEnvUiRefs.fogDensityValue, s.fog.density, 3);
+    setSlider(worldEnvUiRefs.fogOpacity, worldEnvUiRefs.fogOpacityValue, s.fog.opacity, 3);
+
+    setToggle(worldEnvUiRefs.ddgiOff, worldEnvUiRefs.ddgiOn, s.ddgi.enabled);
+    if (worldEnvUiRefs.ddgiProbes) worldEnvUiRefs.ddgiProbes.value = s.ddgi.probesPerFrame;
+    if (worldEnvUiRefs.ddgiProbesValue) worldEnvUiRefs.ddgiProbesValue.textContent = String(s.ddgi.probesPerFrame);
+    setSlider(worldEnvUiRefs.ddgiIntensity, worldEnvUiRefs.ddgiIntensityValue, s.ddgi.intensity, 2);
+
+    setToggle(worldEnvUiRefs.shadowsOff, worldEnvUiRefs.shadowsOn, s.shadows.enabled);
+
+    // Summary chip + status text
+    if (worldEnvUiRefs.summaryValue) {
+        const off = [];
+        if (!s.sky.enabled) off.push('Sky');
+        if (!s.bloom.enabled) off.push('Bloom');
+        if (!s.fog.enabled) off.push('Fog');
+        if (!s.ddgi.enabled) off.push('DDGI');
+        if (!s.shadows.enabled) off.push('Shadows');
+        worldEnvUiRefs.summaryValue.textContent = off.length ? `Off: ${off.join(' · ')}` : 'All effects active';
+    }
+    if (worldEnvUiRefs.masterStatus) {
+        const allCoreOn = s.sky.enabled && s.ambient.enabled && s.hemi.enabled && s.sun.enabled && s.bloom.enabled && s.fog.enabled && s.shadows.enabled;
+        const perfPreset = !s.bloom.enabled && !s.fog.enabled && !s.ddgi.enabled && s.sky.enabled && s.sun.enabled;
+        if (allCoreOn && !s.ddgi.enabled) {
+            worldEnvUiRefs.masterStatus.textContent = 'Everything on (DDGI off — opt in for prettier indirect lighting).';
+        } else if (allCoreOn && s.ddgi.enabled) {
+            worldEnvUiRefs.masterStatus.textContent = 'Everything on, including DDGI.';
+        } else if (perfPreset) {
+            worldEnvUiRefs.masterStatus.textContent = 'Performance preset active. Bloom + Fog + DDGI paused.';
+        } else {
+            worldEnvUiRefs.masterStatus.textContent = 'Custom configuration.';
+        }
+    }
+}
+
+function setWorldEnvMaster(mode) {
+    const s = worldEnvState;
+    if (mode === 'on') {
+        s.sky.enabled = true;
+        s.ambient.enabled = true;
+        s.hemi.enabled = true;
+        s.sun.enabled = true;
+        s.bloom.enabled = true;
+        s.fog.enabled = true;
+        s.shadows.enabled = true;
+        // DDGI is opt-in even with All On — too expensive for a default.
+    } else if (mode === 'off') {
+        s.sky.enabled = false;
+        s.ambient.enabled = false;
+        s.hemi.enabled = false;
+        s.sun.enabled = false;
+        s.bloom.enabled = false;
+        s.fog.enabled = false;
+        s.ddgi.enabled = false;
+        s.shadows.enabled = false;
+    } else if (mode === 'perf') {
+        // Performance preset: only the heavy effects go off.
+        s.bloom.enabled = false;
+        s.fog.enabled = false;
+        s.ddgi.enabled = false;
+    }
+    applyWorldEnvState();
+}
+
+function resetWorldEnvDefaults() {
+    worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
+    applyWorldEnvState();
+}
+
 function tickForceAllSceneMeshShadows() {
     if (!shadowDebugState.forceAllMeshes && !gameplay.active) return;
     if ((performance.now() - shadowDebugState.lastAppliedAt) < shadowDebugState.autoApplyIntervalMs) return;
@@ -4151,6 +4424,66 @@ async function init() {
         applyBtn: document.getElementById('debug-apply-mesh-shadows'),
         status: document.getElementById('debug-shadow-status'),
     };
+    perfModeUiRefs = {
+        offBtn: document.getElementById('perf-mode-off'),
+        onBtn: document.getElementById('perf-mode-on'),
+        status: document.getElementById('perf-mode-status'),
+    };
+
+    // World Environment panel refs — every toggle button, slider input, and
+    // value-display span. Lookups are tolerant: the panel may be absent in
+    // older index.html copies; null refs short-circuit gracefully in the
+    // updateWorldEnvUi / handler bodies.
+    worldEnvUiRefs = {
+        summaryValue: document.getElementById('we-summary-value'),
+        masterOnBtn: document.getElementById('we-master-on'),
+        masterOffBtn: document.getElementById('we-master-off'),
+        masterPerfBtn: document.getElementById('we-master-perf'),
+        masterStatus: document.getElementById('we-master-status'),
+        skyOff: document.getElementById('we-sky-off'),
+        skyOn: document.getElementById('we-sky-on'),
+        skyPreset: document.getElementById('we-sky-preset'),
+        skyBlurriness: document.getElementById('we-sky-blurriness'),
+        skyBlurrinessValue: document.getElementById('we-sky-blurriness-value'),
+        ambientOff: document.getElementById('we-ambient-off'),
+        ambientOn: document.getElementById('we-ambient-on'),
+        ambientIntensity: document.getElementById('we-ambient-intensity'),
+        ambientIntensityValue: document.getElementById('we-ambient-intensity-value'),
+        hemiOff: document.getElementById('we-hemi-off'),
+        hemiOn: document.getElementById('we-hemi-on'),
+        hemiIntensity: document.getElementById('we-hemi-intensity'),
+        hemiIntensityValue: document.getElementById('we-hemi-intensity-value'),
+        sunOff: document.getElementById('we-sun-off'),
+        sunOn: document.getElementById('we-sun-on'),
+        sunShadow: document.getElementById('we-sun-shadow'),
+        sunIntensity: document.getElementById('we-sun-intensity'),
+        sunIntensityValue: document.getElementById('we-sun-intensity-value'),
+        exposure: document.getElementById('we-tonemap-exposure'),
+        exposureValue: document.getElementById('we-tonemap-exposure-value'),
+        bloomOff: document.getElementById('we-bloom-off'),
+        bloomOn: document.getElementById('we-bloom-on'),
+        bloomStrength: document.getElementById('we-bloom-strength'),
+        bloomStrengthValue: document.getElementById('we-bloom-strength-value'),
+        bloomRadius: document.getElementById('we-bloom-radius'),
+        bloomRadiusValue: document.getElementById('we-bloom-radius-value'),
+        bloomThreshold: document.getElementById('we-bloom-threshold'),
+        bloomThresholdValue: document.getElementById('we-bloom-threshold-value'),
+        fogOff: document.getElementById('we-fog-off'),
+        fogOn: document.getElementById('we-fog-on'),
+        fogDensity: document.getElementById('we-fog-density'),
+        fogDensityValue: document.getElementById('we-fog-density-value'),
+        fogOpacity: document.getElementById('we-fog-opacity'),
+        fogOpacityValue: document.getElementById('we-fog-opacity-value'),
+        ddgiOff: document.getElementById('we-ddgi-off'),
+        ddgiOn: document.getElementById('we-ddgi-on'),
+        ddgiProbes: document.getElementById('we-ddgi-probes'),
+        ddgiProbesValue: document.getElementById('we-ddgi-probes-value'),
+        ddgiIntensity: document.getElementById('we-ddgi-intensity'),
+        ddgiIntensityValue: document.getElementById('we-ddgi-intensity-value'),
+        shadowsOff: document.getElementById('we-shadows-off'),
+        shadowsOn: document.getElementById('we-shadows-on'),
+        resetBtn: document.getElementById('we-reset-defaults'),
+    };
 
     renderDebugConsoleOutput();
     debugConsoleInput?.addEventListener('keydown', handleDebugConsoleInputKeydown);
@@ -4215,6 +4548,100 @@ async function init() {
         forceAllSceneMeshShadows();
     });
     updateShadowDebugUi();
+
+    perfModeUiRefs?.offBtn?.addEventListener('click', () => {
+        setPerfModeEnabled(false);
+    });
+    perfModeUiRefs?.onBtn?.addEventListener('click', () => {
+        setPerfModeEnabled(true);
+    });
+    updatePerfModeUi();
+
+    // World Environment panel: load saved state, wire all togglers + sliders,
+    // then call applyWorldEnvState once so the engine boots into the user's
+    // last-saved configuration. Each handler mutates the relevant slice of
+    // worldEnvState then re-applies — keeps the UI and runtime in sync without
+    // duplicating logic.
+    loadWorldEnvFromStorage();
+
+    const wireToggle = (offBtn, onBtn, getStateOff, getStateOn) => {
+        offBtn?.addEventListener('click', () => { getStateOff(); applyWorldEnvState(); });
+        onBtn?.addEventListener('click', () => { getStateOn(); applyWorldEnvState(); });
+    };
+    const wireSlider = (input, key, setter, parser = parseFloat) => {
+        input?.addEventListener('input', () => {
+            const v = parser(input.value);
+            if (Number.isFinite(v)) {
+                setter(v);
+                applyWorldEnvState({ switchSky: false });
+            }
+        });
+    };
+
+    worldEnvUiRefs?.masterOnBtn?.addEventListener('click', () => setWorldEnvMaster('on'));
+    worldEnvUiRefs?.masterOffBtn?.addEventListener('click', () => setWorldEnvMaster('off'));
+    worldEnvUiRefs?.masterPerfBtn?.addEventListener('click', () => setWorldEnvMaster('perf'));
+    worldEnvUiRefs?.resetBtn?.addEventListener('click', () => resetWorldEnvDefaults());
+
+    wireToggle(worldEnvUiRefs?.skyOff, worldEnvUiRefs?.skyOn,
+        () => { worldEnvState.sky.enabled = false; },
+        () => { worldEnvState.sky.enabled = true; });
+    worldEnvUiRefs?.skyPreset?.addEventListener('change', () => {
+        worldEnvState.sky.preset = worldEnvUiRefs.skyPreset.value;
+        applyWorldEnvState();
+    });
+    wireSlider(worldEnvUiRefs?.skyBlurriness, 'sky.blurriness', (v) => { worldEnvState.sky.blurriness = v; });
+
+    wireToggle(worldEnvUiRefs?.ambientOff, worldEnvUiRefs?.ambientOn,
+        () => { worldEnvState.ambient.enabled = false; },
+        () => { worldEnvState.ambient.enabled = true; });
+    wireSlider(worldEnvUiRefs?.ambientIntensity, 'ambient.intensity', (v) => { worldEnvState.ambient.intensity = v; });
+
+    wireToggle(worldEnvUiRefs?.hemiOff, worldEnvUiRefs?.hemiOn,
+        () => { worldEnvState.hemi.enabled = false; },
+        () => { worldEnvState.hemi.enabled = true; });
+    wireSlider(worldEnvUiRefs?.hemiIntensity, 'hemi.intensity', (v) => { worldEnvState.hemi.intensity = v; });
+
+    wireToggle(worldEnvUiRefs?.sunOff, worldEnvUiRefs?.sunOn,
+        () => { worldEnvState.sun.enabled = false; },
+        () => { worldEnvState.sun.enabled = true; });
+    worldEnvUiRefs?.sunShadow?.addEventListener('change', () => {
+        worldEnvState.sun.castShadow = !!worldEnvUiRefs.sunShadow.checked;
+        applyWorldEnvState({ switchSky: false });
+    });
+    wireSlider(worldEnvUiRefs?.sunIntensity, 'sun.intensity', (v) => { worldEnvState.sun.intensity = v; });
+
+    wireSlider(worldEnvUiRefs?.exposure, 'tonemap.exposure', (v) => { worldEnvState.tonemap.exposure = v; });
+
+    wireToggle(worldEnvUiRefs?.bloomOff, worldEnvUiRefs?.bloomOn,
+        () => { worldEnvState.bloom.enabled = false; },
+        () => { worldEnvState.bloom.enabled = true; });
+    wireSlider(worldEnvUiRefs?.bloomStrength, 'bloom.strength', (v) => { worldEnvState.bloom.strength = v; });
+    wireSlider(worldEnvUiRefs?.bloomRadius, 'bloom.radius', (v) => { worldEnvState.bloom.radius = v; });
+    wireSlider(worldEnvUiRefs?.bloomThreshold, 'bloom.threshold', (v) => { worldEnvState.bloom.threshold = v; });
+
+    wireToggle(worldEnvUiRefs?.fogOff, worldEnvUiRefs?.fogOn,
+        () => { worldEnvState.fog.enabled = false; },
+        () => { worldEnvState.fog.enabled = true; });
+    wireSlider(worldEnvUiRefs?.fogDensity, 'fog.density', (v) => { worldEnvState.fog.density = v; });
+    wireSlider(worldEnvUiRefs?.fogOpacity, 'fog.opacity', (v) => { worldEnvState.fog.opacity = v; });
+
+    wireToggle(worldEnvUiRefs?.ddgiOff, worldEnvUiRefs?.ddgiOn,
+        () => { worldEnvState.ddgi.enabled = false; },
+        () => { worldEnvState.ddgi.enabled = true; });
+    wireSlider(worldEnvUiRefs?.ddgiProbes, 'ddgi.probesPerFrame',
+        (v) => { worldEnvState.ddgi.probesPerFrame = Math.round(v); }, (s) => parseInt(s, 10));
+    wireSlider(worldEnvUiRefs?.ddgiIntensity, 'ddgi.intensity', (v) => { worldEnvState.ddgi.intensity = v; });
+
+    wireToggle(worldEnvUiRefs?.shadowsOff, worldEnvUiRefs?.shadowsOn,
+        () => { worldEnvState.shadows.enabled = false; },
+        () => { worldEnvState.shadows.enabled = true; });
+
+    // Apply once now that all controllers + UI are wired. This pushes the
+    // (possibly-restored-from-localStorage) state through every subsystem and
+    // syncs the panel display. Any controllers not yet ready are no-ops thanks
+    // to the optional-chaining inside applyWorldEnvState.
+    applyWorldEnvState({ persist: false });
 
     if (browseModelBtn) {
         browseModelBtn.addEventListener('click', () => {
@@ -4600,10 +5027,17 @@ async function init() {
         }
         updateVehicleVisuals(delta);
         updateVehicleSurfaceEffects(delta);
-        volumetricFogController?.update(delta);
-        postProcessVolumeManager?.update(delta);
+        // Performance toggle: skip the per-frame work entirely when on.
+        // setPerfModeEnabled has already called setEnabled(false) on each subsystem
+        // so visuals stay flat; we just skip the update/tick CPU cost here.
+        if (!perfModeEnabled) {
+            volumetricFogController?.update(delta);
+            postProcessVolumeManager?.update(delta);
+        }
         const _ddgiStart = performance.now();
-        getDDGIManager().tick(delta);
+        if (!perfModeEnabled) {
+            getDDGIManager().tick(delta);
+        }
         const _ddgiMs = performance.now() - _ddgiStart;
         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
         tickForceAllSceneMeshShadows();
