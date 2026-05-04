@@ -95,6 +95,8 @@ import {
 import {
     bindAppCore,
 } from './src/runtime/appCore.js';
+import { applyCorrectColorSpace } from './src/runtime/colorSpace.js';
+import { wireSplatDevHooks } from './src/world/splat/init.js';
 import {
     compressTextures,
 } from './src/optim/textureCompression.js';
@@ -5353,6 +5355,7 @@ async function init() {
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    applyCorrectColorSpace(renderer);
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
@@ -8057,6 +8060,7 @@ document.getElementById('btn-delete-comp')?.addEventListener('click', () => {
 
 init().then(() => {
     applyMobileModeState();
+    wireSplatDevHooks(scene, sceneSystem);
 }).catch((err) => console.error('init failed', err));
 
 // Blueprint Transform Controls

@@ -25,6 +25,7 @@
 //   Zwicker 2001,      "Surface Splatting" (the J Jacobian derivation)
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
     Fn, attribute, uniform, varying,
     vec2, vec3, vec4, mat3, float,
@@ -125,7 +126,7 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
     const uFocal    = uniform(new THREE.Vector2(1, 1));
     const uViewport = uniform(new THREE.Vector2(1, 1));
 
-    const material = new THREE.MeshBasicNodeMaterial({
+    const material = new MeshBasicNodeMaterial({
         transparent: true,
         depthWrite:  false,   // splats are translucent; don't occlude each other in depth buffer
         depthTest:   true,    // but DO read depth so opaque scene geometry occludes splats
