@@ -21,6 +21,8 @@ let serializeImportedPropTemplate, registerImportedPropTemplateFromSerializedDat
 let saveObjectScriptDrafts, refreshSceneUI, selectShowcaseActor;
 let buildPrimitiveActorMesh, applyObjectMaterialState, serializeObjectMaterialState;
 let enterBlueprintEditor, exitBlueprintEditor, refreshBlueprintComponents;
+let serializeWorldTerrainState, applyWorldTerrainState, refreshGameplayWorld, forceExitGameplayForWorldLoad;
+let updateGameplayUI, updateWorldPresentation;
 
 export function setupSceneHistory(deps) {
     ({
@@ -46,6 +48,12 @@ export function setupSceneHistory(deps) {
         enterBlueprintEditor,
         exitBlueprintEditor,
         refreshBlueprintComponents,
+        serializeWorldTerrainState,
+        applyWorldTerrainState,
+        refreshGameplayWorld,
+        forceExitGameplayForWorldLoad,
+        updateGameplayUI,
+        updateWorldPresentation,
     } = deps);
 }
 
@@ -199,6 +207,40 @@ export function deserializeComponentTree(parent, comps) {
 
 let editorClipboard = null;
 
+function getActorCoreInfo(actor) {
+    return actor?.userData?.actorCore ?? null;
+}
+
+function markActorAsCore(actor) {
+    if (!actor) return '';
+
+    const userData = { ...(actor.userData || {}) };
+    const current = userData.actorCore || {};
+    const coreId = current.coreId || actor.id;
+    userData.actorCore = {
+        coreId,
+        inheritsRules: false,
+    };
+    actor.userData = userData;
+    return coreId;
+}
+
+function prepareActorDuplicateData(sourceActor, actorData) {
+    if (!sourceActor || !actorData) return actorData;
+
+    const sourceCore = getActorCoreInfo(sourceActor);
+    const coreId = sourceCore?.coreId || markActorAsCore(sourceActor);
+    const userData = { ...(actorData.userData || {}) };
+    userData.actorCore = {
+        coreId,
+        inheritsRules: true,
+    };
+
+    actorData.userData = userData;
+    actorData.scripts = null;
+    return actorData;
+}
+
 export function serializeActorToJSON(actor) {
     return serializeActorData(actor);
 }
@@ -244,7 +286,11 @@ export function copySelectedToClipboard() {
         if (!propId) return;
         const actor = getDynamicPropById(propId);
         if (!actor) return;
-        editorClipboard = { type: 'actor', data: serializeActorToJSON(actor) };
+        editorClipboard = {
+            type: 'actor',
+            sourceActorId: actor.id,
+            data: serializeActorToJSON(actor),
+        };
     }
 }
 
@@ -260,6 +306,8 @@ export function pasteFromClipboard() {
         refreshBlueprintComponents();
     } else if (!blueprintState.active && editorClipboard.type === 'actor') {
         const actorData = JSON.parse(JSON.stringify(editorClipboard.data));
+        const sourceActor = getDynamicPropById(editorClipboard.sourceActorId);
+        prepareActorDuplicateData(sourceActor, actorData);
         actorData.transform.position[1] += 1;
         actorData.transform.position[0] += 1;
         actorData.name += ' (Copy)';
@@ -351,7 +399,7 @@ export const editorHistory = {
 // ─── lines 11413–11444 ───────────────────────────────────────────────────────────────────
 
 export function exportWorldToJSON({ preferAssetPath = false } = {}) {
-    const umap = { version: 2, actors: [], importedTemplates: [] };
+    const umap = { version: 3, actors: [], importedTemplates: [] };
     const usedTemplateIds = new Set();
     for (const actor of (sceneSystem?.actors || [])) {
         const serializedActor = serializeActorData(actor);
@@ -380,14 +428,21 @@ export function exportWorldToJSON({ preferAssetPath = false } = {}) {
         delete umap.importedTemplates;
     }
 
+    const worldTerrain = serializeWorldTerrainState?.();
+    if (worldTerrain?.terrain || worldTerrain?.foliage) {
+        umap.worldTerrain = worldTerrain;
+    }
+
     return umap;
 }
 
 // ─── lines 11446–11468 ───────────────────────────────────────────────────────────────────
 
 export async function loadWorldFromJSON(umap, { fileMap = null } = {}) {
-    if (umap.version !== 1 && umap.version !== 2) console.warn('Unknown umap version', umap.version);
+    if (umap.version !== 1 && umap.version !== 2 && umap.version !== 3) console.warn('Unknown umap version', umap.version);
+    forceExitGameplayForWorldLoad?.();
     clearSceneActors();
+    applyWorldTerrainState?.(umap.worldTerrain ?? {});
 
     if (Array.isArray(umap.importedTemplates)) {
         for (const templateData of umap.importedTemplates) {
@@ -401,6 +456,12 @@ export async function loadWorldFromJSON(umap, { fileMap = null } = {}) {
 
     for (const actorData of umap.actors) {
         spawnActorFromSerializedData(actorData, { preserveId: true });
+    }
+    refreshGameplayWorld?.();
+    if (physics?.ready) {
+        gameplay.canPlay = true;
+        updateWorldPresentation?.();
+        updateGameplayUI?.();
     }
     saveObjectScriptDrafts();
     refreshSceneUI();

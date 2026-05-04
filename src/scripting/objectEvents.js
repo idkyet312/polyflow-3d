@@ -106,6 +106,28 @@ export function setupObjectEvents(deps) {
 
 // ─── Script compilation ──────────────────────────────────────────────────────
 
+function getActorRuleSourceId(prop) {
+    const core = prop?.userData?.actorCore;
+    if (core?.inheritsRules === true && typeof core.coreId === 'string' && core.coreId && core.coreId !== prop.id) {
+        return core.coreId;
+    }
+    return prop?.id || '';
+}
+
+function getActorRuleSource(prop) {
+    const sourceId = getActorRuleSourceId(prop);
+    return sourceId && sourceId !== prop?.id ? getDynamicPropById(sourceId) || prop : prop;
+}
+
+function syncActorsUsingRuleSource(sourceId) {
+    if (!sourceId || !sceneSystem) return;
+    for (const actor of sceneSystem.actors) {
+        if (getActorRuleSourceId(actor) === sourceId) {
+            syncPropScriptState(actor);
+        }
+    }
+}
+
 export function compileObjectEventScript(source) {
     const normalizedSource = typeof source === 'string' ? source.trim() : '';
 
@@ -151,8 +173,11 @@ export function syncPropScriptState(prop) {
 
     ensureActorIdentity(prop);
     const propId = prop.id;
-    const drafts = ensureObjectScriptDraftEntry(propId);
+    const sourceId = getActorRuleSourceId(prop) || propId;
+    const drafts = ensureObjectScriptDraftEntry(sourceId);
     const scriptState = createObjectScriptState(propId);
+    scriptState.ruleSourceId = sourceId;
+    scriptState.inheritsRules = sourceId !== propId;
 
     scriptState.tick.source = drafts.tick;
     scriptState.collision.source = drafts.collision;
@@ -391,13 +416,17 @@ export function syncObjectScriptEditor() {
     const prop = getDynamicPropById(objectScriptState.targetPropId);
     const eventType = objectScriptState.targetEvent;
     const eventState = getActorScriptState(prop)?.[eventType];
+    const source = getActorRuleSource(prop);
+    const inheritsRules = !!prop && !!source?.id && source.id !== prop.id;
 
     if (objectScriptEditorTitle) {
         objectScriptEditorTitle.textContent = `Attach ${getObjectScriptEventLabel(eventType)} Script`;
     }
 
     if (objectScriptEditorTarget) {
-        objectScriptEditorTarget.textContent = `Target: ${getDynamicPropDisplayName(prop)}`;
+        objectScriptEditorTarget.textContent = inheritsRules
+            ? `Target: ${getDynamicPropDisplayName(prop)} inherits ${getDynamicPropDisplayName(source)}`
+            : `Target: ${getDynamicPropDisplayName(prop)}`;
     }
 
     if (objectScriptEditorMode) {
@@ -514,7 +543,8 @@ export function openObjectScriptEditor(eventType) {
 }
 
 export function updatePropScriptSource(prop, eventType, source, { persist = true, notify = true } = {}) {
-    const scriptState = ensureActorScriptState(prop);
+    const sourceProp = getActorRuleSource(prop);
+    const scriptState = ensureActorScriptState(sourceProp);
     if (!scriptState?.[eventType]) return false;
 
     const normalizedSource = typeof source === 'string' ? source : '';
@@ -540,7 +570,7 @@ export function updatePropScriptSource(prop, eventType, source, { persist = true
         }
     }
 
-    const drafts = ensureObjectScriptDraftEntry(prop.id);
+    const drafts = ensureObjectScriptDraftEntry(sourceProp.id);
     drafts[eventType] = normalizedSource;
     if (eventType === 'tick') {
         drafts.tickEnabled = !!scriptState.tick.enabled;
@@ -549,6 +579,8 @@ export function updatePropScriptSource(prop, eventType, source, { persist = true
     if (persist) {
         saveObjectScriptDrafts();
     }
+
+    syncActorsUsingRuleSource(sourceProp.id);
 
     updateObjectScriptEditorStatus(
         eventState.error
@@ -564,18 +596,21 @@ export function clearPropScriptSource(prop, eventType) {
 }
 
 export function setPropTickEventEnabled(prop, isEnabled, { persist = true } = {}) {
-    const scriptState = ensureActorScriptState(prop);
+    const sourceProp = getActorRuleSource(prop);
+    const scriptState = ensureActorScriptState(sourceProp);
     if (!scriptState?.tick) return;
 
     const tickState = scriptState.tick;
     tickState.enabled = !!isEnabled && !!tickState.source.trim() && !tickState.error;
 
-    const drafts = ensureObjectScriptDraftEntry(prop.id);
+    const drafts = ensureObjectScriptDraftEntry(sourceProp.id);
     drafts.tickEnabled = !!isEnabled;
 
     if (persist) {
         saveObjectScriptDrafts();
     }
+
+    syncActorsUsingRuleSource(sourceProp.id);
 
     updateObjectScriptEditorStatus(
         tickState.enabled

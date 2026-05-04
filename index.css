@@ -157,6 +157,54 @@ main {
   transform: scale(0.98);
 }
 
+.scene-ui-folder {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.45rem;
+  border-radius: 10px;
+  background: rgba(112, 0, 255, 0.08);
+  border: 1px solid rgba(112, 0, 255, 0.18);
+}
+
+.scene-ui-core-bin {
+  margin-top: 0.7rem;
+}
+
+.scene-ui-folder-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.15rem 0.25rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: #d7bdff;
+  text-transform: uppercase;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.scene-ui-folder-header span {
+  color: var(--text-dim);
+  font-weight: 600;
+  text-transform: none;
+}
+
+.scene-ui-folder-collapsed .scene-ui-folder-header::after {
+  content: "+";
+  color: var(--text-dim);
+}
+
+.scene-ui-child-item {
+  margin-left: 0.65rem;
+  border-left-color: rgba(112, 0, 255, 0.45);
+}
+
 .scene-ui-item-name {
   font-size: 0.8rem;
   font-weight: 600;

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 
 const ENVIRONMENTS = {
     'sunny-sky': {
@@ -83,7 +83,7 @@ export function createEnvironmentController({ scene, getAmbientLight, getHemiLig
             return;
         }
 
-        const loader = new RGBELoader();
+        const loader = new HDRLoader();
         loader.load(url, (texture) => {
             texture.mapping = THREE.EquirectangularReflectionMapping;
             hdriCache[url] = texture;

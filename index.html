@@ -387,6 +387,56 @@
                             </div>
 
                             <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Sculpt</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="terrain-sculpt-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="terrain-sculpt-on">On</button>
+                                    </div>
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Tool</div>
+                                    <select id="terrain-sculpt-tool" class="viewer-text-input">
+                                        <option value="raise">Raise / Lower</option>
+                                        <option value="smooth">Smooth</option>
+                                        <option value="flatten">Flatten</option>
+                                        <option value="paint">Paint Texture</option>
+                                        <option value="foliage">Paint Foliage</option>
+                                        <option value="erase-foliage">Erase Foliage</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Brush Radius</div>
+                                        <input id="terrain-sculpt-radius" type="range" min="1" max="18" step="0.5" value="5">
+                                        <div class="viewer-slider-value" id="terrain-sculpt-radius-value">5.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Strength</div>
+                                        <input id="terrain-sculpt-strength" type="range" min="0.01" max="0.8" step="0.01" value="0.18">
+                                        <div class="viewer-slider-value" id="terrain-sculpt-strength-value">0.18</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Flatten Height</div>
+                                        <input id="terrain-flatten-height" type="range" min="-3" max="3" step="0.1" value="0">
+                                        <div class="viewer-slider-value" id="terrain-flatten-height-value">0.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Paint Color</div>
+                                        <input id="terrain-paint-color" type="color" value="#5f8f35" class="viewer-text-input" style="height:32px; padding:2px;">
+                                    </div>
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Foliage Type</div>
+                                    <select id="terrain-foliage-type" class="viewer-text-input">
+                                        <option value="grass">Grass</option>
+                                        <option value="tree">Basic Tree</option>
+                                        <option value="bush">Bush</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Foliage Density</div>
+                                        <input id="terrain-foliage-density" type="range" min="5" max="300" step="5" value="80">
+                                        <div class="viewer-slider-value" id="terrain-foliage-density-value">80</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Left drag paints. Shift reverses raise or erases foliage.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Grass</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
@@ -627,7 +677,7 @@
                                     <div class="viewer-menu-actions">
                                         <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse
                                             Files</button>
-                                        <button class="btn viewer-menu-btn" id="load-sample">Load Sample</button>
+                                        <button class="btn viewer-menu-btn" id="load-sample">Load Animation Test</button>
                                     </div>
                                     <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx"
                                         style="display: none;">

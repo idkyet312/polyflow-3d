@@ -4,6 +4,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { TGALoader } from 'three/addons/loaders/TGALoader.js';
 import { DDSLoader } from 'three/addons/loaders/DDSLoader.js';
+import { clone as cloneSkinnedObject } from 'three/addons/utils/SkeletonUtils.js';
 
 const _tempCenter = new THREE.Vector3();
 const _tempSize = new THREE.Vector3();
@@ -23,7 +24,10 @@ function applyImportedMeshShadowSettings(mesh) {
 }
 
 export function cloneDisposableObject(root) {
-    const clone = root.clone(true);
+    const clone = cloneSkinnedObject(root);
+    clone.animations = Array.isArray(root.animations)
+        ? root.animations.map((clip) => clip.clone())
+        : [];
 
     clone.traverse((child) => {
         if (!child.isMesh) return;
@@ -209,6 +213,9 @@ export function loadObjectFromFile(file, fileMap = {}) {
         const finishLoad = (object) => {
             cleanup();
             const root = object.scene || object;
+            root.animations = Array.isArray(object.animations)
+                ? object.animations
+                : (Array.isArray(root.animations) ? root.animations : []);
             convertLoadedObjectMaterials(root);
             resolve(root);
         };

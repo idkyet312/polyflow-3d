@@ -18,13 +18,72 @@ const TERRAIN_TEXTURE_PATHS = {
     ao: 'textures/grass004/Grass004_1K-JPG_AmbientOcclusion.jpg',
 };
 
-function getTerrainHeightAtLocalPosition(x, y) {
+function getBaseTerrainHeightAtLocalPosition(x, y) {
     const radialFalloff = Math.min(1, Math.hypot(x, y) / (TERRAIN_SIZE * 0.5));
     const basin = TERRAIN_BASIN_DEPTH * Math.pow(radialFalloff, 1.7);
     const rolling = Math.sin(x * TERRAIN_ROLLING_X_FREQUENCY) * TERRAIN_ROLLING_X_AMPLITUDE
         + Math.cos(y * TERRAIN_ROLLING_Z_FREQUENCY) * TERRAIN_ROLLING_Z_AMPLITUDE;
     const detail = Math.sin((x + y) * TERRAIN_DETAIL_FREQUENCY) * TERRAIN_DETAIL_AMPLITUDE;
     return basin + rolling + detail;
+}
+
+function ensureTerrainSculptState(terrain) {
+    if (!terrain?.geometry?.attributes?.position) return null;
+    if (terrain.userData.terrainSculptState) return terrain.userData.terrainSculptState;
+
+    const position = terrain.geometry.getAttribute('position');
+    const baseHeights = new Float32Array(position.count);
+    for (let index = 0; index < position.count; index++) {
+        baseHeights[index] = position.getZ(index);
+    }
+
+    if (!terrain.geometry.getAttribute('color')) {
+        const colors = new Float32Array(position.count * 3);
+        colors.fill(1);
+        terrain.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    }
+
+    terrain.material.vertexColors = true;
+    terrain.material.needsUpdate = true;
+
+    terrain.userData.terrainSculptState = {
+        baseHeights,
+        segments: TERRAIN_SEGMENTS,
+        size: TERRAIN_SIZE,
+    };
+    return terrain.userData.terrainSculptState;
+}
+
+function getTerrainVertexIndex(ix, iy, segments = TERRAIN_SEGMENTS) {
+    return iy * (segments + 1) + ix;
+}
+
+function sampleTerrainLocalHeight(terrain, localX, localY) {
+    const position = terrain?.geometry?.getAttribute?.('position');
+    if (!position) return getBaseTerrainHeightAtLocalPosition(localX, localY);
+
+    const state = ensureTerrainSculptState(terrain);
+    const segments = state?.segments ?? TERRAIN_SEGMENTS;
+    const size = state?.size ?? TERRAIN_SIZE;
+    const half = size * 0.5;
+    const u = THREE.MathUtils.clamp((localX + half) / size, 0, 1) * segments;
+    const v = THREE.MathUtils.clamp((half - localY) / size, 0, 1) * segments;
+    const ix = Math.min(segments - 1, Math.max(0, Math.floor(u)));
+    const iy = Math.min(segments - 1, Math.max(0, Math.floor(v)));
+    const tx = u - ix;
+    const ty = v - iy;
+
+    const h00 = position.getZ(getTerrainVertexIndex(ix, iy, segments));
+    const h10 = position.getZ(getTerrainVertexIndex(ix + 1, iy, segments));
+    const h01 = position.getZ(getTerrainVertexIndex(ix, iy + 1, segments));
+    const h11 = position.getZ(getTerrainVertexIndex(ix + 1, iy + 1, segments));
+    const hx0 = THREE.MathUtils.lerp(h00, h10, tx);
+    const hx1 = THREE.MathUtils.lerp(h01, h11, tx);
+    return THREE.MathUtils.lerp(hx0, hx1, ty);
+}
+
+export function sampleTerrainHeightAtLocal(terrain, localX, localY) {
+    return sampleTerrainLocalHeight(terrain, localX, localY);
 }
 
 function createCheckerTexture() {
@@ -183,7 +242,7 @@ export function createTerrainMesh() {
     for (let index = 0; index < positions.count; index++) {
         const x = positions.getX(index);
         const y = positions.getY(index);
-        positions.setZ(index, getTerrainHeightAtLocalPosition(x, y));
+        positions.setZ(index, getBaseTerrainHeightAtLocalPosition(x, y));
     }
 
     geometry.computeVertexNormals();
@@ -200,6 +259,7 @@ export function createTerrainMesh() {
     terrain.rotation.x = -Math.PI / 2;
     terrain.position.y = TERRAIN_Y_OFFSET;
     terrain.receiveShadow = true;
+    ensureTerrainSculptState(terrain);
     return terrain;
 }
 
@@ -217,6 +277,158 @@ export function sampleTerrainHeightAt(worldFloor, worldX, worldZ) {
         return null;
     }
 
-    const localHeight = getTerrainHeightAtLocalPosition(localX, localY);
+    const localHeight = sampleTerrainLocalHeight(worldFloor, localX, localY);
     return worldFloor.position.y + localHeight * terrainScaleY;
+}
+
+export function applyTerrainSculptBrush(terrain, {
+    localX = 0,
+    localY = 0,
+    radius = 5,
+    strength = 0.25,
+    mode = 'raise',
+    targetHeight = 0,
+    paintColor = '#5f8f35',
+    invert = false,
+} = {}) {
+    const state = ensureTerrainSculptState(terrain);
+    const position = terrain?.geometry?.getAttribute?.('position');
+    if (!state || !position) return false;
+
+    const color = terrain.geometry.getAttribute('color');
+    const paint = new THREE.Color(paintColor);
+    const radiusSq = radius * radius;
+    const affected = [];
+    let heightSum = 0;
+
+    for (let index = 0; index < position.count; index++) {
+        const dx = position.getX(index) - localX;
+        const dy = position.getY(index) - localY;
+        const distSq = dx * dx + dy * dy;
+        if (distSq > radiusSq) continue;
+        const t = 1 - Math.sqrt(distSq) / radius;
+        const falloff = t * t * (3 - 2 * t);
+        affected.push({ index, falloff });
+        heightSum += position.getZ(index);
+    }
+
+    if (!affected.length) return false;
+
+    const averageHeight = heightSum / affected.length;
+    const signedStrength = strength * (invert ? -1 : 1);
+
+    for (const entry of affected) {
+        const current = position.getZ(entry.index);
+        if (mode === 'raise') {
+            position.setZ(entry.index, current + signedStrength * entry.falloff);
+        } else if (mode === 'smooth') {
+            position.setZ(entry.index, THREE.MathUtils.lerp(current, averageHeight, Math.abs(strength) * entry.falloff));
+        } else if (mode === 'flatten') {
+            position.setZ(entry.index, THREE.MathUtils.lerp(current, targetHeight, Math.abs(strength) * entry.falloff));
+        } else if (mode === 'paint') {
+            color.setXYZ(
+                entry.index,
+                THREE.MathUtils.lerp(color.getX(entry.index), paint.r, Math.abs(strength) * entry.falloff),
+                THREE.MathUtils.lerp(color.getY(entry.index), paint.g, Math.abs(strength) * entry.falloff),
+                THREE.MathUtils.lerp(color.getZ(entry.index), paint.b, Math.abs(strength) * entry.falloff)
+            );
+        }
+    }
+
+    position.needsUpdate = true;
+    if (mode === 'paint') {
+        color.needsUpdate = true;
+    } else {
+        terrain.geometry.computeVertexNormals();
+        terrain.geometry.attributes.normal.needsUpdate = true;
+        terrain.geometry.computeBoundingSphere();
+        terrain.geometry.computeBoundingBox();
+    }
+    return true;
+}
+
+export function serializeTerrainState(terrain) {
+    const state = ensureTerrainSculptState(terrain);
+    const position = terrain?.geometry?.getAttribute?.('position');
+    if (!state || !position) return null;
+
+    const color = terrain.geometry.getAttribute('color');
+    const heights = [];
+    const colors = [];
+
+    for (let index = 0; index < position.count; index++) {
+        const height = position.getZ(index);
+        if (Math.abs(height - state.baseHeights[index]) > 0.0001) {
+            heights.push(index, Number(height.toFixed(4)));
+        }
+
+        if (color) {
+            const r = color.getX(index);
+            const g = color.getY(index);
+            const b = color.getZ(index);
+            if (Math.abs(r - 1) > 0.0001 || Math.abs(g - 1) > 0.0001 || Math.abs(b - 1) > 0.0001) {
+                colors.push(
+                    index,
+                    Number(r.toFixed(4)),
+                    Number(g.toFixed(4)),
+                    Number(b.toFixed(4))
+                );
+            }
+        }
+    }
+
+    return {
+        version: 1,
+        size: state.size,
+        segments: state.segments,
+        heights,
+        colors,
+        material: {
+            color: `#${terrain.material.color.getHexString()}`,
+            roughness: terrain.material.roughness,
+        },
+    };
+}
+
+export function applySerializedTerrainState(terrain, data) {
+    const state = ensureTerrainSculptState(terrain);
+    const position = terrain?.geometry?.getAttribute?.('position');
+    if (!state || !position) return;
+    data ||= {};
+    if (data.segments && data.segments !== state.segments) return;
+
+    for (let index = 0; index < position.count; index++) {
+        position.setZ(index, state.baseHeights[index]);
+    }
+
+    const heights = Array.isArray(data.heights) ? data.heights : [];
+    for (let i = 0; i < heights.length - 1; i += 2) {
+        const index = heights[i];
+        if (index >= 0 && index < position.count) position.setZ(index, heights[i + 1]);
+    }
+
+    const color = terrain.geometry.getAttribute('color');
+    if (color) {
+        for (let index = 0; index < color.count; index++) {
+            color.setXYZ(index, 1, 1, 1);
+        }
+        const colors = Array.isArray(data.colors) ? data.colors : [];
+        for (let i = 0; i < colors.length - 3; i += 4) {
+            const index = colors[i];
+            if (index >= 0 && index < color.count) {
+                color.setXYZ(index, colors[i + 1], colors[i + 2], colors[i + 3]);
+            }
+        }
+        color.needsUpdate = true;
+    }
+
+    if (data.material?.color) terrain.material.color.set(data.material.color);
+    if (typeof data.material?.roughness === 'number') terrain.material.roughness = THREE.MathUtils.clamp(data.material.roughness, 0, 1);
+    terrain.material.needsUpdate = true;
+
+    position.needsUpdate = true;
+    terrain.geometry.computeVertexNormals();
+    terrain.geometry.attributes.normal.needsUpdate = true;
+    terrain.geometry.computeBoundingSphere();
+    terrain.geometry.computeBoundingBox();
 }

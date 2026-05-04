@@ -107,8 +107,16 @@ export function createPhysicsRuntime({
             const prop = physics.dynamicBodies[index];
             if (!prop?.body || !prop.mesh) continue;
 
-            copyJoltVector(prop.mesh.position, prop.body.GetPosition());
-            copyJoltQuaternion(prop.mesh.quaternion, prop.body.GetRotation());
+            try {
+                copyJoltVector(prop.mesh.position, prop.body.GetPosition());
+                copyJoltQuaternion(prop.mesh.quaternion, prop.body.GetRotation());
+            } catch (error) {
+                physics.dynamicBodies.splice(index, 1);
+                prop.body = null;
+                prop.setComponent?.('physicsBody', { body: null });
+                console.warn('Removed stale physics actor from dynamic sync.', error);
+                continue;
+            }
 
             if (prop.mesh.position.y < worldFloor.position.y - 40) {
                 onRemoveDynamicProp?.(prop, index);

@@ -68,6 +68,9 @@ import {
     setTerrainTint,
     setTerrainRepeat,
     setTerrainRoughness,
+    applyTerrainSculptBrush,
+    serializeTerrainState,
+    applySerializedTerrainState,
 } from './src/world/terrain.js';
 import { createGrassField } from './src/world/grass.js';
 import { createWater } from './src/world/water.js';
@@ -463,6 +466,8 @@ let physicsCore;
 let physicsRuntime;
 let multiplayerController;
 let sceneSystem;
+const animationMixers = new Map();
+const actorCoreSyncState = new Map();
 const EXPORT_MAX_TEXTURE_SIZE = 1024;
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
@@ -624,7 +629,7 @@ const DEFAULT_MOUSE_ACTION_SCRIPTS = {
 const playerLocation = Character?.GetActorLocation?.() ?? FVector.Zero();
 const spawnLocation = playerLocation
     .Add(direction.Scale(1.8))
-    .Add(new FVector(0, -0.35, 0));
+    .Add(new FVector(0, 1.35, 0));
 
 const sphere = World.SpawnActor('Sphere', spawnLocation);
 const phys = sphere?.GetComponentByClass(UPrimitiveComponent);
@@ -840,6 +845,20 @@ const showcase = {
         down: false,
         boost: false,
     },
+};
+const terrainBrushState = {
+    enabled: false,
+    active: false,
+    tool: 'raise',
+    radius: 5,
+    strength: 0.18,
+    flattenHeight: 0,
+    paintColor: '#5f8f35',
+    foliageDensity: 80,
+    foliageType: 'grass',
+    helper: null,
+    helperScale: 1,
+    dirtyPhysics: false,
 };
 const physics = {
     ready: false,
@@ -1194,8 +1213,66 @@ function createOwnedShape(settings) {
     return physicsCore?.createOwnedShape(settings) ?? null;
 }
 
+function getObjectAnimationClips(root) {
+    if (!root) return [];
+
+    const clips = [];
+    const seen = new Set();
+    const addClip = (clip) => {
+        if (!clip || seen.has(clip.uuid || clip.name)) return;
+        seen.add(clip.uuid || clip.name);
+        clips.push(clip);
+    };
+
+    root.animations?.forEach(addClip);
+    root.traverse?.((child) => child.animations?.forEach(addClip));
+    return clips;
+}
+
+function stopObjectAnimations(root) {
+    const entry = animationMixers.get(root);
+    if (!entry) return;
+
+    entry.mixer.stopAllAction();
+    entry.mixer.uncacheRoot(root);
+    animationMixers.delete(root);
+}
+
+function playObjectAnimation(root, clipName = '') {
+    const clips = getObjectAnimationClips(root);
+    if (!clips.length) return null;
+
+    stopObjectAnimations(root);
+
+    const clip = clipName
+        ? THREE.AnimationClip.findByName(clips, clipName) || clips[0]
+        : clips[0];
+    const mixer = new THREE.AnimationMixer(root);
+    const action = mixer.clipAction(clip);
+    action.reset();
+    action.setLoop(THREE.LoopRepeat, Infinity);
+    action.clampWhenFinished = false;
+    action.enabled = true;
+    action.play();
+
+    root.userData.animation = {
+        ...(root.userData.animation || {}),
+        activeClip: clip.name || '',
+        clipNames: clips.map((entry) => entry.name || 'Animation'),
+        playing: true,
+    };
+    animationMixers.set(root, { mixer, action, clips });
+    return action;
+}
+
+function updateObjectAnimations(delta) {
+    animationMixers.forEach((entry) => entry.mixer.update(delta));
+}
+
 function disposeRenderableObject(root) {
     if (!root) return;
+
+    stopObjectAnimations(root);
 
     root.traverse((child) => {
         if (!child.isMesh) return;
@@ -1656,6 +1733,7 @@ function spawnImportedProp(templateId, options = {}) {
             physics.staticBodies.push(actor);
         }
     }
+    playObjectAnimation(visual);
     return actor;
 }
 
@@ -2371,6 +2449,17 @@ function syncShowcaseAnglesFromTarget(target) {
     );
 }
 
+function syncShowcaseAnglesToFaceTarget(target) {
+    tempVectorA.copy(target).sub(camera.position);
+    const flatDistance = Math.max(0.001, Math.hypot(tempVectorA.x, tempVectorA.z));
+    showcase.yaw = Math.atan2(-tempVectorA.x, -tempVectorA.z);
+    showcase.pitch = THREE.MathUtils.clamp(
+        Math.atan2(tempVectorA.y, flatDistance),
+        -PLAYER_SETTINGS.maxLookPitch,
+        PLAYER_SETTINGS.maxLookPitch
+    );
+}
+
 function applyShowcaseCameraRotation() {
     camera.rotation.order = 'YXZ';
     camera.rotation.x = showcase.pitch;
@@ -2699,14 +2788,22 @@ function rebuildActorPhysics(prop) {
     const componentFlags = getActorComponentFlags(prop);
     const currentBody = getActorBody(prop);
     const bodyID = currentBody?.GetID();
+    const dynamicIndex = physics.dynamicBodies.indexOf(prop);
+    const staticIndex = physics.staticBodies.indexOf(prop);
     
     if (bodyID) {
         bodyInterface.RemoveBody(bodyID);
         bodyInterface.DestroyBody(bodyID);
     }
+    prop.body = null;
+    const physicsBodyComponent = getPhysicsBodyComponent(prop);
+    if (physicsBodyComponent) {
+        physicsBodyComponent.body = null;
+    }
+    if (dynamicIndex >= 0) physics.dynamicBodies.splice(dynamicIndex, 1);
+    if (staticIndex >= 0) physics.staticBodies.splice(staticIndex, 1);
 
     if (!componentFlags.collision) {
-        prop.body = null;
         return;
     }
     
@@ -2731,11 +2828,13 @@ function rebuildActorPhysics(prop) {
     if (useExactMeshCollision) {
         const newBody = createStaticMeshBody(rootMesh);
         prop.body = newBody;
+        if (physicsBodyComponent) physicsBodyComponent.body = newBody;
         setActorComponentFlags(prop, {
             ...componentFlags,
             collision: !!newBody,
             physics: false,
         });
+        if (newBody) physics.staticBodies.push(prop);
         return;
     }
 
@@ -2822,11 +2921,19 @@ function rebuildActorPhysics(prop) {
     if (finalShape) {
         const newBody = createDynamicPrimitiveBody(finalShape, rootMesh.position, null, bodyOptions);
         prop.body = newBody;
+        if (physicsBodyComponent) physicsBodyComponent.body = newBody;
         setActorComponentFlags(prop, {
             ...componentFlags,
             collision: !!newBody,
             physics: !!newBody && componentFlags.physics,
         });
+        if (newBody) {
+            if (componentFlags.physics) {
+                physics.dynamicBodies.push(prop);
+            } else {
+                physics.staticBodies.push(prop);
+            }
+        }
     }
 }
 
@@ -4202,6 +4309,11 @@ function setCameraMode(mode) {
     if (mode === 'play') {
         closeObjectScriptMenu();
         closeObjectScriptEditor();
+        if (!gameplay.canPlay && physics.ready) {
+            gameplay.canPlay = true;
+            ensurePlayerCharacter();
+            updateGameplayUI();
+        }
         if (!gameplay.active && !gameplay.pointerLocked) {
             enterGameplay();
         }
@@ -4255,6 +4367,201 @@ function isEditableElement(target) {
 // === extracted: debugConsole (was lines 5985-6468 of original main.js) ===
 // === extracted: mobileControls (was lines 6469-6741 of original main.js) ===
 
+function getActorCoreInfo(actor) {
+    return actor?.userData?.actorCore ?? null;
+}
+
+function getActorCoreId(actor) {
+    const core = getActorCoreInfo(actor);
+    return core?.coreId || actor?.id || '';
+}
+
+function actorInheritsCore(actor) {
+    const core = getActorCoreInfo(actor);
+    return core?.inheritsRules === true && !!core.coreId && core.coreId !== actor?.id;
+}
+
+function getActorCoreSource(actor) {
+    const coreId = getActorCoreId(actor);
+    return coreId && coreId !== actor?.id ? getDynamicPropById(coreId) || actor : actor;
+}
+
+function serializeCoreVisualRules(actor) {
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return null;
+    return {
+        rootMaterial: serializeObjectMaterialState(mesh),
+        materialOverrides: serializeObjectMaterialOverrides(mesh),
+        components: serializeComponentTree(mesh),
+    };
+}
+
+function applyCoreVisualRulesToInstance(instanceActor, rules) {
+    const mesh = getActorRenderObject(instanceActor);
+    if (!mesh || !rules) return;
+    applyObjectMaterialState(mesh, rules.rootMaterial);
+    if (Array.isArray(rules.materialOverrides) && rules.materialOverrides.length > 0) {
+        applyObjectMaterialOverrides(mesh, rules.materialOverrides);
+    }
+    deserializeComponentTree(mesh, JSON.parse(JSON.stringify(rules.components || [])));
+    mesh.userData.hasMaterialOverrides = true;
+    mesh.updateMatrixWorld(true);
+    if (!gameplay.active) {
+        rebuildActorPhysics(instanceActor);
+    }
+}
+
+function syncActorCoreInstances() {
+    if (!sceneSystem?.actors?.size) return;
+    const actors = Array.from(sceneSystem.actors);
+    const cores = actors.filter((actor) => !actorInheritsCore(actor));
+    const liveCoreIds = new Set(cores.map((actor) => actor.id));
+
+    actorCoreSyncState.forEach((_entry, coreId) => {
+        if (!liveCoreIds.has(coreId)) actorCoreSyncState.delete(coreId);
+    });
+
+    cores.forEach((coreActor) => {
+        const linked = actors.filter((actor) => actorInheritsCore(actor) && getActorCoreSource(actor)?.id === coreActor.id);
+        if (!linked.length) return;
+        const rules = serializeCoreVisualRules(coreActor);
+        if (!rules) return;
+        const signature = JSON.stringify(rules);
+        if (actorCoreSyncState.get(coreActor.id)?.signature === signature) return;
+        actorCoreSyncState.set(coreActor.id, { signature });
+        linked.forEach((instanceActor) => applyCoreVisualRulesToInstance(instanceActor, rules));
+    });
+}
+
+function focusSceneActor(actor) {
+    const actorMesh = getActorRenderObject(actor);
+    if (gameplay.active || !actorMesh) return;
+
+    focusShowcaseCameraOnObject(actorMesh);
+}
+
+function getObjectFocusFrame(object) {
+    if (!object) return null;
+
+    tempBoxA.makeEmpty();
+    tempBoxA.setFromObject(object, true);
+
+    const targetPos = new THREE.Vector3();
+    const size = new THREE.Vector3();
+
+    if (tempBoxA.isEmpty()) {
+        object.getWorldPosition(targetPos);
+        size.setScalar(0.7);
+    } else {
+        tempBoxA.getCenter(targetPos);
+        tempBoxA.getSize(size);
+    }
+
+    const radius = Math.max(size.length() * 0.5, 0.35);
+    const vFov = THREE.MathUtils.degToRad(camera.fov || 45);
+    const hFov = 2 * Math.atan(Math.tan(vFov * 0.5) * Math.max(camera.aspect || 1, 0.1));
+    const fitFov = Math.max(0.1, Math.min(vFov, hFov));
+    const distance = THREE.MathUtils.clamp(
+        (radius / Math.sin(fitFov * 0.5)) * 1.65,
+        Math.max(2.1, radius * 2.9),
+        90
+    );
+
+    const viewDir = new THREE.Vector3().subVectors(camera.position, targetPos);
+    if (viewDir.lengthSq() < 0.0001) {
+        viewDir.set(1, 0.45, 1);
+    }
+    viewDir.normalize();
+
+    if (viewDir.y < 0.24) {
+        viewDir.y = 0.34;
+        viewDir.normalize();
+    }
+
+    return {
+        target: targetPos,
+        cameraPosition: targetPos.clone().addScaledVector(viewDir, distance),
+    };
+}
+
+function focusShowcaseCameraOnObject(object, { duration = 0.6 } = {}) {
+    if (gameplay.active || !camera || !object) return;
+
+    const frame = getObjectFocusFrame(object);
+    if (!frame) return;
+
+    showcase.velocity.set(0, 0, 0);
+    gsap?.killTweensOf(camera.position);
+
+    if (gsap) {
+        gsap.to(camera.position, {
+            x: frame.cameraPosition.x,
+            y: frame.cameraPosition.y,
+            z: frame.cameraPosition.z,
+            duration,
+            overwrite: true,
+            ease: 'power2.out',
+            onUpdate: () => {
+                syncShowcaseAnglesToFaceTarget(frame.target);
+                applyShowcaseCameraRotation();
+            }
+        });
+    } else {
+        camera.position.copy(frame.cameraPosition);
+        syncShowcaseAnglesToFaceTarget(frame.target);
+        applyShowcaseCameraRotation();
+    }
+}
+
+function createSceneActorItem(actor, { isChild = false } = {}) {
+    const item = document.createElement('div');
+    item.className = isChild ? 'scene-ui-item scene-ui-child-item' : 'scene-ui-item';
+    item.dataset.id = actor.id;
+
+    if (objectScriptState.targetPropId === actor.id) {
+        item.style.background = 'rgba(255, 255, 255, 0.12)';
+        item.style.borderColor = 'rgba(112, 0, 255, 0.45)';
+        if (!blueprintState.active) {
+            const actorBtnRow = document.createElement('div');
+            actorBtnRow.className = 'scene-ui-item-actions';
+
+            const blueprintBtn = document.createElement('button');
+            blueprintBtn.className = 'btn btn-primary scene-ui-action-btn';
+            blueprintBtn.textContent = 'Edit Blueprint';
+            blueprintBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                enterBlueprintEditor();
+            });
+            actorBtnRow.appendChild(blueprintBtn);
+
+            const saveActorBtn = document.createElement('button');
+            saveActorBtn.className = 'btn scene-ui-action-btn scene-ui-save-btn';
+            saveActorBtn.textContent = 'Save';
+            saveActorBtn.title = 'Download this actor as a .actor file';
+            saveActorBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                exportActorToFile(actor);
+            });
+            actorBtnRow.appendChild(saveActorBtn);
+            item.appendChild(actorBtnRow);
+        }
+    }
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'scene-ui-item-name';
+    nameEl.textContent = actor.rootNode.name || actor.id || 'Actor';
+
+    const typeEl = document.createElement('div');
+    typeEl.className = 'scene-ui-item-type';
+    typeEl.textContent = actorInheritsCore(actor) ? 'instance' : (actor.kind || 'Actor');
+
+    item.appendChild(nameEl);
+    item.appendChild(typeEl);
+    item.addEventListener('click', () => selectShowcaseActor(actor.id));
+    item.addEventListener('dblclick', () => focusSceneActor(actor));
+    return item;
+}
+
 function refreshSceneUI() {
     if (collisionDebugState.enabled) {
         refreshCollisionDebugOverlays();
@@ -4271,6 +4578,45 @@ function refreshSceneUI() {
 
     const actors = Array.from(sceneSystem.actors);
     sceneUiCount.textContent = `${actors.length} Actor${actors.length !== 1 ? 's' : ''}`;
+
+    actors.forEach((actor) => sceneUiList.appendChild(createSceneActorItem(actor)));
+
+    const cores = actors.filter((actor) => !actorInheritsCore(actor)
+        && actors.some((entry) => actorInheritsCore(entry) && getActorCoreSource(entry)?.id === actor.id));
+    if (cores.length) {
+        const folder = document.createElement('div');
+        folder.className = 'scene-ui-folder scene-ui-core-bin';
+        if (refreshSceneUI.coreBinCollapsed) {
+            folder.classList.add('scene-ui-folder-collapsed');
+        }
+
+        const header = document.createElement('button');
+        header.className = 'scene-ui-folder-header';
+        header.type = 'button';
+        header.textContent = 'Core Actors';
+
+        const count = document.createElement('span');
+        count.textContent = `${cores.length} parent${cores.length !== 1 ? 's' : ''}`;
+        header.appendChild(count);
+        header.addEventListener('click', () => {
+            refreshSceneUI.coreBinCollapsed = !refreshSceneUI.coreBinCollapsed;
+            refreshSceneUI();
+        });
+        folder.appendChild(header);
+
+        if (!refreshSceneUI.coreBinCollapsed) {
+            cores.forEach((actor) => {
+                const linked = actors.filter((entry) => actorInheritsCore(entry) && getActorCoreSource(entry)?.id === actor.id);
+                const row = createSceneActorItem(actor);
+                const type = row.querySelector('.scene-ui-item-type');
+                if (type) type.textContent = `parent core · ${linked.length} linked`;
+                folder.appendChild(row);
+            });
+        }
+
+        sceneUiList.appendChild(folder);
+    }
+    return;
 
     actors.forEach(actor => {
         const item = document.createElement('div');
@@ -5082,6 +5428,7 @@ async function init() {
         }
         updateVehicleVisuals(delta);
         updateVehicleSurfaceEffects(delta);
+        syncActorCoreInstances();
         grassField?.update(delta);
         water?.update(delta);
         // Performance toggle: skip the per-frame work entirely when on.
@@ -5097,6 +5444,7 @@ async function init() {
         }
         const _ddgiMs = performance.now() - _ddgiStart;
         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
+        updateObjectAnimations(delta);
         tickForceAllSceneMeshShadows();
 
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());        multiplayerController?.update(delta);
@@ -5138,57 +5486,75 @@ async function init() {
     });
 }
 
+function makeAnimatedSampleQuatTrack(name, eulers) {
+    const values = [];
+    const quaternion = new THREE.Quaternion();
+    eulers.forEach(([x, y, z]) => {
+        quaternion.setFromEuler(new THREE.Euler(x, y, z));
+        values.push(quaternion.x, quaternion.y, quaternion.z, quaternion.w);
+    });
+    return new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, [0, 0.5, 1.0, 1.5, 2.0], values);
+}
+
+function makeAnimatedSamplePart(name, geometry, material, position, rotation = [0, 0, 0]) {
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.name = name;
+    mesh.position.fromArray(position);
+    mesh.rotation.set(...rotation);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+}
+
+function createAnimatedSampleModel() {
+    const root = new THREE.Group();
+    root.name = 'PolyFlow_Animated_Test_Rig';
+
+    const chrome = new THREE.MeshStandardMaterial({ color: 0xd9f0ff, metalness: 0.45, roughness: 0.22 });
+    const teal = new THREE.MeshStandardMaterial({ color: 0x00d8ff, emissive: 0x006b80, emissiveIntensity: 0.8, metalness: 0.12, roughness: 0.3 });
+    const coral = new THREE.MeshStandardMaterial({ color: 0xff5e7a, emissive: 0x6b1022, emissiveIntensity: 0.55, metalness: 0.08, roughness: 0.36 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x182033, metalness: 0.2, roughness: 0.48 });
+    const gold = new THREE.MeshStandardMaterial({ color: 0xffd36a, emissive: 0x8a4b00, emissiveIntensity: 0.35, metalness: 0.2, roughness: 0.28 });
+
+    root.add(
+        makeAnimatedSamplePart('Rig_Base', new THREE.CylinderGeometry(0.8, 0.95, 0.08, 64), dark, [0, 0, 0]),
+        makeAnimatedSamplePart('Rig_Body', new THREE.CapsuleGeometry(0.34, 0.78, 8, 18), chrome, [0, 1.42, 0]),
+        makeAnimatedSamplePart('Rig_Chest_Core', new THREE.TorusGeometry(0.28, 0.025, 12, 48), teal, [0, 1.54, -0.31]),
+        makeAnimatedSamplePart('Rig_Head', new THREE.SphereGeometry(0.27, 32, 20), chrome, [0, 2.1, 0]),
+        makeAnimatedSamplePart('Rig_Visor', new THREE.BoxGeometry(0.38, 0.08, 0.035), teal, [0, 2.13, -0.24]),
+        makeAnimatedSamplePart('Rig_LeftArm', new THREE.CapsuleGeometry(0.08, 0.72, 6, 12), coral, [-0.5, 1.5, 0], [0, 0.2, -0.22]),
+        makeAnimatedSamplePart('Rig_RightArm', new THREE.CapsuleGeometry(0.08, 0.72, 6, 12), coral, [0.5, 1.5, 0], [0, -0.2, 0.22]),
+        makeAnimatedSamplePart('Rig_LeftLeg', new THREE.CapsuleGeometry(0.1, 0.82, 6, 12), dark, [-0.18, 0.62, 0], [0.08, 0, 0.06]),
+        makeAnimatedSamplePart('Rig_RightLeg', new THREE.CapsuleGeometry(0.1, 0.82, 6, 12), dark, [0.18, 0.62, 0], [-0.08, 0, -0.06]),
+        makeAnimatedSamplePart('Rig_Halo', new THREE.TorusGeometry(0.62, 0.018, 12, 96), gold, [0, 2.12, 0], [Math.PI / 2, 0, 0]),
+        makeAnimatedSamplePart('Rig_Energy_Ring', new THREE.TorusGeometry(0.9, 0.02, 12, 128), teal, [0, 0.06, 0], [Math.PI / 2, 0, 0])
+    );
+
+    const times = [0, 0.5, 1.0, 1.5, 2.0];
+    root.animations = [new THREE.AnimationClip('Neon_Run_Loop', 2, [
+        new THREE.VectorKeyframeTrack('Rig_Body.position', times, [0, 1.42, 0, 0, 1.56, -0.04, 0, 1.42, 0, 0, 1.56, 0.04, 0, 1.42, 0]),
+        new THREE.VectorKeyframeTrack('Rig_Head.position', times, [0, 2.1, 0, 0, 2.22, -0.03, 0, 2.1, 0, 0, 2.22, 0.03, 0, 2.1, 0]),
+        new THREE.VectorKeyframeTrack('Rig_Energy_Ring.scale', times, [1, 1, 1, 1.12, 1.12, 1.12, 1, 1, 1, 1.12, 1.12, 1.12, 1, 1, 1]),
+        makeAnimatedSampleQuatTrack('Rig_LeftArm', [[0.9, 0, -0.35], [-0.95, 0, -0.22], [0.9, 0, -0.35], [-0.95, 0, -0.22], [0.9, 0, -0.35]]),
+        makeAnimatedSampleQuatTrack('Rig_RightArm', [[-0.9, 0, 0.35], [0.95, 0, 0.22], [-0.9, 0, 0.35], [0.95, 0, 0.22], [-0.9, 0, 0.35]]),
+        makeAnimatedSampleQuatTrack('Rig_LeftLeg', [[-0.55, 0, 0.08], [0.62, 0, 0.02], [-0.55, 0, 0.08], [0.62, 0, 0.02], [-0.55, 0, 0.08]]),
+        makeAnimatedSampleQuatTrack('Rig_RightLeg', [[0.62, 0, -0.02], [-0.55, 0, -0.08], [0.62, 0, -0.02], [-0.55, 0, -0.08], [0.62, 0, -0.02]]),
+        makeAnimatedSampleQuatTrack('Rig_Halo', [[Math.PI / 2, 0, 0], [Math.PI / 2, 0, Math.PI], [Math.PI / 2, 0, Math.PI * 2], [Math.PI / 2, 0, Math.PI * 3], [Math.PI / 2, 0, Math.PI * 4]]),
+        makeAnimatedSampleQuatTrack('Rig_Energy_Ring', [[Math.PI / 2, 0, 0], [Math.PI / 2, 0, -Math.PI], [Math.PI / 2, 0, -Math.PI * 2], [Math.PI / 2, 0, -Math.PI * 3], [Math.PI / 2, 0, -Math.PI * 4]]),
+    ])];
+
+    return root;
+}
+
 function loadSample() {
     clearCurrentMesh();
 
-    // Create a very dense Torus Knot to simulate a "heavy" file
-    const geometry = new THREE.TorusKnotGeometry(1, 0.3, 300, 100);
-    const material = new THREE.MeshStandardMaterial({
-        color: 0x7000ff,
-        metalness: 0.8,
-        roughness: 0.2,
-        emissive: 0x200040
-    });
-
-    const object = new THREE.Mesh(geometry, material);
-    object.castShadow = true;
-    object.receiveShadow = true;
-
-    currentMesh = object;
+    currentMesh = createAnimatedSampleModel();
     scene.add(currentMesh);
     normalizeCurrentMesh();
+    playObjectAnimation(currentMesh);
     refreshGameplayWorld();
-
-    document.getElementById('asset-name').textContent = 'Heavy_Industrial_Part_RAW.glb';
-    document.getElementById('tri-count').textContent = 'Counting...';
-
-    // Calculate Triangles correctly
-    let totalTris = 0;
-    if (geometry.index) {
-        totalTris = geometry.index.count / 3;
-    } else {
-        totalTris = geometry.attributes.position.count / 3;
-    }
-
-    originalTriCount = Math.round(totalTris);
-    console.log("Sample loaded. Triangles:", originalTriCount);
-
-    // Animate the count-up safely using a proxy object
-    const countObj = { val: 0 };
-    gsap.to(countObj, {
-        val: originalTriCount,
-        duration: 1.5,
-        ease: "power2.out",
-        onUpdate: () => {
-            document.getElementById('tri-count').textContent = Math.ceil(countObj.val).toLocaleString();
-        }
-    });
-
-    originalFileSize = 5400000; // ~5.4 MB for the sample
-    document.getElementById('file-size').textContent = (originalFileSize / (1024 * 1024)).toFixed(1) + ' MB';
-    document.getElementById('file-diff').textContent = '';
-    document.getElementById('webgpu-speedup').textContent = '--';
-
+    updateLoadedAssetStats('PolyFlow_Animated_Test_Rig.glb', 5400000, currentMesh);
     enableOptimizationPipeline();
 }
 
@@ -5276,6 +5642,122 @@ function refreshGameplayWorld() {
     updateGameplayUI();
 }
 
+function ensureTerrainBrushHelper() {
+    if (terrainBrushState.helper) return terrainBrushState.helper;
+    const geometry = new THREE.RingGeometry(0.96, 1, 96);
+    const material = new THREE.MeshBasicMaterial({
+        color: 0x00ffaa,
+        transparent: true,
+        opacity: 0.85,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
+    const helper = new THREE.Mesh(geometry, material);
+    helper.name = 'TerrainBrushPreview';
+    helper.renderOrder = 999;
+    helper.visible = false;
+    terrainBrushState.helper = helper;
+    worldFloor?.add(helper);
+    return helper;
+}
+
+function getTerrainHitFromEvent(event) {
+    if (!renderer || !worldFloor) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointerNdc, camera);
+    const hit = raycaster.intersectObject(worldFloor, false)[0];
+    if (!hit) return null;
+    const local = worldFloor.worldToLocal(hit.point.clone());
+    return { hit, local };
+}
+
+function updateTerrainBrushPreview(event) {
+    const helper = ensureTerrainBrushHelper();
+    if (!terrainBrushState.enabled || gameplay.active || blueprintState.active) {
+        helper.visible = false;
+        return null;
+    }
+    const terrainHit = getTerrainHitFromEvent(event);
+    if (!terrainHit) {
+        helper.visible = false;
+        return null;
+    }
+    helper.visible = true;
+    helper.position.set(terrainHit.local.x, terrainHit.local.y, terrainHit.local.z + 0.035);
+    helper.scale.setScalar(terrainBrushState.radius);
+    const foliagePreviewColor = terrainBrushState.foliageType === 'tree'
+        ? 0x2f7d32
+        : terrainBrushState.foliageType === 'bush'
+            ? 0x55a545
+            : 0xa8d96b;
+    helper.material.color.set(terrainBrushState.tool.includes('foliage') ? foliagePreviewColor : terrainBrushState.tool === 'paint' ? terrainBrushState.paintColor : 0x00ffaa);
+    return terrainHit;
+}
+
+function applyTerrainBrushFromEvent(event) {
+    const terrainHit = updateTerrainBrushPreview(event);
+    if (!terrainHit) return false;
+
+    const { local } = terrainHit;
+    const tool = terrainBrushState.tool;
+    if (tool === 'foliage' || tool === 'erase-foliage') {
+        grassField?.paintFoliage?.({
+            terrain: worldFloor,
+            localX: local.x,
+            localY: local.y,
+            radius: terrainBrushState.radius,
+            density: terrainBrushState.foliageDensity,
+            mode: event.shiftKey || tool === 'erase-foliage' ? 'erase' : 'add',
+            type: terrainBrushState.foliageType,
+        });
+        return true;
+    }
+
+    const changed = applyTerrainSculptBrush(worldFloor, {
+        localX: local.x,
+        localY: local.y,
+        radius: terrainBrushState.radius,
+        strength: terrainBrushState.strength,
+        mode: tool,
+        targetHeight: terrainBrushState.flattenHeight,
+        paintColor: terrainBrushState.paintColor,
+        invert: event.shiftKey,
+    });
+    if (changed) {
+        grassField?.syncToTerrain?.(worldFloor, {
+            localX: local.x,
+            localY: local.y,
+            radius: terrainBrushState.radius + 2,
+        });
+        terrainBrushState.dirtyPhysics = true;
+    }
+    return changed;
+}
+
+function serializeWorldTerrainState() {
+    return {
+        terrain: serializeTerrainState(worldFloor),
+        foliage: grassField?.serializeFoliage?.() ?? null,
+    };
+}
+
+function applyWorldTerrainState(data = {}) {
+    applySerializedTerrainState(worldFloor, data.terrain);
+    rebuildTerrainPhysicsBody();
+    grassField?.applySerializedFoliage?.(data.foliage ?? {}, worldFloor);
+    grassField?.syncToTerrain?.(worldFloor);
+    if (physics.ready) {
+        ensurePlayerCharacter();
+        gameplay.canPlay = true;
+        updateWorldPresentation();
+        updateGameplayUI();
+    }
+}
+
 function setupTerrainPanel() {
     const modeSel = document.getElementById('terrain-mode');
     const colorIn = document.getElementById('terrain-color');
@@ -5286,6 +5768,19 @@ function setupTerrainPanel() {
     const summary = document.getElementById('terrain-summary-value');
     const loadBtn = document.getElementById('terrain-load-image');
     const loadInput = document.getElementById('terrain-image-input');
+    const sculptOff = document.getElementById('terrain-sculpt-off');
+    const sculptOn = document.getElementById('terrain-sculpt-on');
+    const sculptTool = document.getElementById('terrain-sculpt-tool');
+    const sculptRadius = document.getElementById('terrain-sculpt-radius');
+    const sculptRadiusVal = document.getElementById('terrain-sculpt-radius-value');
+    const sculptStrength = document.getElementById('terrain-sculpt-strength');
+    const sculptStrengthVal = document.getElementById('terrain-sculpt-strength-value');
+    const sculptFlatten = document.getElementById('terrain-flatten-height');
+    const sculptFlattenVal = document.getElementById('terrain-flatten-height-value');
+    const sculptPaintColor = document.getElementById('terrain-paint-color');
+    const foliageType = document.getElementById('terrain-foliage-type');
+    const foliageDensity = document.getElementById('terrain-foliage-density');
+    const foliageDensityVal = document.getElementById('terrain-foliage-density-value');
 
     const grassOff = document.getElementById('grass-off');
     const grassOn = document.getElementById('grass-on');
@@ -5297,7 +5792,7 @@ function setupTerrainPanel() {
     const updateSummary = () => {
         if (!summary) return;
         const mode = modeSel?.value ?? 'grid';
-        summary.textContent = `${mode} · ${colorIn?.value ?? '#fff'}`;
+        summary.textContent = `${mode} · ${terrainBrushState.enabled ? 'sculpt' : colorIn?.value ?? '#fff'}`;
     };
 
     modeSel?.addEventListener('change', async () => {
@@ -5340,8 +5835,50 @@ function setupTerrainPanel() {
         reader.readAsDataURL(file);
     });
 
+    const setSculptEnabled = (enabled) => {
+        terrainBrushState.enabled = enabled;
+        terrainBrushState.active = false;
+        sculptOn?.classList.toggle('viewer-toggle-btn-active', enabled);
+        sculptOff?.classList.toggle('viewer-toggle-btn-active', !enabled);
+        if (!enabled && terrainBrushState.helper) terrainBrushState.helper.visible = false;
+        updateSummary();
+    };
+    sculptOn?.addEventListener('click', () => setSculptEnabled(true));
+    sculptOff?.addEventListener('click', () => setSculptEnabled(false));
+
+    sculptTool?.addEventListener('change', () => {
+        terrainBrushState.tool = sculptTool.value;
+    });
+    sculptRadius?.addEventListener('input', () => {
+        const v = parseFloat(sculptRadius.value);
+        terrainBrushState.radius = v;
+        if (sculptRadiusVal) sculptRadiusVal.textContent = v.toFixed(1);
+    });
+    sculptStrength?.addEventListener('input', () => {
+        const v = parseFloat(sculptStrength.value);
+        terrainBrushState.strength = v;
+        if (sculptStrengthVal) sculptStrengthVal.textContent = v.toFixed(2);
+    });
+    sculptFlatten?.addEventListener('input', () => {
+        const v = parseFloat(sculptFlatten.value);
+        terrainBrushState.flattenHeight = v;
+        if (sculptFlattenVal) sculptFlattenVal.textContent = v.toFixed(1);
+    });
+    sculptPaintColor?.addEventListener('input', () => {
+        terrainBrushState.paintColor = sculptPaintColor.value;
+    });
+    foliageType?.addEventListener('change', () => {
+        terrainBrushState.foliageType = foliageType.value;
+    });
+    foliageDensity?.addEventListener('input', () => {
+        const v = parseInt(foliageDensity.value, 10);
+        terrainBrushState.foliageDensity = v;
+        if (foliageDensityVal) foliageDensityVal.textContent = String(v);
+    });
+
     const setGrassEnabled = (enabled) => {
-        if (grassField?.mesh) grassField.mesh.visible = enabled;
+        if (grassField?.setVisible) grassField.setVisible(enabled);
+        else if (grassField?.mesh) grassField.mesh.visible = enabled;
         grassOn?.classList.toggle('viewer-toggle-btn-active', enabled);
         grassOff?.classList.toggle('viewer-toggle-btn-active', !enabled);
     };
@@ -5487,26 +6024,7 @@ function setupGameplayEvents() {
                 if (typeof transformControl !== 'undefined') transformControl.attach(hitObj);
                 refreshBlueprintComponents();
                 
-                // Fly camera to the component
-                const targetPos = new THREE.Vector3();
-                hitObj.getWorldPosition(targetPos);
-                const forward = new THREE.Vector3().subVectors(targetPos, camera.position).normalize();
-                const dist = camera.position.distanceTo(targetPos);
-                const newDist = Math.max(dist * 0.5, 3);
-                
-                if (typeof gsap !== 'undefined') {
-                    gsap.to(camera.position, {
-                        x: targetPos.x - forward.x * newDist,
-                        y: targetPos.y - forward.y * newDist + 1,
-                        z: targetPos.z - forward.z * newDist,
-                        duration: 0.5,
-                        ease: 'power2.out',
-                        onUpdate: () => {
-                            syncShowcaseAnglesFromTarget(targetPos);
-                            applyShowcaseCameraRotation();
-                        }
-                    });
-                }
+                focusShowcaseCameraOnObject(hitObj, { duration: 0.5 });
             }
             return;
         }
@@ -5514,7 +6032,8 @@ function setupGameplayEvents() {
         if (gameplay.active) return;
         const propHit = getDynamicPropHitFromEvent(event);
         if (propHit?.prop) {
-            selectShowcaseActor(propHit.prop.id);
+            selectShowcaseActor(propHit.prop.id, propHit.hit?.object ?? null);
+            focusShowcaseCameraOnObject(propHit.hit?.object ?? getActorRenderObject(propHit.prop), { duration: 0.55 });
             
             if (sceneUiList) {
                 const activeItem = sceneUiList.querySelector(`[data-id="${propHit.prop.id}"]`);
@@ -5533,6 +6052,8 @@ function setupGameplayEvents() {
             return;
         }
         if (maybeOpenObjectScriptMenuFromMobileTap(event)) {
+            const focusedProp = getDynamicPropById(objectScriptState.targetPropId);
+            focusShowcaseCameraOnObject(getActorRenderObject(focusedProp), { duration: 0.55 });
             event.preventDefault();
         }
     }, { passive: false });
@@ -5736,6 +6257,14 @@ function handleGameplayKeyEvent(event) {
 
 function handleGameplayMouseMove(event) {
     if (!gameplay.pointerLocked) {
+        if (terrainBrushState.enabled && !showcase.looking && !blueprintState.active && !gameplay.active) {
+            if (terrainBrushState.active) {
+                applyTerrainBrushFromEvent(event);
+            } else {
+                updateTerrainBrushPreview(event);
+            }
+            return;
+        }
         if (!showcase.looking || gameplay.active) return;
 
         showcase.yaw -= event.movementX * 0.0022;
@@ -5788,6 +6317,12 @@ function handleShowcaseMouseButton(event) {
 
     if (event.type === 'mousedown') {
         renderer.domElement.focus();
+        if (terrainBrushState.enabled && event.button === 0) {
+            terrainBrushState.active = true;
+            applyTerrainBrushFromEvent(event);
+            event.preventDefault();
+            return;
+        }
         if (event.button === 0 && objectScriptState.menuOpen) {
             closeObjectScriptMenu();
         }
@@ -5809,6 +6344,16 @@ function handleShowcaseMouseButton(event) {
         if (event.button !== 2) return;
         closeObjectScriptMenu();
         showcase.looking = true;
+        event.preventDefault();
+        return;
+    }
+
+    if (event.button === 0 && terrainBrushState.active) {
+        terrainBrushState.active = false;
+        if (terrainBrushState.dirtyPhysics) {
+            rebuildTerrainPhysicsBody();
+            terrainBrushState.dirtyPhysics = false;
+        }
         event.preventDefault();
         return;
     }
@@ -5872,6 +6417,10 @@ function handlePointerLockChange() {
 }
 
 function enterGameplay() {
+    if (!gameplay.canPlay && physics.ready) {
+        gameplay.canPlay = true;
+        ensurePlayerCharacter();
+    }
     if (!gameplay.canPlay) return;
 
     snapshotSceneState();
@@ -5921,6 +6470,25 @@ function exitGameplay() {
 
     updateWorldPresentation();
     resetShowcaseCamera(false);
+    updateGameplayUI();
+}
+
+function forceExitGameplayForWorldLoad() {
+    if (!mobileState.enabled && document.pointerLockElement === renderer?.domElement) {
+        document.exitPointerLock?.();
+    }
+
+    gameplay.pointerLocked = false;
+    gameplay.active = false;
+    clearActiveVehicle();
+    gameplay.velocity.set(0, 0, 0);
+    physics.jumpQueued = false;
+    physics.desiredVelocity.set(0, 0, 0);
+    showcase.looking = false;
+    showcase.velocity.set(0, 0, 0);
+    resetMobileInputState();
+    syncTransformControlState();
+    updateWorldPresentation();
     updateGameplayUI();
 }
 
@@ -6097,6 +6665,9 @@ function updateShowcaseCamera(delta) {
 }
 
 function respawnPlayer(useStoredView = false) {
+    if (!gameplay.canPlay && physics.ready) {
+        gameplay.canPlay = true;
+    }
     if (!gameplay.canPlay) return;
 
     if (isDrivingVehicle()) {
@@ -6778,6 +7349,7 @@ async function loadModel(file, fileMap = {}) {
         currentMesh = root;
         scene.add(currentMesh);
         normalizeCurrentMesh();
+        playObjectAnimation(currentMesh);
         refreshGameplayWorld();
         updateLoadedAssetStats(file.name, file.size, currentMesh);
     } catch (error) {
@@ -7581,6 +8153,8 @@ function wireExtractedModules() {
         saveObjectScriptDrafts, refreshSceneUI, selectShowcaseActor,
         buildPrimitiveActorMesh, applyObjectMaterialState, serializeObjectMaterialState,
         enterBlueprintEditor, exitBlueprintEditor, refreshBlueprintComponents,
+        serializeWorldTerrainState, applyWorldTerrainState, refreshGameplayWorld,
+        forceExitGameplayForWorldLoad, updateGameplayUI, updateWorldPresentation,
     });
 }
 

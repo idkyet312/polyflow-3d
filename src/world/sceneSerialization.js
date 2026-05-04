@@ -209,6 +209,12 @@ export function serializeActorData(actor) {
         }
     }
 
+    const actorCore = userDataForSerialization?.actorCore;
+    const inheritsRules = actorCore?.inheritsRules === true
+        && typeof actorCore.coreId === 'string'
+        && actorCore.coreId
+        && actorCore.coreId !== actor.id;
+
     return {
         id: actor.id,
         kind: actor.kind,
@@ -224,7 +230,7 @@ export function serializeActorData(actor) {
         },
         material: dirtyMaterials ? serializeObjectMaterialState(mesh) : null,
         materialOverrides: dirtyMaterials ? serializeObjectMaterialOverrides(mesh) : [],
-        scripts: objectScriptState.drafts[actor.id] || null,
+        scripts: inheritsRules ? null : objectScriptState.drafts[actor.id] || null,
         componentFlags: getActorComponentFlags(actor),
         components: serializeComponentTree(mesh),
     };
@@ -241,11 +247,16 @@ function computeCameraFrontSpawn(distance = 4.5, up = 1.2) {
     return camera.position.clone().addScaledVector(dir, distance).addScaledVector(new THREE.Vector3(0, 1, 0), up);
 }
 
+function serializedActorInheritsRules(actorData = {}) {
+    const core = actorData.userData?.actorCore;
+    return core?.inheritsRules === true && typeof core.coreId === 'string' && core.coreId && core.coreId !== actorData.id;
+}
+
 export function spawnActorFromSerializedData(actorData, { preserveId = false, spawnInFrontOfPlayer = false } = {}) {
     if (!actorData) return null;
 
     const componentFlags = normalizeSerializedActorComponentFlags(actorData);
-    const savedScripts = actorData.scripts
+    const savedScripts = !serializedActorInheritsRules(actorData) && actorData.scripts
         ? JSON.parse(JSON.stringify(actorData.scripts))
         : null;
     let tempScriptId = '';
