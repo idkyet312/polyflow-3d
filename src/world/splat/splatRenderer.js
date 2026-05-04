@@ -31,6 +31,7 @@ import {
     positionLocal, modelViewMatrix, cameraProjectionMatrix,
     dot, exp, max, sqrt,
 } from 'three/tsl';
+import { loadSplatAny } from './loaders/index.js';
 
 // .splat byte layout: 32 bytes per splat, little-endian.
 //   0..11   position xyz (3 x f32)
@@ -70,14 +71,12 @@ export function parseSplat(arrayBuffer) {
     return { count, positions, scales, colors, rotations };
 }
 
+// Format-aware loader. Detects .splat, .ply, and .sog from extension/magic bytes
+// and delegates to the matching parser; all return the same normalized shape.
+// See `./loaders/index.js` for detection logic and `./loaders/{ply,sog}.js`
+// for the per-format implementations.
 export async function loadSplat(url) {
-    const buf = await (await fetch(url)).arrayBuffer();
-    if (buf.byteLength % SPLAT_BYTES !== 0) {
-        throw new Error(
-            `[splat] ${url} is not a multiple of ${SPLAT_BYTES} bytes (size=${buf.byteLength})`
-        );
-    }
-    return parseSplat(buf);
+    return loadSplatAny(url);
 }
 
 // ---------------------------------------------------------------------
