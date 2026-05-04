@@ -43,6 +43,11 @@ loaders/           — multi-format ingest
     ├── parseSog(arrayBuffer)           → PlayCanvas SuperSplat ZIP+WebP archive
     └── loadSog(url)                    → fetch + parseSog
 
+depthSort.js       — back-to-front sort hook
+└── attachDepthSort(mesh, splatData)
+    → wraps mesh.onBeforeRender; sorts per-instance attributes far→near
+    → throttled (≥150ms between sorts; cosθ < 0.999 or moved > 0.5 units)
+
 splatActor.js      — actor / runtime integration
 ├── SplatComponent extends ActorComponent
 │   ├── beginPlay()              → async loadSplat → buildSplatMesh → attach to actor root
@@ -212,9 +217,6 @@ eigendecomposition produce the correct screen-space covariance.
 
 **Wrong (deferred).**
 
-- **Sort order** — splats render in file order, so background splats
-  sometimes render over foreground ones. Fixed in Phase 3 by adding a
-  WebGPU compute depth sort (bitonic or radix).
 - **No SH** — splat color doesn't change with view angle. Specular surfaces
   look flat / matte. Add when supporting `.ply` (Phase 1.5).
 - **No frustum cull / LOD** — fine for ≤1M splat scenes; will tank with 5M.
@@ -225,11 +227,29 @@ eigendecomposition produce the correct screen-space covariance.
 - ~~Splat mesh transform is approximate~~ — `W` now uses `mat3(view·model)`,
   so transformed `SplatActor`s produce correctly-shaped ellipses. ✅
 
+**Fixed in Phase 2.5.**
+
+- ~~Sort order — splats render in file order, so background splats sometimes
+  render over foreground ones~~ — `depthSort.js` now does a CPU back-to-front
+  sort, throttled to run when the camera moves meaningfully. Each frame: at
+  most ~50 ms of work for 250 K splats, gated to ~150 ms intervals; idle
+  cost is zero when the camera is still. ✅
+
+  This is the JS-only "good enough for sub-1M splats" version. Phase 3 moves
+  it to a WebGPU compute pass for larger scenes.
+- ~~Splat-byte-quantized rotations aren't unit~~ — vertex shader now
+  normalizes the quaternion before building the rotation matrix, so the
+  EWA covariance stays well-formed regardless of source format. ✅
+- ~~Faint long alpha tails~~ — fragment shader subtracts `0.004` from the
+  Gaussian alpha and clamps to zero, killing the sub-1/255 tail that
+  produced visible streaks beyond ~2.5 sigma. ✅
+
 ## Phased roadmap
 
 1. ✅ **Phase 1** — MVP loader + renderer.
 2. ✅ **Phase 2** — `SplatActor` + transform support.
-3. ✅ **Phase 2.5 (this)** — `.ply` and `.sog` loaders, scene serialization wiring.
+3. ✅ **Phase 2.5 (this)** — `.ply` / `.sog` loaders, scene-serialization
+   wiring, drag-and-drop UI, **CPU depth sort + shader correctness fixes**.
 4. **Phase 3** — WebGPU compute depth sort, frustum cull, LOD.
 5. **Phase 4** — Physics collision proxy (voxelize → marching cubes → Jolt static body).
 6. **Phase 5 (research)** — DDGI lighting integration (probe sampling or SH bake-down).
