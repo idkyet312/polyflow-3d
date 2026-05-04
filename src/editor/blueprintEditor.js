@@ -279,6 +279,7 @@ export function getBlueprintMaterialEditorRefs() {
 
 export function getBlueprintComponentDisplayName(object3D) {
     if (!object3D) return 'Nothing selected';
+    if (object3D.userData?.isCollisionShape) return object3D.name || 'Collision Box';
     if (object3D.name) return object3D.name;
     if (object3D.isSpotLight) return 'Spot Light';
     if (object3D.isPointLight) return 'Point Light';
@@ -290,7 +291,7 @@ export function getBlueprintComponentDisplayName(object3D) {
 // ─── lines 10374–10376 ─────────────────────────────────────────────────────────────
 
 export function isBlueprintMaterialTarget(object3D) {
-    return !!object3D?.isMesh;
+    return !!object3D?.isMesh && !object3D.userData?.isCollisionShape;
 }
 
 // ─── lines 10378–10387 ─────────────────────────────────────────────────────────────
@@ -678,6 +679,7 @@ export function refreshBlueprintComponents() {
             const label = document.createElement('span');
             let typeName = 'Group';
             if (isRoot) typeName = 'Root';
+            else if (object3D.userData?.isCollisionShape) typeName = 'Collision Box';
             else if (object3D.isSpotLight) typeName = 'Spot Light';
             else if (object3D.isPointLight) typeName = 'Point Light';
             else if (object3D.isLight) typeName = 'Light';
@@ -694,7 +696,7 @@ export function refreshBlueprintComponents() {
 
             item.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const additiveSelection = (e.ctrlKey || e.metaKey || e.shiftKey) && object3D.isMesh;
+                const additiveSelection = (e.ctrlKey || e.metaKey || e.shiftKey) && isBlueprintMaterialTarget(object3D);
                 if (additiveSelection) {
                     blueprintState.materialMultiSelectActive = true;
                     if (blueprintState.selectedComponents.has(object3D)) {
@@ -705,7 +707,7 @@ export function refreshBlueprintComponents() {
                 } else {
                     blueprintState.selectedComponents.clear();
                     blueprintState.materialMultiSelectActive = false;
-                    if (object3D.isMesh) {
+                    if (isBlueprintMaterialTarget(object3D)) {
                         blueprintState.selectedComponents.add(object3D);
                     }
                 }

@@ -61,7 +61,7 @@ export function createPhysicsCore({
         return totalTriangles;
     }
 
-    function createStaticMeshBody(root) {
+    function createStaticMeshBody(root, options = {}) {
         if (!physics.ready || !root) return null;
 
         const { Jolt, bodyInterface } = physics;
@@ -128,7 +128,8 @@ export function createPhysicsCore({
             Jolt.EMotionType_Static,
             nonMovingLayer
         );
-        creationSettings.mFriction = 0.9;
+        creationSettings.mFriction = options.friction ?? 0.9;
+        creationSettings.mRestitution = options.restitution ?? 0.08;
         const body = bodyInterface.CreateBody(creationSettings);
         bodyInterface.AddBody(body.GetID(), Jolt.EActivation_DontActivate);
 

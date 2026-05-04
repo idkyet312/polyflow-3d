@@ -247,6 +247,49 @@ main {
   color: #fff !important;
 }
 
+.scene-ui-physics-editor {
+  margin-top: 0.55rem;
+  padding: 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(8, 10, 18, 0.42);
+  border-radius: 6px;
+}
+
+.scene-ui-physics-title {
+  font-size: 0.68rem;
+  font-weight: 800;
+  color: #f4f0ff;
+  margin-bottom: 0.45rem;
+}
+
+.scene-ui-physics-row {
+  display: grid;
+  grid-template-columns: 4.6rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.45rem;
+  margin-bottom: 0.35rem;
+  font-size: 0.66rem;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.scene-ui-physics-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.25rem 0.35rem;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.24);
+  color: #fff;
+  font: inherit;
+}
+
+.scene-ui-physics-note {
+  margin-top: 0.4rem;
+  font-size: 0.62rem;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.52);
+}
+
 @media (max-width: 768px) {
   .workspace {
     flex-direction: column-reverse;

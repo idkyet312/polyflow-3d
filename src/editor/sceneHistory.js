@@ -102,6 +102,13 @@ export function serializeComponentTree(object3D) {
             if (child.isMesh && child.material) {
                 entry.material = serializeObjectMaterialState(child);
             }
+            if (child.userData?.isCollisionShape) {
+                entry.userData = {
+                    isCollisionShape: true,
+                    collisionShapeType: child.userData.collisionShapeType || 'box',
+                    skipMaterialExport: true,
+                };
+            }
             if (child.isPointLight) {
                 entry.light = {
                     color: '#' + child.color.getHexString(),
@@ -167,6 +174,21 @@ export function deserializeComponentTree(parent, comps) {
         }
 
         if (!comp) return;
+
+        if (compData.userData?.isCollisionShape) {
+            comp.userData.isCollisionShape = true;
+            comp.userData.collisionShapeType = compData.userData.collisionShapeType || 'box';
+            comp.userData.skipMaterialExport = true;
+            comp.name ||= 'Collision Box';
+            comp.material = new THREE.MeshBasicMaterial({
+                color: 0x22d3ee,
+                transparent: true,
+                opacity: 0.16,
+                wireframe: true,
+                depthTest: false,
+            });
+            comp.renderOrder = 20;
+        }
 
         if (compData.name) comp.name = compData.name;
         if (Array.isArray(compData.position)) comp.position.fromArray(compData.position);

@@ -730,6 +730,10 @@ const collisionDebugState = {
     enabled: false,
     overlays: [],
 };
+const actorPhysicsEditorState = {
+    previewActorId: '',
+    previewOverlay: null,
+};
 const shadowDebugState = {
     forceAllMeshes: false,
     lastAppliedAt: 0,
@@ -1784,8 +1788,8 @@ function countTrianglesForObject(root) {
     return physicsCore?.countTrianglesForObject(root) ?? 0;
 }
 
-function createStaticMeshBody(root) {
-    return physicsCore?.createStaticMeshBody(root) ?? null;
+function createStaticMeshBody(root, options = {}) {
+    return physicsCore?.createStaticMeshBody(root, options) ?? null;
 }
 
 function destroyPhysicsBody(body) {
@@ -2270,6 +2274,10 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
     }
 
     const body = bodyInterface.CreateBody(creationSettings);
+    const mass = Number(options.mass);
+    if (simulatePhysics && Number.isFinite(mass) && mass > 0) {
+        body.GetMotionProperties?.()?.ScaleToMass?.(mass);
+    }
     bodyInterface.AddBody(
         body.GetID(),
         !simulatePhysics || options.activate === false ? Jolt.EActivation_DontActivate : Jolt.EActivation_Activate
@@ -2711,6 +2719,9 @@ function selectShowcaseActor(actorId, selectionObject = null) {
     }
     
     if (previousTargetId !== objectScriptState.targetPropId) {
+        if (actorPhysicsEditorState.previewActorId && actorPhysicsEditorState.previewActorId !== objectScriptState.targetPropId) {
+            clearActorPhysicsPreview();
+        }
         refreshSceneUI();
     }
 }
@@ -2814,8 +2825,9 @@ function rebuildActorPhysics(prop) {
 
     let bodyOptions = {
         rotation: getActorRenderObject(prop).quaternion,
-        friction: prop.userData?.friction || 0.5,
-        restitution: prop.userData?.restitution || 0.3,
+        mass: prop.userData?.physicsMass,
+        friction: prop.userData?.physicsFriction ?? prop.userData?.friction ?? 0.5,
+        restitution: prop.userData?.physicsRestitution ?? prop.userData?.restitution ?? 0.3,
         allowedDOFs: prop.userData?.allowedDOFs,
         kinematic: prop.userData?.kinematic,
         simulatePhysics: useExactMeshCollision ? false : componentFlags.physics,
@@ -2826,7 +2838,7 @@ function rebuildActorPhysics(prop) {
     rootMesh.updateMatrixWorld(true);
 
     if (useExactMeshCollision) {
-        const newBody = createStaticMeshBody(rootMesh);
+        const newBody = createStaticMeshBody(rootMesh, bodyOptions);
         prop.body = newBody;
         if (physicsBodyComponent) physicsBodyComponent.body = newBody;
         setActorComponentFlags(prop, {
@@ -2835,16 +2847,28 @@ function rebuildActorPhysics(prop) {
             physics: false,
         });
         if (newBody) physics.staticBodies.push(prop);
+        if (actorPhysicsEditorState.previewActorId === prop.id) refreshActorPhysicsPreview();
         return;
     }
 
     const subShapes = [];
     const compoundSettings = new Jolt.MutableCompoundShapeSettings();
     let hasCompound = false;
+    let hasExplicitCollisionShapes = false;
+    rootMesh.traverse((node) => {
+        if (node.userData?.isCollisionShape) hasExplicitCollisionShapes = true;
+    });
 
     // A helper to traverse and collect collision shapes
     function traverseAndBuildShapes(node, isRoot) {
-        if (!node.visible) return; // Skip hidden components
+        const isCollisionShape = !!node.userData?.isCollisionShape;
+        if (!node.visible && !isCollisionShape) return; // Skip hidden visual components
+        if (hasExplicitCollisionShapes && !isCollisionShape) {
+            for (const child of node.children) {
+                traverseAndBuildShapes(child, false);
+            }
+            return;
+        }
         
         // Handle only meshes
         if (node.isMesh) {
@@ -2935,6 +2959,7 @@ function rebuildActorPhysics(prop) {
             }
         }
     }
+    if (actorPhysicsEditorState.previewActorId === prop.id) refreshActorPhysicsPreview();
 }
 
 function getActorScriptState(prop) {
@@ -4513,6 +4538,116 @@ function focusShowcaseCameraOnObject(object, { duration = 0.6 } = {}) {
     }
 }
 
+function buildCollisionBoxComponent() {
+    const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(2, 2, 2),
+        new THREE.MeshBasicMaterial({
+            color: 0x22d3ee,
+            transparent: true,
+            opacity: 0.16,
+            wireframe: true,
+            depthTest: false,
+        })
+    );
+    mesh.name = 'Collision Box';
+    mesh.renderOrder = 20;
+    mesh.userData.isCollisionShape = true;
+    mesh.userData.collisionShapeType = 'box';
+    mesh.userData.skipMaterialExport = true;
+    return mesh;
+}
+
+function getActorPhysicsSettings(actor) {
+    const userData = actor?.userData ?? {};
+    return {
+        mass: Number.isFinite(userData.physicsMass) ? userData.physicsMass : 12,
+        friction: Number.isFinite(userData.physicsFriction) ? userData.physicsFriction : (Number.isFinite(userData.friction) ? userData.friction : 0.5),
+        restitution: Number.isFinite(userData.physicsRestitution) ? userData.physicsRestitution : (Number.isFinite(userData.restitution) ? userData.restitution : 0.3),
+    };
+}
+
+function clearActorPhysicsPreview() {
+    const overlay = actorPhysicsEditorState.previewOverlay;
+    if (overlay) {
+        overlay.parent?.remove(overlay);
+        disposeCollisionOverlayObject(overlay);
+    }
+    actorPhysicsEditorState.previewOverlay = null;
+    actorPhysicsEditorState.previewActorId = '';
+}
+
+function refreshActorPhysicsPreview() {
+    const actorId = actorPhysicsEditorState.previewActorId;
+    if (!actorId) return;
+
+    const actor = getDynamicPropById(actorId);
+    const actorMesh = getActorRenderObject(actor);
+    const nextOverlay = actor ? buildActorCollisionOverlay(actor) : null;
+
+    if (actorPhysicsEditorState.previewOverlay) {
+        actorPhysicsEditorState.previewOverlay.parent?.remove(actorPhysicsEditorState.previewOverlay);
+        disposeCollisionOverlayObject(actorPhysicsEditorState.previewOverlay);
+        actorPhysicsEditorState.previewOverlay = null;
+    }
+
+    if (!actorMesh || !nextOverlay) {
+        actorPhysicsEditorState.previewActorId = '';
+        return;
+    }
+
+    nextOverlay.name = 'actor-physics-preview-overlay';
+    actorMesh.add(nextOverlay);
+    actorPhysicsEditorState.previewOverlay = nextOverlay;
+}
+
+function setActorPhysicsPreview(actor, enabled) {
+    clearActorPhysicsPreview();
+    if (!enabled || !actor?.id) return;
+    actorPhysicsEditorState.previewActorId = actor.id;
+    refreshActorPhysicsPreview();
+}
+
+function applyActorPhysicsSettings(actor, settings) {
+    if (!actor) return;
+
+    const next = {
+        physicsMass: THREE.MathUtils.clamp(Number(settings.mass) || 12, 0.01, 100000),
+        physicsFriction: THREE.MathUtils.clamp(Number(settings.friction) || 0, 0, 2),
+        physicsRestitution: THREE.MathUtils.clamp(Number(settings.restitution) || 0, 0, 1),
+    };
+    Object.assign(actor.userData, next);
+    const mesh = getActorRenderObject(actor);
+    if (mesh?.userData) Object.assign(mesh.userData, next);
+
+    if (getActorComponentFlags(actor).collision) {
+        rebuildActorPhysics(actor);
+    }
+    refreshActorPhysicsPreview();
+    if (collisionDebugState.enabled) refreshCollisionDebugOverlays();
+    refreshSceneUI();
+}
+
+function syncBlueprintPhysicsEditor(actor = getDynamicPropById(objectScriptState.targetPropId)) {
+    const settings = getActorPhysicsSettings(actor);
+    const mass = document.getElementById('bp-physics-mass');
+    const friction = document.getElementById('bp-physics-friction');
+    const restitution = document.getElementById('bp-physics-restitution');
+    if (mass) mass.value = String(settings.mass);
+    if (friction) friction.value = String(settings.friction);
+    if (restitution) restitution.value = String(settings.restitution);
+}
+
+function applyBlueprintPhysicsEditor() {
+    const actor = getDynamicPropById(objectScriptState.targetPropId);
+    if (!actor) return;
+    applyActorPhysicsSettings(actor, {
+        mass: parseFloat(document.getElementById('bp-physics-mass')?.value ?? '12'),
+        friction: parseFloat(document.getElementById('bp-physics-friction')?.value ?? '0.5'),
+        restitution: parseFloat(document.getElementById('bp-physics-restitution')?.value ?? '0.3'),
+    });
+    refreshBlueprintComponents();
+}
+
 function createSceneActorItem(actor, { isChild = false } = {}) {
     const item = document.createElement('div');
     item.className = isChild ? 'scene-ui-item scene-ui-child-item' : 'scene-ui-item';
@@ -4531,6 +4666,7 @@ function createSceneActorItem(actor, { isChild = false } = {}) {
             blueprintBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 enterBlueprintEditor();
+                syncBlueprintPhysicsEditor(actor);
             });
             actorBtnRow.appendChild(blueprintBtn);
 
@@ -4637,6 +4773,7 @@ function refreshSceneUI() {
                 blueprintBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     enterBlueprintEditor();
+                    syncBlueprintPhysicsEditor(actor);
                 });
                 actorBtnRow.appendChild(blueprintBtn);
 
@@ -5265,7 +5402,12 @@ async function init() {
     transformControl.addEventListener('dragging-changed', (event) => {
         showcase.looking = false;
         if (!event.value) {
-            syncTransformToPhysics();
+            if (blueprintState.active) {
+                const prop = getDynamicPropById(objectScriptState.targetPropId);
+                if (prop) rebuildActorPhysics(prop);
+            } else {
+                syncTransformToPhysics();
+            }
             transformControl.justFinishedDragging = true;
             editorHistory.captureState();
             setTimeout(() => transformControl.justFinishedDragging = false, 100);
@@ -7786,6 +7928,11 @@ document.getElementById('btn-edit-actor-script')?.addEventListener('click', () =
     openObjectScriptEditor('tick');
 });
 
+document.getElementById('btn-bp-apply-physics')?.addEventListener('click', () => {
+    editorHistory.captureState();
+    applyBlueprintPhysicsEditor();
+});
+
 document.getElementById('btn-add-comp-cube')?.addEventListener('click', () => {
     editorHistory.captureState();
     const parent = blueprintState.selectedComponent || getActorRenderObject(getDynamicPropById(objectScriptState.targetPropId));
@@ -7821,6 +7968,27 @@ document.getElementById('btn-add-comp-sphere')?.addEventListener('click', () => 
     blueprintState.materialMultiSelectActive = false;
     blueprintState.selectedComponents.add(mesh);
     if (typeof transformControl !== 'undefined') transformControl.attach(mesh);
+    refreshBlueprintComponents();
+});
+
+document.getElementById('btn-add-comp-collision-box')?.addEventListener('click', () => {
+    editorHistory.captureState();
+    const prop = getDynamicPropById(objectScriptState.targetPropId);
+    const parent = blueprintState.selectedComponent || getActorRenderObject(prop);
+    if (!parent) return;
+
+    const mesh = buildCollisionBoxComponent();
+    mesh.scale.set(0.55, 0.55, 0.55);
+    mesh.position.set(0, 0.75, 0);
+    parent.add(mesh);
+    blueprintState.selectedComponent = mesh;
+    blueprintState.selectedComponents.clear();
+    blueprintState.materialMultiSelectActive = false;
+    if (typeof transformControl !== 'undefined') {
+        transformControl.attach(mesh);
+        transformControl.setMode?.('translate');
+    }
+    if (prop) rebuildActorPhysics(prop);
     refreshBlueprintComponents();
 });
 
@@ -7882,6 +8050,7 @@ document.getElementById('btn-delete-comp')?.addEventListener('click', () => {
         blueprintState.selectedComponents.clear();
         blueprintState.materialMultiSelectActive = false;
         if (typeof transformControl !== 'undefined') transformControl.attach(rootMesh);
+        rebuildActorPhysics(prop);
         refreshBlueprintComponents();
     }
 });
@@ -7894,7 +8063,13 @@ init().then(() => {
 // === extracted: blueprintEditor (block 2) (was lines 10886-10972 of original main.js) ===
 
 ['bp-loc-x', 'bp-loc-y', 'bp-loc-z', 'bp-rot-x', 'bp-rot-y', 'bp-rot-z', 'bp-scl-x', 'bp-scl-y', 'bp-scl-z'].forEach(id => {
-    document.getElementById(id)?.addEventListener('change', applyBlueprintDetailsFromUI);
+    document.getElementById(id)?.addEventListener('change', () => {
+        applyBlueprintDetailsFromUI();
+        if (blueprintState.active) {
+            const prop = getDynamicPropById(objectScriptState.targetPropId);
+            if (prop) rebuildActorPhysics(prop);
+        }
+    });
 });
 
 // Blueprint panel: Save/Load Actor buttons
