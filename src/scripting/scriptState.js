@@ -331,3 +331,33 @@ export function updateDynamicBodyCollisionScripts() {
 
         scriptState.activeCollisions = new Set(nextCollisions.keys());
     });
+}
+
+export function handleObjectScriptGlobalPointerDown(event) {
+    const clickedInsideMenu = objectScriptMenu && !objectScriptMenu.hidden && objectScriptMenu.contains(event.target);
+    const clickedInsideEditor = objectScriptEditor && !objectScriptEditor.hidden && objectScriptEditor.contains(event.target);
+
+    if (!clickedInsideMenu && objectScriptState.menuOpen) {
+        closeObjectScriptMenu();
+    }
+
+    if (!clickedInsideEditor && objectScriptState.editorOpen && event.target !== renderer?.domElement) {
+        closeObjectScriptEditor();
+    }
+}
+
+export function handleObjectScriptKeydown(event) {
+    if (event.key !== 'Escape') return;
+
+    if (debugConsoleState.visible) {
+        return;
+    }
+
+    if (objectScriptState.menuOpen) {
+        closeObjectScriptMenu();
+    }
+
+    if (objectScriptState.editorOpen) {
+        closeObjectScriptEditor();
+    }
+}
