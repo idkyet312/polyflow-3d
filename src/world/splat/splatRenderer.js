@@ -25,6 +25,7 @@
 //   Zwicker 2001,      "Surface Splatting" (the J Jacobian derivation)
 
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
     Fn, attribute, uniform, varying,
     vec2, vec3, vec4, mat3, float,
@@ -37,9 +38,31 @@ import { attachDepthSort } from './depthSort.js';
 // .splat byte layout: 32 bytes per splat, little-endian.
 //   0..11   position xyz (3 x f32)
 //   12..23  scale xyz    (3 x f32, already exp(log_scale))
-//   24..27  color RGBA   (4 x u8, divide by 255)
+//   24..27  color RGBA   (4 x u8, sRGB-encoded — see srgbToLinear below)
 //   28..31  rotation xyzw(4 x u8, decode (b - 127.5) / 127.5)
 const SPLAT_BYTES = 32;
+
+// .splat color bytes are sRGB-encoded by the antimatter15 converter (and
+// by every other converter that targets antimatter15-viewer compatibility):
+// after running the SH DC formula `0.5 + C0 * f_dc` to get a linear value,
+// the converter applies the linear→sRGB transfer curve and quantizes to u8.
+// We undo that here so the renderer fragment shader operates in linear-light
+// space (where Gaussian alpha math is meaningful and where the renderer's
+// outputColorSpace = SRGBColorSpace re-applies the sRGB encode at the end of
+// the pipeline). Without this step, byte/255 is treated as linear, which
+// double-gamma-corrects when paired with SRGBColorSpace output and gives
+// desaturated, low-contrast colors with no true black.
+//
+// PLY and SOG already produce linear values (see loaders/{ply,sog}.js) so
+// this lookup is .splat-format-only.
+const SRGB_TO_LINEAR_LUT = (() => {
+    const lut = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+        const c = i / 255;
+        lut[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    return lut;
+})();
 
 // ---------------------------------------------------------------------
 // Loader / parser
@@ -60,9 +83,11 @@ export function parseSplat(arrayBuffer) {
         scales[i * 3 + 0]    = view.getFloat32(o + 12, true);
         scales[i * 3 + 1]    = view.getFloat32(o + 16, true);
         scales[i * 3 + 2]    = view.getFloat32(o + 20, true);
-        colors[i * 4 + 0]    = view.getUint8(o + 24) / 255;
-        colors[i * 4 + 1]    = view.getUint8(o + 25) / 255;
-        colors[i * 4 + 2]    = view.getUint8(o + 26) / 255;
+        // RGB: sRGB→linear via LUT (see SRGB_TO_LINEAR_LUT above).
+        // Alpha: keep linear — alpha is opacity, not perceptual.
+        colors[i * 4 + 0]    = SRGB_TO_LINEAR_LUT[view.getUint8(o + 24)];
+        colors[i * 4 + 1]    = SRGB_TO_LINEAR_LUT[view.getUint8(o + 25)];
+        colors[i * 4 + 2]    = SRGB_TO_LINEAR_LUT[view.getUint8(o + 26)];
         colors[i * 4 + 3]    = view.getUint8(o + 27) / 255;
         rotations[i * 4 + 0] = (view.getUint8(o + 28) - 127.5) / 127.5;
         rotations[i * 4 + 1] = (view.getUint8(o + 29) - 127.5) / 127.5;
@@ -101,7 +126,7 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
     const uFocal    = uniform(new THREE.Vector2(1, 1));
     const uViewport = uniform(new THREE.Vector2(1, 1));
 
-    const material = new THREE.MeshBasicNodeMaterial({
+    const material = new MeshBasicNodeMaterial({
         transparent: true,
         depthWrite:  false,   // splats are translucent; don't occlude each other in depth buffer
         depthTest:   true,    // but DO read depth so opaque scene geometry occludes splats
