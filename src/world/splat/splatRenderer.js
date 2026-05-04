@@ -28,7 +28,7 @@ import * as THREE from 'three';
 import {
     Fn, attribute, uniform, varying,
     vec2, vec3, vec4, mat3, float,
-    positionLocal, modelMatrix, cameraViewMatrix, cameraProjectionMatrix,
+    positionLocal, modelViewMatrix, cameraProjectionMatrix,
     dot, exp, max, sqrt,
 } from 'three/tsl';
 
@@ -141,8 +141,9 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         );
         const cov3D = R.mul(S2).mul(R.transpose());
 
-        // Splat center: world -> view -> clip
-        const viewPos = cameraViewMatrix.mul(modelMatrix).mul(vec4(sp, 1.0));
+        // Splat center: world -> view -> clip. modelViewMatrix is (view * model),
+        // i.e. exactly the model-to-view-space transform we want.
+        const viewPos = modelViewMatrix.mul(vec4(sp, 1.0));
         const tz      = max(viewPos.z.negate(), 0.001);   // positive depth in front of camera
 
         // Jacobian J of perspective projection at viewPos (Zwicker 2001).
@@ -155,10 +156,10 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         );
 
         // 2D screen-space covariance: T * Sigma_3D * T^T, where T = J * W.
-        // W = upper-left 3x3 of (view * model). Phase 2: respect the splat actor's transform
-        // so a moved/rotated/scaled SplatActor still produces correctly-shaped ellipses.
-        const VM = cameraViewMatrix.mul(modelMatrix);
-        const W  = mat3(VM.element(0).xyz, VM.element(1).xyz, VM.element(2).xyz);
+        // W = upper-left 3x3 of modelViewMatrix (view * model). This respects the splat
+        // actor's transform, so a moved/rotated/scaled SplatActor still produces
+        // correctly-shaped ellipses.
+        const W = mat3(modelViewMatrix.element(0).xyz, modelViewMatrix.element(1).xyz, modelViewMatrix.element(2).xyz);
         const T = J.mul(W);
         const C = T.mul(cov3D).mul(T.transpose());
         const a = C.element(0).x.add(0.3);   // 0.3 = anti-aliasing low-pass regularization
