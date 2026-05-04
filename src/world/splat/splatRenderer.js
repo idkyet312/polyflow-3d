@@ -31,6 +31,8 @@ import {
     positionLocal, modelViewMatrix, cameraProjectionMatrix,
     dot, exp, max, sqrt,
 } from 'three/tsl';
+import { loadSplatAny } from './loaders/index.js';
+import { attachDepthSort } from './depthSort.js';
 
 // .splat byte layout: 32 bytes per splat, little-endian.
 //   0..11   position xyz (3 x f32)
@@ -70,14 +72,12 @@ export function parseSplat(arrayBuffer) {
     return { count, positions, scales, colors, rotations };
 }
 
+// Format-aware loader. Detects .splat, .ply, and .sog from extension/magic bytes
+// and delegates to the matching parser; all return the same normalized shape.
+// See `./loaders/index.js` for detection logic and `./loaders/{ply,sog}.js`
+// for the per-format implementations.
 export async function loadSplat(url) {
-    const buf = await (await fetch(url)).arrayBuffer();
-    if (buf.byteLength % SPLAT_BYTES !== 0) {
-        throw new Error(
-            `[splat] ${url} is not a multiple of ${SPLAT_BYTES} bytes (size=${buf.byteLength})`
-        );
-    }
-    return parseSplat(buf);
+    return loadSplatAny(url);
 }
 
 // ---------------------------------------------------------------------
@@ -119,8 +119,15 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         const sc  = attribute('splatColor');
         const sr  = attribute('splatRot');
 
+        // Normalize the quaternion before building R. .splat byte-quantized
+        // rotations aren't exactly unit (per-component error ~1/256), and PLY/SOG
+        // can drift from FP rounding. A non-unit quaternion produces a rotation
+        // matrix with baked-in scale, which combined with the splat's scale
+        // diagonal gives degenerate covariance and visible streaking.
+        const qn = sr.div(max(sqrt(dot(sr, sr)), float(0.0001)));
+
         // Quaternion (x,y,z,w) -> 3x3 rotation matrix.
-        const x = sr.x, y = sr.y, z = sr.z, w = sr.w;
+        const x = qn.x, y = qn.y, z = qn.z, w = qn.w;
         const R = mat3(
             vec3(float(1).sub(float(2).mul(y.mul(y).add(z.mul(z)))),
                  float(2).mul(x.mul(y).add(w.mul(z))),
@@ -195,8 +202,12 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         // 2D Gaussian: alpha = alpha_splat * exp(-0.5 * ||vQuad||^2).
         // Because we expanded the quad in the eigenbasis with 3*sqrt(lambda) units,
         // ||vQuad||^2 is exactly the squared Mahalanobis distance.
-        const r2    = dot(vQuad, vQuad);
-        const alpha = exp(r2.mul(-0.5)).mul(vColor.a);
+        const r2  = dot(vQuad, vQuad);
+        const raw = exp(r2.mul(-0.5)).mul(vColor.a);
+        // Hard cutoff for the long faint tail beyond ~2.5 sigma. Below 1/255
+        // the framebuffer can't represent the contribution anyway, and the
+        // tails are what give un-sorted splats the visible "streaks" feel.
+        const alpha = raw.sub(0.004).max(0);
         return vec4(vColor.rgb, alpha);
     })();
 
@@ -214,6 +225,12 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         );
         uViewport.value.copy(size);
     };
+
+    // Throttled CPU back-to-front depth sort. Wraps onBeforeRender so the
+    // camera uniform update above still runs. Without this, alpha-blended
+    // splats render in load order and the result reads as visible "marks"
+    // rather than a coherent surface — see depthSort.js for the rationale.
+    attachDepthSort(mesh, { count, positions, scales, colors, rotations });
 
     return mesh;
 }

@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { DDGIVolumeComponent } from '../runtime/sceneRuntime.js';
+import { createSplatActor } from './splat/splatActor.js';
 
 // Module-scope deps — populated by setupSceneSerialization, assigned once.
 let scene, camera, sceneSystem, physics, importedPropState, objectScriptState, VEHICLE_SETTINGS;
@@ -142,7 +143,7 @@ export function getActorComponentFlags(actor) {
     };
 }
 
-// ─── lines 9614–9627 ─────────────────────────────────────────────────────────────────────
+// ─── lines 9614–9627 ───────────────────────────────────────────────────────────────────
 
 export function setActorComponentFlags(actor, flags = {}) {
     if (!actor) {
@@ -159,7 +160,7 @@ export function setActorComponentFlags(actor, flags = {}) {
     return normalizedFlags;
 }
 
-// ─── lines 9629–9656 ─────────────────────────────────────────────────────────────────────
+// ─── lines 9629–9656 ───────────────────────────────────────────────────────────────────
 
 export function normalizeSerializedActorComponentFlags(actorData = {}) {
     const rawFlags = actorData.componentFlags || actorData.componentState || null;
@@ -190,7 +191,7 @@ export function normalizeSerializedActorComponentFlags(actorData = {}) {
     };
 }
 
-// ─── lines 9658–9699 ─────────────────────────────────────────────────────────────────────
+// ─── lines 9658–9699 ──────────────────────────────────────────────────────────────────────
 
 export function serializeActorData(actor) {
     if (!actor) return null;
@@ -206,6 +207,17 @@ export function serializeActorData(actor) {
             || actor.GetComponent?.(DDGIVolumeComponent);
         if (ddgi?.serialize) {
             userDataForSerialization = { ...(userDataForSerialization || {}), ddgi: ddgi.serialize() };
+        }
+    }
+    if (actor.kind === 'splat') {
+        // SplatActor stores its URL in actor.userData.splatUrl (set by
+        // createSplatActor). Ensure it's also in the serialized userData so the
+        // deserializer can find it without walking the components tree.
+        const splatUrl = actor.userData?.splatUrl
+            || mesh.userData?.splatUrl
+            || '';
+        if (splatUrl) {
+            userDataForSerialization = { ...(userDataForSerialization || {}), splatUrl };
         }
     }
 
@@ -236,7 +248,7 @@ export function serializeActorData(actor) {
     };
 }
 
-// ─── lines 9701–9866 ─────────────────────────────────────────────────────────────────────
+// ─── lines 9701–9866 ───────────────────────────────────────────────────────────────────
 
 function computeCameraFrontSpawn(distance = 4.5, up = 1.2) {
     if (!camera) return new THREE.Vector3();
@@ -315,6 +327,21 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
             size,
             options: ddgiOptions,
         });
+    } else if (actorData.kind === 'splat') {
+        const url = actorData.userData?.splatUrl
+            || actorData.components?.find?.((c) => c?.type === 'SplatComponent')?.url
+            || '';
+        if (!url) {
+            console.error('[sceneSerialization] splat actor missing splatUrl, skipping:', actorData);
+            actor = null;
+        } else {
+            actor = createSplatActor({
+                id:   actorData.id || '',
+                name: actorData.name || 'Splat',
+                url,
+            });
+            sceneSystem?.addActor?.(actor);
+        }
     } else {
         const savedPos = spawnInFrontOfPlayer
             ? computeCameraFrontSpawn()
@@ -465,7 +492,7 @@ export function exportActorToFile(actor) {
     setTimeout(() => URL.revokeObjectURL(url), 100);
 }
 
-// ─── lines 9926–9965 ─────────────────────────────────────────────────────────────────────
+// ─── lines 9926–9965 ─────────────────────────────────────────────────────────────────
 
 // Reuses the existing #processing-overlay panel for any long-running task.
 export const progressOverlay = {
@@ -506,7 +533,7 @@ export function yieldToPaint() {
     });
 }
 
-// ─── lines 9967–10034 ────────────────────────────────────────────────────────────────────
+// ─── lines 9967–10034 ────────────────────────────────────────────────────────────────
 
 export async function loadActorFromFile(file) {
     if (!file) return;
@@ -578,7 +605,7 @@ export async function loadActorFromFile(file) {
     }
 }
 
-// ─── lines 10036–10048 ───────────────────────────────────────────────────────────────────
+// ─── lines 10036–10048 ────────────────────────────────────────────────────────────────
 
 export function readFileAsTextWithProgress(file, onProgress) {
     return new Promise((resolve, reject) => {
