@@ -155,9 +155,10 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         );
 
         // 2D screen-space covariance: T * Sigma_3D * T^T, where T = J * W.
-        // W = upper-left 3x3 of (view * model). We use mat3(view) on the assumption that
-        // the splat mesh has identity model transform. Move the user, not the splat. Spike-only.
-        const W = mat3(cameraViewMatrix);
+        // W = upper-left 3x3 of (view * model). Phase 2: respect the splat actor's transform
+        // so a moved/rotated/scaled SplatActor still produces correctly-shaped ellipses.
+        const VM = cameraViewMatrix.mul(modelMatrix);
+        const W  = mat3(VM.element(0).xyz, VM.element(1).xyz, VM.element(2).xyz);
         const T = J.mul(W);
         const C = T.mul(cov3D).mul(T.transpose());
         const a = C.element(0).x.add(0.3);   // 0.3 = anti-aliasing low-pass regularization

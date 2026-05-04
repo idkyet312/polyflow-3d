@@ -5,20 +5,42 @@ renders anisotropic 2D Gaussians as instanced quads via EWA splatting.
 
 ## Status
 
-**Phase 1 spike** — minimum-viable renderer. Loads `.splat`, renders splats
-with proper EWA math, no depth sort. ~190 lines in `splatRenderer.js`.
+**Phase 2 in progress.** Phase 1 spike (renderer + EWA math) is complete; Phase 2
+adds the actor wrapper, transform support, and serialization hooks.
 
-See the [tracking issue](https://github.com/idkyet312/polyflow-3d/issues) for
-the full multi-phase plan.
+- ✅ `splatRenderer.js` — `.splat` parser + EWA Gaussian renderer (Phase 1)
+- ✅ `splatRenderer.js` — `W = mat3(view·model)` transform fix (Phase 2)
+- ✅ `splatActor.js` — `SplatComponent` + `createSplatActor` + serialization (Phase 2)
+- ✅ `init.js` — one-call wire-up for `main.js` (Phase 1 finalization)
+- ⏳ Wire `serializeSplatActor` into `src/world/sceneSerialization.js` (Phase 2 follow-up)
+- ⏳ WebGPU compute depth sort (Phase 3)
 
-## Architecture (current spike)
+See [issue #16](https://github.com/idkyet312/polyflow-3d/issues/16) for the full multi-phase plan.
+
+## Architecture
 
 ```
-splatRenderer.js
+splatRenderer.js   — pure rendering (no scene-system awareness)
 ├── parseSplat(arrayBuffer)      → typed arrays for the 4 per-splat fields
 ├── loadSplat(url)               → fetch + parse
 ├── buildSplatMesh(data)         → InstancedBufferGeometry + NodeMaterial
-└── addSplatToScene(scene, url)  → load + build + add (one-call entry point)
+└── addSplatToScene(scene, url)  → load + build + add (bare mesh, no actor)
+
+splatActor.js      — actor / runtime integration
+├── SplatComponent extends ActorComponent
+│   ├── beginPlay()              → async loadSplat → buildSplatMesh → attach to actor root
+│   ├── endPlay()                → dispose mesh + GPU resources
+│   ├── _computeBounds(positions)→ PCA-fit Box3 from splat centers
+│   └── toJSON()                 → serialization hook
+├── createSplatActor({url, name, position})
+│   → Actor with kind='splat' + TransformComponent + SplatComponent
+├── serializeSplatActor(actor)   / deserializeSplatActor(json)
+└── addSplatActorToSceneSystem(sys, opts)  → factory + register + await load
+
+init.js            — one-call wire-up
+└── wireSplatDevHooks(scene, sceneSystem?)
+    → exposes window.splatRenderer / window.splatActor
+    → if ?splat=<url> in URL, auto-loads at origin (uses actor path when SceneSystem given)
 ```
 
 The renderer is a single `THREE.Mesh` carrying:
@@ -51,20 +73,27 @@ File size must be a multiple of 32. No header.
 
 ## How to test
 
-```js
-// Drop into main.js after init().then(...) chain:
-import { addSplatToScene } from './src/world/splat/splatRenderer.js';
+Two-line wire-up into `main.js` — add to the existing `init().then(...)` chain:
 
-init().then(async () => {
-    if (window.location.search.includes('splat=')) {
-        const url = new URLSearchParams(window.location.search).get('splat');
-        await addSplatToScene(scene, url);
-    }
-});
+```js
+import { wireSplatDevHooks } from './src/world/splat/init.js';
+
+init().then(() => wireSplatDevHooks(scene, sceneSystem));   // sceneSystem optional
 ```
 
 Then visit `http://localhost:5173/?splat=https://huggingface.co/cakewalk/splat-data/resolve/main/nike.splat`
 to see a Nike sneaker rendered with anisotropic Gaussians.
+
+When a `SceneSystem` is passed, the splat is registered as a proper Actor
+(transform-gizmo editable, serializable). When omitted, falls back to a bare mesh.
+
+In DevTools you can also do:
+
+```js
+> await window.splatActor.addSplatActorToSceneSystem(sceneSystem, {
+    url: '/path/to/file.splat', name: 'Living Room',
+  });
+```
 
 **Sample files:**
 - Nike sneaker (~12 MB, ~250K splats): `https://huggingface.co/cakewalk/splat-data/resolve/main/nike.splat`
@@ -88,15 +117,17 @@ eigendecomposition produce the correct screen-space covariance.
   look flat / matte. Add when supporting `.ply` (Phase 1.5).
 - **No frustum cull / LOD** — fine for ≤1M splat scenes; will tank with 5M.
   Phase 3.
-- **Splat mesh transform is approximate** — if you `mesh.position.set(...)`
-  or rotate the splat mesh, ellipses are slightly wrong shape because we
-  use `mat3(cameraViewMatrix)` instead of `mat3(view·model)` for `W`.
-  Fixed when wrapping in a proper `SplatActor` (Phase 2).
+
+**Fixed in Phase 2.**
+
+- ~~Splat mesh transform is approximate~~ — `W` now uses `mat3(view·model)`,
+  so transformed `SplatActor`s produce correctly-shaped ellipses. ✅
 
 ## Phased roadmap
 
-1. **Phase 1 (this)** — MVP loader + renderer.
-2. **Phase 2** — `SplatActor`, transform gizmo, scene serialization round-trip.
+1. ✅ **Phase 1** — MVP loader + renderer.
+2. 🟡 **Phase 2 (this)** — `SplatActor` + transform support landed.
+   Still to do: wire `serializeSplatActor` into `world/sceneSerialization.js`.
 3. **Phase 3** — WebGPU compute depth sort, frustum cull, LOD.
 4. **Phase 4** — Physics collision proxy (voxelize → marching cubes → Jolt static body).
 5. **Phase 5 (research)** — DDGI lighting integration (probe sampling or SH bake-down).
