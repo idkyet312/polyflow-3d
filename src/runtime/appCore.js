@@ -18,6 +18,8 @@
 // whole-variable reassignments owned by main.js (e.g. `currentMesh = ...`),
 // main.js should expose a setter via setAppCore('currentMesh', value).
 
+import { wireSplatDevHooks } from '../world/splat/init.js';
+
 export const core = {};
 
 const _setters = {};
@@ -32,6 +34,18 @@ export function bindAppCore(getters, setters = {}) {
     }
     for (const [key, setter] of Object.entries(setters)) {
         _setters[key] = setter;
+    }
+
+    // ─── Splat module Phase 1 wire-up ────────────────────────────────────
+    // bindAppCore runs inside init()'s wireExtractedModules() chain (main.js
+    // line ~5420), so by the time we get here scene/camera/etc. are initialized.
+    // We hook from here instead of main.js to keep the 314 KB monolith untouched.
+    // sceneSystem is not in the appCore bindings, so we pass null and use the
+    // bare-mesh render path; the actor path is still invokable via DevTools:
+    //   await window.splatActor.addSplatActorToSceneSystem(sceneSystem, {...})
+    if (typeof window !== 'undefined' && core.scene) {
+        try { wireSplatDevHooks(core.scene, null); }
+        catch (e) { console.error('[splat] auto-wire failed:', e); }
     }
 }
 
