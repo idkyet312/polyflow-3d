@@ -95,7 +95,7 @@ focal length (in pixels) and viewport size.
 Each splat is exactly **32 bytes, little-endian**:
 
 | Offset | Size | Field          | Encoding                              |
-|--------|------|----------------|----------------------------------------|
+|--------|------|----------------|---------------------------------------|
 | 0      | 12   | position xyz   | 3 × float32                           |
 | 12     | 12   | scale xyz      | 3 × float32 (already exp(log_scale))  |
 | 24     | 4    | color RGBA     | 4 × uint8 → divide by 255             |
@@ -145,6 +145,39 @@ Two-line wire-up into `main.js` — add to the existing `init().then(...)` chain
 import { wireSplatDevHooks } from './src/world/splat/init.js';
 
 init().then(() => wireSplatDevHooks(scene, sceneSystem));   // sceneSystem optional
+```
+
+`wireSplatDevHooks` does three things:
+1. Exposes `window.splatRenderer` and `window.splatActor` for ad-hoc DevTools testing.
+2. Wires the **drag-and-drop file loader** (see below).
+3. Honors `?splat=<url>` in the page URL — if present, auto-loads the splat at world origin.
+
+## Drag-and-drop loading
+
+After `wireSplatDevHooks` runs, the page becomes a drop target. Drag a `.splat`,
+`.ply`, or `.sog` file from your file manager onto the browser window: a
+dashed-border overlay appears, and dropping loads the file as a new `SplatActor`
+at world origin (or as a bare mesh if no `SceneSystem` was passed).
+
+What you see:
+- **Drag in progress** — full-screen dashed overlay with "Drop to load splat".
+- **Loading** — info toast (bottom-right) shows the filename + size.
+- **Done** — green toast: "Loaded `<filename>`". The actor appears in the scene UI.
+- **Error** — red toast with the parser error (e.g. wrong format, malformed header).
+
+Multiple files dropped at once are loaded sequentially (parallel decode of two
+84 MB SOGs can OOM mobile devices).
+
+**Limitation: dropped files use `blob:` URLs**, which don't survive page
+reloads. If you save the scene and reload, the splat actor will fail to
+re-fetch its file. Workarounds:
+- Re-drop the file after reload.
+- Host the splat somewhere reachable (HuggingFace, S3, your own server) and
+  load via `?splat=https://…` instead — those URLs persist in saved scenes.
+
+To opt out of the drop zone (e.g. you have your own file-handling UI):
+```js
+init().then(() => wireSplatDevHooks(scene, sceneSystem, { enableDropZone: false }));
 ```
 
 Then visit `http://localhost:5173/?splat=https://huggingface.co/cakewalk/splat-data/resolve/main/nike.splat`

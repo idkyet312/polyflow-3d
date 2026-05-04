@@ -29,13 +29,18 @@ const SPLAT_BYTES   = 32;
 /**
  * Detect splat format from URL extension. Returns one of:
  *   'splat' | 'ply' | 'sog' | null
+ *
+ * Checks the path before any query/fragment first, then falls back to the full
+ * URL — so callers can stash a filename hint in the fragment of a `blob:` URL
+ * (e.g. `blob:abc#scene.ply`), since blob URLs themselves have no extension.
  */
 export function detectFormatFromUrl(url) {
     if (typeof url !== 'string') return null;
-    const path = url.split('?')[0].split('#')[0].toLowerCase();
-    if (path.endsWith('.splat')) return 'splat';
-    if (path.endsWith('.ply'))   return 'ply';
-    if (path.endsWith('.sog'))   return 'sog';
+    const lower = url.toLowerCase();
+    const path = lower.split('?')[0].split('#')[0];
+    if (path.endsWith('.splat') || lower.endsWith('.splat')) return 'splat';
+    if (path.endsWith('.ply')   || lower.endsWith('.ply'))   return 'ply';
+    if (path.endsWith('.sog')   || lower.endsWith('.sog'))   return 'sog';
     return null;
 }
 
