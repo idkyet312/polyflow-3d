@@ -229,9 +229,16 @@ export function createDDGIManager() {
             state.roundRobinCursor = (state.roundRobinCursor + 1) % total;
             state.grid.probePositionByIndex(idx, _tmpPos);
             try {
+                // C4: sky / HDRI must contribute to GI bounce. Hiding the
+                // background made every probe see black where it should see
+                // sky — outdoor scenes lost natural-light bounce, indoor
+                // scenes with windows lost daylight. Fog is still hidden
+                // since it's a view-space effect (not bounce-relevant).
+                // Note: until visibility weighting (C3) lands, sky may leak
+                // slightly into closed interiors; revisit with Chebyshev.
                 const cubeRT = await state.cubeRenderer.captureProbe(idx, _tmpPos, {
                     layersMask: DDGI_CAPTURE_MASK,
-                    hideBackground: true,
+                    hideBackground: false,
                     hideFog: true,
                 });
                 integrateInto(idx, cubeRT);

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Fn, vec2, vec3, vec4, float, texture, uniform, positionWorld, normalWorld, output } from 'three/tsl';
+import { Fn, vec2, vec3, vec4, float, texture, uniform, positionWorld, normalWorld, output, materialColor } from 'three/tsl';
 
 function createBlackTexture() {
     const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
@@ -124,12 +124,21 @@ export function patchMaterials(root, ddgiNode) {
             if (!mat || mat.userData?._ddgiPatched) continue;
             if (!(mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial)) continue;
             try {
+                // Modulate DDGI irradiance by surface albedo BEFORE adding.
+                // Otherwise black surfaces glow and red surfaces get neutral GI
+                // instead of red-tinted GI — the standard DDGI shading is
+                // direct + albedo * irradiance, not direct + irradiance.
+                // Use mat.colorNode if explicitly set (e.g. from a map texture
+                // chain); fall back to the TSL `materialColor` accessor which
+                // resolves the material's diffuse value at fragment time.
+                const albedo = mat.colorNode || materialColor;
+                const ddgiContribution = vec3(ddgiNode).mul(albedo);
                 if (mat.outputNode) {
-                    mat.outputNode = mat.outputNode.add(vec4(ddgiNode, 0));
+                    mat.outputNode = mat.outputNode.add(vec4(ddgiContribution, 0));
                 } else {
                     // Add after the standard lighting path. This keeps DDGI out
                     // of emissiveNode, so bloom does not treat bounce as glow.
-                    mat.outputNode = output.add(vec4(ddgiNode, 0));
+                    mat.outputNode = output.add(vec4(ddgiContribution, 0));
                 }
                 mat.userData._ddgiPatched = true;
                 mat.needsUpdate = true;

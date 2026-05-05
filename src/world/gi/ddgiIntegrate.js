@@ -15,7 +15,7 @@ import {
     vec3,
     vec4,
 } from 'three/tsl';
-import { probeTileRect } from './ddgiAtlas.js';
+import { probeTileRect, TILE_GUTTER } from './ddgiAtlas.js';
 
 const CUBE_SAMPLES = 32;
 
@@ -70,8 +70,24 @@ export function createIntegrator({ renderer }) {
     const uPrevTileScale = uniform(new THREE.Vector2());
     const sampleDirs = uniformArray(makeSampleDirs(), 'vec3');
 
+    // Hardcoded constants matching IRRADIANCE_TILE / TILE_GUTTER in ddgiAtlas.js.
+    // Baked into the shader so we don't need uniforms for them.
+    const TILE_F = 8;          // IRRADIANCE_TILE
+    const GUTTER_F = 1;        // TILE_GUTTER
+    const TILE_PX = TILE_F + GUTTER_F * 2;  // 10
+    const MAX_LUMINANCE = 16;  // M2: per-channel clamp for energy explosion guard
+
     const integrateNode = Fn(() => {
-        const tileUv = uv();
+        // We render to the FULL tile (10×10 inc. 1px gutter on each side). For
+        // pixels in the inner 8×8 the math is unchanged. For pixels in the 1-px
+        // gutter we clamp to the nearest inner-pixel center, producing edge
+        // replication — bilinear taps near octahedral seams now read defined
+        // values instead of uninitialized memory. (C2)
+        const pixPos = uv().mul(float(TILE_PX));                              // [0, 10]
+        const innerPx = pixPos.sub(float(GUTTER_F))                          // [-1, 9]
+            .clamp(float(0.5), float(TILE_F).sub(0.5));                      // [0.5, 7.5]
+        const tileUv = innerPx.div(float(TILE_F));                           // [0.0625, 0.9375]
+
         const f = tileUv.mul(2).sub(1);
         const nOut = vec3(f.x, f.y, float(1).sub(f.x.abs()).sub(f.y.abs())).toVar();
         const t = nOut.z.negate().max(0);
@@ -88,7 +104,10 @@ export function createIntegrator({ renderer }) {
             weightSum.addAssign(w);
         });
 
-        const irr = sum.div(weightSum.max(1e-5)).mul(uIntensity);
+        // (M2) Per-channel clamp before EMA mix so a bright direct light or a
+        // brief misintegration cannot explode through the infinite-bounce loop.
+        const irr = sum.div(weightSum.max(1e-5)).mul(uIntensity)
+            .clamp(vec3(0), vec3(MAX_LUMINANCE));
         const prevUv = uPrevTileOrigin.add(tileUv.mul(uPrevTileScale));
         const prev = prevAtlasTex.sample(prevUv).rgb;
         const mixed = irr.mul(float(1).sub(uHysteresis)).add(prev.mul(uHysteresis));
@@ -135,10 +154,22 @@ export function createIntegrator({ renderer }) {
         const tile = atlas.tile;
         const rect = probeTileRect(probeIndex, tile, atlas.tilesPerRow);
 
+        // Full tile = inner 8×8 + 1px gutter on each side (10×10). Integrate
+        // pass writes to the full region with edge-replicated borders so the
+        // sampler's bilinear taps near octahedral seams have valid data. (C2)
+        const fullRect = {
+            x: rect.x - TILE_GUTTER,
+            y: rect.y - TILE_GUTTER,
+            w: rect.w + TILE_GUTTER * 2,
+            h: rect.h + TILE_GUTTER * 2,
+        };
+
         cubeTex.value = cubeTarget.texture;
         prevAtlasTex.value = atlas.back.texture;
         uIntensity.value = intensity;
         uHysteresis.value = hysteresis;
+        // The prev-atlas read uses tileUv (clamped to [0,1] inner range inside
+        // the shader), so origin/scale still target the inner 8×8 region.
         uPrevTileOrigin.value.set(rect.x / atlas.width, rect.y / atlas.height);
         uPrevTileScale.value.set(rect.w / atlas.width, rect.h / atlas.height);
         irrMat.needsUpdate = true;
@@ -150,11 +181,14 @@ export function createIntegrator({ renderer }) {
 
         try {
             renderer.setRenderTarget(atlas.front);
-            renderer.setViewport(rect.x, rect.y, rect.w, rect.h);
-            renderer.setScissor(rect.x, rect.y, rect.w, rect.h);
+            renderer.setViewport(fullRect.x, fullRect.y, fullRect.w, fullRect.h);
+            renderer.setScissor(fullRect.x, fullRect.y, fullRect.w, fullRect.h);
             renderer.setScissorTest(true);
             renderer.render(passScene, passCamera);
 
+            // Copy pass: inner 8×8 only — atlas.back is read by next frame's
+            // EMA which only touches inner UVs (the integrate shader clamps),
+            // so the gutter on atlas.back can stay stale.
             copySrcTex.value = atlas.front.texture;
             copyMat.needsUpdate = true;
             renderer.setRenderTarget(atlas.back);

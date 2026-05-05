@@ -3212,6 +3212,9 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     const mesh = new THREE.Mesh(geom, mat);
     mesh.position.copy(spawnPos);
     mesh.userData.ddgiSkipReceive = true;
+    // M6: also hide the volume wireframe from cube capture, otherwise probes
+    // near a volume actor would bake the green wireframe color into irradiance.
+    mesh.userData.ddgiSkipCapture = true;
     mesh.userData.ignoreForcedSceneShadows = true;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
