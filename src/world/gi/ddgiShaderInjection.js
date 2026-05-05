@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Fn, vec2, vec3, vec4, float, texture, uniform, positionWorld, normalWorld, output, materialColor } from 'three/tsl';
+import { Fn, vec2, vec3, vec4, float, texture, uniform, positionWorld, normalWorld, output } from 'three/tsl';
 
 function createBlackTexture() {
     const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
@@ -123,27 +123,56 @@ export function patchMaterials(root, ddgiNode) {
         for (const mat of mats) {
             if (!mat || mat.userData?._ddgiPatched) continue;
             if (!(mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial)) continue;
+
+            // Snapshot original outputNode so we can restore it if the patched
+            // graph fails to compile and produces black output.
+            const originalOutputNode = mat.outputNode;
             try {
                 // Modulate DDGI irradiance by surface albedo BEFORE adding.
                 // Otherwise black surfaces glow and red surfaces get neutral GI
                 // instead of red-tinted GI — the standard DDGI shading is
                 // direct + albedo * irradiance, not direct + irradiance.
-                // Use mat.colorNode if explicitly set (e.g. from a map texture
-                // chain); fall back to the TSL `materialColor` accessor which
-                // resolves the material's diffuse value at fragment time.
-                const albedo = mat.colorNode || materialColor;
-                const ddgiContribution = vec3(ddgiNode).mul(albedo);
+                //
+                // Albedo source priority (least version-dependent first):
+                //   1. mat.colorNode if explicitly set (textured/custom mats).
+                //   2. A per-material UniformNode wrapping mat.color (the
+                //      common case for standard materials — works on every
+                //      Three.js TSL version because it doesn't rely on
+                //      `materialColor` or other TSL accessors).
+                //   3. If neither is available, fall back to unmodulated
+                //      additive (less correct but safe — never goes black).
+                let albedoNode = null;
+                if (mat.colorNode) {
+                    albedoNode = mat.colorNode;
+                } else if (mat.color) {
+                    let cached = mat.userData._ddgiAlbedoUniform;
+                    if (!cached) {
+                        cached = uniform(mat.color);
+                        mat.userData._ddgiAlbedoUniform = cached;
+                    }
+                    albedoNode = cached;
+                }
+
+                const contribution = albedoNode
+                    ? ddgiNode.mul(albedoNode)
+                    : ddgiNode;
+
                 if (mat.outputNode) {
-                    mat.outputNode = mat.outputNode.add(vec4(ddgiContribution, 0));
+                    mat.outputNode = mat.outputNode.add(vec4(contribution, 0));
                 } else {
-                    // Add after the standard lighting path. This keeps DDGI out
-                    // of emissiveNode, so bloom does not treat bounce as glow.
-                    mat.outputNode = output.add(vec4(ddgiContribution, 0));
+                    // Add after the standard lighting path. This keeps DDGI
+                    // out of emissiveNode, so bloom does not treat bounce as
+                    // glow.
+                    mat.outputNode = output.add(vec4(contribution, 0));
                 }
                 mat.userData._ddgiPatched = true;
                 mat.needsUpdate = true;
             } catch (e) {
-                console.warn('[DDGI] material patch failed', mat, e);
+                console.warn('[DDGI] material patch failed, restoring original', mat, e);
+                mat.outputNode = originalOutputNode;
+                // Mark as patched anyway so we don't retry every frame and
+                // spam the console.
+                mat.userData._ddgiPatched = true;
             }
         }
     });
