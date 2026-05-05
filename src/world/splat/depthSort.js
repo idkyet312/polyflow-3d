@@ -90,10 +90,12 @@ export function attachDepthSort(mesh, splatData, opts = {}) {
     const _camWorld   = new THREE.Vector3();
     const _camLocal   = new THREE.Vector3();
     const _camDirWld  = new THREE.Vector3();
+    const _camDirLocal = new THREE.Vector3();
     const _invMatrix  = new THREE.Matrix4();
     const _modelMat   = new THREE.Matrix4();
     const _mvpLocal   = new THREE.Matrix4();
     const _camLocalA  = [0, 0, 0];
+    const _camDirLocalA = [0, 0, 1];
 
     // Buffer for the latest unapplied sort result (set by the worker
     // callback, drained at the start of the next onBeforeRender so we
@@ -172,9 +174,13 @@ export function attachDepthSort(mesh, splatData, opts = {}) {
         //    can sort directly against the local-space positions it owns).
         _invMatrix.copy(this.matrixWorld).invert();
         _camLocal.copy(_camWorld).applyMatrix4(_invMatrix);
+        _camDirLocal.copy(_camDirWld).transformDirection(_invMatrix).normalize();
         _camLocalA[0] = _camLocal.x;
         _camLocalA[1] = _camLocal.y;
         _camLocalA[2] = _camLocal.z;
+        _camDirLocalA[0] = _camDirLocal.x;
+        _camDirLocalA[1] = _camDirLocal.y;
+        _camDirLocalA[2] = _camDirLocal.z;
 
         // 5. If cull is on, build local-space MVP: P * V * M.
         let mvpForWorker = null;
@@ -185,7 +191,7 @@ export function attachDepthSort(mesh, splatData, opts = {}) {
             mvpForWorker = new Float32Array(_mvpLocal.elements);
         }
 
-        sortClient.requestSort(_camLocalA, mvpForWorker, enableCull ? cullMargin : 0, onSorted);
+        sortClient.requestSort(_camLocalA, _camDirLocalA, mvpForWorker, enableCull ? cullMargin : 0, onSorted);
 
         if (!lastCamPos) lastCamPos = new THREE.Vector3();
         lastCamPos.copy(_camWorld);

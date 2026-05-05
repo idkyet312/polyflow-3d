@@ -82,6 +82,9 @@ self.onmessage = (e) => {
         const cx = m.camLocal[0];
         const cy = m.camLocal[1];
         const cz = m.camLocal[2];
+        const vx = m.viewLocal?.[0] ?? 0;
+        const vy = m.viewLocal?.[1] ?? 0;
+        const vz = m.viewLocal?.[2] ?? 1;
 
         const mvp        = m.mvpLocal || null;
         const cullMargin = (typeof m.cullMargin === 'number') ? m.cullMargin : 0;
@@ -104,7 +107,9 @@ self.onmessage = (e) => {
                 const px = pos[i3], py = pos[i3 + 1], pz = pos[i3 + 2];
 
                 const dx = px - cx, dy = py - cy, dz = pz - cz;
-                depthsF32[i] = dx * dx + dy * dy + dz * dz;
+                depthsF32[i] = dx * vx + dy * vy + dz * vz;
+                const bits = depthsU32[i];
+                depthsU32[i] = (bits & 0x80000000) ? (~bits >>> 0) : (bits ^ 0x80000000);
 
                 const cw = m30 * px + m31 * py + m32 * pz + m33;
                 if (cw <= 0.0001) {
@@ -127,7 +132,9 @@ self.onmessage = (e) => {
                 const dx = pos[i3]     - cx;
                 const dy = pos[i3 + 1] - cy;
                 const dz = pos[i3 + 2] - cz;
-                depthsF32[i] = dx * dx + dy * dy + dz * dz;
+                depthsF32[i] = dx * vx + dy * vy + dz * vz;
+                const bits = depthsU32[i];
+                depthsU32[i] = (bits & 0x80000000) ? (~bits >>> 0) : (bits ^ 0x80000000);
             }
             visibleCount = N;
         }

@@ -23,7 +23,8 @@ import * as THREE from 'three';
 import { ActorComponent } from '../../runtime/components/ActorComponent.js';
 import { TransformComponent } from '../../runtime/components/TransformComponent.js';
 import { Actor } from '../../runtime/sceneRuntime.js';
-import { buildSplatMesh, loadSplat } from './splatRenderer.js';
+import { loadSplat } from './splatRenderer.js';
+import { buildSplatMeshAuto } from './perfMode.js';
 
 // ---------------------------------------------------------------------
 // SplatComponent — UE-style component holding the splat renderer mesh
@@ -53,7 +54,7 @@ export class SplatComponent extends ActorComponent {
         this.loadPromise = (async () => {
             try {
                 const data = await loadSplat(this.url);
-                this.mesh = buildSplatMesh(data);
+                this.mesh = buildSplatMeshAuto(data);
                 this.count = data.count;
                 this._computeBounds(data.positions);
 

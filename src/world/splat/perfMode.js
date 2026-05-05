@@ -68,7 +68,7 @@ export function detectComputeSupport() {
  * @returns {THREE.Mesh}
  */
 export function buildSplatMeshAuto(splatData) {
-    const mode = _modeOverride || (detectComputeSupport() ? 'compute' : 'worker');
+    const mode = _modeOverride || 'worker';
 
     if (mode === 'compute') {
         try {

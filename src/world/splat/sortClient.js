@@ -81,10 +81,10 @@ export class SortClient {
      *          - call `recycle(recycledBuffer)` afterward so the buffer is
      *            shipped back to the worker on the next request.
      */
-    requestSort(camLocal, mvpLocal, cullMargin, callback) {
+    requestSort(camLocal, viewLocal, mvpLocal, cullMargin, callback) {
         if (!this._ready) return;
 
-        const req = { camLocal, mvpLocal, cullMargin, callback };
+        const req = { camLocal, viewLocal, mvpLocal, cullMargin, callback };
         if (this._inflight) {
             // Coalesce: latest pending wins. Discard any older pending.
             this._pending = req;
@@ -133,6 +133,9 @@ export class SortClient {
             camLocal:  Array.isArray(req.camLocal)
                 ? req.camLocal
                 : [req.camLocal[0], req.camLocal[1], req.camLocal[2]],
+            viewLocal: Array.isArray(req.viewLocal)
+                ? req.viewLocal
+                : [req.viewLocal[0], req.viewLocal[1], req.viewLocal[2]],
             mvpLocal:  req.mvpLocal || null,
             cullMargin: req.cullMargin || 0,
         };

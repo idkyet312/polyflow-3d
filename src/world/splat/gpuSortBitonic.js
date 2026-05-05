@@ -136,7 +136,8 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
             // bitcast<u32>(positive_float) preserves ordering: smaller float
             // → smaller u32. Standard radix-on-float trick (web-splat does
             // the same with bitcast<u32>(clip.z) at preprocess.wgsl:248).
-            const key = depth.bitcast('uint');                // f32 → u32 reinterpret
+            const normalizedDepth = depth.div(float(100000.0)).clamp(0.0, 1.0);
+            const key = uint(0xffffffff).sub(normalizedDepth.mul(float(4294967295.0)).toUint());
             sortKeysNodeBK.element(i).assign(key);
         });
     });
