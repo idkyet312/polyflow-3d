@@ -110,3 +110,57 @@ export function packHalfPairs(src) {
     }
     return out;
 }
+
+// Scratch buffer for the half→float decode path.
+const _decode_f32 = new Float32Array(1);
+const _decode_u32 = new Uint32Array(_decode_f32.buffer);
+
+/**
+ * Convert one u16 half-float bit pattern → its f32 value.
+ * Inverse of floatToHalf.
+ * @param {number} h u16 bit pattern
+ * @returns {number} f32 value
+ */
+export function halfToFloat(h) {
+    const sign = (h & 0x8000) << 16;
+    let   exp  = (h & 0x7c00) >>> 10;
+    let   m    = h & 0x03ff;
+
+    if (exp === 0) {
+        if (m === 0) {
+            _decode_u32[0] = sign;
+            return _decode_f32[0];
+        }
+        // Subnormal — normalize.
+        while ((m & 0x0400) === 0) { m <<= 1; exp -= 1; }
+        m &= 0x03ff;
+        exp += 1;
+    } else if (exp === 0x1f) {
+        // ±Inf or NaN.
+        _decode_u32[0] = sign | 0x7f800000 | (m << 13);
+        return _decode_f32[0];
+    }
+    exp = exp + 127 - 15;
+    _decode_u32[0] = sign | (exp << 23) | (m << 13);
+    return _decode_f32[0];
+}
+
+/**
+ * Decode a Uint16Array of half-floats into a Float32Array.
+ * Length-equivalent: out.length === src.length.
+ *
+ * @param {Uint16Array}  src
+ * @param {Float32Array} [out]  Optional pre-allocated buffer.
+ * @returns {Float32Array}
+ */
+export function unpackHalfArray(src, out) {
+    const n = src.length;
+    if (!out) out = new Float32Array(n);
+    if (out.length !== n) {
+        throw new Error(`[halfFloat] output length ${out.length} != input length ${n}`);
+    }
+    for (let i = 0; i < n; i++) {
+        out[i] = halfToFloat(src[i]);
+    }
+    return out;
+}

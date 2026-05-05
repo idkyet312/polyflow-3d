@@ -55,8 +55,12 @@ import {
     uint, float, vec3, vec4, mat4,
     If, abs, max,
 } from 'three/tsl';
+import { unpackHalfArray } from './halfFloat.js';
 
 const WORKGROUP_SIZE = 256;
+
+// SH coefficients per channel for each degree (excluding DC band 0).
+const COEFFS_PER_CHANNEL = [0, 3, 8, 15];
 
 // ---------------------------------------------------------------------------
 // nextPow2 — bitonic sort works on power-of-2-length arrays. We pad with
@@ -251,21 +255,43 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
  * Call this from buildSplatMeshCompute and stash on mesh.userData.splat
  * so attachGpuSort can find them.
  *
- * @param {{count:number, positions:Float32Array, scales:Float32Array, colors:Float32Array, rotations:Float32Array}} splatData
+ * Phase 4 additions (radiance fields):
+ *   - When `splatData.sh` is present and degree > 0, allocate `shCoeffsStorage`
+ *     (vec3 per coeff per splat, f32) and — for codebook layout — `shLabelsStorage`
+ *     (uint per splat). Half-float source data from the loader is unpacked to f32
+ *     here. Phase-4 follow-up may halve GPU memory by switching to half-pack
+ *     storage (~135 MB → ~70 MB at 1.5M splats deg 3).
+ *   - Always allocate `frameColorsStorage` (vec4 RGBA per splat, f32 linear).
+ *     The new compute preprocess pass writes per-frame view-dependent color
+ *     here; the vertex shader reads `frameColors[src]` instead of evaluating
+ *     SH every vertex (= every quad corner = 4× redundant work).
+ *
+ * @param {{count, positions, scales, colors, rotations,
+ *          colorEncoding?:'fdc_raw'|'linear_rgb',
+ *          sh?:{degree, layout:'direct'|'codebook',
+ *               coeffs:Uint16Array, codebookSize?:number, labels?:Uint16Array}}} splatData
  * @returns {{
  *   count: number,
  *   countPadded: number,
+ *   colorEncoding: 'fdc_raw' | 'linear_rgb',
+ *   shDegree: number,
+ *   shLayout: 'none' | 'direct' | 'codebook',
+ *   shCodebookSize?: number,
  *   positionsStorage: StorageInstancedBufferAttribute,
  *   scalesStorage:    StorageInstancedBufferAttribute,
  *   colorsStorage:    StorageInstancedBufferAttribute,
  *   rotationsStorage: StorageInstancedBufferAttribute,
  *   sortKeysStorage:  StorageInstancedBufferAttribute,
  *   sortedIndicesStorage: StorageInstancedBufferAttribute,
+ *   shCoeffsStorage?: StorageInstancedBufferAttribute,
+ *   shLabelsStorage?: StorageInstancedBufferAttribute,
+ *   frameColorsStorage: StorageInstancedBufferAttribute,
  * }}
  */
 export function allocateSplatStorage(splatData) {
     const N      = splatData.count | 0;
     const N_pad  = nextPow2(N);
+    const colorEncoding = splatData.colorEncoding || 'linear_rgb';
 
     // Source-data storage (read-only in shaders, written once on upload).
     const positionsStorage = new StorageInstancedBufferAttribute(splatData.positions, 3);
@@ -277,14 +303,63 @@ export function allocateSplatStorage(splatData) {
     const sortKeysStorage      = new StorageInstancedBufferAttribute(new Uint32Array(N_pad), 1);
     const sortedIndicesStorage = new StorageInstancedBufferAttribute(new Uint32Array(N_pad), 1);
 
-    return {
+    // Per-frame evaluated color (output of the new preprocess compute pass).
+    // 4 floats per splat: (R, G, B, alpha). Allocated to N (not N_pad) — only
+    // real splats have output color; padded slots are never read by the render
+    // pass (geometry.instanceCount = N caps draw to real splats).
+    const frameColorsStorage = new StorageInstancedBufferAttribute(new Float32Array(N * 4), 4);
+
+    const out = {
         count:                N,
         countPadded:          N_pad,
+        colorEncoding,
+        shDegree:             0,
+        shLayout:             'none',
         positionsStorage,
         scalesStorage,
         colorsStorage,
         rotationsStorage,
         sortKeysStorage,
         sortedIndicesStorage,
+        frameColorsStorage,
     };
+
+    // Phase 4 — SH bands 1..N.
+    const sh = splatData.sh;
+    if (sh && sh.degree > 0 && sh.coeffs) {
+        const K = COEFFS_PER_CHANNEL[sh.degree] | 0;
+        if (K > 0) {
+            // Source half-pack from the loader → f32 vec3 per coefficient for
+            // the GPU storage. Layout per splat (direct):
+            //   Float32Array(N * K * 3)    — vertex-major RGB-interleaved
+            //   coeffs[i*K*3 + k*3 + c] = c-th channel of k-th coef of splat i
+            // For codebook: coeffs[entry*K*3 + ...], length codebookSize*K*3.
+            const halfSrc = sh.coeffs;
+            const f32Coeffs = unpackHalfArray(halfSrc);
+            // StorageInstancedBufferAttribute itemSize=3 = vec3 elements.
+            // Each "instance" of this storage is one coefficient (one vec3).
+            const shCoeffsStorage = new StorageInstancedBufferAttribute(f32Coeffs, 3);
+
+            out.shDegree       = sh.degree;
+            out.shLayout       = sh.layout || 'direct';
+            out.shCoeffsStorage = shCoeffsStorage;
+
+            if (out.shLayout === 'codebook') {
+                if (!sh.labels) {
+                    console.warn('[splat-gpuSort] sh.layout=codebook but sh.labels missing; treating as no SH');
+                    out.shDegree = 0;
+                    out.shLayout = 'none';
+                    out.shCoeffsStorage = undefined;
+                } else {
+                    out.shCodebookSize = sh.codebookSize | 0;
+                    // Labels: u32 per splat (uint storage). Source is u16 from loader.
+                    const labelsU32 = new Uint32Array(N);
+                    for (let i = 0; i < N; i++) labelsU32[i] = sh.labels[i] >>> 0;
+                    out.shLabelsStorage = new StorageInstancedBufferAttribute(labelsU32, 1);
+                }
+            }
+        }
+    }
+
+    return out;
 }

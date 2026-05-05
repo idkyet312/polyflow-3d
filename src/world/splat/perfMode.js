@@ -91,5 +91,16 @@ export function buildSplatMeshAuto(splatData) {
         // TODO: refactor splatRenderer.js to make the depth-sort attach
         // optional, then honor 'off' here.
     }
+    // Phase 4: SH bands 1..N are evaluated only in the compute path. If the
+    // user is on worker/off and the dataset SHIPPED with SH data, surface a
+    // one-time hint so the visual difference (specular highlights missing,
+    // washed-out look on glossy surfaces) doesn't read as a bug.
+    if (splatData?.sh?.degree > 0) {
+        console.log(
+            `[splat] dataset has SH degree ${splatData.sh.degree} — view-dependent ` +
+            `radiance is rendered only on the compute path. Switch to compute mode ` +
+            `(setSplatSortMode('compute') + reload) to see specular/glossy detail.`,
+        );
+    }
     return mesh;
 }
