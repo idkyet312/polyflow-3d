@@ -435,14 +435,16 @@ const globalPostProcessUniforms = {
     bloomThreshold: uniform(0.48)
 };
 
-// Performance toggle: when on, skips DDGI tick, volumetric fog update, and the
-// post-process volume update. The three subsystems own their own state via
-// setEnabled, so flipping this back to false restores the default render path
-// without a reload. Defaults to OFF on fix/ddgi-correctness so DDGI is actually
-// exercised at boot — perf-mode-on suppresses ddgiManager.tick() (main.js:5865)
-// AND forces setEnabled(false)+setInjectionEnabled(false) via applyWorldEnvState
-// (~L4133), which masked the C1/C2/M2/C4/M6 fixes from PR #22.
-const PERF_MODE_DEFAULT_ENABLED = false;
+// Performance toggle: when on, skips volumetric fog update and post-process
+// volume update. (DDGI no longer respects this on fix/ddgi-correctness — see
+// runtimeDdgiEnabled below.) The two subsystems own their own state via
+// setEnabled, so flipping this saves both render work and CPU update work.
+//
+// Stays at TRUE on this branch so the post-process / TSL bloom pipeline doesn't
+// boot — there's a separate latent bug there (UnrealBloomPass.* label invalid
+// uncaught WebGPU errors on boot) that we don't want to surface while we're
+// debugging DDGI. Bloom can be re-enabled from the World Environment panel.
+const PERF_MODE_DEFAULT_ENABLED = true;
 let perfModeEnabled = PERF_MODE_DEFAULT_ENABLED;
 let perfModeUiRefs = null;
 
@@ -4077,7 +4079,12 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     const s = worldEnvState;
     const runtimeBloomEnabled = s.bloom.enabled && !perfModeEnabled;
     const runtimeFogEnabled = s.fog.enabled && !perfModeEnabled;
-    const runtimeDdgiEnabled = s.ddgi.enabled && (!perfModeEnabled || s.ddgi.contributionView);
+    // fix/ddgi-correctness: decouple DDGI from perf-mode. The original gate
+    // (`s.ddgi.enabled && !perfModeEnabled`) meant perfMode forced setEnabled(false)
+    // on the DDGI manager via applyWorldEnvState below, which made the bake never
+    // run and masked PR #22's correctness fixes. Now DDGI's runtime enabled state
+    // tracks ONLY the explicit worldEnvState.ddgi.enabled toggle.
+    const runtimeDdgiEnabled = s.ddgi.enabled;
 
     // Sky / Background
     if (environmentController) {
@@ -5886,9 +5893,9 @@ async function init() {
         }
         const _ddgiStart = performance.now();
         const ddgiManager = getDDGIManager();
-        if (!perfModeEnabled || ddgiManager.isDebugVisible?.() || ddgiManager.contributionViewEnabled) {
-            ddgiManager.tick(delta);
-        }
+        // fix/ddgi-correctness: tick DDGI regardless of perf mode. The runtime
+        // enabled flag (set by applyWorldEnvState) is the single source of truth.
+        ddgiManager.tick(delta);
         const _ddgiMs = performance.now() - _ddgiStart;
         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
         updateObjectAnimations(delta);
