@@ -30,7 +30,7 @@ import {
     Fn, attribute, uniform, varying,
     vec2, vec3, vec4, mat3, float,
     positionLocal, modelViewMatrix, cameraProjectionMatrix,
-    dot, exp, max, sqrt,
+    dot, exp, max, sqrt, Discard,
 } from 'three/tsl';
 import { loadSplatAny } from './loaders/index.js';
 import { attachDepthSort } from './depthSort.js';
@@ -113,65 +113,59 @@ export async function loadSplat(url) {
 // ---------------------------------------------------------------------
 export function buildSplatMesh({ count, positions, scales, colors, rotations, colorEncoding = 'linear_rgb' }, opts = {}) {
     const blendMode = normalizeSplatBlendMode(opts.blendMode);
-    const tuning = getSplatRenderTuning(blendMode);
+    const tuning = getSplatRenderTuning(blendMode, opts.renderSettings);
     const evaluateRawDc = colorEncoding === 'fdc_raw';
 
-    // Geometry: unit quad spanning [-1, 1] in xy, instanced `count` times.
     const geometry = new THREE.InstancedBufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
         -1, -1, 0,   1, -1, 0,   1, 1, 0,   -1, 1, 0,
     ]), 3));
     geometry.setIndex([0, 1, 2, 0, 2, 3]);
     geometry.instanceCount = count;
-    geometry.setAttribute('splatPos',   new THREE.InstancedBufferAttribute(positions, 3));
-    geometry.setAttribute('splatScale', new THREE.InstancedBufferAttribute(scales,    3));
-    geometry.setAttribute('splatColor', new THREE.InstancedBufferAttribute(colors,    4));
-    geometry.setAttribute('splatRot',   new THREE.InstancedBufferAttribute(rotations, 4));
+    geometry.setAttribute('splatPos', new THREE.InstancedBufferAttribute(positions, 3));
+    geometry.setAttribute('splatScale', new THREE.InstancedBufferAttribute(scales, 3));
+    geometry.setAttribute('splatColor', new THREE.InstancedBufferAttribute(colors, 4));
+    geometry.setAttribute('splatRot', new THREE.InstancedBufferAttribute(rotations, 4));
 
-    // Camera-derived uniforms; refreshed each frame in onBeforeRender below.
-    const uFocal    = uniform(new THREE.Vector2(1, 1));
+    const uFocal = uniform(new THREE.Vector2(1, 1));
     const uViewport = uniform(new THREE.Vector2(1, 1));
+    const uSplatRadius = uniform(tuning.radius);
+    const uAlphaCutoff = uniform(tuning.alphaCutoff);
+    const uAlphaScale = uniform(tuning.alphaScale);
+    const uPremultiply = uniform(blendMode === 'reference' ? 1 : 0);
 
     const material = new MeshBasicNodeMaterial({
         transparent: true,
-        depthWrite:  false,   // splats are translucent; don't occlude each other in depth buffer
-        depthTest:   true,    // but DO read depth so opaque scene geometry occludes splats
-        side:        THREE.DoubleSide,
+        depthWrite: false,
+        depthTest: true,
+        side: THREE.DoubleSide,
     });
     configureSplatMaterialBlend(material, blendMode);
 
-    // Cross-stage varyings.
-    const vQuad  = varying(vec2(0, 0), 'vQuad');   // quad-local position scaled to sigma units
+    const vQuad = varying(vec2(0, 0), 'vQuad');
     const vColor = varying(vec4(0, 0, 0, 0), 'vColor');
 
     material.vertexNode = Fn(() => {
-        const sp  = attribute('splatPos');
+        const sp = attribute('splatPos');
         const ssc = attribute('splatScale');
-        const sc  = attribute('splatColor');
-        const sr  = attribute('splatRot');
+        const sc = attribute('splatColor');
+        const sr = attribute('splatRot');
 
-        // Normalize the quaternion before building R. .splat byte-quantized
-        // rotations aren't exactly unit (per-component error ~1/256), and PLY/SOG
-        // can drift from FP rounding. A non-unit quaternion produces a rotation
-        // matrix with baked-in scale, which combined with the splat's scale
-        // diagonal gives degenerate covariance and visible streaking.
         const qn = sr.div(max(sqrt(dot(sr, sr)), float(0.0001)));
 
-        // Quaternion (x,y,z,w) -> 3x3 rotation matrix.
         const x = qn.x, y = qn.y, z = qn.z, w = qn.w;
         const R = mat3(
             vec3(float(1).sub(float(2).mul(y.mul(y).add(z.mul(z)))),
-                 float(2).mul(x.mul(y).add(w.mul(z))),
-                 float(2).mul(x.mul(z).sub(w.mul(y)))),
+                float(2).mul(x.mul(y).add(w.mul(z))),
+                float(2).mul(x.mul(z).sub(w.mul(y)))),
             vec3(float(2).mul(x.mul(y).sub(w.mul(z))),
-                 float(1).sub(float(2).mul(x.mul(x).add(z.mul(z)))),
-                 float(2).mul(y.mul(z).add(w.mul(x)))),
+                float(1).sub(float(2).mul(x.mul(x).add(z.mul(z)))),
+                float(2).mul(y.mul(z).add(w.mul(x)))),
             vec3(float(2).mul(x.mul(z).add(w.mul(y))),
-                 float(2).mul(y.mul(z).sub(w.mul(x))),
-                 float(1).sub(float(2).mul(x.mul(x).add(y.mul(y))))),
+                float(2).mul(y.mul(z).sub(w.mul(x))),
+                float(1).sub(float(2).mul(x.mul(x).add(y.mul(y))))),
         );
 
-        // Sigma_3D = R * S^2 * R^T  (S = diag(scale))
         const S2 = mat3(
             vec3(ssc.x.mul(ssc.x), 0, 0),
             vec3(0, ssc.y.mul(ssc.y), 0),
@@ -179,53 +173,42 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations, co
         );
         const cov3D = R.mul(S2).mul(R.transpose());
 
-        // Splat center: world -> view -> clip. modelViewMatrix is (view * model),
-        // i.e. exactly the model-to-view-space transform we want.
         const viewPos = modelViewMatrix.mul(vec4(sp, 1.0));
-        const tz      = max(viewPos.z.negate(), 0.001);   // positive depth in front of camera
+        const tz = max(viewPos.z.negate(), 0.001);
 
-        // Jacobian J of perspective projection at viewPos (Zwicker 2001).
         const J02 = uFocal.x.mul(viewPos.x).div(tz.mul(tz)).negate();
         const J12 = uFocal.y.mul(viewPos.y).div(tz.mul(tz)).negate();
         const J = mat3(
-            vec3(uFocal.x.div(tz), 0,                0),
-            vec3(0,                uFocal.y.div(tz), 0),
-            vec3(J02,              J12,              0),
+            vec3(uFocal.x.div(tz), 0, 0),
+            vec3(0, uFocal.y.div(tz), 0),
+            vec3(J02, J12, 0),
         );
 
-        // 2D screen-space covariance: T * Sigma_3D * T^T, where T = J * W.
-        // W = upper-left 3x3 of modelViewMatrix (view * model). This respects the splat
-        // actor's transform, so a moved/rotated/scaled SplatActor still produces
-        // correctly-shaped ellipses.
         const W = mat3(modelViewMatrix.element(0).xyz, modelViewMatrix.element(1).xyz, modelViewMatrix.element(2).xyz);
         const T = J.mul(W);
         const C = T.mul(cov3D).mul(T.transpose());
-        const a = C.element(0).x.add(0.3);   // 0.3 = anti-aliasing low-pass regularization
+        const a = C.element(0).x.add(0.3);
         const b = C.element(0).y;
         const c = C.element(1).y.add(0.3);
 
-        // Eigendecomposition of the 2x2 symmetric matrix [[a,b],[b,c]].
-        const det  = a.mul(c).sub(b.mul(b));
-        const mid  = a.add(c).mul(0.5);
+        const det = a.mul(c).sub(b.mul(b));
+        const mid = a.add(c).mul(0.5);
         const disc = sqrt(max(mid.mul(mid).sub(det), 0.0));
         const lam1 = mid.add(disc);
         const lam2 = max(mid.sub(disc), 0.0);
 
-        // Major / minor axes in screen pixels, sized to 3 sigmas (~99.7%).
-        const v1     = vec2(b, lam1.sub(a));
-        const v1Len  = max(v1.length(), 1e-6);
-        const major  = v1.div(v1Len).mul(sqrt(lam1).mul(3.0));
-        const minor  = vec2(major.y.negate(), major.x).mul(sqrt(lam2).div(max(sqrt(lam1), 1e-6)));
+        const v1 = vec2(b, lam1.sub(a));
+        const v1Len = max(v1.length(), 1e-6);
+        const major = v1.div(v1Len).mul(sqrt(lam1).mul(3.0));
+        const minor = vec2(major.y.negate(), major.x).mul(sqrt(lam2).div(max(sqrt(lam1), 1e-6)));
 
-        // Project center to clip space, then expand the quad along (major, minor).
         const clipCenter = cameraProjectionMatrix.mul(viewPos);
-        const px2clip    = vec2(2.0).div(uViewport).mul(clipCenter.w);
+        const px2clip = vec2(2.0).div(uViewport).mul(clipCenter.w);
         const offsetClip = major.mul(positionLocal.x).add(minor.mul(positionLocal.y)).mul(px2clip);
 
-        // Pass to fragment: positionLocal * 3 -> quad-local coords in units of sigma.
-        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(tuning.radius));
+        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(uSplatRadius));
         if (evaluateRawDc) {
-            vColor.assign(vec4(sc.rgb.mul(SH_C0).add(0.5).clamp(0.0, 1.0).pow(2.2), sc.a));
+            vColor.assign(vec4(sc.rgb.mul(SH_C0).add(0.5).max(0.0), sc.a));
         } else {
             vColor.assign(sc);
         }
@@ -234,28 +217,33 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations, co
     })();
 
     material.colorNode = Fn(() => {
-        // 2D Gaussian: alpha = alpha_splat * exp(-0.5 * ||vQuad||^2).
-        // Because we expanded the quad in the eigenbasis with 3*sqrt(lambda) units,
-        // ||vQuad||^2 is exactly the squared Mahalanobis distance.
-        const r2  = dot(vQuad, vQuad);
-        const raw = exp(r2.mul(-0.5)).mul(vColor.a).mul(tuning.alphaScale);
-        // Hard cutoff for the long faint tail beyond ~2.5 sigma. Below 1/255
-        // the framebuffer can't represent the contribution anyway, and the
-        // tails are what give un-sorted splats the visible "streaks" feel.
-        const alpha = raw.sub(tuning.alphaCutoff).max(0);
-        if (blendMode === 'reference') {
-            return vec4(vColor.rgb.mul(alpha), alpha);
-        }
-        return vec4(vColor.rgb, alpha);
+        const r2 = dot(vQuad, vQuad);
+        const raw = exp(r2.mul(-0.5)).mul(vColor.a).mul(uAlphaScale);
+        Discard(raw.lessThan(uAlphaCutoff));
+        const alpha = raw;
+        return uPremultiply.greaterThan(0.5).select(
+            vec4(vColor.rgb.mul(alpha), alpha),
+            vec4(vColor.rgb, alpha),
+        );
     })();
 
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.frustumCulled = false;   // no per-instance bbox yet; cull at scene level only
-    mesh.renderOrder   = 100;     // render after all opaques
-    mesh.name          = 'SplatCloud';
+    mesh.frustumCulled = false;
+    mesh.renderOrder = 100;
+    mesh.name = 'SplatCloud';
     mesh.userData.splatBlendMode = blendMode;
+    mesh.userData.splatRenderUniforms = {
+        radius: uSplatRadius,
+        alphaCutoff: uAlphaCutoff,
+        alphaScale: uAlphaScale,
+        premultiply: uPremultiply,
+    };
+    mesh.userData.splatRenderSettings = {
+        blendMode,
+        radius: tuning.radius,
+        alphaCutoff: tuning.alphaCutoff,
+    };
 
-    // Update camera-derived uniforms each frame.
     mesh.onBeforeRender = (renderer, _scene, camera) => {
         const size = renderer.getSize(new THREE.Vector2());
         uFocal.value.set(
@@ -265,10 +253,6 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations, co
         uViewport.value.copy(size);
     };
 
-    // Throttled CPU back-to-front depth sort. Wraps onBeforeRender so the
-    // camera uniform update above still runs. Without this, alpha-blended
-    // splats render in load order and the result reads as visible "marks"
-    // rather than a coherent surface — see depthSort.js for the rationale.
     if (opts.attachSort !== false) {
         attachDepthSort(mesh, { count, positions, scales, colors, rotations });
     }

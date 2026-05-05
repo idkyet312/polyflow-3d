@@ -1,54 +1,32 @@
 // src/world/splat/splatActor.js
 //
 // Phase 2: SplatActor — wraps a Gaussian Splat as a first-class scene actor.
-//
-// Integrates with:
-//   - Actor / SceneSystem  (registers like any other actor; mesh added to scene root)
-//   - TransformComponent   (transform gizmo edits propagate through modelMatrix)
-//   - sceneSerialization   (toJSON / deserializeSplatActor hooks for round-trip)
-//
-// What this ADDS over the bare splatRenderer mesh:
-//   - Lifecycle: loads on beginPlay, disposes on endPlay
-//   - URL-aware serialization: saves the splat URL + transform; reloads on import
-//   - PCA-fit bounding box from splat centers (selection outline + scene UI)
-//   - Splats show up under runtime/components like other actors
-//
-// What this does NOT do yet (deferred):
-//   - WebGPU compute depth sort (Phase 3)
-//   - Frustum cull / LOD (Phase 3)
-//   - Physics collision proxy (Phase 4)
-//   - DDGI lighting integration (Phase 5)
 
 import * as THREE from 'three';
 import { ActorComponent } from '../../runtime/components/ActorComponent.js';
 import { TransformComponent } from '../../runtime/components/TransformComponent.js';
 import { Actor } from '../../runtime/sceneRuntime.js';
 import { loadSplat } from './splatRenderer.js';
-import { buildSplatMeshAuto } from './perfMode.js';
+import { buildSplatMeshAuto, getSplatRenderSettings } from './perfMode.js';
+import { applySplatRenderSettings, normalizeSplatRenderSettings } from './renderTuning.js';
 
-// ---------------------------------------------------------------------
-// SplatComponent — UE-style component holding the splat renderer mesh
-// ---------------------------------------------------------------------
 export class SplatComponent extends ActorComponent {
     static componentKey = 'SplatComponent';
 
-    constructor({ url = '', count = 0 } = {}) {
+    constructor({ url = '', count = 0, renderSettings = null } = {}) {
         super();
-        /** @type {string} URL to the .splat file. Required for beginPlay to do anything. */
         this.url = url;
-        /** @type {number} Splat count (populated after load). */
         this.count = count;
         this.shDegree = 0;
         this.shData = null;
-        /** @type {THREE.Mesh|null} The actual renderer mesh (set after load). */
         this.mesh = null;
-        /** @type {Promise<void>|null} Resolves when the splat is loaded and attached. */
         this.loadPromise = null;
-        /** @type {THREE.Box3} PCA-fit bounds from splat centers. Empty until load completes. */
         this.bounds = new THREE.Box3();
+        this.renderSettings = renderSettings
+            ? normalizeSplatRenderSettings(renderSettings, renderSettings?.blendMode)
+            : null;
     }
 
-    /** Called by Actor.addComponent. Kicks off async load. */
     beginPlay() {
         if (!this.url || !this.owner) return;
         if (this.loadPromise) return;
@@ -62,8 +40,12 @@ export class SplatComponent extends ActorComponent {
                 this.shData = data.sh || null;
                 this._computeBounds(data.positions);
 
-                // Attach to the actor's root mesh so transform-gizmo edits on the actor
-                // propagate to the splat via Three.js's parent matrix chain.
+                if (this.renderSettings) {
+                    applySplatRenderSettings(this.mesh, this.renderSettings, { resetToPreset: true });
+                    this.renderSettings = { ...(this.mesh.userData?.splatRenderSettings || this.renderSettings) };
+                }
+                this._syncOwnerUserData();
+
                 const root = this.owner?.mesh;
                 if (root && this.mesh) root.add(this.mesh);
             } catch (err) {
@@ -73,7 +55,6 @@ export class SplatComponent extends ActorComponent {
         })();
     }
 
-    /** Called when the actor is destroyed or the component is removed. */
     endPlay() {
         if (this.mesh) {
             this.mesh.parent?.remove(this.mesh);
@@ -84,17 +65,52 @@ export class SplatComponent extends ActorComponent {
         this.loadPromise = null;
     }
 
-    /** Tight box from splat centers. Doesn't account for splat anisotropy — fine for selection. */
     _computeBounds(positions) {
         this.bounds.makeEmpty();
-        const v = new THREE.Vector3();
+        const point = new THREE.Vector3();
         for (let i = 0; i < positions.length; i += 3) {
-            v.set(positions[i], positions[i + 1], positions[i + 2]);
-            this.bounds.expandByPoint(v);
+            point.set(positions[i], positions[i + 1], positions[i + 2]);
+            this.bounds.expandByPoint(point);
         }
     }
 
-    /** Serialization hook: called by the scene serializer. */
+    _syncOwnerUserData() {
+        if (!this.owner) return;
+
+        const nextUserData = {
+            ...(this.owner.userData || {}),
+            splatUrl: this.url,
+        };
+
+        if (this.renderSettings) {
+            nextUserData.splatRenderSettings = { ...this.renderSettings };
+        }
+
+        this.owner.userData = nextUserData;
+    }
+
+    setRenderSettings(settings = {}, opts = {}) {
+        const fallback = this.renderSettings || getSplatRenderSettings();
+        const requestedBlendMode = settings?.blendMode || fallback.blendMode;
+        const nextInput = opts.resetToPreset
+            ? { ...settings, blendMode: requestedBlendMode }
+            : { ...(this.renderSettings || fallback), ...settings, blendMode: requestedBlendMode };
+        const next = normalizeSplatRenderSettings(nextInput, requestedBlendMode);
+
+        this.renderSettings = {
+            blendMode: next.blendMode,
+            radius: next.radius,
+            alphaCutoff: next.alphaCutoff,
+        };
+
+        if (this.mesh) {
+            applySplatRenderSettings(this.mesh, this.renderSettings, { resetToPreset: true });
+        }
+
+        this._syncOwnerUserData();
+        return this.renderSettings;
+    }
+
     toJSON() {
         return {
             type: 'SplatComponent',
@@ -104,34 +120,19 @@ export class SplatComponent extends ActorComponent {
     }
 }
 
-// ---------------------------------------------------------------------
-// Factory: createSplatActor
-// ---------------------------------------------------------------------
-/**
- * Build an Actor wrapping a Gaussian Splat.
- *
- *   const actor = createSplatActor({
- *       url: '/path/to/file.splat',
- *       name: 'PhotoScan',
- *       position: new THREE.Vector3(0, 0, 0),
- *   });
- *   sceneSystem.addActor(actor);   // shows up in the scene + scene UI
- *
- * @param {object}   options
- * @param {string}   options.url       REQUIRED. URL to the .splat file.
- * @param {string}  [options.name]     Display name (default 'Splat').
- * @param {string}  [options.id]       Stable id; auto-generated if omitted.
- * @param {THREE.Vector3} [options.position]  Initial world position.
- * @returns {Actor}
- */
-export function createSplatActor({ url, name = 'Splat', id = '', position = null } = {}) {
+export function createSplatActor({ url, name = 'Splat', id = '', position = null, renderSettings = null } = {}) {
     if (!url) throw new Error('[splatActor] createSplatActor requires { url }');
 
-    // Empty Group acts as the actor root; the splat renderer mesh attaches as a child
-    // once SplatComponent.beginPlay's async load resolves.
+    const defaults = getSplatRenderSettings();
+    const initialRenderSettings = normalizeSplatRenderSettings(
+        renderSettings || defaults,
+        renderSettings?.blendMode || defaults.blendMode,
+    );
+
     const root = new THREE.Group();
     root.name = name;
     root.userData.splatUrl = url;
+    root.userData.splatRenderSettings = { ...initialRenderSettings };
     if (position) root.position.copy(position);
 
     const actor = new Actor({
@@ -139,54 +140,41 @@ export function createSplatActor({ url, name = 'Splat', id = '', position = null
         name,
         kind: 'splat',
         mesh: root,
-        userData: { splatUrl: url },
+        userData: {
+            splatUrl: url,
+            splatRenderSettings: { ...initialRenderSettings },
+        },
     });
 
     actor.addComponent(new TransformComponent());
-    actor.addComponent(new SplatComponent({ url }));
+    actor.addComponent(new SplatComponent({ url, renderSettings: initialRenderSettings }));
 
     return actor;
 }
 
-// ---------------------------------------------------------------------
-// Serialization
-// ---------------------------------------------------------------------
-/**
- * Serialize a SplatActor to a plain JSON shape.
- * Companion to deserializeSplatActor; intended to plug into the project's
- * existing scene serializer (src/world/sceneSerialization.js) at the actor level.
- *
- *   {
- *     kind: 'splat',
- *     id, name,
- *     transform: { position: [x,y,z], quaternion: [x,y,z,w], scale: [x,y,z] },
- *     userData:  { splatUrl: '...' },
- *     components: [ SplatComponent.toJSON() ]
- *   }
- */
 export function serializeSplatActor(actor) {
     if (!actor || actor.kind !== 'splat') return null;
     const root = actor.mesh;
     const splat = actor.getComponentByClass(SplatComponent);
+    const renderSettings = splat?.renderSettings || actor.userData?.splatRenderSettings || null;
 
     return {
         kind: 'splat',
-        id:   actor.id,
+        id: actor.id,
         name: actor.rootNode?.name ?? root?.name ?? 'Splat',
         transform: {
-            position:   root ? root.position.toArray()   : [0, 0, 0],
+            position: root ? root.position.toArray() : [0, 0, 0],
             quaternion: root ? root.quaternion.toArray() : [0, 0, 0, 1],
-            scale:      root ? root.scale.toArray()      : [1, 1, 1],
+            scale: root ? root.scale.toArray() : [1, 1, 1],
         },
-        userData: { splatUrl: splat?.url ?? actor.userData?.splatUrl ?? '' },
+        userData: {
+            splatUrl: splat?.url ?? actor.userData?.splatUrl ?? '',
+            ...(renderSettings ? { splatRenderSettings: { ...renderSettings } } : {}),
+        },
         components: splat ? [splat.toJSON()] : [],
     };
 }
 
-/**
- * Deserialize a JSON payload (from serializeSplatActor) back into a live SplatActor.
- * The caller is responsible for adding it to a SceneSystem.
- */
 export function deserializeSplatActor(json) {
     const url = json?.userData?.splatUrl
         ?? json?.splatUrl
@@ -195,25 +183,41 @@ export function deserializeSplatActor(json) {
     if (!url) throw new Error('[splatActor] deserializeSplatActor: missing splatUrl');
 
     const actor = createSplatActor({
-        id:   json.id ?? '',
+        id: json.id ?? '',
         name: json.name ?? 'Splat',
         url,
+        renderSettings: json?.userData?.splatRenderSettings ?? null,
     });
 
-    const t = json.transform ?? {};
+    const transform = json.transform ?? {};
     const root = actor.mesh;
     if (root) {
-        if (Array.isArray(t.position))   root.position.fromArray(t.position);
-        if (Array.isArray(t.quaternion)) root.quaternion.fromArray(t.quaternion);
-        if (Array.isArray(t.scale))      root.scale.fromArray(t.scale);
+        if (Array.isArray(transform.position)) root.position.fromArray(transform.position);
+        if (Array.isArray(transform.quaternion)) root.quaternion.fromArray(transform.quaternion);
+        if (Array.isArray(transform.scale)) root.scale.fromArray(transform.scale);
         root.updateMatrixWorld(true);
     }
+
     return actor;
 }
 
-// ---------------------------------------------------------------------
-// Convenience: register with SceneSystem and wait for load
-// ---------------------------------------------------------------------
+export function getSplatActorRenderSettings(actor) {
+    if (!actor || actor.kind !== 'splat') return null;
+    const splat = actor.getComponentByClass?.(SplatComponent) || null;
+    const fallback = getSplatRenderSettings();
+    const settings = splat?.renderSettings
+        || actor.userData?.splatRenderSettings
+        || actor.mesh?.userData?.splatRenderSettings
+        || fallback;
+    return normalizeSplatRenderSettings(settings, settings?.blendMode || fallback.blendMode);
+}
+
+export function setSplatActorRenderSettings(actor, settings = {}, opts = {}) {
+    if (!actor || actor.kind !== 'splat') return null;
+    const splat = actor.getComponentByClass?.(SplatComponent) || null;
+    return splat?.setRenderSettings(settings, opts) || null;
+}
+
 export async function addSplatActorToSceneSystem(sceneSystem, options) {
     const actor = createSplatActor(options);
     sceneSystem.addActor(actor);

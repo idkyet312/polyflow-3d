@@ -32,7 +32,7 @@ import {
     Fn, instanceIndex, uniform, varying, storage,
     vec2, vec3, vec4, mat3, float, uint,
     positionLocal, modelViewMatrix, modelWorldMatrix, cameraProjectionMatrix, cameraPosition,
-    dot, exp, max, sqrt,
+    dot, exp, max, sqrt, Discard,
     unpackHalf2x16,
 } from 'three/tsl';
 
@@ -53,7 +53,7 @@ const SH_C3 = [-0.5900435899266435, 2.890611442640554, -0.4570457994644658, 0.37
  */
 export function buildSplatMeshCompute(splatData, opts = {}) {
     const blendMode = normalizeSplatBlendMode(opts.blendMode);
-    const tuning = getSplatRenderTuning(blendMode);
+    const tuning = getSplatRenderTuning(blendMode, opts.renderSettings);
     const requestedShDegree = Number.isFinite(opts.shDegree) ? opts.shDegree : 0;
     const slot = allocateSplatStorage(splatData, { shDegree: requestedShDegree });
     const N    = slot.count;
@@ -79,6 +79,10 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
     // Camera-derived uniforms (refreshed each frame in onBeforeRender).
     const uFocal    = uniform(new THREE.Vector2(1, 1));
     const uViewport = uniform(new THREE.Vector2(1, 1));
+    const uSplatRadius = uniform(tuning.radius);
+    const uAlphaCutoff = uniform(tuning.alphaCutoff);
+    const uAlphaScale = uniform(tuning.alphaScale);
+    const uPremultiply = uniform(blendMode === 'reference' ? 1 : 0);
 
     const material = new MeshBasicNodeMaterial({
         transparent: true,
@@ -266,25 +270,24 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
                 rgb.addAssign(readShCoeff(src, 14).mul(x.mul(xx.sub(yy.mul(3.0))).mul(SH_C3[6])));
             }
             }
-            outColor = vec4(rgb.add(0.5).clamp(0.0, 1.0).pow(2.2), sc.a);
+            outColor = vec4(rgb.add(0.5).max(0.0), sc.a);
         }
 
-        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(tuning.radius));
+        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(uSplatRadius));
         vColor.assign(outColor);
 
         return clipCenter.add(vec4(offsetClip.x, offsetClip.y, 0, 0));
     })();
 
     material.colorNode = Fn(() => {
-        // 2D Gaussian: alpha = alpha_splat * exp(-0.5 * ||vQuad||²).
-        const r2    = dot(vQuad, vQuad);
-        const raw   = exp(r2.mul(-0.5)).mul(vColor.a).mul(tuning.alphaScale);
-        // Hard cutoff to kill the long faint tail beyond ~2.5 sigma.
-        const alpha = raw.sub(tuning.alphaCutoff).max(0);
-        if (blendMode === 'reference') {
-            return vec4(vColor.rgb.mul(alpha), alpha);
-        }
-        return vec4(vColor.rgb, alpha);
+        const r2 = dot(vQuad, vQuad);
+        const raw = exp(r2.mul(-0.5)).mul(vColor.a).mul(uAlphaScale);
+        Discard(raw.lessThan(uAlphaCutoff));
+        const alpha = raw;
+        return uPremultiply.greaterThan(0.5).select(
+            vec4(vColor.rgb.mul(alpha), alpha),
+            vec4(vColor.rgb, alpha),
+        );
     })();
 
     const mesh = new THREE.Mesh(geometry, material);
@@ -300,6 +303,17 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
     mesh.userData.splatShBytes = slot.shBytes || 0;
     mesh.userData.splatShFallbackReason = slot.shFallbackReason || '';
     mesh.userData.splatBlendMode = blendMode;
+    mesh.userData.splatRenderUniforms = {
+        radius: uSplatRadius,
+        alphaCutoff: uAlphaCutoff,
+        alphaScale: uAlphaScale,
+        premultiply: uPremultiply,
+    };
+    mesh.userData.splatRenderSettings = {
+        blendMode,
+        radius: tuning.radius,
+        alphaCutoff: tuning.alphaCutoff,
+    };
 
     // Keep camera-derived uniforms fresh.
     mesh.onBeforeRender = (renderer, _scene, camera) => {

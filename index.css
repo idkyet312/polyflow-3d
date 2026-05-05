@@ -499,6 +499,91 @@ main {
   margin-top: 0.85rem;
 }
 
+.viewer-splat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+
+.viewer-splat-panel-block {
+  padding: 0.85rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.viewer-splat-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.viewer-splat-panel-title {
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-color);
+}
+
+.viewer-splat-panel-chip {
+  flex: 0 0 auto;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(112, 0, 255, 0.12);
+  border: 1px solid rgba(112, 0, 255, 0.24);
+  color: #d9beff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.viewer-splat-panel-note {
+  margin-top: 0.45rem;
+}
+
+.viewer-splat-panel-subblock {
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.viewer-inline-note-compact {
+  margin-top: 0.7rem;
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.viewer-splat-slider-group {
+  margin-top: 0.75rem;
+}
+
+.viewer-splat-slider-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.45rem;
+}
+
+.viewer-splat-slider-group .viewer-slider-label {
+  margin-bottom: 0;
+}
+
+.viewer-splat-slider-group .viewer-slider-value {
+  margin-top: 0;
+  min-width: 4.75rem;
+  text-align: right;
+}
+
+.viewer-splat-panel-status {
+  margin-top: 0.8rem;
+}
+
 .viewer-slider-label {
   font-size: 0.7rem;
   font-weight: 700;

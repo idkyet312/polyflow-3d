@@ -310,12 +310,16 @@ export function getDynamicPropDisplayName(prop) {
 }
 
 export function getDynamicPropById(propId) {
+    if (!propId) return null;
+
     if (sceneSystem) {
         for (const actor of sceneSystem.actors) {
             if (actor.id === propId) return actor;
         }
     }
-    return physics.dynamicBodies.find((prop) => prop.id === propId) || null;
+
+    const dynamicBodies = Array.isArray(physics?.dynamicBodies) ? physics.dynamicBodies : [];
+    return dynamicBodies.find((prop) => prop.id === propId) || null;
 }
 
 export function isTransformControlSphereHit(event, { mode = null } = {}) {

@@ -339,6 +339,7 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
                 id:   actorData.id || '',
                 name: actorData.name || 'Splat',
                 url,
+                renderSettings: actorData.userData?.splatRenderSettings || null,
             });
             sceneSystem?.addActor?.(actor);
         }

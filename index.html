@@ -827,29 +827,59 @@
                                         <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
                                     </div>
                                     <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full DDGI + fog + post-process active.</div>
-                                    <div class="viewer-inline-note">Splat sort backend for newly loaded splats.</div>
-                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-sort-auto">Auto</button>
-                                        <button class="btn viewer-toggle-btn" id="splat-sort-compute">Compute</button>
-                                        <button class="btn viewer-toggle-btn" id="splat-sort-worker">Worker</button>
-                                        <button class="btn viewer-toggle-btn" id="splat-sort-off">Off</button>
-                                    </div>
-                                    <div class="viewer-inline-note" id="splat-sort-status">Splat sort: auto.</div>
-                                    <div class="viewer-inline-note">Splat blend mode for newly loaded splats.</div>
-                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-blend-reference">Reference</button>
-                                        <button class="btn viewer-toggle-btn" id="splat-blend-polyflow">PolyFlow</button>
-                                    </div>
-                                    <div class="viewer-inline-note" id="splat-blend-status">Blend: reference</div>
-                                    <div id="splat-sh-controls" style="display: none;">
-                                        <div class="viewer-inline-note">Spherical Harmonics degree for newly loaded compute splats.</div>
-                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-sh-0">0</button>
-                                            <button class="btn viewer-toggle-btn" id="splat-sh-1">1</button>
-                                            <button class="btn viewer-toggle-btn" id="splat-sh-2">2</button>
-                                            <button class="btn viewer-toggle-btn" id="splat-sh-3">3</button>
+                                    <div class="viewer-splat-panel">
+                                        <div class="viewer-splat-panel-block">
+                                            <div class="viewer-splat-panel-header">
+                                                <div class="viewer-splat-panel-title">Splat Backend</div>
+                                                <div class="viewer-splat-panel-chip">New splats</div>
+                                            </div>
+                                            <div class="viewer-inline-note viewer-splat-panel-note">Choose the sort path for incoming splats. SH controls appear only when compute splats carry SH data.</div>
+                                            <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                                <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-sort-auto">Auto</button>
+                                                <button class="btn viewer-toggle-btn" id="splat-sort-compute">Compute</button>
+                                                <button class="btn viewer-toggle-btn" id="splat-sort-worker">Worker</button>
+                                                <button class="btn viewer-toggle-btn" id="splat-sort-off">Off</button>
+                                            </div>
+                                            <div class="viewer-inline-note" id="splat-sort-status">Splat sort: auto.</div>
+                                            <div id="splat-sh-controls" class="viewer-splat-panel-subblock" style="display: none;">
+                                                <div class="viewer-inline-note viewer-inline-note-compact">Spherical Harmonics Degree</div>
+                                                <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                                    <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-sh-0">0</button>
+                                                    <button class="btn viewer-toggle-btn" id="splat-sh-1">1</button>
+                                                    <button class="btn viewer-toggle-btn" id="splat-sh-2">2</button>
+                                                    <button class="btn viewer-toggle-btn" id="splat-sh-3">3</button>
+                                                </div>
+                                                <div class="viewer-inline-note" id="splat-sh-status">SH: unavailable</div>
+                                            </div>
                                         </div>
-                                        <div class="viewer-inline-note" id="splat-sh-status">SH: unavailable</div>
+                                        <div class="viewer-splat-panel-block">
+                                            <div class="viewer-splat-panel-header">
+                                                <div class="viewer-splat-panel-title">Splat Appearance</div>
+                                                <div class="viewer-splat-panel-chip" id="splat-target-status">Defaults</div>
+                                            </div>
+                                            <div class="viewer-inline-note viewer-splat-panel-note">Tune the selected splat live. With no splat selected, these values become defaults for the next one you load.</div>
+                                            <div class="viewer-inline-note viewer-inline-note-compact">Blend Mode</div>
+                                            <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                                <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-blend-reference">Reference</button>
+                                                <button class="btn viewer-toggle-btn" id="splat-blend-polyflow">PolyFlow</button>
+                                            </div>
+                                            <div class="viewer-inline-note" id="splat-blend-status">Blend: reference</div>
+                                            <div class="viewer-slider-group viewer-splat-slider-group">
+                                                <div class="viewer-splat-slider-header">
+                                                    <div class="viewer-slider-label">Splat Radius</div>
+                                                    <div class="viewer-slider-value" id="splat-radius-value">2.55</div>
+                                                </div>
+                                                <input id="splat-radius" type="range" min="0.5" max="8" step="0.01" value="2.55">
+                                            </div>
+                                            <div class="viewer-slider-group viewer-splat-slider-group">
+                                                <div class="viewer-splat-slider-header">
+                                                    <div class="viewer-slider-label">Alpha Cutoff</div>
+                                                    <div class="viewer-slider-value" id="splat-alpha-cutoff-value">0.0039</div>
+                                                </div>
+                                                <input id="splat-alpha-cutoff" type="range" min="0" max="0.2" step="0.0005" value="0.0039">
+                                            </div>
+                                            <div class="viewer-inline-note viewer-splat-panel-status" id="splat-tuning-status">Defaults · radius 2.55 · cutoff 0.0039</div>
+                                        </div>
                                     </div>
                                 </div>
                             </details>

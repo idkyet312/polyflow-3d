@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WebGPURenderer, PostProcessing } from 'three/webgpu';
+import { WebGPURenderer, RenderPipeline } from 'three/webgpu';
 import { pass, mrt, output, emissive, uniform } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
@@ -7,6 +7,10 @@ import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js'
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
+import {
+    getSplatActorRenderSettings,
+    setSplatActorRenderSettings,
+} from './src/world/splat/splatActor.js';
 import {
     WidgetManager,
     BaseWidget,
@@ -100,13 +104,19 @@ import { wireSplatDevHooks } from './src/world/splat/init.js';
 import {
     detectComputeSupport,
     getSplatBlendMode,
+    getSplatRenderSettings,
     getSplatShDegree,
     getSplatSortMode,
     getSplatSortStatus,
     setSplatBlendMode,
+    setSplatRenderSettings,
     setSplatShDegree,
     setSplatSortMode,
 } from './src/world/splat/perfMode.js';
+import {
+    SPLAT_ALPHA_CUTOFF_RANGE,
+    SPLAT_RADIUS_RANGE,
+} from './src/world/splat/renderTuning.js';
 import {
     compressTextures,
 } from './src/optim/textureCompression.js';
@@ -456,6 +466,7 @@ let perfModeUiRefs = null;
 let splatSortUiRefs = null;
 let splatShUiRefs = null;
 let splatBlendUiRefs = null;
+let splatTuningUiRefs = null;
 const SPLAT_TARGET_STORAGE_BUFFER_LIMIT = 256_000_000;
 
 // World Environment panel state — Godot-style WorldEnvironment node mirror.
@@ -716,7 +727,7 @@ const multiplayerState = {
     defaultRoom: 'sandbox',
 };
 
-const clock = new THREE.Clock();
+const clock = new THREE.Timer();
 const downVector = new THREE.Vector3(0, -1, 0);
 const upVector = new THREE.Vector3(0, 1, 0);
 const gameplayBounds = new THREE.Box3();
@@ -2740,6 +2751,8 @@ function selectShowcaseActor(actorId, selectionObject = null) {
         }
         refreshSceneUI();
     }
+
+    updateSplatSortUi();
 }
 
 function syncTransformControlState() {
@@ -3784,10 +3797,79 @@ function updatePerfModeUi() {
     }
 }
 
+function getSelectedSplatActor() {
+    const actor = getDynamicPropById(objectScriptState.targetPropId);
+    return actor?.kind === 'splat' ? actor : null;
+}
+
+function getActiveSplatRenderTarget() {
+    const actor = getSelectedSplatActor();
+    if (actor) {
+        return {
+            actor,
+            settings: getSplatActorRenderSettings(actor) || getSplatRenderSettings(),
+            label: actor.rootNode?.name || actor.mesh?.name || actor.name || actor.id || 'Selected splat',
+        };
+    }
+
+    return {
+        actor: null,
+        settings: getSplatRenderSettings(),
+        label: 'new splats',
+    };
+}
+
+function setActiveSplatBlendMode(mode) {
+    const selectedSplatActor = getSelectedSplatActor();
+    if (selectedSplatActor) {
+        setSplatActorRenderSettings(selectedSplatActor, { blendMode: mode }, { resetToPreset: true });
+        return;
+    }
+    setSplatBlendMode(mode);
+}
+
+function setActiveSplatRenderSettings(settings = {}) {
+    const selectedSplatActor = getSelectedSplatActor();
+    if (selectedSplatActor) {
+        setSplatActorRenderSettings(selectedSplatActor, settings);
+        return getSplatActorRenderSettings(selectedSplatActor);
+    }
+    return setSplatRenderSettings(settings);
+}
+
+function updateSplatTuningUi() {
+    if (!splatTuningUiRefs) return;
+
+    const { actor, settings, label } = getActiveSplatRenderTarget();
+    const radius = Number.isFinite(settings?.radius) ? settings.radius : 0;
+    const alphaCutoff = Number.isFinite(settings?.alphaCutoff) ? settings.alphaCutoff : 0;
+
+    if (splatTuningUiRefs.targetBadge) {
+        splatTuningUiRefs.targetBadge.textContent = actor ? 'Selected' : 'Defaults';
+    }
+
+    if (splatTuningUiRefs.radiusInput) {
+        splatTuningUiRefs.radiusInput.value = radius.toFixed(2);
+    }
+    if (splatTuningUiRefs.radiusValue) {
+        splatTuningUiRefs.radiusValue.textContent = radius.toFixed(2);
+    }
+    if (splatTuningUiRefs.alphaCutoffInput) {
+        splatTuningUiRefs.alphaCutoffInput.value = alphaCutoff.toFixed(4);
+    }
+    if (splatTuningUiRefs.alphaCutoffValue) {
+        splatTuningUiRefs.alphaCutoffValue.textContent = alphaCutoff.toFixed(4);
+    }
+    if (splatTuningUiRefs.status) {
+        splatTuningUiRefs.status.textContent = `${actor ? label : 'New splats'} · radius ${radius.toFixed(2)} · cutoff ${alphaCutoff.toFixed(4)}`;
+    }
+}
+
 function updateSplatSortUi(statusOverride = null) {
     if (!splatSortUiRefs) return;
     const requested = getSplatSortMode();
     const status = statusOverride || getSplatSortStatus();
+    const { settings, actor } = getActiveSplatRenderTarget();
     const buttons = splatSortUiRefs.buttons || {};
     for (const [mode, button] of Object.entries(buttons)) {
         button?.classList.toggle('viewer-toggle-btn-active', requested === mode);
@@ -3795,16 +3877,19 @@ function updateSplatSortUi(statusOverride = null) {
     if (splatSortUiRefs.status) {
         const support = detectComputeSupport() ? 'compute supported' : 'compute unavailable';
         const active = status.effectiveMode || (requested === 'auto' ? 'auto' : requested);
-        const error = status.error ? ` ${status.error}` : '';
-        splatSortUiRefs.status.textContent = `Splat sort: ${requested} -> ${active}. ${support}. ${status.message || ''}${error}`;
+        const message = status.message ? ` · ${status.message}` : '';
+        const error = status.error ? ` · ${status.error}` : '';
+        splatSortUiRefs.status.textContent = `Requested ${requested} · active ${active} · ${support}${message}${error}`;
     }
     if (splatBlendUiRefs) {
-        const blendMode = getSplatBlendMode();
+        const blendMode = settings?.blendMode || getSplatBlendMode();
         for (const [mode, button] of Object.entries(splatBlendUiRefs.buttons || {})) {
             button?.classList.toggle('viewer-toggle-btn-active', mode === blendMode);
         }
         if (splatBlendUiRefs.status) {
-            splatBlendUiRefs.status.textContent = `Blend: ${status.blendMode || blendMode}`;
+            splatBlendUiRefs.status.textContent = actor
+                ? `${blendMode} blend · selected`
+                : `${status.blendMode || blendMode} blend · defaults`;
         }
     }
     if (splatShUiRefs) {
@@ -3821,6 +3906,7 @@ function updateSplatSortUi(statusOverride = null) {
                 : 'SH: unavailable';
         }
     }
+    updateSplatTuningUi();
 }
 
 async function getPreferredWebGpuLimits() {
@@ -5059,6 +5145,22 @@ async function init() {
         },
         status: document.getElementById('splat-blend-status'),
     };
+    splatTuningUiRefs = {
+        radiusInput: document.getElementById('splat-radius'),
+        radiusValue: document.getElementById('splat-radius-value'),
+        alphaCutoffInput: document.getElementById('splat-alpha-cutoff'),
+        alphaCutoffValue: document.getElementById('splat-alpha-cutoff-value'),
+        targetBadge: document.getElementById('splat-target-status'),
+        status: document.getElementById('splat-tuning-status'),
+    };
+    if (splatTuningUiRefs?.radiusInput) {
+        splatTuningUiRefs.radiusInput.min = String(SPLAT_RADIUS_RANGE.min);
+        splatTuningUiRefs.radiusInput.max = String(SPLAT_RADIUS_RANGE.max);
+    }
+    if (splatTuningUiRefs?.alphaCutoffInput) {
+        splatTuningUiRefs.alphaCutoffInput.min = String(SPLAT_ALPHA_CUTOFF_RANGE.min);
+        splatTuningUiRefs.alphaCutoffInput.max = String(SPLAT_ALPHA_CUTOFF_RANGE.max);
+    }
 
     // World Environment panel refs — every toggle button, slider input, and
     // value-display span. Lookups are tolerant: the panel may be absent in
@@ -5200,10 +5302,22 @@ async function init() {
     }
     for (const [mode, button] of Object.entries(splatBlendUiRefs?.buttons || {})) {
         button?.addEventListener('click', () => {
-            setSplatBlendMode(mode);
+            setActiveSplatBlendMode(mode);
             updateSplatSortUi();
         });
     }
+    splatTuningUiRefs?.radiusInput?.addEventListener('input', () => {
+        const radius = Number.parseFloat(splatTuningUiRefs.radiusInput.value);
+        if (!Number.isFinite(radius)) return;
+        setActiveSplatRenderSettings({ radius });
+        updateSplatSortUi();
+    });
+    splatTuningUiRefs?.alphaCutoffInput?.addEventListener('input', () => {
+        const alphaCutoff = Number.parseFloat(splatTuningUiRefs.alphaCutoffInput.value);
+        if (!Number.isFinite(alphaCutoff)) return;
+        setActiveSplatRenderSettings({ alphaCutoff });
+        updateSplatSortUi();
+    });
     window.addEventListener('splat-sort-status', (event) => updateSplatSortUi(event.detail));
     updateSplatSortUi();
 
@@ -5496,7 +5610,7 @@ async function init() {
     const sceneColor = scenePass.getTextureNode('output');
     const sceneEmissive = scenePass.getTextureNode('emissive');
     const bloomNode = bloom(sceneEmissive, globalPostProcessUniforms.bloomStrength, globalPostProcessUniforms.bloomRadius, globalPostProcessUniforms.bloomThreshold);
-    postProcessing = new PostProcessing(renderer);
+    postProcessing = new RenderPipeline(renderer);
     postProcessing.outputNode = sceneColor.add(bloomNode);
 
     postProcessVolumeManager = createPostProcessVolumeManager({
@@ -5675,6 +5789,7 @@ async function init() {
     updateGameplayUI();
 
     renderer.setAnimationLoop(() => {
+        clock.update();
         const delta = Math.min(clock.getDelta(), 0.05);
 
         const updateStart = performance.now();

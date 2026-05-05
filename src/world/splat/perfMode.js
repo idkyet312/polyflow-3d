@@ -6,15 +6,18 @@ import { StorageInstancedBufferAttribute } from 'three/webgpu';
 import { buildSplatMesh as buildSplatMeshWorker } from './splatRenderer.js';
 import { buildSplatMeshCompute } from './splatRendererCompute.js';
 import { normalizeSplatBlendMode } from './blendMode.js';
+import { getSplatRenderTuning, normalizeSplatRenderSettings } from './renderTuning.js';
 
 const VALID_MODES = ['auto', 'compute', 'worker', 'off'];
 const STORAGE_KEY = 'polyflow.splatSortMode';
 const SH_STORAGE_KEY = 'polyflow.splatShDegree';
 const BLEND_STORAGE_KEY = 'polyflow.splatBlendMode';
+const RENDER_SETTINGS_STORAGE_KEY = 'polyflow.splatRenderSettings';
 
-let _modeOverride = readInitialModeOverride(); // null = auto
+let _modeOverride = readInitialModeOverride();
 let _shDegree = readInitialShDegree();
 let _blendMode = readInitialBlendMode();
+let _renderSettings = readInitialRenderSettings(_blendMode);
 let _lastStatus = {
     requestedMode: _modeOverride || 'auto',
     effectiveMode: 'worker',
@@ -106,6 +109,42 @@ function persistBlendMode(mode) {
     }
 }
 
+function readInitialRenderSettings(blendMode) {
+    const settings = {};
+    if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        if (params.has('splatRadius')) {
+            settings.radius = Number.parseFloat(params.get('splatRadius') || '');
+        }
+        if (params.has('splatAlphaCutoff')) {
+            settings.alphaCutoff = Number.parseFloat(params.get('splatAlphaCutoff') || '');
+        }
+        if (!Object.keys(settings).length) {
+            try {
+                const raw = window.localStorage?.getItem(RENDER_SETTINGS_STORAGE_KEY);
+                if (raw) Object.assign(settings, JSON.parse(raw));
+            } catch {
+                // Ignore malformed or restricted storage.
+            }
+        }
+    }
+
+    const normalized = normalizeSplatRenderSettings({ blendMode, ...settings }, blendMode);
+    return {
+        radius: normalized.radius,
+        alphaCutoff: normalized.alphaCutoff,
+    };
+}
+
+function persistRenderSettings(settings) {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage?.setItem(RENDER_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    } catch {
+        // Ignore restricted storage contexts.
+    }
+}
+
 function dispatchStatus() {
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent('splat-sort-status', { detail: getSplatSortStatus() }));
@@ -164,7 +203,15 @@ export function getSplatShDegree() {
 
 export function setSplatBlendMode(mode, opts = {}) {
     _blendMode = normalizeSplatBlendMode(mode);
-    if (opts.persist !== false) persistBlendMode(_blendMode);
+    const preset = getSplatRenderTuning(_blendMode);
+    _renderSettings = {
+        radius: preset.radius,
+        alphaCutoff: preset.alphaCutoff,
+    };
+    if (opts.persist !== false) {
+        persistBlendMode(_blendMode);
+        persistRenderSettings(_renderSettings);
+    }
     setLastStatus({
         blendMode: _blendMode,
         message: `Splat blend mode set to ${_blendMode}. New splats use this mode.`,
@@ -174,6 +221,33 @@ export function setSplatBlendMode(mode, opts = {}) {
 
 export function getSplatBlendMode() {
     return _blendMode;
+}
+
+export function setSplatRenderSettings(settings = {}, opts = {}) {
+    const normalized = normalizeSplatRenderSettings({
+        blendMode: _blendMode,
+        ..._renderSettings,
+        ...settings,
+    }, _blendMode);
+    _renderSettings = {
+        radius: normalized.radius,
+        alphaCutoff: normalized.alphaCutoff,
+    };
+    if (opts.persist !== false) persistRenderSettings(_renderSettings);
+    setLastStatus({
+        blendMode: _blendMode,
+        message: `Splat tuning updated. New splats use radius ${normalized.radius.toFixed(2)} and cutoff ${normalized.alphaCutoff.toFixed(4)}.`,
+        error: '',
+    });
+    return getSplatRenderSettings();
+}
+
+export function getSplatRenderSettings() {
+    return {
+        blendMode: _blendMode,
+        radius: _renderSettings.radius,
+        alphaCutoff: _renderSettings.alphaCutoff,
+    };
 }
 
 export function detectComputeSupport() {
@@ -190,7 +264,10 @@ export function buildSplatMeshAuto(splatData) {
 
     if (mode === 'compute') {
         if (!computeSupported) {
-            const mesh = buildSplatMeshWorker(splatData, { blendMode: _blendMode });
+            const mesh = buildSplatMeshWorker(splatData, {
+                blendMode: _blendMode,
+                renderSettings: _renderSettings,
+            });
             mesh.userData.splatSortMode = 'worker';
             mesh.userData.splatSortRequestedMode = requestedMode;
             mesh.userData.splatSortFallbackReason = 'WebGPU storage buffers are unavailable.';
@@ -208,7 +285,11 @@ export function buildSplatMeshAuto(splatData) {
         }
 
         try {
-            const mesh = buildSplatMeshCompute(splatData, { shDegree: _shDegree, blendMode: _blendMode });
+            const mesh = buildSplatMeshCompute(splatData, {
+                shDegree: _shDegree,
+                blendMode: _blendMode,
+                renderSettings: _renderSettings,
+            });
             mesh.userData.splatSortMode = 'compute';
             mesh.userData.splatSortRequestedMode = requestedMode;
             const actualShDegree = mesh.userData.splatShDegree || 0;
@@ -226,7 +307,10 @@ export function buildSplatMeshAuto(splatData) {
             return mesh;
         } catch (err) {
             console.warn('[splat-perfMode] compute path threw at build time, falling back to worker:', err);
-            const mesh = buildSplatMeshWorker(splatData, { blendMode: _blendMode });
+            const mesh = buildSplatMeshWorker(splatData, {
+                blendMode: _blendMode,
+                renderSettings: _renderSettings,
+            });
             mesh.userData.splatSortMode = 'worker';
             mesh.userData.splatSortRequestedMode = requestedMode;
             mesh.userData.splatSortFallbackReason = err?.message || String(err);
@@ -244,7 +328,11 @@ export function buildSplatMeshAuto(splatData) {
         }
     }
 
-    const mesh = buildSplatMeshWorker(splatData, { attachSort: mode !== 'off', blendMode: _blendMode });
+    const mesh = buildSplatMeshWorker(splatData, {
+        attachSort: mode !== 'off',
+        blendMode: _blendMode,
+        renderSettings: _renderSettings,
+    });
     mesh.userData.splatSortMode = mode === 'off' ? 'off' : 'worker';
     mesh.userData.splatSortRequestedMode = requestedMode;
     setLastStatus({
