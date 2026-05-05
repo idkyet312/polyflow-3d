@@ -58,8 +58,8 @@ export class SplatComponent extends ActorComponent {
                 const data = await loadSplat(this.url);
                 this.mesh = buildSplatMeshAuto(data);
                 this.count = data.count;
-                this.shDegree = data.shDegree || 0;
-                this.shData = data.shCoefficients || null;
+                this.shDegree = data.sh?.degree || 0;
+                this.shData = data.sh || null;
                 this._computeBounds(data.positions);
 
                 // Attach to the actor's root mesh so transform-gizmo edits on the actor

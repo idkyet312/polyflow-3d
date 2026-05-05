@@ -302,15 +302,15 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
 export function allocateSplatStorage(splatData, opts = {}) {
     const N      = splatData.count | 0;
     const N_pad  = nextPow2(N);
-    const requestedShDegree = Math.max(0, Math.min(3, opts.shDegree ?? splatData.shDegree ?? 0));
+    const requestedShDegree = Math.max(0, Math.min(3, opts.shDegree ?? splatData.sh?.degree ?? 0));
 
     // Source-data storage (read-only in shaders, written once on upload).
     const positionsStorage = new StorageInstancedBufferAttribute(splatData.positions, 3);
     const scalesStorage    = new StorageInstancedBufferAttribute(splatData.scales,    3);
     const colorsStorage    = new StorageInstancedBufferAttribute(splatData.colors,    4);
     const rotationsStorage = new StorageInstancedBufferAttribute(splatData.rotations, 4);
-    const shPacking = splatData.shCoefficients
-        ? chooseShPacking(splatData.shCoefficients, N, Math.min(requestedShDegree, splatData.shDegree || requestedShDegree))
+    const shPacking = splatData.sh
+        ? chooseShPacking(splatData.sh, N, Math.min(requestedShDegree, splatData.sh.degree || requestedShDegree))
         : null;
     const packedSh = shPacking?.packed || null;
     const shStorage = shPacking?.layout === 'interleaved' && packedSh
@@ -324,6 +324,12 @@ export function allocateSplatStorage(splatData, opts = {}) {
         : null;
     const shStorageB = shPacking?.layout === 'planar'
         ? new StorageInstancedBufferAttribute(shPacking.packedB, 1)
+        : null;
+    const shCodebookStorage = shPacking?.layout === 'codebook'
+        ? new StorageInstancedBufferAttribute(shPacking.codebook, 1)
+        : null;
+    const shLabelsStorage = shPacking?.layout === 'codebook'
+        ? new StorageInstancedBufferAttribute(shPacking.labels, 1)
         : null;
 
     // Sort working buffers (written every frame; allocated to padded size).
@@ -350,10 +356,14 @@ export function allocateSplatStorage(splatData, opts = {}) {
         shStorageR,
         shStorageG,
         shStorageB,
+        shCodebookStorage,
+        shLabelsStorage,
         shLayout: shPacking?.layout || '',
         shDegree: shPacking?.degree || 0,
         shPackedU32PerSplat: shPacking?.packedU32PerSplat || 0,
         shPackedU32PerChannelSplat: shPacking?.packedU32PerChannelSplat || 0,
+        shPackedU32PerEntry: shPacking?.packedU32PerEntry || 0,
+        shCodebookSize: shPacking?.codebookSize || 0,
         shFallbackReason: shPacking?.fallbackReason || '',
         shBytes: shPacking?.byteLength || 0,
         sortKeysStorage,
@@ -361,27 +371,42 @@ export function allocateSplatStorage(splatData, opts = {}) {
     };
 }
 
-function chooseShPacking(coefficients, count, requestedDegree) {
+function chooseShPacking(sh, count, requestedDegree) {
+    if (sh.layout === 'codebook') {
+        return chooseCodebookShPacking(sh, requestedDegree);
+    }
+    if (sh.layout !== 'direct' || !sh.coeffs) {
+        return {
+            degree: 0,
+            packedU32PerSplat: 0,
+            packedU32PerChannelSplat: 0,
+            packed: null,
+            fallbackReason: 'Unsupported SH layout; using DC color.',
+        };
+    }
+    const sourceAcCoeffCount = (((sh.degree || requestedDegree) + 1) * ((sh.degree || requestedDegree) + 1)) - 1;
+    const sourceStrideHalves = sourceAcCoeffCount * 3;
     for (let degree = requestedDegree; degree > 0; degree--) {
         const coeffCount = (degree + 1) * (degree + 1);
-        const packedU32PerSplat = Math.ceil((coeffCount * 3) / 2);
+        const acCoeffCount = coeffCount - 1;
+        const packedU32PerSplat = Math.ceil((acCoeffCount * 3) / 2);
         const byteLength = count * packedU32PerSplat * 4;
         if (byteLength <= MAX_SH_STORAGE_BYTES) {
             return {
                 layout: 'interleaved',
                 degree,
                 packedU32PerSplat,
-                packed: packShCoefficients(coefficients, count, degree, packedU32PerSplat),
+                packed: packDirectShPairs(sh.coeffs, count, degree, packedU32PerSplat, sourceStrideHalves),
                 byteLength,
                 fallbackReason: degree < requestedDegree
                     ? `SH deg ${requestedDegree} exceeds ${(MAX_SH_STORAGE_BYTES / (1024 * 1024)).toFixed(0)} MB buffer cap; using deg ${degree}.`
                     : '',
             };
         }
-        const packedU32PerChannelSplat = Math.ceil(coeffCount / 2);
+        const packedU32PerChannelSplat = Math.ceil(acCoeffCount / 2);
         const channelByteLength = count * packedU32PerChannelSplat * 4;
         if (channelByteLength <= MAX_SH_STORAGE_BYTES) {
-            const planar = packShCoefficientsPlanar(coefficients, count, degree, packedU32PerChannelSplat);
+            const planar = packDirectShPlanar(sh.coeffs, count, degree, packedU32PerChannelSplat, sourceStrideHalves);
             return {
                 layout: 'planar',
                 degree,
@@ -401,19 +426,47 @@ function chooseShPacking(coefficients, count, requestedDegree) {
     };
 }
 
-function packShCoefficients(coefficients, count, degree, packedU32PerSplat) {
-    const strideFloats = 16 * 3;
-    if (coefficients.length < count * strideFloats) return null;
+function chooseCodebookShPacking(sh, requestedDegree) {
+    const degree = Math.max(0, Math.min(requestedDegree, sh.degree || 0));
+    if (degree <= 0 || !sh.coeffs || !sh.labels) {
+        return {
+            degree: 0,
+            packed: null,
+            fallbackReason: 'Missing SH codebook data; using DC color.',
+        };
+    }
+    const acCoeffCount = ((degree + 1) * (degree + 1)) - 1;
+    const packedU32PerEntry = Math.ceil((acCoeffCount * 3) / 2);
+    const sourceAcCoeffCount = (((sh.degree || degree) + 1) * ((sh.degree || degree) + 1)) - 1;
+    const sourceStrideHalves = sourceAcCoeffCount * 3;
+    const codebookSize = sh.codebookSize || Math.floor(sh.coeffs.length / Math.max(1, sourceStrideHalves));
+    const codebook = packCodebookShPairs(sh.coeffs, codebookSize, degree, packedU32PerEntry, sourceStrideHalves);
+    const labels = new Uint32Array(sh.labels.length);
+    for (let i = 0; i < sh.labels.length; i++) labels[i] = sh.labels[i];
+    return {
+        layout: 'codebook',
+        degree,
+        packedU32PerEntry,
+        codebookSize,
+        codebook,
+        labels,
+        byteLength: codebook.byteLength + labels.byteLength,
+        fallbackReason: degree < requestedDegree
+            ? `SH deg ${requestedDegree} unavailable; using deg ${degree}.`
+            : '',
+    };
+}
 
-    const coeffFloats = ((degree + 1) * (degree + 1)) * 3;
+function packDirectShPairs(coefficients, count, degree, packedU32PerSplat, srcStrideHalves) {
+    const coeffHalves = (((degree + 1) * (degree + 1)) - 1) * 3;
     const packed = new Uint32Array(count * packedU32PerSplat);
     for (let i = 0; i < count; i++) {
-        const srcBase = i * strideFloats;
+        const srcBase = i * srcStrideHalves;
         const dstBase = i * packedU32PerSplat;
         for (let p = 0; p < packedU32PerSplat; p++) {
-            const lo = THREE.DataUtils.toHalfFloat(coefficients[srcBase + p * 2 + 0]);
-            const hi = p * 2 + 1 < coeffFloats
-                ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + p * 2 + 1])
+            const lo = coefficients[srcBase + p * 2 + 0] || 0;
+            const hi = p * 2 + 1 < coeffHalves
+                ? coefficients[srcBase + p * 2 + 1]
                 : 0;
             packed[dstBase + p] = lo | (hi << 16);
         }
@@ -421,25 +474,24 @@ function packShCoefficients(coefficients, count, degree, packedU32PerSplat) {
     return packed;
 }
 
-function packShCoefficientsPlanar(coefficients, count, degree, packedU32PerChannelSplat) {
-    const strideFloats = 16 * 3;
-    const coeffCount = (degree + 1) * (degree + 1);
+function packDirectShPlanar(coefficients, count, degree, packedU32PerChannelSplat, srcStrideHalves) {
+    const acCoeffCount = ((degree + 1) * (degree + 1)) - 1;
     const packedR = new Uint32Array(count * packedU32PerChannelSplat);
     const packedG = new Uint32Array(count * packedU32PerChannelSplat);
     const packedB = new Uint32Array(count * packedU32PerChannelSplat);
 
     for (let i = 0; i < count; i++) {
-        const srcBase = i * strideFloats;
+        const srcBase = i * srcStrideHalves;
         const dstBase = i * packedU32PerChannelSplat;
         for (let p = 0; p < packedU32PerChannelSplat; p++) {
             const c0 = p * 2;
             const c1 = c0 + 1;
-            const r0 = THREE.DataUtils.toHalfFloat(coefficients[srcBase + c0 * 3 + 0]);
-            const g0 = THREE.DataUtils.toHalfFloat(coefficients[srcBase + c0 * 3 + 1]);
-            const b0 = THREE.DataUtils.toHalfFloat(coefficients[srcBase + c0 * 3 + 2]);
-            const r1 = c1 < coeffCount ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + c1 * 3 + 0]) : 0;
-            const g1 = c1 < coeffCount ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + c1 * 3 + 1]) : 0;
-            const b1 = c1 < coeffCount ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + c1 * 3 + 2]) : 0;
+            const r0 = coefficients[srcBase + c0 * 3 + 0] || 0;
+            const g0 = coefficients[srcBase + c0 * 3 + 1] || 0;
+            const b0 = coefficients[srcBase + c0 * 3 + 2] || 0;
+            const r1 = c1 < acCoeffCount ? coefficients[srcBase + c1 * 3 + 0] : 0;
+            const g1 = c1 < acCoeffCount ? coefficients[srcBase + c1 * 3 + 1] : 0;
+            const b1 = c1 < acCoeffCount ? coefficients[srcBase + c1 * 3 + 2] : 0;
             packedR[dstBase + p] = r0 | (r1 << 16);
             packedG[dstBase + p] = g0 | (g1 << 16);
             packedB[dstBase + p] = b0 | (b1 << 16);
@@ -447,4 +499,21 @@ function packShCoefficientsPlanar(coefficients, count, degree, packedU32PerChann
     }
 
     return { packedR, packedG, packedB };
+}
+
+function packCodebookShPairs(coefficients, codebookSize, degree, packedU32PerEntry, srcStrideHalves) {
+    const coeffHalves = (((degree + 1) * (degree + 1)) - 1) * 3;
+    const packed = new Uint32Array(codebookSize * packedU32PerEntry);
+    for (let entry = 0; entry < codebookSize; entry++) {
+        const srcBase = entry * srcStrideHalves;
+        const dstBase = entry * packedU32PerEntry;
+        for (let p = 0; p < packedU32PerEntry; p++) {
+            const lo = coefficients[srcBase + p * 2 + 0] || 0;
+            const hi = p * 2 + 1 < coeffHalves
+                ? coefficients[srcBase + p * 2 + 1]
+                : 0;
+            packed[dstBase + p] = lo | (hi << 16);
+        }
+    }
+    return packed;
 }

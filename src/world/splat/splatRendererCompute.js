@@ -60,7 +60,10 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
     const shDegree = slot.shDegree || 0;
     const shPackedU32PerSplat = slot.shPackedU32PerSplat || 0;
     const shPackedU32PerChannelSplat = slot.shPackedU32PerChannelSplat || 0;
+    const shPackedU32PerEntry = slot.shPackedU32PerEntry || 0;
     const shLayout = slot.shLayout || '';
+    const colorEncoding = splatData.colorEncoding || 'linear_rgb';
+    const evaluateRawDc = colorEncoding === 'fdc_raw';
 
     // Geometry: unit quad in [-1,1]² — same as the attribute-based renderer.
     // We don't actually need ANY per-instance attribute on the geometry in
@@ -108,6 +111,12 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
     const shNodeB = slot.shStorageB
         ? storage(slot.shStorageB, 'uint', N * shPackedU32PerChannelSplat).toReadOnly()
         : null;
+    const shCodebookNode = slot.shCodebookStorage
+        ? storage(slot.shCodebookStorage, 'uint', Math.max(1, slot.shCodebookSize * shPackedU32PerEntry)).toReadOnly()
+        : null;
+    const shLabelsNode = slot.shLabelsStorage
+        ? storage(slot.shLabelsStorage, 'uint', N).toReadOnly()
+        : null;
 
     function readShCoeff(src, coeffIndex) {
         if (shLayout === 'planar') {
@@ -116,6 +125,17 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
                 readShChannelCoeff(shNodeG, src, coeffIndex),
                 readShChannelCoeff(shNodeB, src, coeffIndex),
             );
+        }
+        if (shLayout === 'codebook') {
+            const label = shLabelsNode.element(src);
+            const packedBase = label.mul(uint(shPackedU32PerEntry));
+            const halfIndex = coeffIndex * 3;
+            const pair0 = Math.floor(halfIndex / 2);
+            const lanes0 = unpackHalf2x16(shCodebookNode.element(packedBase.add(uint(pair0))));
+            const lanes1 = unpackHalf2x16(shCodebookNode.element(packedBase.add(uint(pair0 + 1))));
+            return (halfIndex & 1) === 0
+                ? vec3(lanes0.x, lanes0.y, lanes1.x)
+                : vec3(lanes0.y, lanes1.x, lanes1.y);
         }
         const packedBase = src.mul(uint(shPackedU32PerSplat));
         const halfIndex = coeffIndex * 3;
@@ -213,7 +233,9 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
 
         // Pass to fragment.
         let outColor = sc;
-        if (shDegree > 0 && (shNode || shNodeR)) {
+        if (evaluateRawDc) {
+            const rgb = sc.rgb.mul(SH_C0).toVar();
+            if (shDegree > 0 && (shNode || shNodeR || shCodebookNode)) {
             const worldPos = modelWorldMatrix.mul(vec4(sp, 1.0)).xyz;
             const dir = worldPos.sub(cameraPosition).normalize();
             const x = dir.x;
@@ -222,28 +244,27 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
             const xx = x.mul(x);
             const yy = y.mul(y);
             const zz = z.mul(z);
-            const rgb = readShCoeff(src, 0).mul(SH_C0).toVar();
-
             if (shDegree >= 1) {
-                rgb.addAssign(readShCoeff(src, 1).mul(y.mul(-SH_C1)));
-                rgb.addAssign(readShCoeff(src, 2).mul(z.mul(SH_C1)));
-                rgb.addAssign(readShCoeff(src, 3).mul(x.mul(-SH_C1)));
+                rgb.addAssign(readShCoeff(src, 0).mul(y.mul(-SH_C1)));
+                rgb.addAssign(readShCoeff(src, 1).mul(z.mul(SH_C1)));
+                rgb.addAssign(readShCoeff(src, 2).mul(x.mul(-SH_C1)));
             }
             if (shDegree >= 2) {
-                rgb.addAssign(readShCoeff(src, 4).mul(x.mul(y).mul(SH_C2[0])));
-                rgb.addAssign(readShCoeff(src, 5).mul(y.mul(z).mul(SH_C2[1])));
-                rgb.addAssign(readShCoeff(src, 6).mul(zz.mul(2.0).sub(xx).sub(yy).mul(SH_C2[2])));
-                rgb.addAssign(readShCoeff(src, 7).mul(x.mul(z).mul(SH_C2[3])));
-                rgb.addAssign(readShCoeff(src, 8).mul(xx.sub(yy).mul(SH_C2[4])));
+                rgb.addAssign(readShCoeff(src, 3).mul(x.mul(y).mul(SH_C2[0])));
+                rgb.addAssign(readShCoeff(src, 4).mul(y.mul(z).mul(SH_C2[1])));
+                rgb.addAssign(readShCoeff(src, 5).mul(zz.mul(2.0).sub(xx).sub(yy).mul(SH_C2[2])));
+                rgb.addAssign(readShCoeff(src, 6).mul(x.mul(z).mul(SH_C2[3])));
+                rgb.addAssign(readShCoeff(src, 7).mul(xx.sub(yy).mul(SH_C2[4])));
             }
             if (shDegree >= 3) {
-                rgb.addAssign(readShCoeff(src, 9).mul(y.mul(xx.mul(3.0).sub(yy)).mul(SH_C3[0])));
-                rgb.addAssign(readShCoeff(src, 10).mul(x.mul(y).mul(z).mul(SH_C3[1])));
-                rgb.addAssign(readShCoeff(src, 11).mul(y.mul(zz.mul(4.0).sub(xx).sub(yy)).mul(SH_C3[2])));
-                rgb.addAssign(readShCoeff(src, 12).mul(z.mul(zz.mul(2.0).sub(xx.mul(3.0)).sub(yy.mul(3.0))).mul(SH_C3[3])));
-                rgb.addAssign(readShCoeff(src, 13).mul(x.mul(zz.mul(4.0).sub(xx).sub(yy)).mul(SH_C3[4])));
-                rgb.addAssign(readShCoeff(src, 14).mul(z.mul(xx.sub(yy)).mul(SH_C3[5])));
-                rgb.addAssign(readShCoeff(src, 15).mul(x.mul(xx.sub(yy.mul(3.0))).mul(SH_C3[6])));
+                rgb.addAssign(readShCoeff(src, 8).mul(y.mul(xx.mul(3.0).sub(yy)).mul(SH_C3[0])));
+                rgb.addAssign(readShCoeff(src, 9).mul(x.mul(y).mul(z).mul(SH_C3[1])));
+                rgb.addAssign(readShCoeff(src, 10).mul(y.mul(zz.mul(4.0).sub(xx).sub(yy)).mul(SH_C3[2])));
+                rgb.addAssign(readShCoeff(src, 11).mul(z.mul(zz.mul(2.0).sub(xx.mul(3.0)).sub(yy.mul(3.0))).mul(SH_C3[3])));
+                rgb.addAssign(readShCoeff(src, 12).mul(x.mul(zz.mul(4.0).sub(xx).sub(yy)).mul(SH_C3[4])));
+                rgb.addAssign(readShCoeff(src, 13).mul(z.mul(xx.sub(yy)).mul(SH_C3[5])));
+                rgb.addAssign(readShCoeff(src, 14).mul(x.mul(xx.sub(yy.mul(3.0))).mul(SH_C3[6])));
+            }
             }
             outColor = vec4(rgb.add(0.5).clamp(0.0, 1.0).pow(2.2), sc.a);
         }
@@ -275,7 +296,7 @@ export function buildSplatMeshCompute(splatData, opts = {}) {
     mesh.userData.splatSortStatus = 'identity';
     mesh.userData.splatSortError = '';
     mesh.userData.splatShDegree = shDegree;
-    mesh.userData.splatShMaxDegree = splatData.shDegree || 0;
+    mesh.userData.splatShMaxDegree = splatData.sh?.degree || 0;
     mesh.userData.splatShBytes = slot.shBytes || 0;
     mesh.userData.splatShFallbackReason = slot.shFallbackReason || '';
     mesh.userData.splatBlendMode = blendMode;

@@ -7,14 +7,30 @@
 // return the same normalized shape consumed by `buildSplatMesh`:
 //
 //   {
-//     count:     number,
-//     positions: Float32Array(count * 3),  // raw xyz
-//     scales:    Float32Array(count * 3),  // already exp(log_scale)
-//     colors:    Float32Array(count * 4),  // RGBA in [0,1]
-//     rotations: Float32Array(count * 4),  // quaternion (x,y,z,w), normalized
-//     shCoefficients?: Float32Array(count * 48), // coeff-major SH, raw linear coeffs
-//     shDegree?: 1 | 2 | 3,
+//     count:         number,
+//     positions:     Float32Array(count * 3),  // raw xyz
+//     scales:        Float32Array(count * 3),  // already exp(log_scale)
+//     colors:        Float32Array(count * 4),  // see colorEncoding
+//     rotations:     Float32Array(count * 4),  // quaternion (x,y,z,w), normalized
+//     colorEncoding: 'linear_rgb' | 'fdc_raw',
+//     sh?: {                                    // present iff loader produced bands 1..N
+//       degree: 1 | 2 | 3,
+//       layout: 'direct' | 'codebook',
+//       coeffs: Uint16Array,                    // direct: count × 3K halves;
+//                                                // codebook: codebookSize × 3K halves.
+//       codebookSize?: number,                  // codebook layout only
+//       labels?: Uint16Array,                   // codebook layout only, length count
+//     },
 //   }
+//
+// colorEncoding values:
+//   - 'linear_rgb': colors[i*4 + 0..2] are already-evaluated linear RGB.
+//                   Used by .splat (legacy byte format, no SH source data) and
+//                   by PLY when no f_dc properties are present (white fallback).
+//   - 'fdc_raw':    colors[i*4 + 0..2] are raw SH band-0 (f_dc_n) coefficients.
+//                   Shader evaluates `clamp01(0.5 + SH_C0 * f_dc + bands_1..3)`.
+//                   Used by PLY (when DC present) and SOG.
+// In both cases colors[i*4 + 3] is alpha in [0,1].
 //
 // Supported formats:
 //   - .splat  Antimatter15-style raw 32-byte records (no header).
@@ -39,10 +55,6 @@ const SRGB_TO_LINEAR_LUT = (() => {
 /**
  * Detect splat format from URL extension. Returns one of:
  *   'splat' | 'ply' | 'sog' | null
- *
- * Checks the path before any query/fragment first, then falls back to the full
- * URL — so callers can stash a filename hint in the fragment of a `blob:` URL
- * (e.g. `blob:abc#scene.ply`), since blob URLs themselves have no extension.
  */
 export function detectFormatFromUrl(url) {
     if (typeof url !== 'string') return null;
@@ -56,18 +68,15 @@ export function detectFormatFromUrl(url) {
 
 /**
  * Detect splat format by sniffing the first few bytes of an ArrayBuffer.
- * Useful when the URL has no extension (e.g. content-disposition redirects).
  */
 export function detectFormatFromBuffer(buffer) {
     if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4) return null;
     const view = new DataView(buffer);
-    const magic = view.getUint32(0, false);     // big-endian read of first 4 bytes
+    const magic = view.getUint32(0, false);
     if (magic === PK_MAGIC || magic === PK_MAGIC_EOCD) return 'sog';
-    // PLY ASCII header always starts with "ply\n" (or "ply\r\n").
     if (view.getUint8(0) === 0x70 &&
         view.getUint8(1) === 0x6C &&
         view.getUint8(2) === 0x79) return 'ply';
-    // .splat has no magic header; caller treats this as a fallback case.
     return null;
 }
 
@@ -81,6 +90,7 @@ export function detectFormatFromBuffer(buffer) {
 //   12..23  scale xyz    (3 x f32, already exp(log_scale))
 //   24..27  color RGBA   (4 x u8, divide by 255)
 //   28..31  rotation xyzw(4 x u8, decode (b - 127.5) / 127.5)
+//
 export function parseSplatBinary(arrayBuffer) {
     if (arrayBuffer.byteLength % SPLAT_BYTES !== 0) {
         throw new Error(
@@ -111,16 +121,24 @@ export function parseSplatBinary(arrayBuffer) {
         rotations[i * 4 + 2] = (view.getUint8(o + 30) - 127.5) / 127.5;
         rotations[i * 4 + 3] = (view.getUint8(o + 31) - 127.5) / 127.5;
     }
-    return { count, positions, scales, colors, rotations };
+    return {
+        count,
+        positions,
+        scales,
+        colors,
+        rotations,
+        // .splat colors are already evaluated RGB (no SH source data
+        // exists in this format). Shader uses them directly.
+        colorEncoding: 'linear_rgb',
+    };
 }
 
 /**
- * Parse a splat ArrayBuffer of any supported format. Useful when you've
- * already fetched the bytes (e.g. from a drag-and-drop file input).
+ * Parse a splat ArrayBuffer of any supported format.
  *
  * @param {ArrayBuffer} buffer
  * @param {string} [hint]  Optional URL or filename for extension-based detection.
- * @returns {Promise<{count, positions, scales, colors, rotations}>}
+ * @returns {Promise<{count, positions, scales, colors, rotations, colorEncoding, sh?}>}
  */
 export async function parseSplatAny(buffer, hint = '') {
     const format =

@@ -43,6 +43,7 @@ import { getSplatRenderTuning } from './renderTuning.js';
 //   24..27  color RGBA   (4 x u8, sRGB-encoded — see srgbToLinear below)
 //   28..31  rotation xyzw(4 x u8, decode (b - 127.5) / 127.5)
 const SPLAT_BYTES = 32;
+const SH_C0 = 0.28209479177387814;
 
 // .splat color bytes are sRGB-encoded by the antimatter15 converter (and
 // by every other converter that targets antimatter15-viewer compatibility):
@@ -110,9 +111,10 @@ export async function loadSplat(url) {
 // ---------------------------------------------------------------------
 // Mesh builder
 // ---------------------------------------------------------------------
-export function buildSplatMesh({ count, positions, scales, colors, rotations }, opts = {}) {
+export function buildSplatMesh({ count, positions, scales, colors, rotations, colorEncoding = 'linear_rgb' }, opts = {}) {
     const blendMode = normalizeSplatBlendMode(opts.blendMode);
     const tuning = getSplatRenderTuning(blendMode);
+    const evaluateRawDc = colorEncoding === 'fdc_raw';
 
     // Geometry: unit quad spanning [-1, 1] in xy, instanced `count` times.
     const geometry = new THREE.InstancedBufferGeometry();
@@ -222,7 +224,11 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }, 
 
         // Pass to fragment: positionLocal * 3 -> quad-local coords in units of sigma.
         vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(tuning.radius));
-        vColor.assign(sc);
+        if (evaluateRawDc) {
+            vColor.assign(vec4(sc.rgb.mul(SH_C0).add(0.5).clamp(0.0, 1.0).pow(2.2), sc.a));
+        } else {
+            vColor.assign(sc);
+        }
 
         return clipCenter.add(vec4(offsetClip.x, offsetClip.y, 0, 0));
     })();

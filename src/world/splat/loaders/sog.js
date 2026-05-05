@@ -12,7 +12,7 @@
 //       quats.webp             quaternion (largest-component-omitted)
 //       scales.webp            per-channel codebook indices
 //       sh0.webp               color codebook indices (RGB) + sigmoid opacity (A)
-//       shN_centroids.webp     optional: higher-order SH palette
+//       shN_centroids.webp     optional: higher-order SH palette (codebook bytes)
 //       shN_labels.webp        optional: per-Gaussian palette index (16-bit)
 //
 //   - meta.json:
@@ -30,18 +30,28 @@
 //   - Texture dimensions: width = ceil(sqrt(count)/4)*4, height = ceil(count/width/4)*4.
 //     Both are multiples of 4 (texture is padded; Gaussians fill in Morton order).
 //
-// Output matches the normalized splat shape used by buildSplatMesh:
-//   { count, positions: F32[N*3], scales: F32[N*3], colors: F32[N*4], rotations: F32[N*4] }
+// Output matches the normalized splat shape used by buildSplatMesh, with two
+// additions in Phase 4 (radiance fields):
+//   { count, positions, scales, colors, rotations,
+//     colorEncoding: 'fdc_raw' | 'linear_rgb',     // 'fdc_raw' when sh0 present
+//     sh?: { degree, layout: 'codebook', codebookSize, codebook, labels },
+//   }
 //
-// Optional shN higher SH bands are returned as `shCoefficients`.
+// SH-N layout follows the PlayCanvas SOG spec:
+//   - `bands` ∈ {1,2,3}, with K={3,8,15} AC coeffs/channel.
+//   - `shN.codebook` is a 256-entry float LUT.
+//   - `shN_centroids.webp` stores one AC coefficient per RGB pixel:
+//       u = (label % 64) * K + coeff, v = floor(label / 64)
+//       R/G/B are codebook indices for color channels.
+//   - `shN_labels.webp` stores `R | (G << 8)` per Gaussian.
+
+import { floatToHalf } from '../halfFloat.js';
 
 const SH_C0 = 0.28209479177387814;
 const TEXT_DECODER = new TextDecoder('utf-8');
 
-function srgbToLinearFloat(c) {
-    const v = Math.max(0, Math.min(1, c));
-    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-}
+// SH coefficients per channel for each degree (excluding DC band 0).
+const COEFFS_PER_CHANNEL = [0, 3, 8, 15];
 
 // =============================================================================
 // Public entry points
@@ -50,7 +60,7 @@ function srgbToLinearFloat(c) {
 /**
  * Parse a SOG ArrayBuffer into normalized splat data.
  * @param {ArrayBuffer} buffer
- * @returns {Promise<{count, positions, scales, colors, rotations, shCoefficients?: Float32Array, shDegree?: number}>}
+ * @returns {Promise<{count, positions, scales, colors, rotations, colorEncoding, sh?}>}
  */
 export async function parseSog(buffer) {
     const entries = await readZip(buffer);
@@ -86,7 +96,7 @@ async function decodeSog(meta, entries) {
         throw new Error('[splat-sog] meta is missing one of: quats / scales / sh0');
     }
 
-    // Decode all required image attributes in parallel.
+    // Decode the always-present attributes in parallel.
     const [meansLo, meansHi, quats, scales, sh0] = await Promise.all([
         decodeWebpEntry(entries, meta.means.files[0]),
         decodeWebpEntry(entries, meta.means.files[1]),
@@ -98,15 +108,30 @@ async function decodeSog(meta, entries) {
     const positions = decodePositions(meansLo, meansHi, count, meta.means);
     const rotations = decodeQuats(quats, count);
     const out_scales = decodeScales(scales, count, meta.scales.codebook);
-    const colors = decodeColorsAndOpacity(sh0, count, meta.sh0.codebook);
-    const shCoefficients = await decodeHigherOrderSh(entries, meta, sh0, count);
+    const colors = decodeRawDcAndOpacity(sh0, count, meta.sh0.codebook);
 
-    const out = { count, positions, scales: out_scales, colors, rotations };
-    if (shCoefficients) {
-        out.shCoefficients = shCoefficients;
-        out.shDegree = meta.shN?.bands === 3 ? 3 : meta.shN?.bands === 2 ? 2 : 1;
+    const result = {
+        count,
+        positions,
+        scales: out_scales,
+        colors,
+        rotations,
+        // sh0 codebook gave us f_dc per channel (raw, not evaluated). Shader
+        // does the `0.5 + SH_C0 * f_dc + bands_1..3` chain.
+        colorEncoding: 'fdc_raw',
+    };
+
+    // Optional: higher-order SH (bands 1..N).
+    if (meta.shN?.files?.length && meta.shN.bands && meta.shN.count) {
+        try {
+            const sh = await decodeShN(entries, meta.shN, count);
+            if (sh) result.sh = sh;
+        } catch (err) {
+            console.warn('[splat-sog] shN decode failed; falling back to DC-only:', err.message);
+        }
     }
-    return out;
+
+    return result;
 }
 
 // -----------------------------------------------------------------------------
@@ -128,12 +153,10 @@ function decodePositions(lo, hi, count, meansMeta) {
         const yi = lo[base + 1] | (hi[base + 1] << 8);
         const zi = lo[base + 2] | (hi[base + 2] << 8);
 
-        // Unnormalize from log-space range stored in meta.means.{mins,maxs}.
         const lx = mins[0] + rx * (xi * inv65535);
         const ly = mins[1] + ry * (yi * inv65535);
         const lz = mins[2] + rz * (zi * inv65535);
 
-        // Inverse log transform: sign(v) * (exp(|v|) - 1).
         positions[i * 3 + 0] = Math.sign(lx) * (Math.exp(Math.abs(lx)) - 1);
         positions[i * 3 + 1] = Math.sign(ly) * (Math.exp(Math.abs(ly)) - 1);
         positions[i * 3 + 2] = Math.sign(lz) * (Math.exp(Math.abs(lz)) - 1);
@@ -145,12 +168,6 @@ function decodePositions(lo, hi, count, meansMeta) {
 // Quaternions: largest-component-omitted, recovery from sqrt(1 - sum(others^2)).
 // Output order: (x, y, z, w) per the renderer's expectations.
 // -----------------------------------------------------------------------------
-//
-// Tag (alpha channel) encodes which component was omitted:
-//   tag = 252 -> q[0] (x) is the largest, omitted; a/b/c go to q[1],q[2],q[3]
-//   tag = 253 -> q[1] (y) omitted; a/b/c -> q[0],q[2],q[3]
-//   tag = 254 -> q[2] (z) omitted; a/b/c -> q[0],q[1],q[3]
-//   tag = 255 -> q[3] (w) omitted; a/b/c -> q[0],q[1],q[2]
 const QUAT_SLOTS = [
     [1, 2, 3, 0],
     [0, 2, 3, 1],
@@ -179,7 +196,6 @@ function decodeQuats(rgba, count) {
         const t = 1 - (a * a + b * b + c * c);
         q[recoverIdx] = Math.sqrt(Math.max(0, t));
 
-        // Normalize defensively (encoder makes it unit, FP rounding drifts).
         const len = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
         out[i * 4 + 0] = q[0] / len;
         out[i * 4 + 1] = q[1] / len;
@@ -208,9 +224,12 @@ function decodeScales(rgba, count, codebook) {
 }
 
 // -----------------------------------------------------------------------------
-// Color (SH DC band) + opacity (already sigmoid'd).
+// SH band 0 (DC) — raw f_dc lookup + opacity (already sigmoid'd).
+// CHANGED in Phase 4: outputs RAW f_dc (not 0.5 + SH_C0 * f_dc), so the
+// shader can do the full clamp01(0.5 + SH_C0 * f_dc + bands_1..3) chain in
+// one place. colorEncoding='fdc_raw'.
 // -----------------------------------------------------------------------------
-function decodeColorsAndOpacity(rgba, count, codebook) {
+function decodeRawDcAndOpacity(rgba, count, codebook) {
     if (!codebook || codebook.length === 0) {
         throw new Error('[splat-sog] meta.sh0.codebook is missing or empty');
     }
@@ -219,73 +238,112 @@ function decodeColorsAndOpacity(rgba, count, codebook) {
     const out = new Float32Array(count * 4);
     for (let i = 0; i < count; i++) {
         const base = i * 4;
-        const fdc0 = cb[rgba[base + 0]];
-        const fdc1 = cb[rgba[base + 1]];
-        const fdc2 = cb[rgba[base + 2]];
-
-        const r = 0.5 + SH_C0 * fdc0;
-        const g = 0.5 + SH_C0 * fdc1;
-        const b = 0.5 + SH_C0 * fdc2;
-
-        out[i * 4 + 0] = srgbToLinearFloat(r);
-        out[i * 4 + 1] = srgbToLinearFloat(g);
-        out[i * 4 + 2] = srgbToLinearFloat(b);
-        out[i * 4 + 3] = rgba[base + 3] * inv255;        // alpha already in [0,1]
+        out[i * 4 + 0] = cb[rgba[base + 0]];                  // raw f_dc R
+        out[i * 4 + 1] = cb[rgba[base + 1]];                  // raw f_dc G
+        out[i * 4 + 2] = cb[rgba[base + 2]];                  // raw f_dc B
+        out[i * 4 + 3] = rgba[base + 3] * inv255;             // alpha already in [0,1]
     }
     return out;
 }
 
-async function decodeHigherOrderSh(entries, meta, sh0Rgba, count) {
-    if (!meta.shN?.files?.length || !meta.shN?.codebook?.length) return null;
+// -----------------------------------------------------------------------------
+// SH bands 1..N — codebook indexed by 16-bit per-vertex labels.
+//
+// Returns: { degree, layout: 'codebook', codebookSize, codebook, labels }
+//   - codebook  : Uint16Array of half-floats, length codebookSize × 3K.
+//                 Layout: codebook[entry * 3K + k * 3 + c] = k-th coef, channel c.
+//   - labels    : Uint16Array of length `count`, per-vertex codebook index.
+//
+// FIXME: Format assumptions for shN_centroids.webp / shN_labels.webp are
+// best-guess (see top-of-file note). Verify on a real SuperSplat export
+// before merging.
+// -----------------------------------------------------------------------------
+async function decodeShN(entries, shNMeta, vertexCount) {
+    const bands = shNMeta.bands | 0;
+    if (bands < 1 || bands > 3) {
+        console.warn(`[splat-sog] unsupported shN bands=${bands}; skipping`);
+        return null;
+    }
+    const K = COEFFS_PER_CHANNEL[bands];
+    if (K === 0) return null;
 
-    const centroidFile = meta.shN.files.find((name) => /centroid/i.test(name)) || meta.shN.files[0];
-    const labelFile = meta.shN.files.find((name) => /label/i.test(name)) || meta.shN.files[1];
-    if (!centroidFile || !labelFile) return null;
+    const codebookCount = shNMeta.count | 0;
+    if (codebookCount <= 0 || codebookCount > 65536) {
+        console.warn(`[splat-sog] shN codebook count out of range: ${codebookCount}`);
+        return null;
+    }
+
+    if (!shNMeta.files || shNMeta.files.length < 2) {
+        console.warn('[splat-sog] meta.shN.files must list two textures (centroids + labels)');
+        return null;
+    }
+
+    // Find the centroid texture (first non-labels file) and labels texture.
+    // Names typically include "centroids" / "labels" but order isn't guaranteed.
+    let centroidsName = null;
+    let labelsName    = null;
+    for (const f of shNMeta.files) {
+        if (typeof f !== 'string') continue;
+        if (f.includes('label')) labelsName = f;
+        else if (f.includes('centroid')) centroidsName = f;
+    }
+    // Fallback: positional order [centroids, labels] from playcanvas.
+    if (!centroidsName) centroidsName = shNMeta.files[0];
+    if (!labelsName)    labelsName    = shNMeta.files[1];
 
     const [centroidsRgba, labelsRgba] = await Promise.all([
-        decodeWebpEntry(entries, centroidFile),
-        decodeWebpEntry(entries, labelFile),
+        decodeWebpEntry(entries, centroidsName),
+        decodeWebpEntry(entries, labelsName),
     ]);
 
-    const dcCodebook = meta.sh0.codebook;
-    const restCodebook = meta.shN.codebook;
-    const degree = meta.shN.bands === 3 ? 3 : meta.shN.bands === 2 ? 2 : 1;
-    const coeffCount = (degree + 1) * (degree + 1);
-    const restCoeffCount = coeffCount - 1;
-    const shCoefficients = new Float32Array(count * 48);
-    const centroidWidth = centroidsRgba.width || (meta.shN.bands === 3 ? 960 : meta.shN.bands === 2 ? 512 : 192);
+    const lut = shNMeta.codebook;
+    if (!Array.isArray(lut) || lut.length < 256) {
+        console.warn('[splat-sog] meta.shN.codebook must be a 256-entry float LUT; skipping shN');
+        return null;
+    }
 
-    for (let i = 0; i < count; i++) {
-        const src = i * 4;
-        const shBase = i * 48;
-        shCoefficients[shBase + 0] = dcCodebook[sh0Rgba[src + 0]];
-        shCoefficients[shBase + 1] = dcCodebook[sh0Rgba[src + 1]];
-        shCoefficients[shBase + 2] = dcCodebook[sh0Rgba[src + 2]];
-
-        const label = labelsRgba[src + 0] | (labelsRgba[src + 1] << 8);
-        for (let c = 1; c < coeffCount; c++) {
-            const ac = c - 1;
-            const u = (label % 64) * restCoeffCount + ac;
-            const v = Math.floor(label / 64);
-            const pixel = (v * centroidWidth + u) * 4;
-            if (pixel + 2 >= centroidsRgba.length) continue;
-            shCoefficients[shBase + c * 3 + 0] = restCodebook[centroidsRgba[pixel + 0]];
-            shCoefficients[shBase + c * 3 + 1] = restCodebook[centroidsRgba[pixel + 1]];
-            shCoefficients[shBase + c * 3 + 2] = restCodebook[centroidsRgba[pixel + 2]];
+    const codebook = new Uint16Array(codebookCount * 3 * K);
+    const width = centroidsRgba.width || (64 * K);
+    for (let entry = 0; entry < codebookCount; entry++) {
+        const dstBase = entry * 3 * K;
+        for (let k = 0; k < K; k++) {
+            const u = (entry % 64) * K + k;
+            const v = Math.floor(entry / 64);
+            const src = (v * width + u) * 4;
+            if (src + 2 >= centroidsRgba.length) continue;
+            codebook[dstBase + k * 3 + 0] = floatToHalf(lut[centroidsRgba[src + 0]]);
+            codebook[dstBase + k * 3 + 1] = floatToHalf(lut[centroidsRgba[src + 1]]);
+            codebook[dstBase + k * 3 + 2] = floatToHalf(lut[centroidsRgba[src + 2]]);
         }
     }
 
-    return shCoefficients;
+    // Labels: 16-bit indices, packed `R | (G << 8)` per pixel.
+    if (labelsRgba.length < vertexCount * 4) {
+        console.warn(
+            `[splat-sog] shN_labels texture too small: have ${labelsRgba.length} bytes, ` +
+            `need ${vertexCount * 4}. Skipping shN.`,
+        );
+        return null;
+    }
+    const labels = new Uint16Array(vertexCount);
+    for (let i = 0; i < vertexCount; i++) {
+        const base = i * 4;
+        labels[i] = labelsRgba[base + 0] | (labelsRgba[base + 1] << 8);
+    }
+
+    return {
+        degree: bands,
+        layout: 'codebook',
+        codebookSize: codebookCount,
+        codebook,
+        labels,
+    };
 }
 
 // =============================================================================
 // WebP decoding via createImageBitmap + OffscreenCanvas
 // =============================================================================
 
-/**
- * Decode a WebP entry from the ZIP map into a raw RGBA pixel buffer.
- * Returns the underlying Uint8ClampedArray (length = width * height * 4).
- */
 async function decodeWebpEntry(entries, name) {
     const bytes = entries.get(name);
     if (!bytes) {
@@ -304,8 +362,6 @@ async function decodeWebpEntry(entries, name) {
     const w = bitmap.width;
     const h = bitmap.height;
 
-    // Prefer OffscreenCanvas (works in workers); fall back to a detached
-    // <canvas> on the main thread.
     let canvas;
     if (typeof OffscreenCanvas === 'function') {
         canvas = new OffscreenCanvas(w, h);
@@ -322,24 +378,12 @@ async function decodeWebpEntry(entries, name) {
     const imageData = ctx.getImageData(0, 0, w, h);
     imageData.data.width = w;
     imageData.data.height = h;
-    return imageData.data;       // Uint8ClampedArray, RGBA row-major
+    return imageData.data;
 }
 
 // =============================================================================
 // Minimal ZIP reader (central-directory based)
 // =============================================================================
-//
-// Handles:
-//   - Method 0 (stored / no compression) — the default for already-compressed
-//     WebP entries inside SOG archives.
-//   - Method 8 (deflate) via the native DecompressionStream API.
-//
-// Does NOT handle:
-//   - Encryption
-//   - ZIP64 (files > 4 GB) — SOG archives are small, this is fine.
-//   - Multi-volume archives.
-//
-// Returns a Map<filename, Uint8Array>.
 
 const SIG_LOCAL = 0x04034b50;
 const SIG_CDIR  = 0x02014b50;
@@ -349,8 +393,6 @@ async function readZip(buffer) {
     const dv = new DataView(buffer);
     const entries = new Map();
 
-    // 1. Locate End-of-Central-Directory by scanning backward for the EOCD signature.
-    //    EOCD is 22 bytes minimum, optionally followed by a comment up to 64 KB.
     const fileLen = buffer.byteLength;
     const minEocdOffset = Math.max(0, fileLen - 22 - 0xFFFF);
     let eocdOffset = -1;
@@ -367,7 +409,6 @@ async function readZip(buffer) {
     const cdirEntries = dv.getUint16(eocdOffset + 10, true);
     const cdirOffset  = dv.getUint32(eocdOffset + 16, true);
 
-    // 2. Walk central directory; collect inflate jobs to run in parallel.
     const inflateJobs = [];
     let p = cdirOffset;
     for (let i = 0; i < cdirEntries; i++) {
@@ -383,7 +424,6 @@ async function readZip(buffer) {
         const localHeaderAt = dv.getUint32(p + 42, true);
         const name = TEXT_DECODER.decode(new Uint8Array(buffer, p + 46, nameLen));
 
-        // 3. Read the local file header to find where the actual data begins.
         if (dv.getUint32(localHeaderAt, true) !== SIG_LOCAL) {
             throw new Error(`[splat-sog] malformed local header for "${name}"`);
         }
@@ -392,10 +432,8 @@ async function readZip(buffer) {
         const dataStart   = localHeaderAt + 30 + lfhNameLen + lfhExtraLen;
 
         if (compMethod === 0) {
-            // Stored: data is verbatim.
             entries.set(name, new Uint8Array(buffer, dataStart, uncompSize));
         } else if (compMethod === 8) {
-            // Deflate: defer to inflate pass below.
             const compressed = new Uint8Array(buffer, dataStart, compSize);
             inflateJobs.push({ name, compressed });
         } else {
@@ -408,7 +446,6 @@ async function readZip(buffer) {
         p += 46 + nameLen + extraLen + commentLen;
     }
 
-    // 4. Inflate any deflated entries in parallel.
     if (inflateJobs.length) {
         if (typeof DecompressionStream !== 'function') {
             throw new Error(

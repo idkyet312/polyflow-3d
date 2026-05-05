@@ -196,9 +196,9 @@ export function buildSplatMeshAuto(splatData) {
             mesh.userData.splatSortFallbackReason = 'WebGPU storage buffers are unavailable.';
             setLastStatus({
                 effectiveMode: 'worker',
-                hasSH: !!splatData.shCoefficients,
+                hasSH: !!splatData.sh,
                 shDegree: 0,
-                shMaxDegree: splatData.shDegree || 0,
+                shMaxDegree: splatData.sh?.degree || 0,
                 shBytes: 0,
                 blendMode: _blendMode,
                 message: 'Compute unavailable. Using worker sort.',
@@ -215,9 +215,9 @@ export function buildSplatMeshAuto(splatData) {
             const shFallback = mesh.userData.splatShFallbackReason || '';
             setLastStatus({
                 effectiveMode: 'compute',
-                hasSH: !!splatData.shCoefficients,
+                hasSH: !!splatData.sh,
                 shDegree: actualShDegree,
-                shMaxDegree: splatData.shDegree || 0,
+                shMaxDegree: splatData.sh?.degree || 0,
                 shBytes: mesh.userData.splatShBytes || 0,
                 blendMode: _blendMode,
                 message: `Compute sort active for ${splatData.count.toLocaleString()} splats. SH deg ${actualShDegree}.${shFallback ? ` ${shFallback}` : ''}`,
@@ -232,9 +232,9 @@ export function buildSplatMeshAuto(splatData) {
             mesh.userData.splatSortFallbackReason = err?.message || String(err);
             setLastStatus({
                 effectiveMode: 'worker',
-                hasSH: !!splatData.shCoefficients,
+                hasSH: !!splatData.sh,
                 shDegree: 0,
-                shMaxDegree: splatData.shDegree || 0,
+                shMaxDegree: splatData.sh?.degree || 0,
                 shBytes: 0,
                 blendMode: _blendMode,
                 message: 'Compute build failed. Using worker sort.',
@@ -249,9 +249,9 @@ export function buildSplatMeshAuto(splatData) {
     mesh.userData.splatSortRequestedMode = requestedMode;
     setLastStatus({
         effectiveMode: mesh.userData.splatSortMode,
-        hasSH: !!splatData.shCoefficients,
+        hasSH: !!splatData.sh,
         shDegree: 0,
-        shMaxDegree: splatData.shDegree || 0,
+        shMaxDegree: splatData.sh?.degree || 0,
         shBytes: 0,
         blendMode: _blendMode,
         message: mode === 'off'
