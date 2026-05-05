@@ -438,8 +438,11 @@ const globalPostProcessUniforms = {
 // Performance toggle: when on, skips DDGI tick, volumetric fog update, and the
 // post-process volume update. The three subsystems own their own state via
 // setEnabled, so flipping this back to false restores the default render path
-// without a reload. Defaults to on so heavy effects stay paused at boot.
-const PERF_MODE_DEFAULT_ENABLED = true;
+// without a reload. Defaults to OFF on fix/ddgi-correctness so DDGI is actually
+// exercised at boot — perf-mode-on suppresses ddgiManager.tick() (main.js:5865)
+// AND forces setEnabled(false)+setInjectionEnabled(false) via applyWorldEnvState
+// (~L4133), which masked the C1/C2/M2/C4/M6 fixes from PR #22.
+const PERF_MODE_DEFAULT_ENABLED = false;
 let perfModeEnabled = PERF_MODE_DEFAULT_ENABLED;
 let perfModeUiRefs = null;
 
