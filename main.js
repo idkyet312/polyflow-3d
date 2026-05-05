@@ -5349,7 +5349,19 @@ async function init() {
     runtimeAudio.listener = new SoundGeneratorAudioListener();
     camera.add(runtimeAudio.listener);
 
-    renderer = new WebGPURenderer({ antialias: true, alpha: true });
+    // Phase 4 (radiance fields): request a raised storage-buffer cap so SH
+    // coefficient buffers fit. Default is 128 MB; SH deg-3 at 1.5M splats
+    // needs ~270 MB (f32 vec3 layout). 512 MB is broadly available on
+    // desktop GPUs; mobile/low-end will refuse and the renderer will fall
+    // back to the smaller cap (the splat builder caps SH degree at 2 in
+    // that case, automatically).
+    renderer = new WebGPURenderer({
+        antialias: true,
+        alpha: true,
+        requiredLimits: {
+            maxStorageBufferBindingSize: 512 * 1024 * 1024,   // 512 MB
+        },
+    });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;

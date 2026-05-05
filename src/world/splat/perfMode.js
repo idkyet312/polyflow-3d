@@ -68,7 +68,13 @@ export function detectComputeSupport() {
  * @returns {THREE.Mesh}
  */
 export function buildSplatMeshAuto(splatData) {
-    const mode = _modeOverride || 'worker';
+    // Auto: prefer compute when WebGPU is available — the compute path is
+    // where view-dependent SH (Phase 4) and per-frame radiance evaluation
+    // live. Worker path is the universal fallback.
+    let mode = _modeOverride;
+    if (!mode) {
+        mode = detectComputeSupport() ? 'compute' : 'worker';
+    }
 
     if (mode === 'compute') {
         try {
