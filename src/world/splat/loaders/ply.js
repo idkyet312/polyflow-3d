@@ -8,25 +8,43 @@
 //   header (in declared order) — typically:
 //
 //     x, y, z, nx, ny, nz,
-//     f_dc_0, f_dc_1, f_dc_2,           // SH band 0 (DC)  -> RGB
-//     f_rest_0 .. f_rest_44,            // SH bands 1..3 (optional)
+//     f_dc_0, f_dc_1, f_dc_2,           // SH band 0 (DC)  -> raw, evaluated in shader
+//     f_rest_0 .. f_rest_44,            // SH bands 1..3 (optional, channel-major)
 //     opacity,                          // logit; sigmoid -> alpha
 //     scale_0, scale_1, scale_2,        // log-scale; exp -> world scale
 //     rot_0, rot_1, rot_2, rot_3        // quaternion (w, x, y, z)  ← w-first!
 //
-// Conversions to our normalized SplatData:
-//   color:    RGB = clamp01(0.5 + 0.28209479177 * f_dc_n);  alpha = sigmoid(opacity)
+// Conversions to our normalized SplatData (Phase 4 — radiance fields):
+//   colors:   when DC is present, stores RAW f_dc + sigmoid(opacity), with
+//             colorEncoding='fdc_raw'. The renderer (shader-side) evaluates
+//             `clamp01(0.5 + SH_C0 * f_dc + bands_1..3)` once per frame.
+//             When DC is absent, falls back to linear-RGB white + alpha=1
+//             with colorEncoding='linear_rgb' (no eval needed).
 //   scale:    Math.exp(scale_n)
 //   rotation: rearrange (w,x,y,z) → (x,y,z,w), then normalize
+//   sh:       when f_rest_* are present, packs them as a vertex-major
+//             half-float Uint16Array — layout `[r1, g1, b1, r2, g2, b2, ...]`
+//             per splat (i.e. 3K halves / splat for K coeffs/channel).
+//             Source PLY layout is channel-major (f_rest_0..K-1 = R,
+//             K..2K-1 = G, 2K..3K-1 = B); we transpose during parse.
+//             Half-float halves memory at imperceptible quality cost
+//             (web-splat reference uses the same trick).
 //
-// We currently discard f_rest_* (no view-dependent SH yet — Phase 1.5 work).
+// Detected SH max degree from f_rest_* property count:
+//     0 f_rest → degree 0 (DC only)
+//     9 f_rest → degree 1 (3 coeffs/channel)
+//    24 f_rest → degree 2 (8 coeffs/channel)
+//    45 f_rest → degree 3 (15 coeffs/channel)
+//   Other counts → use the highest valid degree fitting; warn.
 //
 // Reference impls used for cross-checking conventions:
 //   - antimatter15/splat (PLY → .splat converter): rot_0 is W
 //   - mkkellogg/GaussianSplats3D
 //   - playcanvas/splat-transform: src/lib/readers/read-ply.ts
+//   - KeKsBoTer/web-splat (TSL/WGSL SH eval reference)
 
-const SH_C0 = 0.28209479177387814;    // 0th-order SH basis constant
+import { floatToHalf } from '../halfFloat.js';
+
 const TEXT_DECODER = new TextDecoder('utf-8');
 
 const PROP_SIZE = {
@@ -56,17 +74,30 @@ const PROP_READER = {
     float64: (dv, o, le) => dv.getFloat64(o, le),
 };
 
+// SH coefficients per channel for each degree (excluding DC band 0).
+//   degree 0: 0    (DC only)
+//   degree 1: 3    band 1
+//   degree 2: 8    bands 1..2 (3 + 5)
+//   degree 3: 15   bands 1..3 (3 + 5 + 7)
+const COEFFS_PER_CHANNEL = [0, 3, 8, 15];
+
+/**
+ * Map PLY's f_rest_* count → max SH degree we can render. Returns the
+ * largest degree D in {0,1,2,3} such that 3 × COEFFS_PER_CHANNEL[D] <= count.
+ * Truncated f_rest groups (e.g. 12 = partial deg 2) get rounded DOWN — we
+ * use only complete bands.
+ */
+function detectShDegreeFromFRestCount(count) {
+    if (count >= 45) return 3;
+    if (count >= 24) return 2;
+    if (count >= 9)  return 1;
+    return 0;
+}
+
 // -----------------------------------------------------------------------------
 // Header parsing
 // -----------------------------------------------------------------------------
 
-/**
- * Locate the byte offset just past `end_header\n` in the buffer.
- * Decodes only the leading slice (PLY headers are small ASCII).
- *
- * @param {ArrayBuffer} buffer
- * @returns {{ headerText: string, dataOffset: number }}
- */
 function readHeader(buffer) {
     const slice  = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 65536));
     const ascii  = TEXT_DECODER.decode(slice);
@@ -74,22 +105,13 @@ function readHeader(buffer) {
     if (marker < 0) {
         throw new Error('[splat-ply] end_header not found in first 64 KB of file');
     }
-    // Header may end with "end_header\n" or "end_header\r\n".
     const after = ascii.indexOf('\n', marker);
     if (after < 0) throw new Error('[splat-ply] malformed header (no newline after end_header)');
 
-    // Re-encode the header substring to get its true byte length, since the
-    // 64 KB ASCII slice may contain non-ASCII bytes that don't correspond 1:1.
     const headerBytes = new TextEncoder().encode(ascii.slice(0, after + 1));
     return { headerText: ascii.slice(0, after + 1), dataOffset: headerBytes.byteLength };
 }
 
-/**
- * Parse the header text into a structured form.
- *
- * @param {string} headerText
- * @returns {{ format: string, vertexCount: number, properties: Array<{name:string,type:string,size:number}> }}
- */
 function parseHeader(headerText) {
     const lines = headerText.split(/\r?\n/);
     let format       = '';
@@ -112,10 +134,9 @@ function parseHeader(headerText) {
             continue;
         }
         if (line.startsWith('property ')) {
-            if (!inVertexElement) continue;     // skip e.g. face properties
-            // "property <type> <name>"  or  "property list <count_type> <type> <name>"
+            if (!inVertexElement) continue;
             const tokens = line.split(/\s+/);
-            if (tokens[1] === 'list') continue; // we don't need list properties for splats
+            if (tokens[1] === 'list') continue;
             const type = tokens[1];
             const name = tokens[2];
             const size = PROP_SIZE[type];
@@ -149,13 +170,20 @@ const REQUIRED = ['x', 'y', 'z', 'opacity', 'scale_0', 'scale_1', 'scale_2',
  * Parse a Gaussian-flavored PLY ArrayBuffer into the normalized splat shape.
  *
  * @param {ArrayBuffer} buffer
- * @returns {{count, positions, scales, colors, rotations}}
+ * @returns {{
+ *   count: number,
+ *   positions: Float32Array,
+ *   scales: Float32Array,
+ *   colors: Float32Array,
+ *   rotations: Float32Array,
+ *   colorEncoding: 'fdc_raw' | 'linear_rgb',
+ *   sh?: { degree: number, layout: 'direct', coeffs: Uint16Array },
+ * }}
  */
 export function parsePly(buffer) {
     const { headerText, dataOffset } = readHeader(buffer);
     const { vertexCount, properties } = parseHeader(headerText);
 
-    // Compute byte stride and per-property offset within the stride.
     const stride = properties.reduce((sum, p) => sum + p.size, 0);
     const offsets = {};
     let cursor = 0;
@@ -164,7 +192,6 @@ export function parsePly(buffer) {
         cursor += p.size;
     }
 
-    // Sanity-check: file must be long enough to hold all records.
     const bodyBytes = buffer.byteLength - dataOffset;
     if (bodyBytes < stride * vertexCount) {
         throw new Error(
@@ -173,14 +200,37 @@ export function parsePly(buffer) {
         );
     }
 
-    // Verify required properties are present. f_dc_0..2 are also expected for
-    // color but we degrade gracefully (white) if missing.
     for (const name of REQUIRED) {
         if (!(name in offsets)) {
             throw new Error(`[splat-ply] required property "${name}" missing from header`);
         }
     }
-    const hasDC = offsets.f_dc_0 && offsets.f_dc_1 && offsets.f_dc_2;
+    const hasDC = !!(offsets.f_dc_0 && offsets.f_dc_1 && offsets.f_dc_2);
+
+    // Detect SH max degree from f_rest_* property count. The exporter
+    // emits f_rest_0 .. f_rest_(3K-1) where K = coeffs/channel for the
+    // chosen degree. We don't read names with regex in the hot loop —
+    // just count and map.
+    let fRestCount = 0;
+    for (const name in offsets) if (name.startsWith('f_rest_')) fRestCount++;
+    const shDegree = hasDC ? detectShDegreeFromFRestCount(fRestCount) : 0;
+    const K        = COEFFS_PER_CHANNEL[shDegree];
+
+    // Verify every f_rest_<n> for n < 3K is present and float-typed.
+    // (PLYs often have stray f_rest_* slots beyond what the chosen degree
+    // uses; we just ignore those — but the ones we DO use must be there.)
+    if (K > 0) {
+        for (let i = 0; i < 3 * K; i++) {
+            const propName = `f_rest_${i}`;
+            const p = offsets[propName];
+            if (!p) {
+                throw new Error(`[splat-ply] expected SH property "${propName}" missing (degree=${shDegree})`);
+            }
+            if (p.type !== 'float' && p.type !== 'float32') {
+                throw new Error(`[splat-ply] SH property "${propName}" must be float, got ${p.type}`);
+            }
+        }
+    }
 
     const dv = new DataView(buffer, dataOffset, bodyBytes);
     const positions = new Float32Array(vertexCount * 3);
@@ -188,7 +238,28 @@ export function parsePly(buffer) {
     const colors    = new Float32Array(vertexCount * 4);
     const rotations = new Float32Array(vertexCount * 4);
 
-    // Hoist readers into locals so the hot loop avoids object indirection.
+    // Pre-compute f_rest property offsets for the hot loop. Order is
+    // [c=0,k=0], [c=0,k=1], ... [c=0,k=K-1], [c=1,k=0], ... — matching the
+    // PLY's channel-major layout. We index this by (c * K + k).
+    let restOffsets = null;
+    if (K > 0) {
+        restOffsets = new Int32Array(3 * K);
+        for (let c = 0; c < 3; c++) {
+            for (let k = 0; k < K; k++) {
+                restOffsets[c * K + k] = offsets[`f_rest_${c * K + k}`].offset;
+            }
+        }
+    }
+
+    // SH output buffer: vertex-major, RGB-interleaved, half-float packed.
+    //   coeffs[i * 3K + k * 3 + c] = half-float of the k-th SH coeff for
+    //   channel c (0=R, 1=G, 2=B) of vertex i.
+    // This layout maximizes cache locality in the shader's per-vertex SH loop.
+    let shCoeffs = null;
+    if (K > 0) {
+        shCoeffs = new Uint16Array(vertexCount * 3 * K);
+    }
+
     const read = (name, base) => {
         const { offset, type } = offsets[name];
         return PROP_READER[type](dv, base + offset, true);
@@ -207,15 +278,15 @@ export function parsePly(buffer) {
         scales[i * 3 + 1] = Math.exp(read('scale_1', base));
         scales[i * 3 + 2] = Math.exp(read('scale_2', base));
 
-        // Color: SH DC band → linear RGB; opacity → sigmoid alpha.
+        // Color: SH DC band stored RAW; opacity → sigmoid alpha.
+        // Shader will evaluate `0.5 + SH_C0 * f_dc + bands_1..3` once per frame.
         if (hasDC) {
-            const r = 0.5 + SH_C0 * read('f_dc_0', base);
-            const g = 0.5 + SH_C0 * read('f_dc_1', base);
-            const b = 0.5 + SH_C0 * read('f_dc_2', base);
-            colors[i * 4 + 0] = Math.max(0, Math.min(1, r));
-            colors[i * 4 + 1] = Math.max(0, Math.min(1, g));
-            colors[i * 4 + 2] = Math.max(0, Math.min(1, b));
+            colors[i * 4 + 0] = read('f_dc_0', base);
+            colors[i * 4 + 1] = read('f_dc_1', base);
+            colors[i * 4 + 2] = read('f_dc_2', base);
         } else {
+            // No DC → fall back to opaque white. We'll surface this via
+            // colorEncoding='linear_rgb' so the shader uses these directly.
             colors[i * 4 + 0] = 1;
             colors[i * 4 + 1] = 1;
             colors[i * 4 + 2] = 1;
@@ -233,9 +304,36 @@ export function parsePly(buffer) {
         rotations[i * 4 + 1] = qy / len;
         rotations[i * 4 + 2] = qz / len;
         rotations[i * 4 + 3] = qw / len;
+
+        // SH bands 1..3: read in PLY's channel-major order, transpose into
+        // vertex-major RGB-interleaved on write, half-float pack inline.
+        if (shCoeffs !== null) {
+            const outBase = i * 3 * K;
+            for (let k = 0; k < K; k++) {
+                for (let c = 0; c < 3; c++) {
+                    const f = dv.getFloat32(base + restOffsets[c * K + k], true);
+                    shCoeffs[outBase + k * 3 + c] = floatToHalf(f);
+                }
+            }
+        }
     }
 
-    return { count: vertexCount, positions, scales, colors, rotations };
+    const result = {
+        count: vertexCount,
+        positions,
+        scales,
+        colors,
+        rotations,
+        colorEncoding: hasDC ? 'fdc_raw' : 'linear_rgb',
+    };
+    if (shDegree > 0) {
+        result.sh = {
+            degree: shDegree,
+            layout: 'direct',
+            coeffs: shCoeffs,
+        };
+    }
+    return result;
 }
 
 /**

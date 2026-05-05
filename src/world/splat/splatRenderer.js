@@ -5,7 +5,7 @@
 //
 // Pipeline:
 //   .splat ArrayBuffer
-//     -> parseSplat() -> {positions, scales, colors, rotations} typed arrays
+//     -> parseSplat() -> {positions, scales, colors, rotations, colorEncoding}
 //     -> InstancedBufferGeometry (unit quad x N instance attribs)
 //     -> MeshBasicNodeMaterial with TSL vertexNode + colorNode
 //     -> THREE.Mesh, frustumCulled=false, renderOrder=100, depthWrite=false
@@ -13,12 +13,16 @@
 // Goals:
 //   - Drop a .splat URL into the scene -> see anisotropic Gaussians on screen.
 //   - Proper EWA splatting math (correctly oriented ellipses, not point sprites).
-// Non-goals (deferred to later phases):
-//   - Depth sort. Splats render in file order; alpha blending is wrong but
-//     the result still reads as the captured object. Phase 3 fixes this.
-//   - Spherical harmonics view-dependent color (uses DC component only).
-//   - LOD, frustum culling, performance toggles.
-//   - Editor integration, persistence, SplatActor wrapper.
+//
+// Phase 4 (radiance fields) update:
+//   - Loaders may emit `colorEncoding: 'fdc_raw'` (PLY, SOG when DC present)
+//     OR `colorEncoding: 'linear_rgb'` (.splat, PLY without DC).
+//   - The worker path here STILL renders DC-only (no view-dependent SH);
+//     for fdc_raw it evaluates `clamp01(0.5 + SH_C0 * f_dc)` in the vertex
+//     shader. SH bands 1..N are ignored on this path — they live exclusively
+//     in the compute path (see splatRendererCompute.js).
+//   - splatData.sh, if present, is silently dropped here. perfMode.js logs
+//     a hint if the user is on worker mode and SH was discarded.
 //
 // References:
 //   Kerbl et al. 2023, "3D Gaussian Splatting for Real-Time Radiance Field Rendering"
@@ -34,6 +38,9 @@ import {
 } from 'three/tsl';
 import { loadSplatAny } from './loaders/index.js';
 import { attachDepthSort } from './depthSort.js';
+
+// SH band-0 normalization constant. final_dc_color = 0.5 + SH_C0 * f_dc.
+const SH_C0 = 0.28209479177387814;
 
 // .splat byte layout: 32 bytes per splat, little-endian.
 //   0..11   position xyz (3 x f32)
@@ -53,8 +60,8 @@ const SPLAT_BYTES = 32;
 // double-gamma-corrects when paired with SRGBColorSpace output and gives
 // desaturated, low-contrast colors with no true black.
 //
-// PLY and SOG already produce linear values (see loaders/{ply,sog}.js) so
-// this lookup is .splat-format-only.
+// PLY and SOG emit either raw f_dc (colorEncoding='fdc_raw') or pre-evaluated
+// linear (colorEncoding='linear_rgb'); this LUT is .splat-format-only.
 const SRGB_TO_LINEAR_LUT = (() => {
     const lut = new Float32Array(256);
     for (let i = 0; i < 256; i++) {
@@ -94,7 +101,10 @@ export function parseSplat(arrayBuffer) {
         rotations[i * 4 + 2] = (view.getUint8(o + 30) - 127.5) / 127.5;
         rotations[i * 4 + 3] = (view.getUint8(o + 31) - 127.5) / 127.5;
     }
-    return { count, positions, scales, colors, rotations };
+    // .splat colors are evaluated linear RGB after the LUT; no f_dc to
+    // recover. Surface this so buildSplatMesh's vertex shader skips the
+    // 0.5 + SH_C0 * f_dc step.
+    return { count, positions, scales, colors, rotations, colorEncoding: 'linear_rgb' };
 }
 
 // Format-aware loader. Detects .splat, .ply, and .sog from extension/magic bytes
@@ -108,7 +118,11 @@ export async function loadSplat(url) {
 // ---------------------------------------------------------------------
 // Mesh builder
 // ---------------------------------------------------------------------
-export function buildSplatMesh({ count, positions, scales, colors, rotations }) {
+export function buildSplatMesh(splatData) {
+    const { count, positions, scales, colors, rotations } = splatData;
+    // Default to legacy 'linear_rgb' if the loader didn't say — safest for
+    // pre-Phase-4 callers that haven't been updated.
+    const colorEncoding = splatData.colorEncoding || 'linear_rgb';
 
     // Geometry: unit quad spanning [-1, 1] in xy, instanced `count` times.
     const geometry = new THREE.InstancedBufferGeometry();
@@ -218,7 +232,20 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
 
         // Pass to fragment: positionLocal * 3 -> quad-local coords in units of sigma.
         vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(3.0));
-        vColor.assign(sc);
+
+        // Color path. JS-level branch on colorEncoding picks the right
+        // shader form at material build time; no per-vertex branch.
+        //
+        //   linear_rgb: pass `splatColor` through unchanged (.splat / no-DC PLY)
+        //   fdc_raw:    evaluate clamp01(0.5 + SH_C0 * f_dc), keep alpha as-is
+        //               (worker path is DC-only; bands 1..N are dropped)
+        if (colorEncoding === 'fdc_raw') {
+            const dc = vec3(0.5).add(sc.rgb.mul(float(SH_C0)));
+            const dcClamped = dc.clamp(0.0, 1.0);
+            vColor.assign(vec4(dcClamped, sc.a));
+        } else {
+            vColor.assign(sc);
+        }
 
         return clipCenter.add(vec4(offsetClip.x, offsetClip.y, 0, 0));
     })();
@@ -240,6 +267,7 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
     mesh.frustumCulled = false;   // no per-instance bbox yet; cull at scene level only
     mesh.renderOrder   = 100;     // render after all opaques
     mesh.name          = 'SplatCloud';
+    mesh.userData.splatColorEncoding = colorEncoding;     // surface for diagnostics
 
     // Update camera-derived uniforms each frame.
     mesh.onBeforeRender = (renderer, _scene, camera) => {
@@ -255,7 +283,7 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
     // camera uniform update above still runs. Without this, alpha-blended
     // splats render in load order and the result reads as visible "marks"
     // rather than a coherent surface — see depthSort.js for the rationale.
-    attachDepthSort(mesh, { count, positions, scales, colors, rotations });
+    attachDepthSort(mesh, splatData);
 
     return mesh;
 }
