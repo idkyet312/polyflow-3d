@@ -452,7 +452,10 @@ let perfModeUiRefs = null;
 // Defaults match the engine's out-of-box look — DDGI off (heavy), everything
 // else on. Changing the master "All Off" or "Performance" preset rewrites the
 // `enabled` fields but preserves slider values.
-const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v2';
+// Bumped v2 → v3 on fix/ddgi-correctness so old saves with `ddgi.enabled = false`
+// (the previous default) don't override the new boot-on-DDGI default. See doc
+// comment on PERF_MODE_DEFAULT_ENABLED above for the broader fix context.
+const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v3';
 const WORLD_ENV_DEFAULTS = Object.freeze({
     sky: { enabled: true, preset: 'sunny-sky', blurriness: 0.05 },
     ambient: { enabled: true, intensity: 1.0 },
@@ -5784,6 +5787,24 @@ async function init() {
     loadWorldEnvFromStorage();
     applyWorldEnvState({ persist: false });
     setPerfModeEnabled(PERF_MODE_DEFAULT_ENABLED);
+
+    // Diagnostic on the fix/ddgi-correctness branch — surfaces the resolved DDGI
+    // state at boot so anyone testing knows whether the path is actually live.
+    // Remove before merging to a regular branch.
+    try {
+        const ddgi = getDDGIManager();
+        const snap = ddgi.getSnapshot?.() || {};
+        // eslint-disable-next-line no-console
+        console.info('[DDGI] boot state', {
+            perfModeEnabled,
+            'worldEnvState.ddgi.enabled': worldEnvState.ddgi.enabled,
+            'worldEnvState.ddgi.intensity': worldEnvState.ddgi.intensity,
+            managerEnabled: snap.enabled,
+            managerInjectionEnabled: snap.injectionEnabled,
+            activeVolumeType: snap.activeVolumeType,
+            probeCount: snap.probeCount,
+        });
+    } catch (e) { /* boot order — DDGI may not be live yet */ }
 
     // Create example widgets
     createExampleWidgets();
