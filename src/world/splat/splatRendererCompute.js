@@ -30,12 +30,20 @@ import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import {
     Fn, instanceIndex, uniform, varying, storage,
-    vec2, vec3, vec4, mat3, float,
-    positionLocal, modelViewMatrix, cameraProjectionMatrix,
+    vec2, vec3, vec4, mat3, float, uint,
+    positionLocal, modelViewMatrix, modelWorldMatrix, cameraProjectionMatrix, cameraPosition,
     dot, exp, max, sqrt,
+    unpackHalf2x16,
 } from 'three/tsl';
 
 import { allocateSplatStorage, attachGpuSort } from './gpuSortBitonic.js';
+import { configureSplatMaterialBlend, normalizeSplatBlendMode } from './blendMode.js';
+import { getSplatRenderTuning } from './renderTuning.js';
+
+const SH_C0 = 0.28209479177387814;
+const SH_C1 = 0.4886025119029199;
+const SH_C2 = [1.0925484305920792, -1.0925484305920792, 0.31539156525252005, -1.0925484305920792, 0.5462742152960396];
+const SH_C3 = [-0.5900435899266435, 2.890611442640554, -0.4570457994644658, 0.3731763325901154, -0.4570457994644658, 1.445305721320277, -0.5900435899266435];
 
 /**
  * Build a splat mesh that uses GPU compute sorting.
@@ -43,9 +51,16 @@ import { allocateSplatStorage, attachGpuSort } from './gpuSortBitonic.js';
  * @param {{count:number, positions:Float32Array, scales:Float32Array, colors:Float32Array, rotations:Float32Array}} splatData
  * @returns {THREE.Mesh}
  */
-export function buildSplatMeshCompute(splatData) {
-    const slot = allocateSplatStorage(splatData);
+export function buildSplatMeshCompute(splatData, opts = {}) {
+    const blendMode = normalizeSplatBlendMode(opts.blendMode);
+    const tuning = getSplatRenderTuning(blendMode);
+    const requestedShDegree = Number.isFinite(opts.shDegree) ? opts.shDegree : 0;
+    const slot = allocateSplatStorage(splatData, { shDegree: requestedShDegree });
     const N    = slot.count;
+    const shDegree = slot.shDegree || 0;
+    const shPackedU32PerSplat = slot.shPackedU32PerSplat || 0;
+    const shPackedU32PerChannelSplat = slot.shPackedU32PerChannelSplat || 0;
+    const shLayout = slot.shLayout || '';
 
     // Geometry: unit quad in [-1,1]² — same as the attribute-based renderer.
     // We don't actually need ANY per-instance attribute on the geometry in
@@ -67,8 +82,8 @@ export function buildSplatMeshCompute(splatData) {
         depthWrite:  false,
         depthTest:   true,
         side:        THREE.DoubleSide,
-        blending:    THREE.NormalBlending,
     });
+    configureSplatMaterialBlend(material, blendMode);
 
     // Cross-stage varyings.
     const vQuad  = varying(vec2(0, 0), 'vQuad');
@@ -76,11 +91,47 @@ export function buildSplatMeshCompute(splatData) {
 
     // Wrap StorageInstancedBufferAttribute objects with TSL storage() nodes
     // so they can be indexed inside the vertex shader.
-    const positionsNode = storage(slot.positionsStorage, 'vec3');
-    const scalesNode    = storage(slot.scalesStorage,    'vec3');
-    const colorsNode    = storage(slot.colorsStorage,    'vec4');
-    const rotationsNode = storage(slot.rotationsStorage, 'vec4');
-    const indicesNode   = storage(slot.sortedIndicesStorage, 'uint');
+    const positionsNode = storage(slot.positionsStorage, 'vec3', N).toReadOnly();
+    const scalesNode    = storage(slot.scalesStorage,    'vec3', N).toReadOnly();
+    const colorsNode    = storage(slot.colorsStorage,    'vec4', N).toReadOnly();
+    const rotationsNode = storage(slot.rotationsStorage, 'vec4', N).toReadOnly();
+    const indicesNode   = storage(slot.sortedIndicesStorage, 'uint', slot.countPadded).toReadOnly();
+    const shNode = slot.shStorage
+        ? storage(slot.shStorage, 'uint', N * shPackedU32PerSplat).toReadOnly()
+        : null;
+    const shNodeR = slot.shStorageR
+        ? storage(slot.shStorageR, 'uint', N * shPackedU32PerChannelSplat).toReadOnly()
+        : null;
+    const shNodeG = slot.shStorageG
+        ? storage(slot.shStorageG, 'uint', N * shPackedU32PerChannelSplat).toReadOnly()
+        : null;
+    const shNodeB = slot.shStorageB
+        ? storage(slot.shStorageB, 'uint', N * shPackedU32PerChannelSplat).toReadOnly()
+        : null;
+
+    function readShCoeff(src, coeffIndex) {
+        if (shLayout === 'planar') {
+            return vec3(
+                readShChannelCoeff(shNodeR, src, coeffIndex),
+                readShChannelCoeff(shNodeG, src, coeffIndex),
+                readShChannelCoeff(shNodeB, src, coeffIndex),
+            );
+        }
+        const packedBase = src.mul(uint(shPackedU32PerSplat));
+        const halfIndex = coeffIndex * 3;
+        const pair0 = Math.floor(halfIndex / 2);
+        const lanes0 = unpackHalf2x16(shNode.element(packedBase.add(uint(pair0))));
+        const lanes1 = unpackHalf2x16(shNode.element(packedBase.add(uint(pair0 + 1))));
+        return (halfIndex & 1) === 0
+            ? vec3(lanes0.x, lanes0.y, lanes1.x)
+            : vec3(lanes0.y, lanes1.x, lanes1.y);
+    }
+
+    function readShChannelCoeff(node, src, coeffIndex) {
+        const packedBase = src.mul(uint(shPackedU32PerChannelSplat));
+        const lanes = unpackHalf2x16(node.element(packedBase.add(uint(Math.floor(coeffIndex / 2)))));
+        return (coeffIndex & 1) === 0 ? lanes.x : lanes.y;
+    }
 
     material.vertexNode = Fn(() => {
         // Indirection: instanceIndex → src splat index via sortedIndices.
@@ -161,8 +212,44 @@ export function buildSplatMeshCompute(splatData) {
         const offsetClip = major.mul(positionLocal.x).add(minor.mul(positionLocal.y)).mul(px2clip);
 
         // Pass to fragment.
-        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(3.0));   // 3 → squared Mahalanobis at corner
-        vColor.assign(sc);
+        let outColor = sc;
+        if (shDegree > 0 && (shNode || shNodeR)) {
+            const worldPos = modelWorldMatrix.mul(vec4(sp, 1.0)).xyz;
+            const dir = worldPos.sub(cameraPosition).normalize();
+            const x = dir.x;
+            const y = dir.y;
+            const z = dir.z;
+            const xx = x.mul(x);
+            const yy = y.mul(y);
+            const zz = z.mul(z);
+            const rgb = readShCoeff(src, 0).mul(SH_C0).toVar();
+
+            if (shDegree >= 1) {
+                rgb.addAssign(readShCoeff(src, 1).mul(y.mul(-SH_C1)));
+                rgb.addAssign(readShCoeff(src, 2).mul(z.mul(SH_C1)));
+                rgb.addAssign(readShCoeff(src, 3).mul(x.mul(-SH_C1)));
+            }
+            if (shDegree >= 2) {
+                rgb.addAssign(readShCoeff(src, 4).mul(x.mul(y).mul(SH_C2[0])));
+                rgb.addAssign(readShCoeff(src, 5).mul(y.mul(z).mul(SH_C2[1])));
+                rgb.addAssign(readShCoeff(src, 6).mul(zz.mul(2.0).sub(xx).sub(yy).mul(SH_C2[2])));
+                rgb.addAssign(readShCoeff(src, 7).mul(x.mul(z).mul(SH_C2[3])));
+                rgb.addAssign(readShCoeff(src, 8).mul(xx.sub(yy).mul(SH_C2[4])));
+            }
+            if (shDegree >= 3) {
+                rgb.addAssign(readShCoeff(src, 9).mul(y.mul(xx.mul(3.0).sub(yy)).mul(SH_C3[0])));
+                rgb.addAssign(readShCoeff(src, 10).mul(x.mul(y).mul(z).mul(SH_C3[1])));
+                rgb.addAssign(readShCoeff(src, 11).mul(y.mul(zz.mul(4.0).sub(xx).sub(yy)).mul(SH_C3[2])));
+                rgb.addAssign(readShCoeff(src, 12).mul(z.mul(zz.mul(2.0).sub(xx.mul(3.0)).sub(yy.mul(3.0))).mul(SH_C3[3])));
+                rgb.addAssign(readShCoeff(src, 13).mul(x.mul(zz.mul(4.0).sub(xx).sub(yy)).mul(SH_C3[4])));
+                rgb.addAssign(readShCoeff(src, 14).mul(z.mul(xx.sub(yy)).mul(SH_C3[5])));
+                rgb.addAssign(readShCoeff(src, 15).mul(x.mul(xx.sub(yy.mul(3.0))).mul(SH_C3[6])));
+            }
+            outColor = vec4(rgb.add(0.5).clamp(0.0, 1.0).pow(2.2), sc.a);
+        }
+
+        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(tuning.radius));
+        vColor.assign(outColor);
 
         return clipCenter.add(vec4(offsetClip.x, offsetClip.y, 0, 0));
     })();
@@ -170,9 +257,12 @@ export function buildSplatMeshCompute(splatData) {
     material.colorNode = Fn(() => {
         // 2D Gaussian: alpha = alpha_splat * exp(-0.5 * ||vQuad||²).
         const r2    = dot(vQuad, vQuad);
-        const raw   = exp(r2.mul(-0.5)).mul(vColor.a);
+        const raw   = exp(r2.mul(-0.5)).mul(vColor.a).mul(tuning.alphaScale);
         // Hard cutoff to kill the long faint tail beyond ~2.5 sigma.
-        const alpha = raw.sub(0.004).max(0);
+        const alpha = raw.sub(tuning.alphaCutoff).max(0);
+        if (blendMode === 'reference') {
+            return vec4(vColor.rgb.mul(alpha), alpha);
+        }
         return vec4(vColor.rgb, alpha);
     })();
 
@@ -181,6 +271,14 @@ export function buildSplatMeshCompute(splatData) {
     mesh.renderOrder   = 100;
     mesh.name          = 'SplatCloud (compute)';
     mesh.userData.splat = slot;       // make storage buffers discoverable for attachGpuSort
+    mesh.userData.splatSortMode = 'compute';
+    mesh.userData.splatSortStatus = 'identity';
+    mesh.userData.splatSortError = '';
+    mesh.userData.splatShDegree = shDegree;
+    mesh.userData.splatShMaxDegree = splatData.shDegree || 0;
+    mesh.userData.splatShBytes = slot.shBytes || 0;
+    mesh.userData.splatShFallbackReason = slot.shFallbackReason || '';
+    mesh.userData.splatBlendMode = blendMode;
 
     // Keep camera-derived uniforms fresh.
     mesh.onBeforeRender = (renderer, _scene, camera) => {

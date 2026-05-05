@@ -17,6 +17,7 @@
 
 import * as splatRenderer from './splatRenderer.js';
 import * as splatActor from './splatActor.js';
+import * as splatPerf from './perfMode.js';
 import { wireSplatDropZone } from './dropZone.js';
 
 export async function wireSplatDevHooks(scene, sceneSystem = null, opts = {}) {
@@ -26,6 +27,16 @@ export async function wireSplatDevHooks(scene, sceneSystem = null, opts = {}) {
     if (typeof window !== 'undefined') {
         window.splatRenderer = splatRenderer;
         window.splatActor    = splatActor;
+        window.splatPerf     = {
+            setMode: splatPerf.setSplatSortMode,
+            getMode: splatPerf.getSplatSortMode,
+            getStatus: splatPerf.getSplatSortStatus,
+            setShDegree: splatPerf.setSplatShDegree,
+            getShDegree: splatPerf.getSplatShDegree,
+            setBlendMode: splatPerf.setSplatBlendMode,
+            getBlendMode: splatPerf.getSplatBlendMode,
+            detectComputeSupport: splatPerf.detectComputeSupport,
+        };
     }
 
     // Drag-and-drop file loading. Wired before the URL auto-loader so it's

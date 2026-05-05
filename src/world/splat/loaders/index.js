@@ -12,6 +12,8 @@
 //     scales:    Float32Array(count * 3),  // already exp(log_scale)
 //     colors:    Float32Array(count * 4),  // RGBA in [0,1]
 //     rotations: Float32Array(count * 4),  // quaternion (x,y,z,w), normalized
+//     shCoefficients?: Float32Array(count * 48), // coeff-major SH, raw linear coeffs
+//     shDegree?: 1 | 2 | 3,
 //   }
 //
 // Supported formats:
@@ -25,6 +27,14 @@ import { parseSog } from './sog.js';
 const PK_MAGIC      = 0x504B0304;    // "PK\x03\x04"  (ZIP local file header)
 const PK_MAGIC_EOCD = 0x504B0506;    // "PK\x05\x06"  (ZIP end-of-central-dir)
 const SPLAT_BYTES   = 32;
+const SRGB_TO_LINEAR_LUT = (() => {
+    const lut = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+        const c = i / 255;
+        lut[i] = c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    return lut;
+})();
 
 /**
  * Detect splat format from URL extension. Returns one of:
@@ -92,9 +102,9 @@ export function parseSplatBinary(arrayBuffer) {
         scales[i * 3 + 0]    = view.getFloat32(o + 12, true);
         scales[i * 3 + 1]    = view.getFloat32(o + 16, true);
         scales[i * 3 + 2]    = view.getFloat32(o + 20, true);
-        colors[i * 4 + 0]    = view.getUint8(o + 24) / 255;
-        colors[i * 4 + 1]    = view.getUint8(o + 25) / 255;
-        colors[i * 4 + 2]    = view.getUint8(o + 26) / 255;
+        colors[i * 4 + 0]    = SRGB_TO_LINEAR_LUT[view.getUint8(o + 24)];
+        colors[i * 4 + 1]    = SRGB_TO_LINEAR_LUT[view.getUint8(o + 25)];
+        colors[i * 4 + 2]    = SRGB_TO_LINEAR_LUT[view.getUint8(o + 26)];
         colors[i * 4 + 3]    = view.getUint8(o + 27) / 255;
         rotations[i * 4 + 0] = (view.getUint8(o + 28) - 127.5) / 127.5;
         rotations[i * 4 + 1] = (view.getUint8(o + 29) - 127.5) / 127.5;

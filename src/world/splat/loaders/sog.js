@@ -33,11 +33,15 @@
 // Output matches the normalized splat shape used by buildSplatMesh:
 //   { count, positions: F32[N*3], scales: F32[N*3], colors: F32[N*4], rotations: F32[N*4] }
 //
-// Phase 2.5 limitations (deferred):
-//   - shN higher SH bands are ignored (no view-dependent SH rendering yet).
+// Optional shN higher SH bands are returned as `shCoefficients`.
 
 const SH_C0 = 0.28209479177387814;
 const TEXT_DECODER = new TextDecoder('utf-8');
+
+function srgbToLinearFloat(c) {
+    const v = Math.max(0, Math.min(1, c));
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
 
 // =============================================================================
 // Public entry points
@@ -46,7 +50,7 @@ const TEXT_DECODER = new TextDecoder('utf-8');
 /**
  * Parse a SOG ArrayBuffer into normalized splat data.
  * @param {ArrayBuffer} buffer
- * @returns {Promise<{count, positions, scales, colors, rotations}>}
+ * @returns {Promise<{count, positions, scales, colors, rotations, shCoefficients?: Float32Array, shDegree?: number}>}
  */
 export async function parseSog(buffer) {
     const entries = await readZip(buffer);
@@ -95,8 +99,14 @@ async function decodeSog(meta, entries) {
     const rotations = decodeQuats(quats, count);
     const out_scales = decodeScales(scales, count, meta.scales.codebook);
     const colors = decodeColorsAndOpacity(sh0, count, meta.sh0.codebook);
+    const shCoefficients = await decodeHigherOrderSh(entries, meta, sh0, count);
 
-    return { count, positions, scales: out_scales, colors, rotations };
+    const out = { count, positions, scales: out_scales, colors, rotations };
+    if (shCoefficients) {
+        out.shCoefficients = shCoefficients;
+        out.shDegree = meta.shN?.bands === 3 ? 3 : meta.shN?.bands === 2 ? 2 : 1;
+    }
+    return out;
 }
 
 // -----------------------------------------------------------------------------
@@ -217,12 +227,55 @@ function decodeColorsAndOpacity(rgba, count, codebook) {
         const g = 0.5 + SH_C0 * fdc1;
         const b = 0.5 + SH_C0 * fdc2;
 
-        out[i * 4 + 0] = Math.max(0, Math.min(1, r));
-        out[i * 4 + 1] = Math.max(0, Math.min(1, g));
-        out[i * 4 + 2] = Math.max(0, Math.min(1, b));
+        out[i * 4 + 0] = srgbToLinearFloat(r);
+        out[i * 4 + 1] = srgbToLinearFloat(g);
+        out[i * 4 + 2] = srgbToLinearFloat(b);
         out[i * 4 + 3] = rgba[base + 3] * inv255;        // alpha already in [0,1]
     }
     return out;
+}
+
+async function decodeHigherOrderSh(entries, meta, sh0Rgba, count) {
+    if (!meta.shN?.files?.length || !meta.shN?.codebook?.length) return null;
+
+    const centroidFile = meta.shN.files.find((name) => /centroid/i.test(name)) || meta.shN.files[0];
+    const labelFile = meta.shN.files.find((name) => /label/i.test(name)) || meta.shN.files[1];
+    if (!centroidFile || !labelFile) return null;
+
+    const [centroidsRgba, labelsRgba] = await Promise.all([
+        decodeWebpEntry(entries, centroidFile),
+        decodeWebpEntry(entries, labelFile),
+    ]);
+
+    const dcCodebook = meta.sh0.codebook;
+    const restCodebook = meta.shN.codebook;
+    const degree = meta.shN.bands === 3 ? 3 : meta.shN.bands === 2 ? 2 : 1;
+    const coeffCount = (degree + 1) * (degree + 1);
+    const restCoeffCount = coeffCount - 1;
+    const shCoefficients = new Float32Array(count * 48);
+    const centroidWidth = centroidsRgba.width || (meta.shN.bands === 3 ? 960 : meta.shN.bands === 2 ? 512 : 192);
+
+    for (let i = 0; i < count; i++) {
+        const src = i * 4;
+        const shBase = i * 48;
+        shCoefficients[shBase + 0] = dcCodebook[sh0Rgba[src + 0]];
+        shCoefficients[shBase + 1] = dcCodebook[sh0Rgba[src + 1]];
+        shCoefficients[shBase + 2] = dcCodebook[sh0Rgba[src + 2]];
+
+        const label = labelsRgba[src + 0] | (labelsRgba[src + 1] << 8);
+        for (let c = 1; c < coeffCount; c++) {
+            const ac = c - 1;
+            const u = (label % 64) * restCoeffCount + ac;
+            const v = Math.floor(label / 64);
+            const pixel = (v * centroidWidth + u) * 4;
+            if (pixel + 2 >= centroidsRgba.length) continue;
+            shCoefficients[shBase + c * 3 + 0] = restCodebook[centroidsRgba[pixel + 0]];
+            shCoefficients[shBase + c * 3 + 1] = restCodebook[centroidsRgba[pixel + 1]];
+            shCoefficients[shBase + c * 3 + 2] = restCodebook[centroidsRgba[pixel + 2]];
+        }
+    }
+
+    return shCoefficients;
 }
 
 // =============================================================================
@@ -267,6 +320,8 @@ async function decodeWebpEntry(entries, name) {
     ctx.drawImage(bitmap, 0, 0);
     bitmap.close?.();
     const imageData = ctx.getImageData(0, 0, w, h);
+    imageData.data.width = w;
+    imageData.data.height = h;
     return imageData.data;       // Uint8ClampedArray, RGBA row-major
 }
 

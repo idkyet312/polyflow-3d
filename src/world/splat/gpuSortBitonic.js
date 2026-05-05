@@ -52,11 +52,12 @@ import * as THREE from 'three';
 import { StorageInstancedBufferAttribute } from 'three/webgpu';
 import {
     Fn, instanceIndex, uniform, storage,
-    uint, float, vec3, vec4, mat4,
-    If, abs, max,
+    uint, float, vec4,
+    If, max,
 } from 'three/tsl';
 
 const WORKGROUP_SIZE = 256;
+const MAX_SH_STORAGE_BYTES = 240 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // nextPow2 — bitonic sort works on power-of-2-length arrays. We pad with
@@ -113,9 +114,9 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
     // nodes so they can be indexed/assigned inside a kernel. The wrapping
     // is per-kernel (Three.js may bind them to different bind groups for
     // each compute pipeline).
-    const positionsNode     = storage(slot.positionsStorage,     'vec3');
-    const sortKeysNodeBK    = storage(slot.sortKeysStorage,      'uint');
-    const sortedIndicesBK   = storage(slot.sortedIndicesStorage, 'uint');
+    const positionsNode     = storage(slot.positionsStorage,     'vec3', N).toReadOnly();
+    const sortKeysNodeBK    = storage(slot.sortKeysStorage,      'uint', N_pad);
+    const sortedIndicesBK   = storage(slot.sortedIndicesStorage, 'uint', N_pad);
 
     const buildKeys = Fn(() => {
         const i = instanceIndex;
@@ -159,8 +160,8 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
     // Separate storage() wrappers for the compare-swap kernel. Same
     // underlying buffers, but Three.js may bind them differently per
     // compute pipeline.
-    const sortKeysNodeCS  = storage(slot.sortKeysStorage,      'uint');
-    const sortedIndicesCS = storage(slot.sortedIndicesStorage, 'uint');
+    const sortKeysNodeCS  = storage(slot.sortKeysStorage,      'uint', N_pad);
+    const sortedIndicesCS = storage(slot.sortedIndicesStorage, 'uint', N_pad);
 
     const compareSwap = Fn(() => {
         const t = instanceIndex;
@@ -179,14 +180,14 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
         // is a safety guard against over-dispatch rounding.
         If(j.lessThan(uint(N_pad)), () => {
             const dirAsc = i.bitAnd(K).equal(uint(0));      // ascending vs descending sub-sequence
-            const ki = sortKeysNodeCS.element(i);
-            const kj = sortKeysNodeCS.element(j);
+            const ki = sortKeysNodeCS.element(i).toVar();
+            const kj = sortKeysNodeCS.element(j).toVar();
 
             // Swap iff (ki > kj) XOR dirAsc — i.e. the wrong order for this dir.
-            const shouldSwap = ki.greaterThan(kj).equal(dirAsc);
+            const shouldSwap = dirAsc.select(ki.greaterThan(kj), ki.lessThan(kj));
             If(shouldSwap, () => {
-                const ii  = sortedIndicesCS.element(i);
-                const ij  = sortedIndicesCS.element(j);
+                const ii  = sortedIndicesCS.element(i).toVar();
+                const ij  = sortedIndicesCS.element(j).toVar();
                 sortKeysNodeCS.element(i).assign(kj);
                 sortKeysNodeCS.element(j).assign(ki);
                 sortedIndicesCS.element(i).assign(ij);
@@ -206,8 +207,34 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
     const _viewModel = new THREE.Matrix4();
 
     const prevOnBeforeRender = mesh.onBeforeRender || function () {};
+    let disabled = false;
+    let warnedRuntimeFailure = false;
+
+    function markRuntimeFailure(err) {
+        disabled = true;
+        slot.sortStatus = 'error';
+        slot.sortError = err?.message || String(err);
+        mesh.userData.splatSortRuntimeError = slot.sortError;
+        if (!warnedRuntimeFailure) {
+            warnedRuntimeFailure = true;
+            console.warn('[splat-gpuSort] compute dispatch failed; keeping identity order visible:', err);
+        }
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('splat-sort-status', {
+                detail: {
+                    requestedMode: mesh.userData.splatSortRequestedMode || 'auto',
+                    effectiveMode: 'compute',
+                    computeSupported: true,
+                    message: 'Compute sort failed at runtime. Showing unsorted splat.',
+                    error: slot.sortError,
+                },
+            }));
+        }
+    }
+
     mesh.onBeforeRender = function (renderer, scene, camera) {
         prevOnBeforeRender.call(this, renderer, scene, camera);
+        if (disabled) return;
 
         // Skip if camera hasn't moved since the last sort.
         camera.getWorldPosition(_camWorld);
@@ -223,7 +250,8 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
         uModelView.value.copy(_viewModel);
 
         // Pass 1: build keys.
-        renderer.compute(buildKeysCompute);
+        try {
+            renderer.compute(buildKeysCompute);
 
         // Pass 2: bitonic stages. K = 2,4,...,N_pad; J = K/2,K/4,...,1.
         // For 1.5M splats N_pad=2M → 21 outer × 21 inner = 441 dispatches.
@@ -234,6 +262,12 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
                 renderer.compute(compareSwapCompute);
             }
         }
+            slot.sortStatus = 'sorted';
+            slot.sortError = '';
+        } catch (err) {
+            markRuntimeFailure(err);
+            return;
+        }
 
         if (!lastCamPos) lastCamPos = new THREE.Vector3();
         lastCamPos.copy(_camWorld);
@@ -241,6 +275,7 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
     };
 
     return function disableGpuSort() {
+        disabled = true;
         mesh.onBeforeRender = prevOnBeforeRender;
         // Storage buffers are owned by the mesh.userData; don't dispose here.
     };
@@ -259,32 +294,157 @@ export function attachGpuSort(mesh, splatData, opts = {}) {
  *   scalesStorage:    StorageInstancedBufferAttribute,
  *   colorsStorage:    StorageInstancedBufferAttribute,
  *   rotationsStorage: StorageInstancedBufferAttribute,
+ *   shStorage?:       StorageInstancedBufferAttribute,
  *   sortKeysStorage:  StorageInstancedBufferAttribute,
  *   sortedIndicesStorage: StorageInstancedBufferAttribute,
  * }}
  */
-export function allocateSplatStorage(splatData) {
+export function allocateSplatStorage(splatData, opts = {}) {
     const N      = splatData.count | 0;
     const N_pad  = nextPow2(N);
+    const requestedShDegree = Math.max(0, Math.min(3, opts.shDegree ?? splatData.shDegree ?? 0));
 
     // Source-data storage (read-only in shaders, written once on upload).
     const positionsStorage = new StorageInstancedBufferAttribute(splatData.positions, 3);
     const scalesStorage    = new StorageInstancedBufferAttribute(splatData.scales,    3);
     const colorsStorage    = new StorageInstancedBufferAttribute(splatData.colors,    4);
     const rotationsStorage = new StorageInstancedBufferAttribute(splatData.rotations, 4);
+    const shPacking = splatData.shCoefficients
+        ? chooseShPacking(splatData.shCoefficients, N, Math.min(requestedShDegree, splatData.shDegree || requestedShDegree))
+        : null;
+    const packedSh = shPacking?.packed || null;
+    const shStorage = shPacking?.layout === 'interleaved' && packedSh
+        ? new StorageInstancedBufferAttribute(packedSh, 1)
+        : null;
+    const shStorageR = shPacking?.layout === 'planar'
+        ? new StorageInstancedBufferAttribute(shPacking.packedR, 1)
+        : null;
+    const shStorageG = shPacking?.layout === 'planar'
+        ? new StorageInstancedBufferAttribute(shPacking.packedG, 1)
+        : null;
+    const shStorageB = shPacking?.layout === 'planar'
+        ? new StorageInstancedBufferAttribute(shPacking.packedB, 1)
+        : null;
 
     // Sort working buffers (written every frame; allocated to padded size).
-    const sortKeysStorage      = new StorageInstancedBufferAttribute(new Uint32Array(N_pad), 1);
-    const sortedIndicesStorage = new StorageInstancedBufferAttribute(new Uint32Array(N_pad), 1);
+    const sortKeys = new Uint32Array(N_pad);
+    const sortedIndices = new Uint32Array(N_pad);
+    for (let i = 0; i < N_pad; i++) {
+        sortKeys[i] = 0xffffffff;
+        sortedIndices[i] = i;
+    }
+
+    const sortKeysStorage      = new StorageInstancedBufferAttribute(sortKeys, 1);
+    const sortedIndicesStorage = new StorageInstancedBufferAttribute(sortedIndices, 1);
 
     return {
         count:                N,
         countPadded:          N_pad,
+        sortStatus:           'identity',
+        sortError:            '',
         positionsStorage,
         scalesStorage,
         colorsStorage,
         rotationsStorage,
+        shStorage,
+        shStorageR,
+        shStorageG,
+        shStorageB,
+        shLayout: shPacking?.layout || '',
+        shDegree: shPacking?.degree || 0,
+        shPackedU32PerSplat: shPacking?.packedU32PerSplat || 0,
+        shPackedU32PerChannelSplat: shPacking?.packedU32PerChannelSplat || 0,
+        shFallbackReason: shPacking?.fallbackReason || '',
+        shBytes: shPacking?.byteLength || 0,
         sortKeysStorage,
         sortedIndicesStorage,
     };
+}
+
+function chooseShPacking(coefficients, count, requestedDegree) {
+    for (let degree = requestedDegree; degree > 0; degree--) {
+        const coeffCount = (degree + 1) * (degree + 1);
+        const packedU32PerSplat = Math.ceil((coeffCount * 3) / 2);
+        const byteLength = count * packedU32PerSplat * 4;
+        if (byteLength <= MAX_SH_STORAGE_BYTES) {
+            return {
+                layout: 'interleaved',
+                degree,
+                packedU32PerSplat,
+                packed: packShCoefficients(coefficients, count, degree, packedU32PerSplat),
+                byteLength,
+                fallbackReason: degree < requestedDegree
+                    ? `SH deg ${requestedDegree} exceeds ${(MAX_SH_STORAGE_BYTES / (1024 * 1024)).toFixed(0)} MB buffer cap; using deg ${degree}.`
+                    : '',
+            };
+        }
+        const packedU32PerChannelSplat = Math.ceil(coeffCount / 2);
+        const channelByteLength = count * packedU32PerChannelSplat * 4;
+        if (channelByteLength <= MAX_SH_STORAGE_BYTES) {
+            const planar = packShCoefficientsPlanar(coefficients, count, degree, packedU32PerChannelSplat);
+            return {
+                layout: 'planar',
+                degree,
+                packedU32PerChannelSplat,
+                ...planar,
+                byteLength: planar.packedR.byteLength + planar.packedG.byteLength + planar.packedB.byteLength,
+                fallbackReason: '',
+            };
+        }
+    }
+    return {
+        degree: 0,
+        packedU32PerSplat: 0,
+        packedU32PerChannelSplat: 0,
+        packed: null,
+        fallbackReason: `SH storage exceeds ${(MAX_SH_STORAGE_BYTES / (1024 * 1024)).toFixed(0)} MB buffer cap; using DC color.`,
+    };
+}
+
+function packShCoefficients(coefficients, count, degree, packedU32PerSplat) {
+    const strideFloats = 16 * 3;
+    if (coefficients.length < count * strideFloats) return null;
+
+    const coeffFloats = ((degree + 1) * (degree + 1)) * 3;
+    const packed = new Uint32Array(count * packedU32PerSplat);
+    for (let i = 0; i < count; i++) {
+        const srcBase = i * strideFloats;
+        const dstBase = i * packedU32PerSplat;
+        for (let p = 0; p < packedU32PerSplat; p++) {
+            const lo = THREE.DataUtils.toHalfFloat(coefficients[srcBase + p * 2 + 0]);
+            const hi = p * 2 + 1 < coeffFloats
+                ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + p * 2 + 1])
+                : 0;
+            packed[dstBase + p] = lo | (hi << 16);
+        }
+    }
+    return packed;
+}
+
+function packShCoefficientsPlanar(coefficients, count, degree, packedU32PerChannelSplat) {
+    const strideFloats = 16 * 3;
+    const coeffCount = (degree + 1) * (degree + 1);
+    const packedR = new Uint32Array(count * packedU32PerChannelSplat);
+    const packedG = new Uint32Array(count * packedU32PerChannelSplat);
+    const packedB = new Uint32Array(count * packedU32PerChannelSplat);
+
+    for (let i = 0; i < count; i++) {
+        const srcBase = i * strideFloats;
+        const dstBase = i * packedU32PerChannelSplat;
+        for (let p = 0; p < packedU32PerChannelSplat; p++) {
+            const c0 = p * 2;
+            const c1 = c0 + 1;
+            const r0 = THREE.DataUtils.toHalfFloat(coefficients[srcBase + c0 * 3 + 0]);
+            const g0 = THREE.DataUtils.toHalfFloat(coefficients[srcBase + c0 * 3 + 1]);
+            const b0 = THREE.DataUtils.toHalfFloat(coefficients[srcBase + c0 * 3 + 2]);
+            const r1 = c1 < coeffCount ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + c1 * 3 + 0]) : 0;
+            const g1 = c1 < coeffCount ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + c1 * 3 + 1]) : 0;
+            const b1 = c1 < coeffCount ? THREE.DataUtils.toHalfFloat(coefficients[srcBase + c1 * 3 + 2]) : 0;
+            packedR[dstBase + p] = r0 | (r1 << 16);
+            packedG[dstBase + p] = g0 | (g1 << 16);
+            packedB[dstBase + p] = b0 | (b1 << 16);
+        }
+    }
+
+    return { packedR, packedG, packedB };
 }

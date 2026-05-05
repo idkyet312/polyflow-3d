@@ -1,95 +1,263 @@
 // src/world/splat/perfMode.js
 //
-// Phase 3b — runtime toggle between sort-implementation paths.
-//
-// Modes:
-//   'auto'     — pick best supported (compute → worker → none) at construction.
-//   'compute'  — force GPU compute sort. Throws if WebGPU compute storage
-//                buffers aren't available.
-//   'worker'   — force JS Worker sort (the Phase 3a path). Always available.
-//   'off'      — no sorting. Splats render in load order; alpha blending wrong
-//                but the renderer still works. Useful for perf measurement.
-//
-// The mode is sticky for the lifetime of a splat actor. Switching requires
-// disposing the actor and rebuilding (the storage-buffer layout differs
-// between paths).
+// Runtime selector for splat sort backends.
 
-import * as THREE from 'three';
+import { StorageInstancedBufferAttribute } from 'three/webgpu';
 import { buildSplatMesh as buildSplatMeshWorker } from './splatRenderer.js';
 import { buildSplatMeshCompute } from './splatRendererCompute.js';
+import { normalizeSplatBlendMode } from './blendMode.js';
 
-let _modeOverride = null;     // null = auto
+const VALID_MODES = ['auto', 'compute', 'worker', 'off'];
+const STORAGE_KEY = 'polyflow.splatSortMode';
+const SH_STORAGE_KEY = 'polyflow.splatShDegree';
+const BLEND_STORAGE_KEY = 'polyflow.splatBlendMode';
 
-/** Set the global splat sort mode. Future buildSplatMeshAuto() calls honor it. */
-export function setSplatSortMode(mode) {
-    if (!['auto', 'compute', 'worker', 'off', null].includes(mode)) {
+let _modeOverride = readInitialModeOverride(); // null = auto
+let _shDegree = readInitialShDegree();
+let _blendMode = readInitialBlendMode();
+let _lastStatus = {
+    requestedMode: _modeOverride || 'auto',
+    effectiveMode: 'worker',
+    computeSupported: false,
+    message: 'No splat loaded yet.',
+    error: '',
+    hasSH: false,
+    shDegree: _shDegree,
+    shMaxDegree: 0,
+    shBytes: 0,
+    blendMode: _blendMode,
+};
+
+function normalizeMode(mode) {
+    if (mode === null || mode === undefined || mode === '') return 'auto';
+    return VALID_MODES.includes(mode) ? mode : null;
+}
+
+function readInitialModeOverride() {
+    if (typeof window === 'undefined') return null;
+
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = normalizeMode(params.get('splatSort'));
+    if (fromUrl) return fromUrl === 'auto' ? null : fromUrl;
+
+    try {
+        const fromStorage = normalizeMode(window.localStorage?.getItem(STORAGE_KEY));
+        return fromStorage && fromStorage !== 'auto' ? fromStorage : null;
+    } catch {
+        return null;
+    }
+}
+
+function persistMode(mode) {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage?.setItem(STORAGE_KEY, mode || 'auto');
+    } catch {
+        // Ignore restricted storage contexts.
+    }
+}
+
+function readInitialShDegree() {
+    if (typeof window === 'undefined') return 3;
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get('splatSH');
+    let raw = fromUrl;
+    if (raw === null) {
+        try {
+            raw = window.localStorage?.getItem(SH_STORAGE_KEY);
+        } catch {
+            raw = null;
+        }
+    }
+    const degree = Number.parseInt(raw ?? '3', 10);
+    return Number.isFinite(degree) ? Math.max(0, Math.min(3, degree)) : 0;
+}
+
+function persistShDegree(degree) {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage?.setItem(SH_STORAGE_KEY, String(degree));
+    } catch {
+        // Ignore restricted storage contexts.
+    }
+}
+
+function readInitialBlendMode() {
+    if (typeof window === 'undefined') return 'reference';
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get('splatBlend');
+    let raw = fromUrl;
+    if (raw === null) {
+        try {
+            raw = window.localStorage?.getItem(BLEND_STORAGE_KEY);
+        } catch {
+            raw = null;
+        }
+    }
+    return normalizeSplatBlendMode(raw || 'reference');
+}
+
+function persistBlendMode(mode) {
+    if (typeof window === 'undefined') return;
+    try {
+        window.localStorage?.setItem(BLEND_STORAGE_KEY, mode);
+    } catch {
+        // Ignore restricted storage contexts.
+    }
+}
+
+function dispatchStatus() {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('splat-sort-status', { detail: getSplatSortStatus() }));
+}
+
+function setLastStatus(patch) {
+    _lastStatus = {
+        ..._lastStatus,
+        requestedMode: _modeOverride || 'auto',
+        computeSupported: detectComputeSupport(),
+        ...patch,
+    };
+    dispatchStatus();
+}
+
+export function setSplatSortMode(mode, opts = {}) {
+    const normalized = normalizeMode(mode);
+    if (!normalized) {
         console.warn(`[splat-perfMode] unknown mode "${mode}", ignoring.`);
         return;
     }
-    _modeOverride = mode === 'auto' ? null : mode;
+
+    _modeOverride = normalized === 'auto' ? null : normalized;
+    if (opts.persist !== false) persistMode(normalized);
+    setLastStatus({
+        effectiveMode: normalized === 'auto'
+            ? (detectComputeSupport() ? 'compute' : 'worker')
+            : normalized,
+        message: `Splat sort mode set to ${normalized}. New splats use this mode.`,
+        error: '',
+    });
 }
 
-/** Get the current effective mode. */
 export function getSplatSortMode() {
     return _modeOverride || 'auto';
 }
 
-/**
- * Detect whether the current renderer supports the GPU compute sort path.
- * Returns true if Three.js exposes WebGPURenderer with compute support AND
- * StorageInstancedBufferAttribute is available.
- *
- * This is a static feature check — it doesn't actually issue a compute pass
- * to confirm. If a runtime compute dispatch fails (e.g. on a buggy driver),
- * the caller can catch and fall back to worker manually.
- */
-export function detectComputeSupport() {
-    try {
-        // The StorageInstancedBufferAttribute import lives in three/webgpu.
-        // If three is too old (< r163) the import throws, three/webgpu doesn't
-        // exist, or StorageInstancedBufferAttribute is absent.
-        // eslint-disable-next-line no-unused-vars
-        const probe = require('three/webgpu');
-        if (!probe.StorageInstancedBufferAttribute) return false;
-    } catch {
-        // ESM/Vite path — try dynamic import sniff (best-effort).
-        // We don't await here; if three/webgpu isn't resolvable Vite will
-        // have failed at load time anyway.
-    }
-    if (typeof navigator === 'undefined' || !navigator.gpu) return false;
-    return true;
+export function getSplatSortStatus() {
+    return { ..._lastStatus };
 }
 
-/**
- * Build a splat mesh using the runtime-selected sort implementation.
- * Drop-in replacement for `buildSplatMesh(splatData)` from splatRenderer.js.
- *
- * @param {{count:number, positions:Float32Array, scales:Float32Array, colors:Float32Array, rotations:Float32Array}} splatData
- * @returns {THREE.Mesh}
- */
+export function setSplatShDegree(degree, opts = {}) {
+    const next = Math.max(0, Math.min(3, Number.parseInt(degree, 10) || 0));
+    _shDegree = next;
+    if (opts.persist !== false) persistShDegree(next);
+    setLastStatus({
+        shDegree: next,
+        message: `Splat SH degree set to ${next}. New compute splats use this degree.`,
+        error: '',
+    });
+}
+
+export function getSplatShDegree() {
+    return _shDegree;
+}
+
+export function setSplatBlendMode(mode, opts = {}) {
+    _blendMode = normalizeSplatBlendMode(mode);
+    if (opts.persist !== false) persistBlendMode(_blendMode);
+    setLastStatus({
+        blendMode: _blendMode,
+        message: `Splat blend mode set to ${_blendMode}. New splats use this mode.`,
+        error: '',
+    });
+}
+
+export function getSplatBlendMode() {
+    return _blendMode;
+}
+
+export function detectComputeSupport() {
+    if (typeof navigator === 'undefined' || !navigator.gpu) return false;
+    return typeof StorageInstancedBufferAttribute === 'function';
+}
+
 export function buildSplatMeshAuto(splatData) {
-    const mode = _modeOverride || 'worker';
+    const requestedMode = _modeOverride || 'auto';
+    const computeSupported = detectComputeSupport();
+    const mode = requestedMode === 'auto'
+        ? (computeSupported ? 'compute' : 'worker')
+        : requestedMode;
 
     if (mode === 'compute') {
+        if (!computeSupported) {
+            const mesh = buildSplatMeshWorker(splatData, { blendMode: _blendMode });
+            mesh.userData.splatSortMode = 'worker';
+            mesh.userData.splatSortRequestedMode = requestedMode;
+            mesh.userData.splatSortFallbackReason = 'WebGPU storage buffers are unavailable.';
+            setLastStatus({
+                effectiveMode: 'worker',
+                hasSH: !!splatData.shCoefficients,
+                shDegree: 0,
+                shMaxDegree: splatData.shDegree || 0,
+                shBytes: 0,
+                blendMode: _blendMode,
+                message: 'Compute unavailable. Using worker sort.',
+                error: mesh.userData.splatSortFallbackReason,
+            });
+            return mesh;
+        }
+
         try {
-            const mesh = buildSplatMeshCompute(splatData);
+            const mesh = buildSplatMeshCompute(splatData, { shDegree: _shDegree, blendMode: _blendMode });
             mesh.userData.splatSortMode = 'compute';
+            mesh.userData.splatSortRequestedMode = requestedMode;
+            const actualShDegree = mesh.userData.splatShDegree || 0;
+            const shFallback = mesh.userData.splatShFallbackReason || '';
+            setLastStatus({
+                effectiveMode: 'compute',
+                hasSH: !!splatData.shCoefficients,
+                shDegree: actualShDegree,
+                shMaxDegree: splatData.shDegree || 0,
+                shBytes: mesh.userData.splatShBytes || 0,
+                blendMode: _blendMode,
+                message: `Compute sort active for ${splatData.count.toLocaleString()} splats. SH deg ${actualShDegree}.${shFallback ? ` ${shFallback}` : ''}`,
+                error: '',
+            });
             return mesh;
         } catch (err) {
             console.warn('[splat-perfMode] compute path threw at build time, falling back to worker:', err);
-            // Fall through to worker.
+            const mesh = buildSplatMeshWorker(splatData, { blendMode: _blendMode });
+            mesh.userData.splatSortMode = 'worker';
+            mesh.userData.splatSortRequestedMode = requestedMode;
+            mesh.userData.splatSortFallbackReason = err?.message || String(err);
+            setLastStatus({
+                effectiveMode: 'worker',
+                hasSH: !!splatData.shCoefficients,
+                shDegree: 0,
+                shMaxDegree: splatData.shDegree || 0,
+                shBytes: 0,
+                blendMode: _blendMode,
+                message: 'Compute build failed. Using worker sort.',
+                error: mesh.userData.splatSortFallbackReason,
+            });
+            return mesh;
         }
     }
 
-    const mesh = buildSplatMeshWorker(splatData);
+    const mesh = buildSplatMeshWorker(splatData, { attachSort: mode !== 'off', blendMode: _blendMode });
     mesh.userData.splatSortMode = mode === 'off' ? 'off' : 'worker';
-    if (mode === 'off') {
-        // Strip the worker hookup that buildSplatMesh installs.
-        // (depthSort.js's attach is called inside buildSplatMesh; we'd need
-        // a separate "no-sort" build path to truly disable. For now, 'off'
-        // just labels — the worker still runs in the background.)
-        // TODO: refactor splatRenderer.js to make the depth-sort attach
-        // optional, then honor 'off' here.
-    }
+    mesh.userData.splatSortRequestedMode = requestedMode;
+    setLastStatus({
+        effectiveMode: mesh.userData.splatSortMode,
+        hasSH: !!splatData.shCoefficients,
+        shDegree: 0,
+        shMaxDegree: splatData.shDegree || 0,
+        shBytes: 0,
+        blendMode: _blendMode,
+        message: mode === 'off'
+            ? `Splat sort disabled for ${splatData.count.toLocaleString()} splats.`
+            : `Worker sort active for ${splatData.count.toLocaleString()} splats.`,
+        error: '',
+    });
     return mesh;
 }

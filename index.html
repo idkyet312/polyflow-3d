@@ -827,6 +827,30 @@
                                         <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
                                     </div>
                                     <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full DDGI + fog + post-process active.</div>
+                                    <div class="viewer-inline-note">Splat sort backend for newly loaded splats.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-sort-auto">Auto</button>
+                                        <button class="btn viewer-toggle-btn" id="splat-sort-compute">Compute</button>
+                                        <button class="btn viewer-toggle-btn" id="splat-sort-worker">Worker</button>
+                                        <button class="btn viewer-toggle-btn" id="splat-sort-off">Off</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="splat-sort-status">Splat sort: auto.</div>
+                                    <div class="viewer-inline-note">Splat blend mode for newly loaded splats.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-blend-reference">Reference</button>
+                                        <button class="btn viewer-toggle-btn" id="splat-blend-polyflow">PolyFlow</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="splat-blend-status">Blend: reference</div>
+                                    <div id="splat-sh-controls" style="display: none;">
+                                        <div class="viewer-inline-note">Spherical Harmonics degree for newly loaded compute splats.</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="splat-sh-0">0</button>
+                                            <button class="btn viewer-toggle-btn" id="splat-sh-1">1</button>
+                                            <button class="btn viewer-toggle-btn" id="splat-sh-2">2</button>
+                                            <button class="btn viewer-toggle-btn" id="splat-sh-3">3</button>
+                                        </div>
+                                        <div class="viewer-inline-note" id="splat-sh-status">SH: unavailable</div>
+                                    </div>
                                 </div>
                             </details>
 

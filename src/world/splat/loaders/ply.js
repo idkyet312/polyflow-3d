@@ -149,7 +149,7 @@ const REQUIRED = ['x', 'y', 'z', 'opacity', 'scale_0', 'scale_1', 'scale_2',
  * Parse a Gaussian-flavored PLY ArrayBuffer into the normalized splat shape.
  *
  * @param {ArrayBuffer} buffer
- * @returns {{count, positions, scales, colors, rotations}}
+ * @returns {{count, positions, scales, colors, rotations, shCoefficients?: Float32Array, shDegree?: number}}
  */
 export function parsePly(buffer) {
     const { headerText, dataOffset } = readHeader(buffer);
@@ -181,6 +181,17 @@ export function parsePly(buffer) {
         }
     }
     const hasDC = offsets.f_dc_0 && offsets.f_dc_1 && offsets.f_dc_2;
+    const restNames = [];
+    for (let i = 0; i < 45; i++) {
+        const name = `f_rest_${i}`;
+        if (!(name in offsets)) break;
+        restNames.push(name);
+    }
+    const shDegree = restNames.length >= 45 ? 3 : restNames.length >= 24 ? 2 : restNames.length >= 9 ? 1 : 0;
+    const shCoeffCount = (shDegree + 1) * (shDegree + 1);
+    const shCoefficients = hasDC && shDegree > 0
+        ? new Float32Array(vertexCount * 16 * 3)
+        : null;
 
     const dv = new DataView(buffer, dataOffset, bodyBytes);
     const positions = new Float32Array(vertexCount * 3);
@@ -209,12 +220,26 @@ export function parsePly(buffer) {
 
         // Color: SH DC band → linear RGB; opacity → sigmoid alpha.
         if (hasDC) {
-            const r = 0.5 + SH_C0 * read('f_dc_0', base);
-            const g = 0.5 + SH_C0 * read('f_dc_1', base);
-            const b = 0.5 + SH_C0 * read('f_dc_2', base);
+            const dc0 = read('f_dc_0', base);
+            const dc1 = read('f_dc_1', base);
+            const dc2 = read('f_dc_2', base);
+            const r = 0.5 + SH_C0 * dc0;
+            const g = 0.5 + SH_C0 * dc1;
+            const b = 0.5 + SH_C0 * dc2;
             colors[i * 4 + 0] = Math.max(0, Math.min(1, r));
             colors[i * 4 + 1] = Math.max(0, Math.min(1, g));
             colors[i * 4 + 2] = Math.max(0, Math.min(1, b));
+            if (shCoefficients) {
+                const shBase = i * 48;
+                shCoefficients[shBase + 0] = dc0;
+                shCoefficients[shBase + 1] = dc1;
+                shCoefficients[shBase + 2] = dc2;
+                for (let c = 1; c < shCoeffCount; c++) {
+                    shCoefficients[shBase + c * 3 + 0] = read(`f_rest_${c - 1}`, base);
+                    shCoefficients[shBase + c * 3 + 1] = read(`f_rest_${15 + c - 1}`, base);
+                    shCoefficients[shBase + c * 3 + 2] = read(`f_rest_${30 + c - 1}`, base);
+                }
+            }
         } else {
             colors[i * 4 + 0] = 1;
             colors[i * 4 + 1] = 1;
@@ -235,7 +260,12 @@ export function parsePly(buffer) {
         rotations[i * 4 + 3] = qw / len;
     }
 
-    return { count: vertexCount, positions, scales, colors, rotations };
+    const out = { count: vertexCount, positions, scales, colors, rotations };
+    if (shCoefficients) {
+        out.shCoefficients = shCoefficients;
+        out.shDegree = shDegree;
+    }
+    return out;
 }
 
 /**

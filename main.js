@@ -98,6 +98,16 @@ import {
 import { applyCorrectColorSpace } from './src/runtime/colorSpace.js';
 import { wireSplatDevHooks } from './src/world/splat/init.js';
 import {
+    detectComputeSupport,
+    getSplatBlendMode,
+    getSplatShDegree,
+    getSplatSortMode,
+    getSplatSortStatus,
+    setSplatBlendMode,
+    setSplatShDegree,
+    setSplatSortMode,
+} from './src/world/splat/perfMode.js';
+import {
     compressTextures,
 } from './src/optim/textureCompression.js';
 import {
@@ -443,6 +453,10 @@ const globalPostProcessUniforms = {
 // without a reload. Defaults to off — engine ships unchanged.
 let perfModeEnabled = false;
 let perfModeUiRefs = null;
+let splatSortUiRefs = null;
+let splatShUiRefs = null;
+let splatBlendUiRefs = null;
+const SPLAT_TARGET_STORAGE_BUFFER_LIMIT = 256_000_000;
 
 // World Environment panel state — Godot-style WorldEnvironment node mirror.
 // Each section can be toggled on/off independently, and key values are tunable
@@ -3770,6 +3784,63 @@ function updatePerfModeUi() {
     }
 }
 
+function updateSplatSortUi(statusOverride = null) {
+    if (!splatSortUiRefs) return;
+    const requested = getSplatSortMode();
+    const status = statusOverride || getSplatSortStatus();
+    const buttons = splatSortUiRefs.buttons || {};
+    for (const [mode, button] of Object.entries(buttons)) {
+        button?.classList.toggle('viewer-toggle-btn-active', requested === mode);
+    }
+    if (splatSortUiRefs.status) {
+        const support = detectComputeSupport() ? 'compute supported' : 'compute unavailable';
+        const active = status.effectiveMode || (requested === 'auto' ? 'auto' : requested);
+        const error = status.error ? ` ${status.error}` : '';
+        splatSortUiRefs.status.textContent = `Splat sort: ${requested} -> ${active}. ${support}. ${status.message || ''}${error}`;
+    }
+    if (splatBlendUiRefs) {
+        const blendMode = getSplatBlendMode();
+        for (const [mode, button] of Object.entries(splatBlendUiRefs.buttons || {})) {
+            button?.classList.toggle('viewer-toggle-btn-active', mode === blendMode);
+        }
+        if (splatBlendUiRefs.status) {
+            splatBlendUiRefs.status.textContent = `Blend: ${status.blendMode || blendMode}`;
+        }
+    }
+    if (splatShUiRefs) {
+        const degree = getSplatShDegree();
+        const shVisible = (requested === 'compute' || status.effectiveMode === 'compute') && !!status.hasSH;
+        if (splatShUiRefs.root) splatShUiRefs.root.style.display = shVisible ? '' : 'none';
+        for (const [mode, button] of Object.entries(splatShUiRefs.buttons || {})) {
+            button?.classList.toggle('viewer-toggle-btn-active', Number(mode) === degree);
+        }
+        if (splatShUiRefs.status) {
+            const mb = status.shBytes ? (status.shBytes / (1024 * 1024)).toFixed(1) : '0.0';
+            splatShUiRefs.status.textContent = status.hasSH
+                ? `SH: deg ${status.shDegree || 0}/${status.shMaxDegree || 0} (${mb} MB)`
+                : 'SH: unavailable';
+        }
+    }
+}
+
+async function getPreferredWebGpuLimits() {
+    if (typeof navigator === 'undefined' || !navigator.gpu) return {};
+    try {
+        const adapter = await navigator.gpu.requestAdapter({
+            powerPreference: 'high-performance',
+            featureLevel: 'compatibility',
+        });
+        const maxStorage = adapter?.limits?.maxStorageBufferBindingSize || 0;
+        const maxBuffer = adapter?.limits?.maxBufferSize || 0;
+        if (maxStorage >= SPLAT_TARGET_STORAGE_BUFFER_LIMIT && maxBuffer >= SPLAT_TARGET_STORAGE_BUFFER_LIMIT) {
+            return { maxStorageBufferBindingSize: SPLAT_TARGET_STORAGE_BUFFER_LIMIT };
+        }
+    } catch (err) {
+        console.warn('[splat] WebGPU limit probe failed; using default limits.', err);
+    }
+    return {};
+}
+
 // Performance toggle: turn DDGI, volumetric fog, and post-process bloom off
 // (or on) at runtime without changing engine defaults. Each subsystem owns its
 // own enabled flag — we flip those here AND also gate the per-frame update
@@ -4962,6 +5033,32 @@ async function init() {
         onBtn: document.getElementById('perf-mode-on'),
         status: document.getElementById('perf-mode-status'),
     };
+    splatSortUiRefs = {
+        buttons: {
+            auto: document.getElementById('splat-sort-auto'),
+            compute: document.getElementById('splat-sort-compute'),
+            worker: document.getElementById('splat-sort-worker'),
+            off: document.getElementById('splat-sort-off'),
+        },
+        status: document.getElementById('splat-sort-status'),
+    };
+    splatShUiRefs = {
+        root: document.getElementById('splat-sh-controls'),
+        buttons: {
+            0: document.getElementById('splat-sh-0'),
+            1: document.getElementById('splat-sh-1'),
+            2: document.getElementById('splat-sh-2'),
+            3: document.getElementById('splat-sh-3'),
+        },
+        status: document.getElementById('splat-sh-status'),
+    };
+    splatBlendUiRefs = {
+        buttons: {
+            reference: document.getElementById('splat-blend-reference'),
+            polyflow: document.getElementById('splat-blend-polyflow'),
+        },
+        status: document.getElementById('splat-blend-status'),
+    };
 
     // World Environment panel refs — every toggle button, slider input, and
     // value-display span. Lookups are tolerant: the panel may be absent in
@@ -5089,6 +5186,26 @@ async function init() {
         setPerfModeEnabled(true);
     });
     updatePerfModeUi();
+    for (const [mode, button] of Object.entries(splatSortUiRefs?.buttons || {})) {
+        button?.addEventListener('click', () => {
+            setSplatSortMode(mode);
+            updateSplatSortUi();
+        });
+    }
+    for (const [degree, button] of Object.entries(splatShUiRefs?.buttons || {})) {
+        button?.addEventListener('click', () => {
+            setSplatShDegree(degree);
+            updateSplatSortUi();
+        });
+    }
+    for (const [mode, button] of Object.entries(splatBlendUiRefs?.buttons || {})) {
+        button?.addEventListener('click', () => {
+            setSplatBlendMode(mode);
+            updateSplatSortUi();
+        });
+    }
+    window.addEventListener('splat-sort-status', (event) => updateSplatSortUi(event.detail));
+    updateSplatSortUi();
 
     // World Environment panel: load saved state, wire all togglers + sliders,
     // then call applyWorldEnvState once so the engine boots into the user's
@@ -5349,7 +5466,13 @@ async function init() {
     runtimeAudio.listener = new SoundGeneratorAudioListener();
     camera.add(runtimeAudio.listener);
 
-    renderer = new WebGPURenderer({ antialias: true, alpha: true });
+    const webgpuRequiredLimits = await getPreferredWebGpuLimits();
+    renderer = new WebGPURenderer({
+        antialias: true,
+        alpha: true,
+        powerPreference: 'high-performance',
+        requiredLimits: webgpuRequiredLimits,
+    });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;

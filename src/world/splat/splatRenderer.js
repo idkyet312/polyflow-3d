@@ -34,6 +34,8 @@ import {
 } from 'three/tsl';
 import { loadSplatAny } from './loaders/index.js';
 import { attachDepthSort } from './depthSort.js';
+import { configureSplatMaterialBlend, normalizeSplatBlendMode } from './blendMode.js';
+import { getSplatRenderTuning } from './renderTuning.js';
 
 // .splat byte layout: 32 bytes per splat, little-endian.
 //   0..11   position xyz (3 x f32)
@@ -108,7 +110,9 @@ export async function loadSplat(url) {
 // ---------------------------------------------------------------------
 // Mesh builder
 // ---------------------------------------------------------------------
-export function buildSplatMesh({ count, positions, scales, colors, rotations }) {
+export function buildSplatMesh({ count, positions, scales, colors, rotations }, opts = {}) {
+    const blendMode = normalizeSplatBlendMode(opts.blendMode);
+    const tuning = getSplatRenderTuning(blendMode);
 
     // Geometry: unit quad spanning [-1, 1] in xy, instanced `count` times.
     const geometry = new THREE.InstancedBufferGeometry();
@@ -131,8 +135,8 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         depthWrite:  false,   // splats are translucent; don't occlude each other in depth buffer
         depthTest:   true,    // but DO read depth so opaque scene geometry occludes splats
         side:        THREE.DoubleSide,
-        blending:    THREE.NormalBlending,
     });
+    configureSplatMaterialBlend(material, blendMode);
 
     // Cross-stage varyings.
     const vQuad  = varying(vec2(0, 0), 'vQuad');   // quad-local position scaled to sigma units
@@ -217,7 +221,7 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         const offsetClip = major.mul(positionLocal.x).add(minor.mul(positionLocal.y)).mul(px2clip);
 
         // Pass to fragment: positionLocal * 3 -> quad-local coords in units of sigma.
-        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(3.0));
+        vQuad.assign(vec2(positionLocal.x, positionLocal.y).mul(tuning.radius));
         vColor.assign(sc);
 
         return clipCenter.add(vec4(offsetClip.x, offsetClip.y, 0, 0));
@@ -228,11 +232,14 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
         // Because we expanded the quad in the eigenbasis with 3*sqrt(lambda) units,
         // ||vQuad||^2 is exactly the squared Mahalanobis distance.
         const r2  = dot(vQuad, vQuad);
-        const raw = exp(r2.mul(-0.5)).mul(vColor.a);
+        const raw = exp(r2.mul(-0.5)).mul(vColor.a).mul(tuning.alphaScale);
         // Hard cutoff for the long faint tail beyond ~2.5 sigma. Below 1/255
         // the framebuffer can't represent the contribution anyway, and the
         // tails are what give un-sorted splats the visible "streaks" feel.
-        const alpha = raw.sub(0.004).max(0);
+        const alpha = raw.sub(tuning.alphaCutoff).max(0);
+        if (blendMode === 'reference') {
+            return vec4(vColor.rgb.mul(alpha), alpha);
+        }
         return vec4(vColor.rgb, alpha);
     })();
 
@@ -240,6 +247,7 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
     mesh.frustumCulled = false;   // no per-instance bbox yet; cull at scene level only
     mesh.renderOrder   = 100;     // render after all opaques
     mesh.name          = 'SplatCloud';
+    mesh.userData.splatBlendMode = blendMode;
 
     // Update camera-derived uniforms each frame.
     mesh.onBeforeRender = (renderer, _scene, camera) => {
@@ -255,7 +263,9 @@ export function buildSplatMesh({ count, positions, scales, colors, rotations }) 
     // camera uniform update above still runs. Without this, alpha-blended
     // splats render in load order and the result reads as visible "marks"
     // rather than a coherent surface — see depthSort.js for the rationale.
-    attachDepthSort(mesh, { count, positions, scales, colors, rotations });
+    if (opts.attachSort !== false) {
+        attachDepthSort(mesh, { count, positions, scales, colors, rotations });
+    }
 
     return mesh;
 }

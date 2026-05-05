@@ -38,6 +38,8 @@ export class SplatComponent extends ActorComponent {
         this.url = url;
         /** @type {number} Splat count (populated after load). */
         this.count = count;
+        this.shDegree = 0;
+        this.shData = null;
         /** @type {THREE.Mesh|null} The actual renderer mesh (set after load). */
         this.mesh = null;
         /** @type {Promise<void>|null} Resolves when the splat is loaded and attached. */
@@ -56,6 +58,8 @@ export class SplatComponent extends ActorComponent {
                 const data = await loadSplat(this.url);
                 this.mesh = buildSplatMeshAuto(data);
                 this.count = data.count;
+                this.shDegree = data.shDegree || 0;
+                this.shData = data.shCoefficients || null;
                 this._computeBounds(data.positions);
 
                 // Attach to the actor's root mesh so transform-gizmo edits on the actor
