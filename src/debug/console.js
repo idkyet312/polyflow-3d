@@ -21,7 +21,7 @@ let closeObjectScriptMenu, closeObjectScriptEditor, resetMovementInputState,
     renderer, setRayDebugEnabled, forceAllSceneMeshShadows,
     setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
     resetMobileInputState, updateWorldPresentation, updateGameplayUI,
-    isEditableElement;
+    isEditableElement, getDDGIManager;
 
 export function setupDebugConsole(deps) {
     ({
@@ -51,6 +51,7 @@ export function setupDebugConsole(deps) {
         updateWorldPresentation,
         updateGameplayUI,
         isEditableElement,
+        getDDGIManager,
     } = deps);
 }
 
@@ -177,7 +178,13 @@ export function createDebugStatPanel(name) {
     const titleWrap = document.createElement('div');
     const title = document.createElement('div');
     title.className = 'debug-stat-title';
-    title.textContent = name === 'unit' ? 'Stat Unit' : name === 'physics' ? 'Stat Physics' : 'Stat GPU';
+    title.textContent = name === 'unit'
+        ? 'Stat Unit'
+        : name === 'physics'
+            ? 'Stat Physics'
+            : name === 'ddgi'
+                ? 'Stat DDGI'
+                : 'Stat GPU';
 
     const meta = document.createElement('div');
     meta.className = 'debug-stat-meta';
@@ -201,7 +208,9 @@ export function createDebugStatPanel(name) {
         ? ['Frame', 'FPS', 'Update', 'Physics', 'Render', 'Scripts']
         : name === 'physics'
             ? ['Step', 'Sync', 'Collisions', 'Bodies', 'Passes', 'Delta']
-            : ['GPU', 'Render', 'Frame', 'FPS'];
+            : name === 'ddgi'
+                ? ['Enabled', 'Volume', 'Probes', 'Ready', 'Per Frame', 'Intensity', 'Invalidate', 'DDGI']
+                : ['GPU', 'Render', 'Frame', 'FPS'];
 
     labels.forEach((label) => {
         const key = label.toLowerCase();
@@ -246,6 +255,7 @@ export function updateDebugStatPanels() {
     const averagePhysicsCollisions = getAverageTiming('physicsCollisions');
     const averageScripts = getAverageTiming('scripts');
     const averageRender = getAverageTiming('render');
+    const averageDDGI = getAverageTiming('ddgi');
     const averageFps = averageFrame > 0 ? 1000 / averageFrame : 0;
 
     debugConsoleState.panelRefs.forEach((ref, name) => {
@@ -268,6 +278,20 @@ export function updateDebugStatPanels() {
             ref.rows.bodies.textContent = `${physics.dynamicBodies.length}`;
             ref.rows.passes.textContent = `${debugConsoleState.latest.collisionSteps}`;
             ref.rows.delta.textContent = `${(debugConsoleState.latest.delta * 1000).toFixed(1)} ms`;
+            return;
+        }
+
+        if (name === 'ddgi') {
+            const snap = getDDGIManager?.()?.getSnapshot?.() || {};
+            ref.meta.textContent = snap.contributionView ? 'Contribution view active' : 'Probe atlas status';
+            ref.rows.enabled.textContent = snap.enabled ? 'On' : 'Off';
+            ref.rows.volume.textContent = snap.activeVolumeType || '--';
+            ref.rows.probes.textContent = `${snap.probeCount ?? 0}`;
+            ref.rows.ready.textContent = `${snap.initializedProbes ?? 0}/${snap.probeCount ?? 0}`;
+            ref.rows['per frame'].textContent = `${snap.probesPerFrame ?? 0}`;
+            ref.rows.intensity.textContent = Number(snap.intensity ?? 0).toFixed(2);
+            ref.rows.invalidate.textContent = snap.lastInvalidateReason || '--';
+            ref.rows.ddgi.textContent = formatTimingMs(averageDDGI || snap.lastCaptureMs || 0);
             return;
         }
 
@@ -296,7 +320,7 @@ export function setDebugStatPanel(name, isEnabled) {
 
 export function runStatCommand(args) {
     if (!args.length) {
-        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, none.', 'warn');
+        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, ddgi, none.', 'warn');
         return;
     }
 
@@ -311,7 +335,7 @@ export function runStatCommand(args) {
         return;
     }
 
-    if (!['gpu', 'physics', 'unit'].includes(panel)) {
+    if (!['gpu', 'physics', 'unit', 'ddgi'].includes(panel)) {
         pushDebugConsoleLine(`Unknown stat target: ${panel}.`, 'error');
         return;
     }
@@ -533,6 +557,7 @@ export function recordDebugFrameMetrics(metrics) {
     debugConsoleState.latest.physicsCollisions = metrics.physicsCollisions;
     debugConsoleState.latest.scripts = metrics.scripts;
     debugConsoleState.latest.render = metrics.render;
+    debugConsoleState.latest.ddgi = metrics.ddgi ?? 0;
     debugConsoleState.latest.fps = metrics.frame > 0 ? 1000 / metrics.frame : 0;
     debugConsoleState.latest.delta = metrics.delta;
 
@@ -544,4 +569,5 @@ export function recordDebugFrameMetrics(metrics) {
     pushTimingSample('physicsCollisions', metrics.physicsCollisions);
     pushTimingSample('scripts', metrics.scripts);
     pushTimingSample('render', metrics.render);
+    pushTimingSample('ddgi', metrics.ddgi ?? 0);
 }

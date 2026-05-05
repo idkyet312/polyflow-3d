@@ -438,8 +438,9 @@ const globalPostProcessUniforms = {
 // Performance toggle: when on, skips DDGI tick, volumetric fog update, and the
 // post-process volume update. The three subsystems own their own state via
 // setEnabled, so flipping this back to false restores the default render path
-// without a reload. Defaults to off — engine ships unchanged.
-let perfModeEnabled = false;
+// without a reload. Defaults to on so heavy effects stay paused at boot.
+const PERF_MODE_DEFAULT_ENABLED = true;
+let perfModeEnabled = PERF_MODE_DEFAULT_ENABLED;
 let perfModeUiRefs = null;
 
 // World Environment panel state — Godot-style WorldEnvironment node mirror.
@@ -448,7 +449,7 @@ let perfModeUiRefs = null;
 // Defaults match the engine's out-of-box look — DDGI off (heavy), everything
 // else on. Changing the master "All Off" or "Performance" preset rewrites the
 // `enabled` fields but preserves slider values.
-const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v1';
+const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v2';
 const WORLD_ENV_DEFAULTS = Object.freeze({
     sky: { enabled: true, preset: 'sunny-sky', blurriness: 0.05 },
     ambient: { enabled: true, intensity: 1.0 },
@@ -457,11 +458,12 @@ const WORLD_ENV_DEFAULTS = Object.freeze({
     tonemap: { exposure: 1.0 },
     bloom: { enabled: true, strength: 1.25, radius: 0.95, threshold: 0.48 },
     fog: { enabled: true, density: 0.012, opacity: 0.055 },
-    ddgi: { enabled: false, probesPerFrame: 4, intensity: 0.18 },
+    ddgi: { enabled: true, probesPerFrame: 4, intensity: 0.18, debugProbes: false, contributionView: false },
     shadows: { enabled: true },
 });
 let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
 let worldEnvUiRefs = null;
+let ddgiTestVolumeActor = null;
 let physicsCore;
 let physicsRuntime;
 let multiplayerController;
@@ -475,8 +477,8 @@ const VEHICLE_CUSTOM_IMPORT_VALUE = '__custom_import__';
 const IMPORTED_PROP_MAX_HULL_POINTS = 480;
 const IMPORTED_PROP_MAX_HULL_PARTS = 18;
 const IMPORTED_PROP_COMPLEX_HULL_RADIUS = 0.01;
-const SHOWCASE_CAMERA_POSITION = new THREE.Vector3(6.5, 4.2, 8.5);
-const SHOWCASE_CAMERA_TARGET = new THREE.Vector3(0, 1.4, 0);
+const SHOWCASE_CAMERA_POSITION = new THREE.Vector3(5.8, 2.7, 7.3);
+const SHOWCASE_CAMERA_TARGET = new THREE.Vector3(-1.3, 1.35, -1.25);
 const JOLT_NON_MOVING_LAYER = 0;
 const JOLT_MOVING_LAYER = 1;
 const JOLT_OBJECT_LAYER_COUNT = 2;
@@ -680,6 +682,7 @@ const debugConsoleState = {
         physicsCollisions: 0,
         scripts: 0,
         render: 0,
+        ddgi: 0,
         fps: 0,
         delta: 0,
         collisionSteps: 0,
@@ -693,6 +696,7 @@ const debugConsoleState = {
         physicsCollisions: [],
         scripts: [],
         render: [],
+        ddgi: [],
     },
     gpuTimingMode: 'approximate',
 };
@@ -1738,6 +1742,7 @@ function spawnImportedProp(templateId, options = {}) {
         }
     }
     playObjectAnimation(visual);
+    invalidateDDGI('imported prop spawned');
     return actor;
 }
 
@@ -2409,6 +2414,7 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
         }
     }
 
+    invalidateDDGI(`${kind} spawned`);
     return options.returnActor === true ? actor : body;
 }
 
@@ -2447,14 +2453,7 @@ function syncGameplaySpawnToCamera() {
 }
 
 function syncShowcaseAnglesFromTarget(target) {
-    tempVectorA.copy(target).sub(camera.position);
-    const flatDistance = Math.max(0.001, Math.hypot(tempVectorA.x, tempVectorA.z));
-    showcase.yaw = Math.atan2(tempVectorA.x, tempVectorA.z);
-    showcase.pitch = THREE.MathUtils.clamp(
-        Math.atan2(-tempVectorA.y, flatDistance),
-        -PLAYER_SETTINGS.maxLookPitch,
-        PLAYER_SETTINGS.maxLookPitch
-    );
+    syncShowcaseAnglesToFaceTarget(target);
 }
 
 function syncShowcaseAnglesToFaceTarget(target) {
@@ -2564,6 +2563,22 @@ function createDefaultObjectEventState(eventName) {
         handles: null,
         beganPlay: false,
     };
+}
+
+function markDDGISkipCapture(object) {
+    object?.traverse?.((node) => {
+        if (!node.userData) node.userData = {};
+        node.userData.ddgiSkipCapture = true;
+    });
+    return object;
+}
+
+function invalidateDDGI(reason, fastWarmupFrames = 2) {
+    try {
+        getDDGIManager().invalidate({ reason, fastWarmupFrames });
+    } catch {
+        // DDGI can be unavailable during early boot or teardown.
+    }
 }
 
 function createObjectScriptState(propId = '') {
@@ -3241,6 +3256,242 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     return actor;
 }
 
+function ensureDDGITestVolume(rig) {
+    if (!scene || !rig) return null;
+    if (ddgiTestVolumeActor?.mesh?.parent !== scene) {
+        ddgiTestVolumeActor = null;
+    }
+    if (ddgiTestVolumeActor) return ddgiTestVolumeActor;
+
+    const bounds = new THREE.Box3().setFromObject(rig);
+    if (bounds.isEmpty()) return null;
+
+    bounds.expandByPoint(SHOWCASE_CAMERA_POSITION);
+    bounds.expandByPoint(SHOWCASE_CAMERA_TARGET);
+    bounds.expandByScalar(0.9);
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const gridDims = {
+        x: THREE.MathUtils.clamp(Math.round(size.x / 1.2), 4, 6),
+        y: THREE.MathUtils.clamp(Math.round(size.y / 1.2), 3, 4),
+        z: THREE.MathUtils.clamp(Math.round(size.z / 1.2), 4, 6),
+    };
+    const cellSize = Math.max(
+        size.x / gridDims.x,
+        size.y / gridDims.y,
+        size.z / gridDims.z,
+        0.8,
+    );
+    const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(size.x, size.y, size.z),
+        new THREE.MeshBasicMaterial({
+            color: 0x4dffd2,
+            transparent: true,
+            opacity: 0.0,
+            depthWrite: false,
+            toneMapped: false,
+            fog: false,
+        })
+    );
+    mesh.name = 'ddgi-test-volume';
+    mesh.position.copy(center);
+    mesh.userData.ddgiSkipReceive = true;
+    mesh.userData.ddgiSkipCapture = true;
+    mesh.userData.ignoreForcedSceneShadows = true;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+
+    const actor = createActor({
+        mesh,
+        kind: 'ddgiVolume',
+        userData: { internalSample: true, label: 'ddgi-test-volume' },
+        name: 'ddgi-test-volume',
+    });
+    actor.addComponent(new TransformComponent());
+    const ddgi = new DDGIVolumeComponent({
+        gridDims,
+        cellSize,
+        intensity: WORLD_ENV_DEFAULTS.ddgi.intensity,
+        hysteresis: 0.92,
+        normalBias: 0.22,
+        probesPerFrame: WORLD_ENV_DEFAULTS.ddgi.probesPerFrame,
+    });
+    actor.addComponent(ddgi);
+    scene.add(mesh);
+    try {
+        ddgi.beginPlay();
+    } catch (e) {
+        console.warn('[DDGI] test volume beginPlay failed', e);
+    }
+    ddgiTestVolumeActor = actor;
+    return actor;
+}
+
+function ensureDDGITestRig() {
+    if (!scene) return null;
+    const existing = scene.getObjectByName('ddgi-test-rig');
+    if (existing) {
+        ensureDDGITestVolume(existing);
+        return existing;
+    }
+
+    const rig = new THREE.Group();
+    rig.name = 'ddgi-test-rig';
+    rig.userData.ddgiSampleRig = true;
+    rig.position.set(-1.8, 0.12, -0.6);
+    rig.scale.setScalar(0.62);
+
+    const addBox = (name, size, position, materialOptions, { rotationY = 0, castShadow = true, receiveShadow = true } = {}) => {
+        const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(size.x, size.y, size.z),
+            new THREE.MeshStandardMaterial(materialOptions),
+        );
+        mesh.name = name;
+        mesh.position.copy(position);
+        mesh.rotation.y = rotationY;
+        mesh.castShadow = castShadow;
+        mesh.receiveShadow = receiveShadow;
+        rig.add(mesh);
+        return mesh;
+    };
+
+    addBox('ddgi-test-plinth', new THREE.Vector3(7.4, 0.44, 7.4), new THREE.Vector3(0, 0.22, -0.35), {
+        color: 0x6b7280,
+        roughness: 0.98,
+        metalness: 0.02,
+    }, {
+        castShadow: false,
+    });
+
+    addBox('ddgi-test-floor', new THREE.Vector3(6.6, 0.08, 6.6), new THREE.Vector3(0, 0.50, -0.35), {
+        color: 0xf3f4f6,
+        roughness: 0.94,
+        metalness: 0.01,
+    });
+    addBox('ddgi-test-back-wall', new THREE.Vector3(6.6, 3.0, 0.12), new THREE.Vector3(0, 2.00, -3.59), {
+        color: 0xe7ebf0,
+        roughness: 0.9,
+        metalness: 0.01,
+    });
+    addBox('ddgi-test-left-wall', new THREE.Vector3(0.12, 3.0, 5.8), new THREE.Vector3(-3.24, 2.00, -0.75), {
+        color: 0xfb7185,
+        emissive: 0x4f0f1f,
+        emissiveIntensity: 1.2,
+        roughness: 0.95,
+        metalness: 0.0,
+    });
+    addBox('ddgi-test-right-wall', new THREE.Vector3(0.12, 3.0, 5.8), new THREE.Vector3(3.24, 2.00, -0.75), {
+        color: 0xbae6fd,
+        emissive: 0x12374f,
+        emissiveIntensity: 1.0,
+        roughness: 0.95,
+        metalness: 0.0,
+    });
+    addBox('ddgi-test-front-apron', new THREE.Vector3(5.2, 0.08, 1.2), new THREE.Vector3(0, 0.50, 2.62), {
+        color: 0xf3f4f6,
+        roughness: 0.94,
+        metalness: 0.01,
+    });
+
+    addBox('ddgi-test-short-block', new THREE.Vector3(1.65, 1.35, 1.65), new THREE.Vector3(-0.85, 1.135, -0.55), {
+        color: 0xf8fafc,
+        roughness: 0.6,
+        metalness: 0.02,
+    }, {
+        rotationY: -Math.PI * 0.08,
+    });
+    addBox('ddgi-test-tall-block', new THREE.Vector3(1.05, 2.15, 1.05), new THREE.Vector3(1.42, 1.535, -1.65), {
+        color: 0xdbe4ee,
+        roughness: 0.52,
+        metalness: 0.02,
+    }, {
+        rotationY: Math.PI * 0.11,
+    });
+    addBox('ddgi-test-red-bounce', new THREE.Vector3(0.7, 0.7, 0.7), new THREE.Vector3(-2.1, 0.89, -2.45), {
+        color: 0xef4444,
+        emissive: 0x7f1010,
+        emissiveIntensity: 3.2,
+        roughness: 0.78,
+        metalness: 0.0,
+    });
+    addBox('ddgi-test-green-bounce', new THREE.Vector3(0.7, 0.7, 0.7), new THREE.Vector3(0, 0.89, -2.45), {
+        color: 0x22c55e,
+        emissive: 0x0f6f31,
+        emissiveIntensity: 2.8,
+        roughness: 0.78,
+        metalness: 0.0,
+    });
+    addBox('ddgi-test-blue-bounce', new THREE.Vector3(0.7, 0.7, 0.7), new THREE.Vector3(2.1, 0.89, -2.45), {
+        color: 0x3b82f6,
+        emissive: 0x153a8f,
+        emissiveIntensity: 3.0,
+        roughness: 0.78,
+        metalness: 0.0,
+    });
+    addBox('ddgi-test-light-housing', new THREE.Vector3(2.45, 0.16, 0.46), new THREE.Vector3(0, 3.18, -1.68), {
+        color: 0xffffff,
+        roughness: 0.32,
+        metalness: 0.04,
+    }, {
+        castShadow: false,
+    });
+    addBox('ddgi-test-strip', new THREE.Vector3(2.05, 0.08, 0.22), new THREE.Vector3(0, 3.08, -1.68), {
+        color: 0xfff4d6,
+        emissive: 0xffefc2,
+        emissiveIntensity: 0.35,
+        roughness: 0.14,
+        metalness: 0.0,
+    }, {
+        castShadow: false,
+    });
+
+    scene.add(rig);
+    ensureDDGITestVolume(rig);
+    return rig;
+}
+
+function clearGrassAroundDDGITestRig() {
+    if (!grassField || !worldFloor) return;
+    const rig = scene?.getObjectByName('ddgi-test-rig');
+    if (!rig) return;
+    const bounds = new THREE.Box3().setFromObject(rig);
+    if (bounds.isEmpty()) return;
+    bounds.expandByScalar(0.8);
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const localCenter = worldFloor.worldToLocal(center.clone());
+    grassField.paintFoliage?.({
+        terrain: worldFloor,
+        localX: localCenter.x,
+        localY: localCenter.y,
+        radius: Math.max(size.x, size.z) * 0.62,
+        mode: 'erase',
+        type: 'grass',
+    });
+}
+
+function applyCornellTestPreset() {
+    setPerfModeEnabled(false);
+    worldEnvState.sky.enabled = false;
+    worldEnvState.ambient.enabled = false;
+    worldEnvState.hemi.enabled = false;
+    worldEnvState.sun.enabled = false;
+    worldEnvState.bloom.enabled = false;
+    worldEnvState.fog.enabled = false;
+    worldEnvState.shadows.enabled = true;
+    worldEnvState.tonemap.exposure = 1.0;
+    worldEnvState.ddgi.enabled = true;
+    worldEnvState.ddgi.probesPerFrame = 24;
+    worldEnvState.ddgi.intensity = WORLD_ENV_DEFAULTS.ddgi.intensity;
+    worldEnvState.ddgi.debugProbes = false;
+    worldEnvState.ddgi.contributionView = false;
+    applyWorldEnvState();
+    if (!gameplay.active) {
+        resetShowcaseCamera(false);
+    }
+}
+
 function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     const kind = actorKindSelect?.value || 'sphere';
     const includeCollisionBody = kind === 'vehicle' ? true : !!actorComponentCollisionInput?.checked;
@@ -3331,6 +3582,7 @@ function ensureRaycastDebugLine() {
     helper.cone.material.opacity = 0.95;
     helper.cone.material.toneMapped = false;
     helper.visible = false;
+    markDDGISkipCapture(helper);
     scene.add(helper);
 
     const hitMarker = new THREE.Mesh(
@@ -3346,6 +3598,7 @@ function ensureRaycastDebugLine() {
     hitMarker.name = 'raycast-debug-hit';
     hitMarker.renderOrder = 1000;
     hitMarker.visible = false;
+    markDDGISkipCapture(hitMarker);
     scene.add(hitMarker);
 
     raycastDebugState.helper = helper;
@@ -3777,27 +4030,8 @@ function updatePerfModeUi() {
 // calls in the main render loop, so flipping this saves both render work and
 // CPU update work.
 function setPerfModeEnabled(isEnabled) {
-    const next = !!isEnabled;
-    if (perfModeEnabled === next) {
-        updatePerfModeUi();
-        return;
-    }
-    perfModeEnabled = next;
-
-    // Volumetric fog: hides the layer group AND clears scene.fog when off.
-    volumetricFogController?.setEnabled(!perfModeEnabled);
-
-    // DDGI: tick() short-circuits when state.enabled is false; injectionEnabled
-    // controls the shader-injection patching loop, which we also pause so
-    // newly-added materials don't get patched while perf mode is on.
-    const ddgi = getDDGIManager();
-    ddgi?.setEnabled(!perfModeEnabled);
-    ddgi?.setInjectionEnabled(!perfModeEnabled);
-
-    // Post-process: clamps bloom uniforms to neutral so the MRT bloom pass
-    // becomes a no-op while still running (cheap once strength is 0).
-    postProcessVolumeManager?.setEnabled(!perfModeEnabled);
-
+    perfModeEnabled = !!isEnabled;
+    applyWorldEnvState({ persist: false, switchSky: false });
     updatePerfModeUi();
 }
 
@@ -3817,6 +4051,11 @@ function loadWorldEnvFromStorage() {
                 worldEnvState[key] = { ...WORLD_ENV_DEFAULTS[key], ...parsed[key] };
             }
         }
+        // Debug views are session tools. Always boot into lit render.
+        worldEnvState.ddgi.debugProbes = false;
+        worldEnvState.ddgi.contributionView = false;
+        worldEnvState.ddgi.intensity = Math.min(worldEnvState.ddgi.intensity, WORLD_ENV_DEFAULTS.ddgi.intensity);
+        worldEnvState.ddgi.probesPerFrame = Math.min(worldEnvState.ddgi.probesPerFrame, WORLD_ENV_DEFAULTS.ddgi.probesPerFrame);
     } catch (e) {
         // Corrupt storage — fall back to defaults silently.
     }
@@ -3830,6 +4069,9 @@ function saveWorldEnvToStorage() {
 
 function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     const s = worldEnvState;
+    const runtimeBloomEnabled = s.bloom.enabled && !perfModeEnabled;
+    const runtimeFogEnabled = s.fog.enabled && !perfModeEnabled;
+    const runtimeDdgiEnabled = s.ddgi.enabled && (!perfModeEnabled || s.ddgi.contributionView);
 
     // Sky / Background
     if (environmentController) {
@@ -3865,7 +4107,7 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     // Bloom — when off, postProcessVolumeManager.setEnabled clamps uniforms
     // to neutral. When on, push the user's slider values through both the
     // shader uniforms AND the volume defaults so volume-based grading still works.
-    if (s.bloom.enabled) {
+    if (runtimeBloomEnabled) {
         postProcessVolumeManager?.setEnabled?.(true);
         if (globalPostProcessUniforms.bloomStrength) globalPostProcessUniforms.bloomStrength.value = s.bloom.strength;
         if (globalPostProcessUniforms.bloomRadius) globalPostProcessUniforms.bloomRadius.value = s.bloom.radius;
@@ -3881,17 +4123,19 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
 
     // Fog
     if (volumetricFogController) {
-        volumetricFogController.setEnabled?.(s.fog.enabled);
+        volumetricFogController.setEnabled?.(runtimeFogEnabled);
         volumetricFogController.setDensity?.(s.fog.density);
         volumetricFogController.setOpacity?.(s.fog.opacity);
     }
 
     // DDGI
     const ddgi = getDDGIManager();
-    ddgi?.setEnabled?.(s.ddgi.enabled);
-    ddgi?.setInjectionEnabled?.(s.ddgi.enabled);
+    ddgi?.setEnabled?.(runtimeDdgiEnabled);
+    ddgi?.setInjectionEnabled?.(runtimeDdgiEnabled);
     ddgi?.setProbesPerFrame?.(s.ddgi.probesPerFrame);
     ddgi?.setIntensity?.(s.ddgi.intensity);
+    ddgi?.setDebugVisible?.(s.ddgi.debugProbes);
+    ddgi?.setContributionViewEnabled?.(runtimeDdgiEnabled && s.ddgi.contributionView);
 
     // Shadows
     if (renderer?.shadowMap) {
@@ -3943,6 +4187,8 @@ function updateWorldEnvUi() {
     if (worldEnvUiRefs.ddgiProbes) worldEnvUiRefs.ddgiProbes.value = s.ddgi.probesPerFrame;
     if (worldEnvUiRefs.ddgiProbesValue) worldEnvUiRefs.ddgiProbesValue.textContent = String(s.ddgi.probesPerFrame);
     setSlider(worldEnvUiRefs.ddgiIntensity, worldEnvUiRefs.ddgiIntensityValue, s.ddgi.intensity, 2);
+    setToggle(worldEnvUiRefs.ddgiProbeDebugOff, worldEnvUiRefs.ddgiProbeDebugOn, s.ddgi.debugProbes);
+    setToggle(worldEnvUiRefs.ddgiViewLit, worldEnvUiRefs.ddgiViewContribution, s.ddgi.contributionView);
 
     setToggle(worldEnvUiRefs.shadowsOff, worldEnvUiRefs.shadowsOn, s.shadows.enabled);
 
@@ -3959,7 +4205,16 @@ function updateWorldEnvUi() {
     if (worldEnvUiRefs.masterStatus) {
         const allCoreOn = s.sky.enabled && s.ambient.enabled && s.hemi.enabled && s.sun.enabled && s.bloom.enabled && s.fog.enabled && s.shadows.enabled;
         const perfPreset = !s.bloom.enabled && !s.fog.enabled && !s.ddgi.enabled && s.sky.enabled && s.sun.enabled;
-        if (allCoreOn && !s.ddgi.enabled) {
+        const cornellPreset = !s.sky.enabled && !s.ambient.enabled && !s.hemi.enabled && !s.sun.enabled
+            && !s.bloom.enabled && !s.fog.enabled && s.shadows.enabled
+            && s.ddgi.enabled && Math.abs(s.ddgi.intensity - WORLD_ENV_DEFAULTS.ddgi.intensity) < 0.001;
+        if (s.ddgi.enabled && s.ddgi.contributionView) {
+            worldEnvUiRefs.masterStatus.textContent = 'DDGI contribution view active.';
+        } else if (s.ddgi.debugProbes) {
+            worldEnvUiRefs.masterStatus.textContent = 'DDGI probe debug active.';
+        } else if (cornellPreset) {
+            worldEnvUiRefs.masterStatus.textContent = 'Cornell test preset active. Sky and sun are off; DDGI bleed is emphasized.';
+        } else if (allCoreOn && !s.ddgi.enabled) {
             worldEnvUiRefs.masterStatus.textContent = 'Everything on (DDGI off — opt in for prettier indirect lighting).';
         } else if (allCoreOn && s.ddgi.enabled) {
             worldEnvUiRefs.masterStatus.textContent = 'Everything on, including DDGI.';
@@ -3996,6 +4251,9 @@ function setWorldEnvMaster(mode) {
         s.bloom.enabled = false;
         s.fog.enabled = false;
         s.ddgi.enabled = false;
+    } else if (mode === 'cornell') {
+        applyCornellTestPreset();
+        return;
     }
     applyWorldEnvState();
 }
@@ -4973,6 +5231,7 @@ async function init() {
         masterOnBtn: document.getElementById('we-master-on'),
         masterOffBtn: document.getElementById('we-master-off'),
         masterPerfBtn: document.getElementById('we-master-perf'),
+        masterCornellBtn: document.getElementById('we-master-cornell'),
         masterStatus: document.getElementById('we-master-status'),
         skyOff: document.getElementById('we-sky-off'),
         skyOn: document.getElementById('we-sky-on'),
@@ -5014,6 +5273,10 @@ async function init() {
         ddgiProbesValue: document.getElementById('we-ddgi-probes-value'),
         ddgiIntensity: document.getElementById('we-ddgi-intensity'),
         ddgiIntensityValue: document.getElementById('we-ddgi-intensity-value'),
+        ddgiProbeDebugOff: document.getElementById('we-ddgi-probe-debug-off'),
+        ddgiProbeDebugOn: document.getElementById('we-ddgi-probe-debug-on'),
+        ddgiViewLit: document.getElementById('we-ddgi-view-lit'),
+        ddgiViewContribution: document.getElementById('we-ddgi-view-contribution'),
         shadowsOff: document.getElementById('we-shadows-off'),
         shadowsOn: document.getElementById('we-shadows-on'),
         resetBtn: document.getElementById('we-reset-defaults'),
@@ -5115,6 +5378,7 @@ async function init() {
     worldEnvUiRefs?.masterOnBtn?.addEventListener('click', () => setWorldEnvMaster('on'));
     worldEnvUiRefs?.masterOffBtn?.addEventListener('click', () => setWorldEnvMaster('off'));
     worldEnvUiRefs?.masterPerfBtn?.addEventListener('click', () => setWorldEnvMaster('perf'));
+    worldEnvUiRefs?.masterCornellBtn?.addEventListener('click', () => setWorldEnvMaster('cornell'));
     worldEnvUiRefs?.resetBtn?.addEventListener('click', () => resetWorldEnvDefaults());
 
     wireToggle(worldEnvUiRefs?.skyOff, worldEnvUiRefs?.skyOn,
@@ -5166,6 +5430,12 @@ async function init() {
     wireSlider(worldEnvUiRefs?.ddgiProbes, 'ddgi.probesPerFrame',
         (v) => { worldEnvState.ddgi.probesPerFrame = Math.round(v); }, (s) => parseInt(s, 10));
     wireSlider(worldEnvUiRefs?.ddgiIntensity, 'ddgi.intensity', (v) => { worldEnvState.ddgi.intensity = v; });
+    wireToggle(worldEnvUiRefs?.ddgiProbeDebugOff, worldEnvUiRefs?.ddgiProbeDebugOn,
+        () => { worldEnvState.ddgi.debugProbes = false; },
+        () => { worldEnvState.ddgi.debugProbes = true; });
+    wireToggle(worldEnvUiRefs?.ddgiViewLit, worldEnvUiRefs?.ddgiViewContribution,
+        () => { worldEnvState.ddgi.contributionView = false; },
+        () => { worldEnvState.ddgi.contributionView = true; });
 
     wireToggle(worldEnvUiRefs?.shadowsOff, worldEnvUiRefs?.shadowsOn,
         () => { worldEnvState.shadows.enabled = false; },
@@ -5340,6 +5610,7 @@ async function init() {
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
     camera.position.copy(SHOWCASE_CAMERA_POSITION);
     camera.rotation.order = 'YXZ';
+    camera.layers.enable(getDDGIManager().getDebugLayer?.() ?? 30);
     syncShowcaseAnglesFromTarget(SHOWCASE_CAMERA_TARGET);
     applyShowcaseCameraRotation();
     scene.add(camera);
@@ -5397,6 +5668,7 @@ async function init() {
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
     transformControl.setSize(1.5); // Make gizmo hit area larger
+    markDDGISkipCapture(transformControl.getHelper());
     transformControl.addEventListener('change', () => {
         if (blueprintState.active) {
             updateBlueprintDetailsUI();
@@ -5504,6 +5776,11 @@ async function init() {
     scene.add(mainDirectionalLight);
     scene.add(mainDirectionalLight.target);
     updateMainDirectionalLightShadowFocus();
+    ensureDDGITestRig();
+    clearGrassAroundDDGITestRig();
+    loadWorldEnvFromStorage();
+    applyWorldEnvState({ persist: false });
+    setPerfModeEnabled(PERF_MODE_DEFAULT_ENABLED);
 
     // Create example widgets
     createExampleWidgets();
@@ -5584,8 +5861,9 @@ async function init() {
             postProcessVolumeManager?.update(delta);
         }
         const _ddgiStart = performance.now();
-        if (!perfModeEnabled) {
-            getDDGIManager().tick(delta);
+        const ddgiManager = getDDGIManager();
+        if (!perfModeEnabled || ddgiManager.isDebugVisible?.() || ddgiManager.contributionViewEnabled) {
+            ddgiManager.tick(delta);
         }
         const _ddgiMs = performance.now() - _ddgiStart;
         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
@@ -5621,6 +5899,7 @@ async function init() {
                 physicsCollisions: physicsMetrics.collisions,
                 scripts: scriptDuration,
                 render: performance.now() - renderStart,
+                ddgi: _ddgiMs,
                 delta,
             });
         } catch (e) {
@@ -8287,6 +8566,7 @@ function wireExtractedModules() {
         setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
         resetMobileInputState, updateWorldPresentation, updateGameplayUI,
         isEditableElement,
+        getDDGIManager,
     });
 
     setupMobileControls({

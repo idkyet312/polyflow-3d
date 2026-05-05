@@ -3,6 +3,7 @@
 // Handles per-object / per-material state serialization and application.
 
 import * as THREE from 'three';
+import { getDDGIManager } from './gi/ddgiManager.js';
 
 // ─── Module-scope deps populated by setupObjectMaterial ────────────────────────────
 let getRenderComponent;
@@ -15,6 +16,14 @@ export function setupObjectMaterial(deps) {
 
 function getActorRenderObject(prop) {
     return getRenderComponent(prop)?.mesh ?? prop?.mesh ?? null;
+}
+
+function invalidateDDGI(reason) {
+    try {
+        getDDGIManager().invalidate({ reason, fastWarmupFrames: 2 });
+    } catch {
+        // DDGI may not be initialized while serialized scene data is loading.
+    }
 }
 
 // ─── Exported functions ───────────────────────────────────────────────────────────────────
@@ -35,6 +44,7 @@ export function setActorColor(actor, hexColor) {
     // includes the per-mesh overrides instead of taking the fast path that
     // relies on template defaults.
     mesh.userData.hasMaterialOverrides = true;
+    invalidateDDGI('actor color changed');
 }
 
 export function markActorMaterialDirty(actor) {
@@ -138,6 +148,7 @@ export function serializeObjectMaterialState(object3D) {
 export function applyObjectMaterialState(object3D, materialState) {
     const materials = getObjectMaterialArray(object3D);
     if (!materials.length || !materialState) return;
+    let changed = false;
 
     const slotStates = Array.isArray(materialState?.slots) ? materialState.slots : null;
 
@@ -187,24 +198,31 @@ export function applyObjectMaterialState(object3D, materialState) {
 
         if (color && material.color) {
             material.color.copy(color);
+            changed = true;
         }
         if (emissive && material.emissive) {
             material.emissive.copy(emissive);
+            changed = true;
         }
         if ('emissiveIntensity' in material && emissiveIntensity !== undefined) {
             material.emissiveIntensity = emissiveIntensity;
+            changed = true;
         }
         if ('roughness' in material && roughness !== undefined) {
             material.roughness = roughness;
+            changed = true;
         }
         if ('metalness' in material && metalness !== undefined) {
             material.metalness = metalness;
+            changed = true;
         }
         if ('opacity' in material && opacity !== undefined) {
             material.opacity = opacity;
+            changed = true;
         }
         if ('alphaTest' in material && alphaTest !== undefined) {
             material.alphaTest = alphaTest;
+            changed = true;
         }
         const hasTransparencyState = nextState.transparent !== undefined
             || opacity !== undefined
@@ -214,30 +232,39 @@ export function applyObjectMaterialState(object3D, materialState) {
                 || (opacity !== undefined && opacity < 0.999)
                 || (transmission !== undefined && transmission > 0);
             material.transparent = shouldBeTransparent;
+            changed = true;
         }
         if ('depthWrite' in material && hasTransparencyState) {
             material.depthWrite = !(material.transparent && (material.alphaTest ?? 0) <= 0);
+            changed = true;
         }
         if ('envMapIntensity' in material && envMapIntensity !== undefined) {
             material.envMapIntensity = envMapIntensity;
+            changed = true;
         }
         if ('transmission' in material && transmission !== undefined) {
             material.transmission = transmission;
+            changed = true;
         }
         if ('thickness' in material && thickness !== undefined) {
             material.thickness = thickness;
+            changed = true;
         }
         if ('ior' in material && ior !== undefined) {
             material.ior = ior;
+            changed = true;
         }
         if ('clearcoat' in material && clearcoat !== undefined) {
             material.clearcoat = clearcoat;
+            changed = true;
         }
         if ('clearcoatRoughness' in material && clearcoatRoughness !== undefined) {
             material.clearcoatRoughness = clearcoatRoughness;
+            changed = true;
         }
         if ('side' in material && side !== null) {
             material.side = side;
+            changed = true;
         }
         // Intentionally not setting material.needsUpdate. The fields touched
         // above (color, roughness, metalness, opacity, emissive, etc.) are
@@ -247,6 +274,7 @@ export function applyObjectMaterialState(object3D, materialState) {
         // restoring a 100k-mesh actor. Side changes flip culling, also no
         // recompile.
     }
+    if (changed) invalidateDDGI('material changed');
 }
 
 export function serializeObjectMaterialOverrides(rootObject) {
@@ -293,4 +321,5 @@ export function applyObjectMaterialOverrides(rootObject, overrides = []) {
         if (!target) return;
         applyObjectMaterialState(target, entry.material);
     });
+    if (overrides.length) invalidateDDGI('material overrides changed');
 }

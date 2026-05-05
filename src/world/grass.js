@@ -287,6 +287,8 @@ export function createGrassField({
     mesh.castShadow = false;
     mesh.receiveShadow = false;
     mesh.userData.isGrassField = true;
+    mesh.userData.ddgiSkipCapture = true;
+    mesh.userData.ddgiSkipReceive = true;
     mesh.renderOrder = 1;
 
     if (worldFloor) {
@@ -332,6 +334,7 @@ export function createGrassField({
             instancedMesh.visible = entry.visible;
             instancedMesh.userData.isPaintedFoliage = true;
             instancedMesh.userData.foliageType = type;
+            instancedMesh.userData.ddgiSkipCapture = true;
 
             items.forEach((item, index) => {
                 setMatrixFromFoliageInstance(matrix, item, type);

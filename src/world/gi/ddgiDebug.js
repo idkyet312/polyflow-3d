@@ -7,7 +7,7 @@ export function createDDGIDebug({ scene, layer = 30 }) {
     group.layers.set(layer);
     scene.add(group);
 
-    const probeGeo = new THREE.SphereGeometry(0.15, 8, 8);
+    const probeGeo = new THREE.SphereGeometry(0.055, 8, 8);
     const probeMat = new THREE.MeshBasicMaterial({
         color: 0xffd24d,
         toneMapped: false,

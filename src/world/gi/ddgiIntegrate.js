@@ -75,7 +75,7 @@ export function createIntegrator({ renderer }) {
     const TILE_F = 8;          // IRRADIANCE_TILE
     const GUTTER_F = 1;        // TILE_GUTTER
     const TILE_PX = TILE_F + GUTTER_F * 2;  // 10
-    const MAX_LUMINANCE = 16;  // M2: per-channel clamp for energy explosion guard
+    const MAX_LUMINANCE = 4;  // M2: per-channel clamp for energy explosion guard
 
     const integrateNode = Fn(() => {
         // We render to the FULL tile (10×10 inc. 1px gutter on each side). For

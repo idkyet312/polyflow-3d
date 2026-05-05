@@ -996,6 +996,11 @@ export function updateEngineAudioDebugOverlay(backendUsed, vehicle, telemetry) {
     else if (ready) state = 'wasm-idle';
     else state = 'legacy';
 
+    const debugForcedVisible = typeof window !== 'undefined' && window.DEBUG_ENGINE_AUDIO_OVERLAY === true;
+    const shouldShow = failed || debugForcedVisible;
+    engineAudioDebugEl.hidden = !shouldShow;
+    if (!shouldShow) return;
+
     const masterGainNow = generator?.gain?.gain?.value;
     const intakeGainNow = generator?.gainIntake?.gain?.value;
     const outletGainNow = generator?.gainOutlet?.gain?.value;

@@ -1,5 +1,7 @@
 import * as THREE from 'three';
-import { Fn, vec2, vec3, vec4, float, texture, uniform, positionWorld, normalWorld, output } from 'three/tsl';
+import { Fn, vec2, vec3, float, texture, uniform, positionWorld, normalWorld, mix } from 'three/tsl';
+
+const DDGI_PATCH_VERSION = 2;
 
 function createBlackTexture() {
     const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
@@ -8,17 +10,7 @@ function createBlackTexture() {
     return tex;
 }
 
-/**
- * TSL irradiance sampler.
- *
- * Builds a node graph that:
- *   1. Biases sample position along the surface normal.
- *   2. Looks up the 8 surrounding probes.
- *   3. Samples each probe's octahedral irradiance tile.
- *   4. Trilinear blends the result.
- */
-
-export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBias }) {
+export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBias, getDebugViewBlend }) {
     const uAtlasSize = uniform(new THREE.Vector2(1, 1));
     const uTilesPerRow = uniform(1);
     const uTile = uniform(8);
@@ -29,12 +21,14 @@ export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBi
     const uCellSize = uniform(1);
     const uIntensity = uniform(1);
     const uNormalBias = uniform(0);
+    const uDebugViewBlend = uniform(0);
     const atlasTex = texture(createBlackTexture());
+    let captureBypass = false;
 
     function refreshUniforms() {
         const grid = getGrid?.();
         const atlas = getAtlas?.();
-        const intensity = getIntensity?.() ?? 1.0;
+        const intensity = captureBypass ? 0 : (getIntensity?.() ?? 1.0);
         if (!grid || !atlas) {
             uIntensity.value = 0.0;
             return;
@@ -48,7 +42,15 @@ export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBi
         uCellSize.value = grid.cellSize;
         uIntensity.value = intensity;
         uNormalBias.value = getNormalBias?.() ?? 0;
+        uDebugViewBlend.value = captureBypass
+            ? 0
+            : THREE.MathUtils.clamp(Number(getDebugViewBlend?.() ?? 0), 0, 1);
         atlasTex.value = atlas.front.texture;
+    }
+
+    function setCaptureBypass(v) {
+        captureBypass = !!v;
+        refreshUniforms();
     }
 
     const sampleNode = Fn(() => {
@@ -105,45 +107,39 @@ export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBi
         const c011 = sampleProbe(probeIndex(ix0, iy1, iz1)).mul(wx0.mul(fy).mul(fz));
         const c111 = sampleProbe(probeIndex(ix1, iy1, iz1)).mul(fx.mul(fy).mul(fz));
 
-        return c000.add(c100).add(c010).add(c110).add(c001).add(c101).add(c011).add(c111).mul(uIntensity);
+        return c000.add(c100).add(c010).add(c110).add(c001).add(c101).add(c011).add(c111)
+            .mul(uIntensity)
+            .clamp(vec3(0), vec3(4.0));
     });
 
     return {
         node: sampleNode(),
         refreshUniforms,
+        setCaptureBypass,
+        debugViewMixNode: uDebugViewBlend,
     };
 }
 
-export function patchMaterials(root, ddgiNode) {
+export function patchMaterials(root, ddgiNode, { debugViewMixNode = null } = {}) {
     if (!root) return;
     root.traverse((obj) => {
         if (!obj.isMesh) return;
         if (obj.userData?.ddgiSkipReceive) return;
         const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
         for (const mat of mats) {
-            if (!mat || mat.userData?._ddgiPatched) continue;
+            if (!mat || mat.userData?._ddgiPatchVersion === DDGI_PATCH_VERSION) continue;
             if (!(mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial)) continue;
 
-            // Snapshot original outputNode so we can restore it if the patched
-            // graph fails to compile and produces black output.
-            const originalOutputNode = mat.outputNode;
+            const originalNodes = mat.userData?._ddgiOriginalNodes || {
+                colorNode: mat.colorNode || null,
+                emissiveNode: mat.emissiveNode || null,
+                outputNode: mat.outputNode || null,
+            };
+
             try {
-                // Modulate DDGI irradiance by surface albedo BEFORE adding.
-                // Otherwise black surfaces glow and red surfaces get neutral GI
-                // instead of red-tinted GI — the standard DDGI shading is
-                // direct + albedo * irradiance, not direct + irradiance.
-                //
-                // Albedo source priority (least version-dependent first):
-                //   1. mat.colorNode if explicitly set (textured/custom mats).
-                //   2. A per-material UniformNode wrapping mat.color (the
-                //      common case for standard materials — works on every
-                //      Three.js TSL version because it doesn't rely on
-                //      `materialColor` or other TSL accessors).
-                //   3. If neither is available, fall back to unmodulated
-                //      additive (less correct but safe — never goes black).
                 let albedoNode = null;
-                if (mat.colorNode) {
-                    albedoNode = mat.colorNode;
+                if (originalNodes.colorNode) {
+                    albedoNode = originalNodes.colorNode;
                 } else if (mat.color) {
                     let cached = mat.userData._ddgiAlbedoUniform;
                     if (!cached) {
@@ -153,26 +149,26 @@ export function patchMaterials(root, ddgiNode) {
                     albedoNode = cached;
                 }
 
-                const contribution = albedoNode
-                    ? ddgiNode.mul(albedoNode)
-                    : ddgiNode;
+                const rawContribution = ddgiNode.clamp(vec3(0), vec3(4));
+                const litContribution = albedoNode
+                    ? rawContribution.mul(albedoNode).mul(1.35)
+                    : rawContribution.mul(1.35);
+                const existingEmissive = originalNodes.emissiveNode || vec3(0);
+                const existingColor = originalNodes.colorNode || albedoNode || vec3(1, 1, 1);
+                const debugBlend = debugViewMixNode || float(0);
+                const debugColor = rawContribution.mul(1.5).clamp(vec3(0), vec3(2));
 
-                if (mat.outputNode) {
-                    mat.outputNode = mat.outputNode.add(vec4(contribution, 0));
-                } else {
-                    // Add after the standard lighting path. This keeps DDGI
-                    // out of emissiveNode, so bloom does not treat bounce as
-                    // glow.
-                    mat.outputNode = output.add(vec4(contribution, 0));
-                }
+                mat.colorNode = mix(existingColor, debugColor, debugBlend);
+                mat.emissiveNode = mix(existingEmissive.add(litContribution), debugColor, debugBlend);
+                mat.outputNode = originalNodes.outputNode;
+                mat.userData._ddgiOriginalNodes = originalNodes;
                 mat.userData._ddgiPatched = true;
+                mat.userData._ddgiPatchVersion = DDGI_PATCH_VERSION;
                 mat.needsUpdate = true;
             } catch (e) {
-                console.warn('[DDGI] material patch failed, restoring original', mat, e);
-                mat.outputNode = originalOutputNode;
-                // Mark as patched anyway so we don't retry every frame and
-                // spam the console.
+                console.warn('[DDGI] material patch failed', mat, e);
                 mat.userData._ddgiPatched = true;
+                mat.userData._ddgiPatchVersion = DDGI_PATCH_VERSION;
             }
         }
     });

@@ -22,6 +22,14 @@ let applyObjectMaterialState;
 let editorHistory;
 let showcase, tempVectorA;
 
+function markDDGISkipCapture(object) {
+    object?.traverse?.((node) => {
+        if (!node.userData) node.userData = {};
+        node.userData.ddgiSkipCapture = true;
+    });
+    return object;
+}
+
 export function setupBlueprintEditor(deps) {
     ({
         scene,
@@ -104,12 +112,14 @@ export function enterBlueprintEditor() {
     floorMesh.rotation.x = -Math.PI / 2;
     floorMesh.position.set(targetPos.x, floorY, targetPos.z);
     floorMesh.receiveShadow = true;
+    markDDGISkipCapture(floorMesh);
     scene.add(floorMesh);
     blueprintState.floorMesh = floorMesh;
 
     // Grid helper
     const gridHelper = new THREE.GridHelper(50, 50, 0x555555, 0x333333);
     gridHelper.position.set(targetPos.x, floorY + 0.01, targetPos.z);
+    markDDGISkipCapture(gridHelper);
     scene.add(gridHelper);
     blueprintState.gridHelper = gridHelper;
 
@@ -118,7 +128,10 @@ export function enterBlueprintEditor() {
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
     dirLight.position.set(targetPos.x + 5, targetPos.y + 8, targetPos.z + 5);
     dirLight.target.position.copy(targetPos);
+    markDDGISkipCapture(dirLight.target);
     scene.add(dirLight.target);
+    markDDGISkipCapture(ambientLight);
+    markDDGISkipCapture(dirLight);
     scene.add(ambientLight);
     scene.add(dirLight);
     blueprintState.editorLights = [ambientLight, dirLight, dirLight.target];

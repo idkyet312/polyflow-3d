@@ -24,11 +24,11 @@ export function createDDGIManager() {
         debug: null,
         volumes: [],
         activeVolume: null,
-        enabled: false,
+        enabled: true,
         probesPerFrame: 4,
         hysteresis: 0.97,
         normalBias: 0.4,
-        intensity: 0.18,
+        intensity: 3.18,
         roundRobinCursor: 0,
         cubeRenderer: null,
         captureBudgetMs: 4.0,
@@ -39,6 +39,11 @@ export function createDDGIManager() {
         sampler: null,
         probeInitialized: null,
         atlasNeedsClear: false,
+        debugContributionView: false,
+        fastWarmupCapturesRemaining: 0,
+        lastInvalidateReason: 'initial',
+        lastInvalidateAt: 0,
+        lastCaptureMs: 0,
         // Apply the DDGI atlas to standard materials by default. Materials can
         // still opt out with userData.ddgiSkipReceive.
         injectionEnabled: true,
@@ -59,6 +64,7 @@ export function createDDGIManager() {
             getGrid: () => state.grid,
             getIntensity: () => (state.enabled && !state.atlasNeedsClear ? state.intensity : 0),
             getNormalBias: () => state.normalBias,
+            getDebugViewBlend: () => (state.debugContributionView ? 1 : 0),
         });
         // Implicit default volume — GI is active without user authoring.
         state._implicitVolume = {
@@ -119,6 +125,19 @@ export function createDDGIManager() {
         clearAtlas();
     }
 
+    function invalidate({ reason = 'manual', fastWarmupFrames = 1 } = {}) {
+        state.probeInitialized?.fill(0);
+        state.roundRobinCursor = 0;
+        state.fastWarmupCapturesRemaining = Math.max(
+            state.fastWarmupCapturesRemaining,
+            (state.grid?.probeCount?.() || 0) * Math.max(1, fastWarmupFrames | 0),
+        );
+        state.lastInvalidateReason = reason;
+        state.lastInvalidateAt = performance.now?.() || Date.now();
+        clearAtlas();
+        state.sampler?.refreshUniforms();
+    }
+
     function gridKey() {
         if (!state.grid) return '';
         const a = state.grid.anchor;
@@ -164,6 +183,10 @@ export function createDDGIManager() {
                 }
             }
         }
+        if (state._implicitVolume) {
+            applyVolume(state._implicitVolume);
+            return;
+        }
         applyVolume(state.volumes[0]);
     }
 
@@ -202,16 +225,14 @@ export function createDDGIManager() {
             state.debug.update(state.grid);
         }
 
-        if (!state.enabled || !state.activeVolume) return;
-
-        // Push current grid + atlas state into the sampler uniforms so all
-        // patched materials see fresh values this frame.
         state.sampler?.refreshUniforms();
+
+        if (!state.enabled || !state.activeVolume) return;
 
         // Idempotent re-patch: catches materials added since last frame.
         // Patched materials short-circuit via userData._ddgiPatched.
         if (state.injectionEnabled && state.scene && state.sampler) {
-            patchMaterials(state.scene, state.sampler.node);
+            patchSceneMaterials(state.scene);
         }
 
         // Round-robin capture, fire-and-forget per frame.
@@ -221,10 +242,12 @@ export function createDDGIManager() {
     }
 
     async function captureBatch() {
+        const start = performance.now?.() || Date.now();
         const total = state.grid.probeCount();
         if (total === 0) return;
         const N = Math.max(1, state.activeVolume?.probesPerFrame || state.probesPerFrame);
         for (let i = 0; i < N; i++) {
+            if (i > 0 && ((performance.now?.() || Date.now()) - start) >= state.captureBudgetMs) break;
             const idx = state.roundRobinCursor % total;
             state.roundRobinCursor = (state.roundRobinCursor + 1) % total;
             state.grid.probePositionByIndex(idx, _tmpPos);
@@ -236,30 +259,42 @@ export function createDDGIManager() {
                 // since it's a view-space effect (not bounce-relevant).
                 // Note: until visibility weighting (C3) lands, sky may leak
                 // slightly into closed interiors; revisit with Chebyshev.
-                const cubeRT = await state.cubeRenderer.captureProbe(idx, _tmpPos, {
-                    layersMask: DDGI_CAPTURE_MASK,
-                    hideBackground: false,
-                    hideFog: true,
-                });
+                let cubeRT = null;
+                try {
+                    // Probe captures must see the normally lit scene, not the
+                    // DDGI debug/contribution material graph. Otherwise DDGI
+                    // Only captures black and poisons the atlas.
+                    state.sampler?.setCaptureBypass?.(true);
+                    cubeRT = await state.cubeRenderer.captureProbe(idx, _tmpPos, {
+                        layersMask: DDGI_CAPTURE_MASK,
+                        hideBackground: state.activeVolume !== state._implicitVolume,
+                        hideFog: true,
+                    });
+                } finally {
+                    state.sampler?.setCaptureBypass?.(false);
+                }
                 integrateInto(idx, cubeRT);
             } catch (e) {
                 if (state.debug?.isVisible()) console.warn('[DDGI] capture failed', idx, e);
                 break;
             }
         }
+        state.lastCaptureMs = (performance.now?.() || Date.now()) - start;
     }
 
     function integrateInto(probeIndex, cubeRT) {
         if (!state.integrator || !state.irradianceAtlas) return;
         if (state.atlasNeedsClear) clearAtlas();
         const firstUpdate = !state.probeInitialized?.[probeIndex];
+        const warmup = state.fastWarmupCapturesRemaining > 0;
         state.integrator.integrateProbe({
             cubeTarget: cubeRT,
             atlas: state.irradianceAtlas,
             probeIndex,
             intensity: 1.0,
-            hysteresis: firstUpdate ? 0 : state.hysteresis,
+            hysteresis: (firstUpdate || warmup) ? 0 : state.hysteresis,
         });
+        if (state.fastWarmupCapturesRemaining > 0) state.fastWarmupCapturesRemaining--;
         if (state.probeInitialized) state.probeInitialized[probeIndex] = 1;
     }
 
@@ -281,11 +316,14 @@ export function createDDGIManager() {
 
     function setEnabled(v) {
         state.enabled = !!v;
+        state.sampler?.refreshUniforms();
     }
 
     function patchSceneMaterials(root) {
         if (!state.sampler) return;
-        patchMaterials(root || state.scene, state.sampler.node);
+        patchMaterials(root || state.scene, state.sampler.node, {
+            debugViewMixNode: state.sampler.debugViewMixNode,
+        });
     }
 
     function setInjectionEnabled(v) {
@@ -293,18 +331,31 @@ export function createDDGIManager() {
         if (state.injectionEnabled) patchSceneMaterials(state.scene);
     }
 
+    function setContributionViewEnabled(v) {
+        state.debugContributionView = !!v;
+        state.sampler?.refreshUniforms();
+        if (state.injectionEnabled) patchSceneMaterials(state.scene);
+    }
+
     // Live-edit setters used by the World Environment panel. These adjust the
     // implicit-volume defaults; explicit DDGIVolume actors are unaffected.
     function setProbesPerFrame(n) {
         const numeric = Math.max(1, Math.min(64, Math.floor(Number.isFinite(n) ? n : state.probesPerFrame)));
+        const changed = numeric !== state.probesPerFrame || (state.activeVolume && state.activeVolume.probesPerFrame !== numeric);
         state.probesPerFrame = numeric;
         if (state._implicitVolume) state._implicitVolume.probesPerFrame = numeric;
+        if (state.activeVolume) state.activeVolume.probesPerFrame = numeric;
+        if (changed) invalidate({ reason: 'probes per frame changed', fastWarmupFrames: 1 });
     }
 
     function setIntensity(v) {
         const numeric = Math.max(0, Math.min(2, Number.isFinite(v) ? v : state.intensity));
+        const changed = Math.abs(numeric - state.intensity) > 1e-4 || (state.activeVolume && Math.abs((state.activeVolume.intensity ?? numeric) - numeric) > 1e-4);
         state.intensity = numeric;
         if (state._implicitVolume) state._implicitVolume.intensity = numeric;
+        if (state.activeVolume) state.activeVolume.intensity = numeric;
+        state.sampler?.refreshUniforms();
+        if (changed) invalidate({ reason: 'intensity changed', fastWarmupFrames: 1 });
     }
 
     function setHysteresis(v) {
@@ -320,13 +371,32 @@ export function createDDGIManager() {
     }
 
     function getSnapshot() {
+        const probeCount = state.grid?.probeCount?.() || 0;
+        let initializedProbes = 0;
+        if (state.probeInitialized) {
+            for (let i = 0; i < state.probeInitialized.length; i++) {
+                initializedProbes += state.probeInitialized[i] ? 1 : 0;
+            }
+        }
+        const activeVolumeType = state.activeVolume === state._implicitVolume
+            ? 'implicit'
+            : (state.activeVolume?.owner?.kind || state.activeVolume?.owner?.name || 'explicit');
         return {
             enabled: state.enabled,
             injectionEnabled: state.injectionEnabled,
-            probesPerFrame: state.probesPerFrame,
+            debugProbes: !!state.debug?.isVisible(),
+            contributionView: state.debugContributionView,
+            probesPerFrame: state.activeVolume?.probesPerFrame || state.probesPerFrame,
             intensity: state.intensity,
             hysteresis: state.hysteresis,
             normalBias: state.normalBias,
+            probeCount,
+            initializedProbes,
+            activeVolumeType,
+            fastWarmupCapturesRemaining: state.fastWarmupCapturesRemaining,
+            lastInvalidateReason: state.lastInvalidateReason,
+            lastInvalidateAt: state.lastInvalidateAt,
+            lastCaptureMs: state.lastCaptureMs,
         };
     }
 
@@ -351,7 +421,9 @@ export function createDDGIManager() {
         tick,
         registerVolume,
         unregisterVolume,
+        invalidate,
         setDebugVisible,
+        setContributionViewEnabled,
         isDebugVisible,
         setEnabled,
         get enabled() { return state.enabled; },
@@ -366,8 +438,10 @@ export function createDDGIManager() {
         getActiveVolume: () => state.activeVolume,
         getProbeTarget,
         getCaptureMask: () => DDGI_CAPTURE_MASK,
+        getDebugLayer: () => DDGI_CAPTURE_LAYER,
         getIrradianceAtlas,
         setInjectionEnabled,
+        get contributionViewEnabled() { return state.debugContributionView; },
         get injectionEnabled() { return state.injectionEnabled; },
     };
 }

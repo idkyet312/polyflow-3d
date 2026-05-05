@@ -218,7 +218,10 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
 
     function setEnabled(enabled) {
         const next = !!enabled;
-        if (state.enabled === next) return;
+        if (state.enabled === next) {
+            if (!next) applyResolvedSettings(DISABLED_POST_PROCESS_SETTINGS);
+            return;
+        }
         state.enabled = next;
         if (!next) {
             // Apply neutral settings immediately so the disable is visible this frame
