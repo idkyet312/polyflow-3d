@@ -220,9 +220,109 @@ export function createDebugStatPanel(name) {
     });
 
     panel.append(header, grid);
+
+    let atlasPreview = null;
+    if (name === 'ddgi') {
+        const wrap = document.createElement('div');
+        wrap.className = 'debug-stat-atlas';
+
+        const label = document.createElement('div');
+        label.className = 'debug-stat-atlas-label';
+        label.textContent = 'Irradiance Atlas';
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'debug-stat-atlas-canvas';
+        canvas.width = 1;
+        canvas.height = 1;
+
+        wrap.append(label, canvas);
+        panel.appendChild(wrap);
+        atlasPreview = {
+            canvas,
+            ctx: canvas.getContext('2d', { willReadFrequently: true }),
+            pending: false,
+            lastReadAt: 0,
+            lastAtlas: null,
+        };
+    }
     debugStatsOverlay.appendChild(panel);
 
-    return { panel, meta, badge, rows };
+    return { panel, meta, badge, rows, atlasPreview };
+}
+
+function halfFloatToLinear(value) {
+    return THREE.DataUtils?.fromHalfFloat
+        ? THREE.DataUtils.fromHalfFloat(value)
+        : value / 65535;
+}
+
+function toneMapAtlasChannel(value) {
+    const mapped = 1 - Math.exp(-Math.max(0, value) * 1.4);
+    return Math.round(Math.pow(THREE.MathUtils.clamp(mapped, 0, 1), 1 / 2.2) * 255);
+}
+
+function paintDDGIAtlasPreview(ref, atlas, pixels) {
+    const preview = ref.atlasPreview;
+    if (!preview?.ctx || !atlas || !pixels) return;
+
+    const width = atlas.width | 0;
+    const height = atlas.height | 0;
+    if (width <= 0 || height <= 0) return;
+
+    if (preview.canvas.width !== width || preview.canvas.height !== height) {
+        preview.canvas.width = width;
+        preview.canvas.height = height;
+    }
+
+    const image = preview.ctx.createImageData(width, height);
+    const textureType = atlas.front?.texture?.type;
+    const isHalfFloat = textureType === THREE.HalfFloatType || pixels instanceof Uint16Array;
+    const isFloat = pixels instanceof Float32Array;
+    const bytesPerTexel = isFloat ? 16 : isHalfFloat ? 8 : 4;
+    const bytesPerElement = pixels.BYTES_PER_ELEMENT || 1;
+    const sourceStride = Math.ceil((width * bytesPerTexel) / 256) * (256 / bytesPerElement);
+
+    for (let y = 0; y < height; y++) {
+        const srcY = height - 1 - y;
+        for (let x = 0; x < width; x++) {
+            const src = srcY * sourceStride + x * 4;
+            const dst = (y * width + x) * 4;
+            const r = isHalfFloat ? halfFloatToLinear(pixels[src]) : pixels[src];
+            const g = isHalfFloat ? halfFloatToLinear(pixels[src + 1]) : pixels[src + 1];
+            const b = isHalfFloat ? halfFloatToLinear(pixels[src + 2]) : pixels[src + 2];
+            image.data[dst] = isFloat || isHalfFloat ? toneMapAtlasChannel(r) : r;
+            image.data[dst + 1] = isFloat || isHalfFloat ? toneMapAtlasChannel(g) : g;
+            image.data[dst + 2] = isFloat || isHalfFloat ? toneMapAtlasChannel(b) : b;
+            image.data[dst + 3] = 255;
+        }
+    }
+
+    preview.ctx.putImageData(image, 0, 0);
+}
+
+function updateDDGIAtlasPreview(ref, atlas) {
+    const preview = ref.atlasPreview;
+    if (!preview || !renderer?.readRenderTargetPixelsAsync || !atlas?.front) return;
+
+    const now = performance.now();
+    if (preview.pending || (now - preview.lastReadAt) < 250) return;
+
+    preview.pending = true;
+    preview.lastReadAt = now;
+    preview.lastAtlas = atlas.front;
+
+    renderer.readRenderTargetPixelsAsync(atlas.front, 0, 0, atlas.width, atlas.height, 0, 0)
+        .then((pixels) => {
+            if (preview.lastAtlas === atlas.front) paintDDGIAtlasPreview(ref, atlas, pixels);
+        })
+        .catch(() => {
+            const ctx = preview.ctx;
+            if (!ctx) return;
+            ctx.clearRect(0, 0, preview.canvas.width, preview.canvas.height);
+        })
+        .finally(() => {
+            preview.pending = false;
+        });
 }
 
 export function syncDebugStatPanels() {
@@ -282,7 +382,8 @@ export function updateDebugStatPanels() {
         }
 
         if (name === 'ddgi') {
-            const snap = getDDGIManager?.()?.getSnapshot?.() || {};
+            const ddgi = getDDGIManager?.();
+            const snap = ddgi?.getSnapshot?.() || {};
             ref.meta.textContent = snap.contributionView ? 'Contribution view active' : 'Probe atlas status';
             ref.rows.enabled.textContent = snap.enabled ? 'On' : 'Off';
             ref.rows.volume.textContent = snap.activeVolumeType || '--';
@@ -292,6 +393,7 @@ export function updateDebugStatPanels() {
             ref.rows.intensity.textContent = Number(snap.intensity ?? 0).toFixed(2);
             ref.rows.invalidate.textContent = snap.lastInvalidateReason || '--';
             ref.rows.ddgi.textContent = formatTimingMs(averageDDGI || snap.lastCaptureMs || 0);
+            updateDDGIAtlasPreview(ref, ddgi?.getIrradianceAtlas?.());
             return;
         }
 

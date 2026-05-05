@@ -80,7 +80,7 @@ export function createDDGIManager() {
 
         // Seed debug data immediately; actual gizmos stay hidden by default.
         state.grid.snapAnchorTo(state.camera?.position || new THREE.Vector3());
-        state.debug.update(state.grid);
+        state.debug.update(state.grid, state.irradianceAtlas);
     }
 
     function ensureAtlasForGrid() {
@@ -222,7 +222,7 @@ export function createDDGIManager() {
         }
 
         if (state.debug?.isVisible()) {
-            state.debug.update(state.grid);
+            state.debug.update(state.grid, state.irradianceAtlas);
         }
 
         state.sampler?.refreshUniforms();
