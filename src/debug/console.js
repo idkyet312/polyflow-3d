@@ -209,7 +209,7 @@ export function createDebugStatPanel(name) {
         : name === 'physics'
             ? ['Step', 'Sync', 'Collisions', 'Bodies', 'Passes', 'Delta']
             : name === 'ddgi'
-                ? ['Enabled', 'Volume', 'Probes', 'Ready', 'Per Frame', 'Intensity', 'Invalidate', 'DDGI']
+                ? ['Enabled', 'Volume', 'Probes', 'Ready', 'Bake N', 'Intensity', 'Invalidate', 'DDGI']
                 : ['GPU', 'Render', 'Frame', 'FPS'];
 
     labels.forEach((label) => {
@@ -280,7 +280,9 @@ function paintDDGIAtlasPreview(ref, atlas, pixels) {
     const isFloat = pixels instanceof Float32Array;
     const bytesPerTexel = isFloat ? 16 : isHalfFloat ? 8 : 4;
     const bytesPerElement = pixels.BYTES_PER_ELEMENT || 1;
-    const sourceStride = Math.ceil((width * bytesPerTexel) / 256) * (256 / bytesPerElement);
+    const sourceStride = pixels === atlas.data
+        ? width * 4
+        : Math.ceil((width * bytesPerTexel) / 256) * (256 / bytesPerElement);
 
     for (let y = 0; y < height; y++) {
         const srcY = height - 1 - y;
@@ -302,10 +304,18 @@ function paintDDGIAtlasPreview(ref, atlas, pixels) {
 
 function updateDDGIAtlasPreview(ref, atlas) {
     const preview = ref.atlasPreview;
-    if (!preview || !renderer?.readRenderTargetPixelsAsync || !atlas?.front) return;
+    if (!preview || !atlas) return;
 
     const now = performance.now();
     if (preview.pending || (now - preview.lastReadAt) < 250) return;
+
+    if (atlas.data) {
+        preview.lastReadAt = now;
+        paintDDGIAtlasPreview(ref, atlas, atlas.data);
+        return;
+    }
+
+    if (!renderer?.readRenderTargetPixelsAsync || !atlas?.front) return;
 
     preview.pending = true;
     preview.lastReadAt = now;
@@ -389,7 +399,7 @@ export function updateDebugStatPanels() {
             ref.rows.volume.textContent = snap.activeVolumeType || '--';
             ref.rows.probes.textContent = `${snap.probeCount ?? 0}`;
             ref.rows.ready.textContent = `${snap.initializedProbes ?? 0}/${snap.probeCount ?? 0}`;
-            ref.rows['per frame'].textContent = `${snap.probesPerFrame ?? 0}`;
+            ref.rows['bake n'].textContent = `${snap.bakeEveryN ?? snap.probesPerFrame ?? 0}`;
             ref.rows.intensity.textContent = Number(snap.intensity ?? 0).toFixed(2);
             ref.rows.invalidate.textContent = snap.lastInvalidateReason || '--';
             ref.rows.ddgi.textContent = formatTimingMs(averageDDGI || snap.lastCaptureMs || 0);

@@ -1,7 +1,14 @@
 import * as THREE from 'three';
-import { Fn, vec2, vec3, float, texture, uniform, positionWorld, normalWorld, mix } from 'three/tsl';
+import { Fn, vec2, vec3, float, int, texture, uniform, uniformArray, positionWorld, normalWorld, mix } from 'three/tsl';
+import { DDGIMeshStandardNodeMaterial } from './DDGIMeshStandardNodeMaterial.js';
 
-const DDGI_PATCH_VERSION = 5;
+const DDGI_PATCH_VERSION = 13;
+const FORCE_RED_GI_TEST = false;
+const FORCE_RED_MATERIAL_OVERRIDE_TEST = false;
+const OCT_RES = 8;
+const OCT_PAD = 1;
+const OCT_RES_P = 10;
+const DEPTH_RANGE = 50;
 
 function createBlackTexture() {
     const tex = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1, THREE.RGBAFormat);
@@ -10,22 +17,36 @@ function createBlackTexture() {
     return tex;
 }
 
-
-export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBias, getDebugViewBlend }) {
+export function createDDGISampler({
+    getAtlas,
+    getGrid,
+    getIntensity,
+    getNormalBias,
+    getDebugViewBlend,
+    getDepthMean,
+    getDepthMeanSq,
+    getProbeTrapped,
+    getSolidTestEnabled,
+    getSolidTestColor,
+}) {
     const uAtlasSize = uniform(new THREE.Vector2(1, 1));
-    const uTilesPerRow = uniform(1);
-    const uTile = uniform(8);
-    const uGutter = uniform(1);
+    const uProbeMin = uniform(new THREE.Vector3());
+    const uProbeMax = uniform(new THREE.Vector3(1, 1, 1));
     const uGridDims = uniform(new THREE.Vector3(1, 1, 1));
-    const uGridAnchor = uniform(new THREE.Vector3());
-    const uGridBoundsHalf = uniform(new THREE.Vector3());
-    const uCellSize = uniform(1);
     const uIntensity = uniform(1);
     const uNormalBias = uniform(0);
     const uDebugViewBlend = uniform(0);
+    const uDepthMean = uniformArray(getDepthMean?.() || [DEPTH_RANGE], 'float');
+    const uDepthMeanSq = uniformArray(getDepthMeanSq?.() || [DEPTH_RANGE * DEPTH_RANGE], 'float');
+    const uProbeTrapped = uniformArray(getProbeTrapped?.() || [0], 'float');
+    const uChebyshevEnabled = uniform(1.0);
+    const uChebyshevFloor = uniform(0.0);
+    const uSolidTestEnabled = uniform(0.0);
+    const uSolidTestColor = uniform(new THREE.Vector3(1.5, 0.9, 0.2));
     const atlasTex = texture(createBlackTexture());
+    const tmpMin = new THREE.Vector3();
+    const tmpMax = new THREE.Vector3();
     let captureBypass = false;
-
 
     function refreshUniforms() {
         const grid = getGrid?.();
@@ -36,91 +57,111 @@ export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBi
             return;
         }
         uAtlasSize.value.set(atlas.width, atlas.height);
-        uTilesPerRow.value = atlas.tilesPerRow;
-        uTile.value = atlas.tile;
         uGridDims.value.set(grid.dims.x, grid.dims.y, grid.dims.z);
-        uGridAnchor.value.copy(grid.anchor);
-        uGridBoundsHalf.value.set(grid.bounds.x * 0.5, grid.bounds.y * 0.5, grid.bounds.z * 0.5);
-        uCellSize.value = grid.cellSize;
+        grid.probePosition(0, 0, 0, tmpMin);
+        grid.probePosition(grid.dims.x - 1, grid.dims.y - 1, grid.dims.z - 1, tmpMax);
+        uProbeMin.value.copy(tmpMin);
+        uProbeMax.value.copy(tmpMax);
         uIntensity.value = intensity;
         uNormalBias.value = getNormalBias?.() ?? 0;
         uDebugViewBlend.value = captureBypass
             ? 0
             : THREE.MathUtils.clamp(Number(getDebugViewBlend?.() ?? 0), 0, 1);
-        atlasTex.value = atlas.front.texture;
+        uSolidTestEnabled.value = captureBypass ? 0.0 : (getSolidTestEnabled?.() ? 1.0 : 0.0);
+        const solidTestColor = getSolidTestColor?.();
+        if (solidTestColor) uSolidTestColor.value.copy(solidTestColor);
+        atlasTex.value = atlas.texture || atlas.front?.texture;
     }
-
 
     function setCaptureBypass(v) {
         captureBypass = !!v;
         refreshUniforms();
     }
 
+    const octEncode = (dir) => {
+        const an = vec3(dir.x.abs(), dir.y.abs(), dir.z.abs());
+        const denom = an.x.add(an.y).add(an.z).max(float(1e-6));
+        const n = dir.div(denom);
+        const px = n.x;
+        const py = n.y;
+        const wrapX = float(1).sub(py.abs()).mul(n.x.sign());
+        const wrapY = float(1).sub(px.abs()).mul(n.y.sign());
+        const useWrap = n.z.lessThan(float(0));
+        return vec2(
+            useWrap.select(wrapX, px),
+            useWrap.select(wrapY, py),
+        ).mul(0.5).add(0.5);
+    };
 
-    const sampleNode = Fn(() => {
-        const n = normalWorld;
-        const wp = positionWorld.add(n.mul(uNormalBias));
+    const sampleProbeOct = (probeIndex, n) => {
+        const uv01 = octEncode(n).clamp(vec2(0), vec2(1));
+        const px = float(probeIndex).mul(float(OCT_RES_P)).add(float(OCT_PAD)).add(uv01.x.mul(float(OCT_RES)));
+        const py = float(OCT_PAD).add(uv01.y.mul(float(OCT_RES)));
+        return atlasTex.sample(vec2(px.div(uAtlasSize.x), py.div(uAtlasSize.y))).rgb;
+    };
 
+    const giSampleFn = Fn(([wp, n]) => {
+        const wpBiased = wp.add(n.mul(uNormalBias));
+        const grid = wpBiased.sub(uProbeMin).div(uProbeMax.sub(uProbeMin))
+            .clamp(vec3(0), vec3(1))
+            .mul(uGridDims.sub(vec3(1)));
+        const baseIdxX = int(grid.x.min(uGridDims.x.sub(float(1.0001))).floor());
+        const baseIdxY = int(grid.y.min(uGridDims.y.sub(float(1.0001))).floor());
+        const baseIdxZ = int(grid.z.min(uGridDims.z.sub(float(1.0001))).floor());
+        const baseIdx = vec3(float(baseIdxX), float(baseIdxY), float(baseIdxZ));
+        const fracIdx = grid.sub(baseIdx).clamp(vec3(0), vec3(1));
+        const probeSpacing = uProbeMax.sub(uProbeMin).div(uGridDims.sub(vec3(1)));
+        const dxI = int(uGridDims.x);
+        const dxDyI = int(uGridDims.x.mul(uGridDims.y));
+        let sum = vec3(0).toVar();
+        let wSum = float(0).toVar();
 
-        const local = wp.sub(uGridAnchor).add(uGridBoundsHalf).div(uCellSize).sub(vec3(0.5));
-        const lx = local.x.clamp(0, uGridDims.x.sub(1));
-        const ly = local.y.clamp(0, uGridDims.y.sub(1));
-        const lz = local.z.clamp(0, uGridDims.z.sub(1));
-        const ix0 = lx.floor();
-        const iy0 = ly.floor();
-        const iz0 = lz.floor();
-        const ix1 = ix0.add(1).clamp(0, uGridDims.x.sub(1));
-        const iy1 = iy0.add(1).clamp(0, uGridDims.y.sub(1));
-        const iz1 = iz0.add(1).clamp(0, uGridDims.z.sub(1));
-        const fx = lx.sub(ix0);
-        const fy = ly.sub(iy0);
-        const fz = lz.sub(iz0);
-        const wx0 = float(1).sub(fx);
-        const wy0 = float(1).sub(fy);
-        const wz0 = float(1).sub(fz);
+        for (let cz = 0; cz < 2; cz++) for (let cy = 0; cy < 2; cy++) for (let cx = 0; cx < 2; cx++) {
+            const ixI = baseIdxX.add(int(cx));
+            const iyI = baseIdxY.add(int(cy));
+            const izI = baseIdxZ.add(int(cz));
+            const tx = cx === 0 ? float(1).sub(fracIdx.x) : fracIdx.x;
+            const ty = cy === 0 ? float(1).sub(fracIdx.y) : fracIdx.y;
+            const tz = cz === 0 ? float(1).sub(fracIdx.z) : fracIdx.z;
+            const sx = tx.mul(tx).mul(float(3).sub(tx.mul(2)));
+            const sy = ty.mul(ty).mul(float(3).sub(ty.mul(2)));
+            const sz = tz.mul(tz).mul(float(3).sub(tz.mul(2)));
+            const triWeight = sx.mul(sy).mul(sz);
+            const piInt = izI.mul(dxDyI).add(iyI.mul(dxI)).add(ixI);
+            const idxV = vec3(float(ixI), float(iyI), float(izI));
+            const probeWorld = uProbeMin.add(idxV.mul(probeSpacing));
+            const dist = wpBiased.sub(probeWorld).length();
+            const dMean = uDepthMean.element(piInt);
+            const dMeanSq = uDepthMeanSq.element(piInt);
+            const variance = dMeanSq.sub(dMean.mul(dMean)).max(float(1e-4));
+            const distExcess = dist.sub(dMean).max(float(0));
+            const chebyshevRaw = variance.div(variance.add(distExcess.mul(distExcess))).clamp(0, 1);
+            const chebyshev = chebyshevRaw.mul(chebyshevRaw);
+            const visWeight = uChebyshevFloor.mix(chebyshev, uChebyshevEnabled).max(uChebyshevFloor);
+            const trappedFlag = uProbeTrapped.element(piInt);
+            const aliveMask = float(1).sub(trappedFlag.mul(0.75));
+            const weight = triWeight.mul(visWeight).mul(aliveMask);
+            const irr = sampleProbeOct(piInt, n).max(vec3(0));
+            sum = sum.add(irr.mul(weight));
+            wSum = wSum.add(weight);
+        }
 
-
-        const an = vec3(n.x.abs(), n.y.abs(), n.z.abs());
-        const denom = an.x.add(an.y).add(an.z).max(1e-5);
-        const nn = n.div(denom);
-        const px = nn.x;
-        const py = nn.y;
-        const wrapX = float(1).sub(py.abs()).mul(nn.x.sign());
-        const wrapY = float(1).sub(px.abs()).mul(nn.y.sign());
-        const useWrap = nn.z.lessThan(0);
-        const encX = useWrap.select(wrapX, px);
-        const encY = useWrap.select(wrapY, py);
-        const oct = vec2(encX, encY).mul(0.5).add(0.5);
-
-
-        const probeIndex = (ix, iy, iz) => iz.mul(uGridDims.y).add(iy).mul(uGridDims.x).add(ix);
-        const sampleProbe = (idx) => {
-            const col = idx.mod(uTilesPerRow);
-            const row = idx.div(uTilesPerRow).floor();
-            const tilePx = uTile.add(uGutter.mul(2));
-            const tileOriginX = col.mul(tilePx).add(uGutter);
-            const tileOriginY = row.mul(tilePx).add(uGutter);
-            const texX = tileOriginX.add(float(0.5)).add(oct.x.mul(uTile.sub(1)));
-            const texY = tileOriginY.add(float(0.5)).add(oct.y.mul(uTile.sub(1)));
-            return atlasTex.sample(vec2(texX, texY).div(uAtlasSize)).rgb;
-        };
-
-
-        const c000 = sampleProbe(probeIndex(ix0, iy0, iz0)).mul(wx0.mul(wy0).mul(wz0));
-        const c100 = sampleProbe(probeIndex(ix1, iy0, iz0)).mul(fx.mul(wy0).mul(wz0));
-        const c010 = sampleProbe(probeIndex(ix0, iy1, iz0)).mul(wx0.mul(fy).mul(wz0));
-        const c110 = sampleProbe(probeIndex(ix1, iy1, iz0)).mul(fx.mul(fy).mul(wz0));
-        const c001 = sampleProbe(probeIndex(ix0, iy0, iz1)).mul(wx0.mul(wy0).mul(fz));
-        const c101 = sampleProbe(probeIndex(ix1, iy0, iz1)).mul(fx.mul(wy0).mul(fz));
-        const c011 = sampleProbe(probeIndex(ix0, iy1, iz1)).mul(wx0.mul(fy).mul(fz));
-        const c111 = sampleProbe(probeIndex(ix1, iy1, iz1)).mul(fx.mul(fy).mul(fz));
-
-
-        return c000.add(c100).add(c010).add(c110).add(c001).add(c101).add(c011).add(c111)
-            .mul(uIntensity)
-            .clamp(vec3(0), vec3(4.0));
+        return sum.div(wSum.max(float(1e-4)));
     });
 
+    const sampleNode = Fn(() => {
+        const n = normalWorld.normalize();
+        const atlasResult = FORCE_RED_GI_TEST
+            ? vec3(4.0, 0, 0)
+            : giSampleFn(positionWorld, n).max(vec3(0));
+
+        const solidResult = atlasResult.mul(float(1).sub(uSolidTestEnabled))
+            .add(uSolidTestColor.mul(uSolidTestEnabled));
+        const debugColor = solidResult.mul(1.5).clamp(vec3(0), vec3(2));
+        const blended = mix(solidResult, debugColor, uDebugViewBlend);
+
+        return blended.mul(uIntensity).clamp(vec3(0), vec3(8.0));
+    });
 
     return {
         node: sampleNode(),
@@ -130,94 +171,131 @@ export function createDDGISampler({ getAtlas, getGrid, getIntensity, getNormalBi
     };
 }
 
+const convertedMaterials = new WeakMap();
+let _ddgiPatchLogCount = 0;
 
-export function patchMaterials(root, ddgiNode, { debugViewMixNode = null } = {}) {
-    if (!root) return;
+function isDDGIConvertibleMaterial(mat) {
+    if (!mat) return false;
+    if (mat.isDDGIMeshStandardNodeMaterial) return true;
+    return !!(mat.isMeshStandardMaterial || mat.isMeshStandardNodeMaterial);
+}
+
+function convertToDDGIMaterial(mat) {
+    if (!mat || mat.isDDGIMeshStandardNodeMaterial) return mat;
+    const cached = convertedMaterials.get(mat);
+    if (cached) return cached;
+
+    const converted = new DDGIMeshStandardNodeMaterial({
+        color: mat.color?.clone?.() || 0xffffff,
+        roughness: mat.roughness ?? 1,
+        metalness: mat.metalness ?? 0,
+        opacity: mat.opacity ?? 1,
+        transparent: !!mat.transparent,
+        alphaTest: mat.alphaTest ?? 0,
+        side: mat.side ?? THREE.FrontSide,
+        vertexColors: !!mat.vertexColors,
+        flatShading: !!mat.flatShading,
+        wireframe: !!mat.wireframe,
+        fog: mat.fog ?? true,
+        toneMapped: mat.toneMapped ?? true,
+        depthTest: mat.depthTest ?? true,
+        depthWrite: mat.depthWrite ?? true,
+        colorWrite: mat.colorWrite ?? true,
+    });
+
+    const textureSlots = [
+        'map', 'lightMap', 'aoMap', 'emissiveMap', 'bumpMap', 'normalMap',
+        'displacementMap', 'roughnessMap', 'metalnessMap', 'alphaMap', 'envMap',
+    ];
+    for (const key of textureSlots) {
+        if (mat[key]) converted[key] = mat[key];
+    }
+
+    if (mat.emissive) converted.emissive.copy(mat.emissive);
+    converted.emissiveIntensity = mat.emissiveIntensity ?? 1;
+    converted.normalScale?.copy?.(mat.normalScale || new THREE.Vector2(1, 1));
+    converted.bumpScale = mat.bumpScale ?? converted.bumpScale;
+    converted.displacementScale = mat.displacementScale ?? converted.displacementScale;
+    converted.displacementBias = mat.displacementBias ?? converted.displacementBias;
+    converted.envMapIntensity = mat.envMapIntensity ?? converted.envMapIntensity;
+    converted.blending = mat.blending;
+    converted.blendSrc = mat.blendSrc;
+    converted.blendDst = mat.blendDst;
+    converted.blendEquation = mat.blendEquation;
+    converted.premultipliedAlpha = mat.premultipliedAlpha;
+    converted.dithering = mat.dithering;
+    converted.polygonOffset = mat.polygonOffset;
+    converted.polygonOffsetFactor = mat.polygonOffsetFactor;
+    converted.polygonOffsetUnits = mat.polygonOffsetUnits;
+    converted.name = mat.name;
+    converted.userData = { ...(mat.userData || {}) };
+    converted.userData._ddgiSourceMaterialType = mat.type || mat.constructor?.name || 'Material';
+
+    convertedMaterials.set(mat, converted);
+    mat.dispose?.();
+    return converted;
+}
+
+export function patchMaterials(root, ddgiNode, { forceRebuild = false } = {}) {
+    if (!root || !ddgiNode) return;
+    let assigned = 0;
+    let converted = 0;
+    let scanned = 0;
+    let skippedUnsupported = 0;
     root.traverse((obj) => {
         if (!obj.isMesh) return;
         if (obj.userData?.ddgiSkipReceive) return;
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const mat of mats) {
+        const hadArrayMaterial = Array.isArray(obj.material);
+        const mats = hadArrayMaterial ? obj.material : [obj.material];
+        let materialChanged = false;
+        for (let i = 0; i < mats.length; i++) {
+            let mat = mats[i];
             if (!mat) continue;
-            if (mat.userData?._ddgiEmissiveIntensityUniform) {
-                mat.userData._ddgiEmissiveIntensityUniform.value = mat.emissiveIntensity ?? 1;
-            }
-            if (mat.userData?._ddgiPatchVersion === DDGI_PATCH_VERSION) continue;
-            if (!(mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial)) continue;
+            scanned++;
 
-            // Snapshot the pristine graph once. Re-patches always start from this
-            // snapshot, so toggling DDGI off/on or bumping DDGI_PATCH_VERSION never
-            // layers patches on top of patches.
-            const originalNodes = mat.userData?._ddgiOriginalNodes || {
-                colorNode: mat.colorNode || null,
-                emissiveNode: mat.emissiveNode || null,
-                outputNode: mat.outputNode || null,
-            };
+            if (!isDDGIConvertibleMaterial(mat)) {
+                skippedUnsupported++;
+                continue;
+            }
+
+            if (!mat.isDDGIMeshStandardNodeMaterial) {
+                mat = convertToDDGIMaterial(mat);
+                mats[i] = mat;
+                materialChanged = true;
+                converted++;
+            }
+
+            const alreadyPatched = mat.userData?._ddgiPatchVersion === DDGI_PATCH_VERSION
+                && mat.ddgiIrradianceNode === ddgiNode;
+            if (alreadyPatched && !forceRebuild) continue;
+            if (alreadyPatched && forceRebuild) {
+                mat.dispose?.();
+                mat.needsUpdate = true;
+                continue;
+            }
 
             try {
-                // Resolve albedo:
-                //   1. textured colorNode (e.g. map * color)  → use directly
-                //   2. plain mat.color                        → wrap in cached UniformNode
-                //   3. neither                                → null (unmodulated GI fallback)
-                let albedoNode = null;
-                if (originalNodes.colorNode) {
-                    albedoNode = originalNodes.colorNode;
-                } else if (mat.color) {
-                    let cached = mat.userData._ddgiAlbedoUniform;
-                    if (!cached) {
-                        cached = uniform(mat.color);
-                        mat.userData._ddgiAlbedoUniform = cached;
-                    }
-                    albedoNode = cached;
+                if (forceRebuild) mat.dispose?.();
+                mat.ddgiIrradianceNode = ddgiNode;
+                if (FORCE_RED_MATERIAL_OVERRIDE_TEST) {
+                    mat.colorNode = vec3(1, 0, 0);
+                    mat.emissiveNode = vec3(4, 0, 0);
+                    mat.lights = false;
+                    mat.toneMapped = false;
                 }
-
-                let emissiveFallback = originalNodes.emissiveNode;
-                if (!emissiveFallback) {
-                    let emissiveColor = mat.userData._ddgiEmissiveUniform;
-                    if (!emissiveColor) {
-                        emissiveColor = uniform(mat.emissive || new THREE.Color(0x000000));
-                        mat.userData._ddgiEmissiveUniform = emissiveColor;
-                    }
-                    let emissiveIntensity = mat.userData._ddgiEmissiveIntensityUniform;
-                    if (!emissiveIntensity) {
-                        emissiveIntensity = uniform(mat.emissiveIntensity ?? 1);
-                        mat.userData._ddgiEmissiveIntensityUniform = emissiveIntensity;
-                    }
-                    emissiveIntensity.value = mat.emissiveIntensity ?? 1;
-                    emissiveFallback = emissiveColor.mul(emissiveIntensity);
-                }
-
-                const rawContribution = ddgiNode.clamp(vec3(0), vec3(4));
-                const litContribution = albedoNode
-                    ? rawContribution.mul(albedoNode).mul(1.35)
-                    : rawContribution.mul(1.35);
-                const existingEmissive = emissiveFallback || vec3(0);
-                const existingColor = originalNodes.colorNode || albedoNode || vec3(1, 1, 1);
-                const debugBlend = debugViewMixNode || float(0);
-                const debugColor = rawContribution.mul(1.5).clamp(vec3(0), vec3(2));
-
-                // Inject GI into emissiveNode. The standard PBR lighting model adds
-                // emissive unmodulated to the final color, giving us the additive
-                // `direct + albedo*irradiance` path we want.
-                //
-                // Tradeoff (accepted): bloom treats emissive as glow, so bright bounce
-                // regions can bloom slightly. The alternative — adding to outputNode —
-                // historically rendered MeshStandardMaterial pitch-black on r0.184 /
-                // WebGPU (see commit 34c7537), so we don't go near outputNode anymore.
-                mat.colorNode = mix(existingColor, debugColor, debugBlend);
-                mat.emissiveNode = mix(existingEmissive.add(litContribution), debugColor, debugBlend);
-                mat.outputNode = originalNodes.outputNode;  // pass through unchanged (usually null)
-
-                mat.userData._ddgiOriginalNodes = originalNodes;
-                mat.userData._ddgiPatched = true;
                 mat.userData._ddgiPatchVersion = DDGI_PATCH_VERSION;
+                mat.userData._ddgiPatched = true;
                 mat.needsUpdate = true;
+                assigned++;
             } catch (e) {
                 console.warn('[DDGI] material patch failed', mat, e);
-                // Mark as patched even on failure so we don't retry & spam every frame.
-                mat.userData._ddgiPatched = true;
                 mat.userData._ddgiPatchVersion = DDGI_PATCH_VERSION;
             }
         }
+        if (materialChanged) obj.material = hadArrayMaterial ? mats : mats[0];
     });
+    if (assigned > 0 || _ddgiPatchLogCount < 3) {
+        _ddgiPatchLogCount++;
+        console.log(`[DDGI] patchMaterials assigned=${assigned} converted=${converted} scanned=${scanned} skipped=${skippedUnsupported}`);
+    }
 }

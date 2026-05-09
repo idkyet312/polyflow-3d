@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { Fn, float, instanceIndex, texture, uniform, vec2, vec3 } from 'three/tsl';
+import { Fn, attribute, float, texture, uniform, vec2, vec3 } from 'three/tsl';
 import { TILE_GUTTER } from './ddgiAtlas.js';
 
 function createBlackTexture() {
@@ -14,6 +14,7 @@ export function createDDGIDebug({ scene, layer = 30 }) {
     const group = new THREE.Group();
     group.name = 'ddgi-debug';
     group.userData.ignoreForcedSceneShadows = true;
+    group.userData.ddgiSkipCapture = true;
     group.layers.set(layer);
     scene.add(group);
 
@@ -22,17 +23,21 @@ export function createDDGIDebug({ scene, layer = 30 }) {
     const uTilesPerRow = uniform(1);
     const uTile = uniform(8);
     const uGutter = uniform(TILE_GUTTER);
-    const uProbeExposure = uniform(3.8);
-    const uProbeSaturation = uniform(3.4);
+    const uProbeExposure = uniform(1.0);
+    const uProbeSaturation = uniform(1.0);
     const atlasTex = texture(createBlackTexture());
 
+    // Each probe sphere reads its tile origin from a per-instance attribute
+    // rather than from `instanceIndex`. In three.js 0.184 the TSL
+    // `instanceIndex` builtin doesn't flow correctly through every WebGPU
+    // material setup path on InstancedMesh — the symptom was every probe
+    // sphere displaying probe 0's irradiance ("all same color"). Reading
+    // tile origin from a vertex attribute side-steps the issue and is the
+    // standard way to feed per-instance data to a TSL graph.
     const irradianceNode = Fn(() => {
-        const idx = float(instanceIndex);
-        const col = idx.mod(uTilesPerRow);
-        const row = idx.div(uTilesPerRow).floor();
-        const tilePx = uTile.add(uGutter.mul(2));
-        const tileOriginX = col.mul(tilePx).add(uGutter);
-        const tileOriginY = row.mul(tilePx).add(uGutter);
+        const tileOrigin = attribute('aProbeTileOrigin', 'vec2');
+        const tileOriginX = tileOrigin.x;
+        const tileOriginY = tileOrigin.y;
 
         const sampleTile = (x, y) => {
             const texX = tileOriginX.add(float(0.5)).add(float(x).mul(uTile.sub(1)));
@@ -58,7 +63,6 @@ export function createDDGIDebug({ scene, layer = 30 }) {
             .add(avg.sub(vec3(luminance)).mul(uProbeSaturation));
 
         return saturated
-            .max(vec3(0.035))
             .mul(uProbeExposure)
             .clamp(vec3(0), vec3(4));
     });
@@ -96,7 +100,14 @@ export function createDDGIDebug({ scene, layer = 30 }) {
             probeMesh.dispose?.();
         }
         probeMesh = new THREE.InstancedMesh(probeGeo, probeMat, count);
+        // Per-instance tile origin so the irradianceNode reads each
+        // probe's own atlas tile. See comment in irradianceNode.
+        const tileOriginAttr = new THREE.InstancedBufferAttribute(new Float32Array(count * 2), 2);
+        tileOriginAttr.setUsage(THREE.DynamicDrawUsage);
+        probeMesh.geometry.setAttribute('aProbeTileOrigin', tileOriginAttr);
+        probeMesh.userData._aProbeTileOrigin = tileOriginAttr;
         probeMesh.frustumCulled = false;
+        probeMesh.userData.ddgiSkipCapture = true;
         probeMesh.visible = visible;
         probeMesh.renderOrder = 1000;
         probeMesh.layers.set(layer);
@@ -118,6 +129,7 @@ export function createDDGIDebug({ scene, layer = 30 }) {
         });
         boxMesh = new THREE.Mesh(geom, mat);
         boxMesh.renderOrder = 999;
+        boxMesh.userData.ddgiSkipCapture = true;
         boxMesh.visible = visible;
         boxMesh.layers.set(layer);
         group.add(boxMesh);
@@ -130,12 +142,23 @@ export function createDDGIDebug({ scene, layer = 30 }) {
         const total = grid.probeCount();
         const inst = ensureProbeMesh(total);
         const m = new THREE.Matrix4();
+        const tileOriginAttr = inst.userData._aProbeTileOrigin;
+        const tilesPerRow = atlas?.tilesPerRow ?? 1;
+        const tile = atlas?.tile ?? 8;
+        const tilePx = tile + TILE_GUTTER * 2;
         for (let i = 0; i < total; i++) {
             grid.probePositionByIndex(i, tmp);
             m.makeTranslation(tmp.x, tmp.y, tmp.z);
             inst.setMatrixAt(i, m);
+            if (tileOriginAttr) {
+                const col = i % tilesPerRow;
+                const row = (i / tilesPerRow) | 0;
+                tileOriginAttr.array[i * 2 + 0] = col * tilePx + TILE_GUTTER;
+                tileOriginAttr.array[i * 2 + 1] = row * tilePx + TILE_GUTTER;
+            }
         }
         inst.instanceMatrix.needsUpdate = true;
+        if (tileOriginAttr) tileOriginAttr.needsUpdate = true;
 
         const box = ensureBox();
         box.position.set(grid.anchor.x, grid.anchor.y, grid.anchor.z);
