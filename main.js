@@ -5806,6 +5806,7 @@ async function init() {
             } else {
                 syncTransformToPhysics();
             }
+            invalidateDDGI('scene object transformed');
             transformControl.justFinishedDragging = true;
             editorHistory.captureState();
             setTimeout(() => transformControl.justFinishedDragging = false, 100);
