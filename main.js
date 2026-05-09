@@ -43,6 +43,8 @@ import { createLightGridController } from './src/world/lightGrid.js';
 import { createVolumetricFog } from './src/world/volumetricFog.js';
 import { createPostProcessVolumeManager } from './src/world/postProcessVolume.js';
 import { getDDGIManager } from './src/world/gi/ddgiManager.js';
+import { createDDGIRayDebug } from './src/world/gi/ddgiRayDebug.js';
+import { DDGIMeshStandardNodeMaterial } from './src/world/gi/DDGIMeshStandardNodeMaterial.js';
 import {
     createActor,
     createSceneSystem,
@@ -435,11 +437,17 @@ const globalPostProcessUniforms = {
     bloomThreshold: uniform(0.48)
 };
 
-// Performance toggle: when on, skips DDGI tick, volumetric fog update, and the
-// post-process volume update. The three subsystems own their own state via
-// setEnabled, so flipping this back to false restores the default render path
-// without a reload. Defaults to off — engine ships unchanged.
-let perfModeEnabled = false;
+// Performance toggle: when on, skips volumetric fog update and post-process
+// volume update. (DDGI no longer respects this on fix/ddgi-correctness — see
+// runtimeDdgiEnabled below.) The two subsystems own their own state via
+// setEnabled, so flipping this saves both render work and CPU update work.
+//
+// Stays at TRUE on this branch so the post-process / TSL bloom pipeline doesn't
+// boot — there's a separate latent bug there (UnrealBloomPass.* label invalid
+// uncaught WebGPU errors on boot) that we don't want to surface while we're
+// debugging DDGI. Bloom can be re-enabled from the World Environment panel.
+const PERF_MODE_DEFAULT_ENABLED = true;
+let perfModeEnabled = PERF_MODE_DEFAULT_ENABLED;
 let perfModeUiRefs = null;
 
 // World Environment panel state — Godot-style WorldEnvironment node mirror.
@@ -448,20 +456,28 @@ let perfModeUiRefs = null;
 // Defaults match the engine's out-of-box look — DDGI off (heavy), everything
 // else on. Changing the master "All Off" or "Performance" preset rewrites the
 // `enabled` fields but preserves slider values.
-const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v1';
+// Bumped v2 → v3 on fix/ddgi-correctness so old saves with `ddgi.enabled = false`
+// (the previous default) don't override the new boot-on-DDGI default. See doc
+// comment on PERF_MODE_DEFAULT_ENABLED above for the broader fix context.
+// Bumped v4 -> v5 for RT DDGI live-bake controls.
+const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v5';
 const WORLD_ENV_DEFAULTS = Object.freeze({
     sky: { enabled: true, preset: 'sunny-sky', blurriness: 0.05 },
     ambient: { enabled: true, intensity: 1.0 },
     hemi: { enabled: true, intensity: 1.5 },
     sun: { enabled: true, castShadow: true, intensity: 2.5 },
     tonemap: { exposure: 1.0 },
-    bloom: { enabled: true, strength: 1.25, radius: 0.95, threshold: 0.48 },
+    bloom: { enabled: true, strength: 0.6, radius: 0.95, threshold: 0.9 },
     fog: { enabled: true, density: 0.012, opacity: 0.055 },
-    ddgi: { enabled: false, probesPerFrame: 4, intensity: 0.18 },
+    ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
     shadows: { enabled: true },
 });
 let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
 let worldEnvUiRefs = null;
+let ddgiTestVolumeActor = null;
+let cornellRayDebug = null;
+let cornellPanelLight = null;
+const cornellRayDebugOrigin = new THREE.Vector3();
 let physicsCore;
 let physicsRuntime;
 let multiplayerController;
@@ -475,8 +491,11 @@ const VEHICLE_CUSTOM_IMPORT_VALUE = '__custom_import__';
 const IMPORTED_PROP_MAX_HULL_POINTS = 480;
 const IMPORTED_PROP_MAX_HULL_PARTS = 18;
 const IMPORTED_PROP_COMPLEX_HULL_RADIUS = 0.01;
-const SHOWCASE_CAMERA_POSITION = new THREE.Vector3(6.5, 4.2, 8.5);
-const SHOWCASE_CAMERA_TARGET = new THREE.Vector3(0, 1.4, 0);
+// Cornell-box camera: positioned in front of the open side of the room
+// looking into the back wall. Centred so the red wall is on the left and
+// the green wall is on the right, matching the ddgi-cornell-box demo.
+const SHOWCASE_CAMERA_POSITION = new THREE.Vector3(0, 1.0, 2.6);
+const SHOWCASE_CAMERA_TARGET = new THREE.Vector3(0, 0.9, 0);
 const JOLT_NON_MOVING_LAYER = 0;
 const JOLT_MOVING_LAYER = 1;
 const JOLT_OBJECT_LAYER_COUNT = 2;
@@ -680,6 +699,7 @@ const debugConsoleState = {
         physicsCollisions: 0,
         scripts: 0,
         render: 0,
+        ddgi: 0,
         fps: 0,
         delta: 0,
         collisionSteps: 0,
@@ -693,6 +713,7 @@ const debugConsoleState = {
         physicsCollisions: [],
         scripts: [],
         render: [],
+        ddgi: [],
     },
     gpuTimingMode: 'approximate',
 };
@@ -1738,6 +1759,7 @@ function spawnImportedProp(templateId, options = {}) {
         }
     }
     playObjectAnimation(visual);
+    invalidateDDGI('imported prop spawned');
     return actor;
 }
 
@@ -2409,6 +2431,7 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
         }
     }
 
+    invalidateDDGI(`${kind} spawned`);
     return options.returnActor === true ? actor : body;
 }
 
@@ -2447,14 +2470,7 @@ function syncGameplaySpawnToCamera() {
 }
 
 function syncShowcaseAnglesFromTarget(target) {
-    tempVectorA.copy(target).sub(camera.position);
-    const flatDistance = Math.max(0.001, Math.hypot(tempVectorA.x, tempVectorA.z));
-    showcase.yaw = Math.atan2(tempVectorA.x, tempVectorA.z);
-    showcase.pitch = THREE.MathUtils.clamp(
-        Math.atan2(-tempVectorA.y, flatDistance),
-        -PLAYER_SETTINGS.maxLookPitch,
-        PLAYER_SETTINGS.maxLookPitch
-    );
+    syncShowcaseAnglesToFaceTarget(target);
 }
 
 function syncShowcaseAnglesToFaceTarget(target) {
@@ -2564,6 +2580,22 @@ function createDefaultObjectEventState(eventName) {
         handles: null,
         beganPlay: false,
     };
+}
+
+function markDDGISkipCapture(object) {
+    object?.traverse?.((node) => {
+        if (!node.userData) node.userData = {};
+        node.userData.ddgiSkipCapture = true;
+    });
+    return object;
+}
+
+function invalidateDDGI(reason, fastWarmupFrames = 2) {
+    try {
+        getDDGIManager().invalidate({ reason, fastWarmupFrames });
+    } catch {
+        // DDGI can be unavailable during early boot or teardown.
+    }
 }
 
 function createObjectScriptState(propId = '') {
@@ -3212,6 +3244,8 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     const mesh = new THREE.Mesh(geom, mat);
     mesh.position.copy(spawnPos);
     mesh.userData.ddgiSkipReceive = true;
+    // Hide the volume wireframe from DDGI bake/debug paths.
+    mesh.userData.ddgiSkipCapture = true;
     mesh.userData.ignoreForcedSceneShadows = true;
     mesh.castShadow = false;
     mesh.receiveShadow = false;
@@ -3236,6 +3270,311 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     try { ddgi.beginPlay(); } catch (e) { console.warn('[DDGI] beginPlay failed', e); }
 
     return actor;
+}
+
+function ensureDDGITestVolume(rig) {
+    if (!scene || !rig) return null;
+    if (ddgiTestVolumeActor?.mesh?.parent !== scene) {
+        ddgiTestVolumeActor = null;
+    }
+    if (ddgiTestVolumeActor) return ddgiTestVolumeActor;
+
+    // Volume mesh is fitted to the Cornell rig — its centre is the room
+    // centre, and `activeVolumeAnchor()` uses that to anchor the probe
+    // grid inside the box. A custom `containsPoint` override (set after
+    // the component is constructed below) widens the activation region
+    // so the camera looking *at* the box from outside still selects this
+    // volume over the implicit camera-anchored fallback.
+    const bounds = new THREE.Box3().setFromObject(rig);
+    if (bounds.isEmpty()) return null;
+    bounds.expandByScalar(-0.05);
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+
+    const gridDims = { x: 6, y: 4, z: 6 };
+    // Fit probes *inside* the Cornell room. Using (dims - 1) places the
+    // first/last layers directly on the floor, ceiling, and walls, which
+    // makes the bottom row read as sunk into the floor slab.
+    const cellSize = Math.max(
+        size.x / gridDims.x,
+        size.y / gridDims.y,
+        size.z / gridDims.z,
+        0.3,
+    );
+    const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(size.x, size.y, size.z),
+        new THREE.MeshBasicMaterial({
+            color: 0x4dffd2,
+            transparent: true,
+            opacity: 0.0,
+            depthWrite: false,
+            toneMapped: false,
+            fog: false,
+        })
+    );
+    mesh.name = 'ddgi-test-volume';
+    mesh.position.copy(center);
+    mesh.userData.ddgiSkipReceive = true;
+    mesh.userData.ddgiSkipCapture = true;
+    mesh.userData.ignoreForcedSceneShadows = true;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+
+    const actor = createActor({
+        mesh,
+        kind: 'ddgiVolume',
+        userData: { internalSample: true, label: 'ddgi-test-volume' },
+        name: 'ddgi-test-volume',
+    });
+    actor.addComponent(new TransformComponent());
+    const ddgi = new DDGIVolumeComponent({
+        gridDims,
+        cellSize,
+        // Cranked high enough to push GI past the engine's bloom threshold
+        // (0.48) so coloured bounce visibly fills shadowed regions of the
+        // Cornell box. Below this value the patcher's emissiveNode write
+        // gets crushed by the bloom HDR mask + ACES tonemap and shadows
+        // render pure black even when DDGI is correctly sampling the
+        // colour-bled probes above them.
+        intensity: 12.0,
+        hysteresis: 0.92,
+        normalBias: 0.05,
+        probesPerFrame: WORLD_ENV_DEFAULTS.ddgi.probesPerFrame,
+    });
+    // Override containsPoint so the volume is "active" whenever the camera
+    // is anywhere reasonable around the Cornell box, not just inside it.
+    // The volume mesh stays small (so the grid anchor is the box centre),
+    // but the activation footprint is expanded — which keeps the implicit
+    // camera-anchored volume from winning when the user looks at the box
+    // from outside.
+    ddgi.containsPoint = (() => {
+        return (point) => {
+            const expanded = new THREE.Box3().setFromObject(mesh).expandByScalar(8);
+            return expanded.containsPoint(point);
+        };
+    })();
+    actor.addComponent(ddgi);
+    scene.add(mesh);
+    try {
+        ddgi.beginPlay();
+    } catch (e) {
+        console.warn('[DDGI] test volume beginPlay failed', e);
+    }
+    ddgiTestVolumeActor = actor;
+    return actor;
+}
+
+function ensureDDGITestRig() {
+    if (!scene) return null;
+    const existing = scene.getObjectByName('ddgi-test-rig');
+    if (existing) {
+        cornellPanelLight = existing.getObjectByName('cornell-panel-light') || cornellPanelLight;
+        ensureDDGITestVolume(existing);
+        return existing;
+    }
+
+    // Cornell-box test rig matching the ddgi-cornell-box demo geometry:
+    // 2.8 m × 2.0 m × 2.8 m room, red left wall, green right wall, white
+    // floor / ceiling / back wall, ceiling-mounted emissive panel, one
+    // tall white box. Authored at full scale so DDGI bake distances match
+    // the standalone reference; rig position lifts the room to sit on the
+    // engine's terrain instead of below it.
+    const rig = new THREE.Group();
+    rig.name = 'ddgi-test-rig';
+    rig.userData.ddgiSampleRig = true;
+    rig.position.set(0, 0.35, 0);
+    rig.scale.setScalar(1.0);
+
+    // Cornell dimensions from the demo: BOX = (1.4, 1.0, 1.4) half-sizes.
+    const BX = 1.4, BY = 2.0, BZ = 1.4; // half-widths / full-height
+    const T = 0.06; // wall thickness
+
+    const addBox = (name, size, position, materialOptions, { rotationY = 0, castShadow = true, receiveShadow = true } = {}) => {
+        // DDGIMeshStandardNodeMaterial subclasses MeshStandardNodeMaterial
+        // and overrides setupLightMap to feed our DDGI irradiance node into
+        // three.js's indirect-diffuse term. Same pattern as the standalone
+        // cornell-box demo. The patcher (in ddgiShaderInjection.js) walks
+        // the scene and assigns ddgiIrradianceNode on each instance.
+        const mat = new DDGIMeshStandardNodeMaterial(materialOptions);
+        const mesh = new THREE.Mesh(
+            new THREE.BoxGeometry(size.x, size.y, size.z),
+            mat,
+        );
+        mesh.name = name;
+        mesh.position.copy(position);
+        mesh.rotation.y = rotationY;
+        mesh.castShadow = castShadow;
+        mesh.receiveShadow = receiveShadow;
+        rig.add(mesh);
+        return mesh;
+    };
+
+    // Floor (white)
+    addBox('cornell-floor', new THREE.Vector3(BX * 2 + T, T, BZ * 2 + T), new THREE.Vector3(0, T * 0.5, 0), {
+        color: 0xeeeeee,
+        roughness: 0.95,
+        metalness: 0.0,
+    });
+    // Ceiling (white)
+    addBox('cornell-ceiling', new THREE.Vector3(BX * 2 + T, T, BZ * 2 + T), new THREE.Vector3(0, BY - T * 0.5, 0), {
+        color: 0xeeeeee,
+        roughness: 0.95,
+        metalness: 0.0,
+    });
+    // Back wall (white)
+    addBox('cornell-back-wall', new THREE.Vector3(BX * 2 + T, BY, T), new THREE.Vector3(0, BY * 0.5, -BZ - T * 0.5), {
+        color: 0xeeeeee,
+        roughness: 0.95,
+        metalness: 0.0,
+    });
+    // Left wall (saturated red — strong albedo so colour bleed is visible).
+    const leftWall = addBox('cornell-left-wall', new THREE.Vector3(T, BY, BZ * 2 + T), new THREE.Vector3(-BX - T * 0.5, BY * 0.5, 0), {
+        color: 0xc81e1e,
+        roughness: 0.95,
+        metalness: 0.0,
+    });
+    // Right wall (saturated green).
+    const rightWall = addBox('cornell-right-wall', new THREE.Vector3(T, BY, BZ * 2 + T), new THREE.Vector3(BX + T * 0.5, BY * 0.5, 0), {
+        color: 0x1ec81e,
+        roughness: 0.95,
+        metalness: 0.0,
+    });
+    // (Previously the coloured walls had ddgiSkipReceive=true to dodge the
+    // old patcher's colorNode rewrite that desaturated their albedo. The
+    // new DDGIMeshStandardNodeMaterial subclass never touches colorNode —
+    // GI flows in through setupLightMap → IrradianceNode → indirect-diffuse
+    // — so the walls now receive GI normally, which is what a Cornell box
+    // colour-bleed test needs.)
+
+    // Tall white box, slightly rotated (matches the Cornell reference).
+    addBox('cornell-tall-block', new THREE.Vector3(0.85, 1.30, 0.85), new THREE.Vector3(0.35, 0.65, 0.20), {
+        color: 0xeeeeee,
+        roughness: 0.85,
+        metalness: 0.0,
+    }, {
+        rotationY: Math.PI * 0.08,
+    });
+
+    // Ceiling light panel — modest emission so the engine's bloom and
+    // tonemapping don't blow walls out to white. Visible bright shape,
+    // not the actual primary light.
+    addBox('cornell-light-panel', new THREE.Vector3(0.7, 0.02, 0.7), new THREE.Vector3(0, BY - T - 0.011, 0), {
+        color: 0x000000,
+        emissive: 0xfff4dd,
+        emissiveIntensity: 3.0,
+        roughness: 0.5,
+        metalness: 0.0,
+    }, {
+        castShadow: false,
+    });
+
+    // Point light at the panel position — primary direct illumination so
+    // walls pick up colour-tintable diffuse light that DDGI can then
+    // bounce. Intensity sized to give walls a comfortable mid-tone (not
+    // pure white) so the colour albedo survives.
+    cornellPanelLight = new THREE.PointLight(0xfff4dd, WORLD_ENV_DEFAULTS.ddgi.lightIntensity, 8.0, 1.5);
+    cornellPanelLight.name = 'cornell-panel-light';
+    cornellPanelLight.position.set(0, BY - 0.15, 0);
+    cornellPanelLight.castShadow = true;
+    cornellPanelLight.shadow.mapSize.set(1024, 1024);
+    cornellPanelLight.shadow.bias = -0.001;
+    rig.add(cornellPanelLight);
+
+    scene.add(rig);
+    ensureDDGITestVolume(rig);
+    return rig;
+}
+
+function clearGrassAroundDDGITestRig() {
+    if (!grassField || !worldFloor) return;
+    const rig = scene?.getObjectByName('ddgi-test-rig');
+    if (!rig) return;
+    const bounds = new THREE.Box3().setFromObject(rig);
+    if (bounds.isEmpty()) return;
+    bounds.expandByScalar(0.8);
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const localCenter = worldFloor.worldToLocal(center.clone());
+    grassField.paintFoliage?.({
+        terrain: worldFloor,
+        localX: localCenter.x,
+        localY: localCenter.y,
+        radius: Math.max(size.x, size.z) * 0.62,
+        mode: 'erase',
+        type: 'grass',
+    });
+}
+
+/**
+ * Cast & draw debug rays from a single probe near the Cornell green wall.
+ * Lines coloured by the surface their ray hits (red wall = red lines,
+ * green wall = green lines, etc). Hit-point spheres at each intersection.
+ * The probe origin is positioned just inside the green-wall boundary so
+ * the rays hitting the green wall are clearly visible up close.
+ */
+function updateCornellRayDebug() {
+    if (!worldEnvState?.ddgi?.rayDebug) {
+        if (cornellRayDebug) {
+            cornellRayDebug.setVisible(false);
+            cornellRayDebug.clear();
+        }
+        return;
+    }
+    if (!scene) return;
+    const rig = scene.getObjectByName('ddgi-test-rig');
+    if (!rig) {
+        if (cornellRayDebug) cornellRayDebug.clear();
+        return;
+    }
+
+    if (!cornellRayDebug) {
+        const ddgiManager = getDDGIManager();
+        const debugLayer = ddgiManager?.getDebugLayer?.() ?? 30;
+        cornellRayDebug = createDDGIRayDebug({ scene, layer: debugLayer });
+        cornellRayDebug.setVisible(true);
+    }
+
+    // Probe origin: 0.4m inboard of the green (right) wall, mid-height,
+    // centred along z. Pinned in *rig-local* space so it follows the rig.
+    cornellRayDebugOrigin.set(1.0, 1.0, 0.0);
+    rig.localToWorld(cornellRayDebugOrigin);
+
+    // Collect cornell rig meshes as raycast targets; exclude the panel
+    // light's own mesh so rays hitting the panel show its bright albedo.
+    const targets = [];
+    rig.traverse((obj) => {
+        if (obj.isMesh && obj.userData?.ddgiSampleRig !== true) {
+            // ddgiSampleRig is set on the rig group; mesh children
+            // don't have it. We *do* want them.
+        }
+        if (obj.isMesh) targets.push(obj);
+    });
+
+    cornellRayDebug.update(cornellRayDebugOrigin, targets);
+}
+
+function applyCornellTestPreset() {
+    setPerfModeEnabled(false);
+    worldEnvState.sky.enabled = false;
+    worldEnvState.ambient.enabled = false;
+    worldEnvState.hemi.enabled = false;
+    worldEnvState.sun.enabled = false;
+    worldEnvState.bloom.enabled = false;
+    worldEnvState.fog.enabled = false;
+    worldEnvState.shadows.enabled = true;
+    worldEnvState.tonemap.exposure = 1.0;
+    worldEnvState.ddgi.enabled = true;
+    worldEnvState.ddgi.liveBake = true;
+    worldEnvState.ddgi.bakeEveryN = 1;
+    worldEnvState.ddgi.probesPerFrame = 1;
+    worldEnvState.ddgi.intensity = WORLD_ENV_DEFAULTS.ddgi.intensity;
+    worldEnvState.ddgi.debugProbes = false;
+    worldEnvState.ddgi.contributionView = false;
+    applyWorldEnvState();
+    if (!gameplay.active) {
+        resetShowcaseCamera(false);
+    }
 }
 
 function spawnActorFromEditor({ openScriptEditor = false } = {}) {
@@ -3328,6 +3667,7 @@ function ensureRaycastDebugLine() {
     helper.cone.material.opacity = 0.95;
     helper.cone.material.toneMapped = false;
     helper.visible = false;
+    markDDGISkipCapture(helper);
     scene.add(helper);
 
     const hitMarker = new THREE.Mesh(
@@ -3343,6 +3683,7 @@ function ensureRaycastDebugLine() {
     hitMarker.name = 'raycast-debug-hit';
     hitMarker.renderOrder = 1000;
     hitMarker.visible = false;
+    markDDGISkipCapture(hitMarker);
     scene.add(hitMarker);
 
     raycastDebugState.helper = helper;
@@ -3774,27 +4115,8 @@ function updatePerfModeUi() {
 // calls in the main render loop, so flipping this saves both render work and
 // CPU update work.
 function setPerfModeEnabled(isEnabled) {
-    const next = !!isEnabled;
-    if (perfModeEnabled === next) {
-        updatePerfModeUi();
-        return;
-    }
-    perfModeEnabled = next;
-
-    // Volumetric fog: hides the layer group AND clears scene.fog when off.
-    volumetricFogController?.setEnabled(!perfModeEnabled);
-
-    // DDGI: tick() short-circuits when state.enabled is false; injectionEnabled
-    // controls the shader-injection patching loop, which we also pause so
-    // newly-added materials don't get patched while perf mode is on.
-    const ddgi = getDDGIManager();
-    ddgi?.setEnabled(!perfModeEnabled);
-    ddgi?.setInjectionEnabled(!perfModeEnabled);
-
-    // Post-process: clamps bloom uniforms to neutral so the MRT bloom pass
-    // becomes a no-op while still running (cheap once strength is 0).
-    postProcessVolumeManager?.setEnabled(!perfModeEnabled);
-
+    perfModeEnabled = !!isEnabled;
+    applyWorldEnvState({ persist: false, switchSky: false });
     updatePerfModeUi();
 }
 
@@ -3814,6 +4136,14 @@ function loadWorldEnvFromStorage() {
                 worldEnvState[key] = { ...WORLD_ENV_DEFAULTS[key], ...parsed[key] };
             }
         }
+        // Debug views are session tools. Always boot into lit render.
+        worldEnvState.ddgi.debugProbes = false;
+        worldEnvState.ddgi.contributionView = false;
+        worldEnvState.ddgi.intensity = Math.min(worldEnvState.ddgi.intensity, WORLD_ENV_DEFAULTS.ddgi.intensity);
+        worldEnvState.ddgi.liveBake = worldEnvState.ddgi.liveBake !== false;
+        worldEnvState.ddgi.bakeEveryN = Math.max(1, Math.min(120,
+            worldEnvState.ddgi.bakeEveryN ?? worldEnvState.ddgi.probesPerFrame ?? WORLD_ENV_DEFAULTS.ddgi.bakeEveryN));
+        worldEnvState.ddgi.probesPerFrame = worldEnvState.ddgi.bakeEveryN;
     } catch (e) {
         // Corrupt storage — fall back to defaults silently.
     }
@@ -3827,6 +4157,14 @@ function saveWorldEnvToStorage() {
 
 function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     const s = worldEnvState;
+    const runtimeBloomEnabled = s.bloom.enabled && !perfModeEnabled;
+    const runtimeFogEnabled = s.fog.enabled && !perfModeEnabled;
+    // fix/ddgi-correctness: decouple DDGI from perf-mode. The original gate
+    // (`s.ddgi.enabled && !perfModeEnabled`) meant perfMode forced setEnabled(false)
+    // on the DDGI manager via applyWorldEnvState below, which made the bake never
+    // run and masked PR #22's correctness fixes. Now DDGI's runtime enabled state
+    // tracks ONLY the explicit worldEnvState.ddgi.enabled toggle.
+    const runtimeDdgiEnabled = s.ddgi.enabled;
 
     // Sky / Background
     if (environmentController) {
@@ -3862,7 +4200,7 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     // Bloom — when off, postProcessVolumeManager.setEnabled clamps uniforms
     // to neutral. When on, push the user's slider values through both the
     // shader uniforms AND the volume defaults so volume-based grading still works.
-    if (s.bloom.enabled) {
+    if (runtimeBloomEnabled) {
         postProcessVolumeManager?.setEnabled?.(true);
         if (globalPostProcessUniforms.bloomStrength) globalPostProcessUniforms.bloomStrength.value = s.bloom.strength;
         if (globalPostProcessUniforms.bloomRadius) globalPostProcessUniforms.bloomRadius.value = s.bloom.radius;
@@ -3878,17 +4216,22 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
 
     // Fog
     if (volumetricFogController) {
-        volumetricFogController.setEnabled?.(s.fog.enabled);
+        volumetricFogController.setEnabled?.(runtimeFogEnabled);
         volumetricFogController.setDensity?.(s.fog.density);
         volumetricFogController.setOpacity?.(s.fog.opacity);
     }
 
     // DDGI
     const ddgi = getDDGIManager();
-    ddgi?.setEnabled?.(s.ddgi.enabled);
-    ddgi?.setInjectionEnabled?.(s.ddgi.enabled);
-    ddgi?.setProbesPerFrame?.(s.ddgi.probesPerFrame);
+    ddgi?.setEnabled?.(runtimeDdgiEnabled);
+    ddgi?.setInjectionEnabled?.(runtimeDdgiEnabled);
+    ddgi?.setLiveBake?.(s.ddgi.liveBake);
+    ddgi?.setBakeEveryN?.(s.ddgi.bakeEveryN ?? s.ddgi.probesPerFrame);
     ddgi?.setIntensity?.(s.ddgi.intensity);
+    ddgi?.setDebugVisible?.(s.ddgi.debugProbes);
+    ddgi?.setContributionViewEnabled?.(runtimeDdgiEnabled && s.ddgi.contributionView);
+    ddgi?.setSolidTestEnabled?.(runtimeDdgiEnabled && s.ddgi.solidTest);
+    if (cornellPanelLight) cornellPanelLight.intensity = s.ddgi.lightIntensity;
 
     // Shadows
     if (renderer?.shadowMap) {
@@ -3937,9 +4280,15 @@ function updateWorldEnvUi() {
     setSlider(worldEnvUiRefs.fogOpacity, worldEnvUiRefs.fogOpacityValue, s.fog.opacity, 3);
 
     setToggle(worldEnvUiRefs.ddgiOff, worldEnvUiRefs.ddgiOn, s.ddgi.enabled);
-    if (worldEnvUiRefs.ddgiProbes) worldEnvUiRefs.ddgiProbes.value = s.ddgi.probesPerFrame;
-    if (worldEnvUiRefs.ddgiProbesValue) worldEnvUiRefs.ddgiProbesValue.textContent = String(s.ddgi.probesPerFrame);
-    setSlider(worldEnvUiRefs.ddgiIntensity, worldEnvUiRefs.ddgiIntensityValue, s.ddgi.intensity, 2);
+    setToggle(worldEnvUiRefs.ddgiLiveBakeOff, worldEnvUiRefs.ddgiLiveBakeOn, s.ddgi.liveBake);
+    if (worldEnvUiRefs.ddgiBakeEveryN) worldEnvUiRefs.ddgiBakeEveryN.value = s.ddgi.bakeEveryN;
+    if (worldEnvUiRefs.ddgiBakeEveryNValue) worldEnvUiRefs.ddgiBakeEveryNValue.textContent = String(s.ddgi.bakeEveryN);
+    setSlider(worldEnvUiRefs.ddgiIntensity, worldEnvUiRefs.ddgiIntensityValue, s.ddgi.intensity, 16);
+    setSlider(worldEnvUiRefs.ddgiLightIntensity, worldEnvUiRefs.ddgiLightIntensityValue, s.ddgi.lightIntensity, 2);
+    setToggle(worldEnvUiRefs.ddgiProbeDebugOff, worldEnvUiRefs.ddgiProbeDebugOn, s.ddgi.debugProbes);
+    setToggle(worldEnvUiRefs.ddgiRayDebugOff, worldEnvUiRefs.ddgiRayDebugOn, s.ddgi.rayDebug);
+    setToggle(worldEnvUiRefs.ddgiSolidTestOff, worldEnvUiRefs.ddgiSolidTestOn, s.ddgi.solidTest);
+    setToggle(worldEnvUiRefs.ddgiViewLit, worldEnvUiRefs.ddgiViewContribution, s.ddgi.contributionView);
 
     setToggle(worldEnvUiRefs.shadowsOff, worldEnvUiRefs.shadowsOn, s.shadows.enabled);
 
@@ -3956,7 +4305,18 @@ function updateWorldEnvUi() {
     if (worldEnvUiRefs.masterStatus) {
         const allCoreOn = s.sky.enabled && s.ambient.enabled && s.hemi.enabled && s.sun.enabled && s.bloom.enabled && s.fog.enabled && s.shadows.enabled;
         const perfPreset = !s.bloom.enabled && !s.fog.enabled && !s.ddgi.enabled && s.sky.enabled && s.sun.enabled;
-        if (allCoreOn && !s.ddgi.enabled) {
+        const cornellPreset = !s.sky.enabled && !s.ambient.enabled && !s.hemi.enabled && !s.sun.enabled
+            && !s.bloom.enabled && !s.fog.enabled && s.shadows.enabled
+            && s.ddgi.enabled && Math.abs(s.ddgi.intensity - WORLD_ENV_DEFAULTS.ddgi.intensity) < 0.001;
+        if (s.ddgi.enabled && s.ddgi.contributionView) {
+            worldEnvUiRefs.masterStatus.textContent = 'DDGI contribution view active.';
+        } else if (s.ddgi.enabled && s.ddgi.solidTest) {
+            worldEnvUiRefs.masterStatus.textContent = 'Solid DDGI test active. Probes bypassed with fixed amber GI.';
+        } else if (s.ddgi.debugProbes) {
+            worldEnvUiRefs.masterStatus.textContent = 'DDGI probe debug active.';
+        } else if (cornellPreset) {
+            worldEnvUiRefs.masterStatus.textContent = 'Cornell test preset active. Sky and sun are off; DDGI bleed is emphasized.';
+        } else if (allCoreOn && !s.ddgi.enabled) {
             worldEnvUiRefs.masterStatus.textContent = 'Everything on (DDGI off — opt in for prettier indirect lighting).';
         } else if (allCoreOn && s.ddgi.enabled) {
             worldEnvUiRefs.masterStatus.textContent = 'Everything on, including DDGI.';
@@ -3993,6 +4353,9 @@ function setWorldEnvMaster(mode) {
         s.bloom.enabled = false;
         s.fog.enabled = false;
         s.ddgi.enabled = false;
+    } else if (mode === 'cornell') {
+        applyCornellTestPreset();
+        return;
     }
     applyWorldEnvState();
 }
@@ -4970,6 +5333,7 @@ async function init() {
         masterOnBtn: document.getElementById('we-master-on'),
         masterOffBtn: document.getElementById('we-master-off'),
         masterPerfBtn: document.getElementById('we-master-perf'),
+        masterCornellBtn: document.getElementById('we-master-cornell'),
         masterStatus: document.getElementById('we-master-status'),
         skyOff: document.getElementById('we-sky-off'),
         skyOn: document.getElementById('we-sky-on'),
@@ -5007,10 +5371,22 @@ async function init() {
         fogOpacityValue: document.getElementById('we-fog-opacity-value'),
         ddgiOff: document.getElementById('we-ddgi-off'),
         ddgiOn: document.getElementById('we-ddgi-on'),
-        ddgiProbes: document.getElementById('we-ddgi-probes'),
-        ddgiProbesValue: document.getElementById('we-ddgi-probes-value'),
+        ddgiLiveBakeOff: document.getElementById('we-ddgi-live-bake-off'),
+        ddgiLiveBakeOn: document.getElementById('we-ddgi-live-bake-on'),
+        ddgiBakeEveryN: document.getElementById('we-ddgi-bake-every-n'),
+        ddgiBakeEveryNValue: document.getElementById('we-ddgi-bake-every-n-value'),
         ddgiIntensity: document.getElementById('we-ddgi-intensity'),
         ddgiIntensityValue: document.getElementById('we-ddgi-intensity-value'),
+        ddgiLightIntensity: document.getElementById('we-ddgi-light-intensity'),
+        ddgiLightIntensityValue: document.getElementById('we-ddgi-light-intensity-value'),
+        ddgiProbeDebugOff: document.getElementById('we-ddgi-probe-debug-off'),
+        ddgiProbeDebugOn: document.getElementById('we-ddgi-probe-debug-on'),
+        ddgiRayDebugOff: document.getElementById('we-ddgi-ray-debug-off'),
+        ddgiRayDebugOn: document.getElementById('we-ddgi-ray-debug-on'),
+        ddgiSolidTestOff: document.getElementById('we-ddgi-solid-test-off'),
+        ddgiSolidTestOn: document.getElementById('we-ddgi-solid-test-on'),
+        ddgiViewLit: document.getElementById('we-ddgi-view-lit'),
+        ddgiViewContribution: document.getElementById('we-ddgi-view-contribution'),
         shadowsOff: document.getElementById('we-shadows-off'),
         shadowsOn: document.getElementById('we-shadows-on'),
         resetBtn: document.getElementById('we-reset-defaults'),
@@ -5112,6 +5488,7 @@ async function init() {
     worldEnvUiRefs?.masterOnBtn?.addEventListener('click', () => setWorldEnvMaster('on'));
     worldEnvUiRefs?.masterOffBtn?.addEventListener('click', () => setWorldEnvMaster('off'));
     worldEnvUiRefs?.masterPerfBtn?.addEventListener('click', () => setWorldEnvMaster('perf'));
+    worldEnvUiRefs?.masterCornellBtn?.addEventListener('click', () => setWorldEnvMaster('cornell'));
     worldEnvUiRefs?.resetBtn?.addEventListener('click', () => resetWorldEnvDefaults());
 
     wireToggle(worldEnvUiRefs?.skyOff, worldEnvUiRefs?.skyOn,
@@ -5160,9 +5537,28 @@ async function init() {
     wireToggle(worldEnvUiRefs?.ddgiOff, worldEnvUiRefs?.ddgiOn,
         () => { worldEnvState.ddgi.enabled = false; },
         () => { worldEnvState.ddgi.enabled = true; });
-    wireSlider(worldEnvUiRefs?.ddgiProbes, 'ddgi.probesPerFrame',
-        (v) => { worldEnvState.ddgi.probesPerFrame = Math.round(v); }, (s) => parseInt(s, 10));
+    wireToggle(worldEnvUiRefs?.ddgiLiveBakeOff, worldEnvUiRefs?.ddgiLiveBakeOn,
+        () => { worldEnvState.ddgi.liveBake = false; },
+        () => { worldEnvState.ddgi.liveBake = true; });
+    wireSlider(worldEnvUiRefs?.ddgiBakeEveryN, 'ddgi.bakeEveryN',
+        (v) => {
+            worldEnvState.ddgi.bakeEveryN = Math.max(1, Math.round(v));
+            worldEnvState.ddgi.probesPerFrame = worldEnvState.ddgi.bakeEveryN;
+        }, (s) => parseInt(s, 10));
     wireSlider(worldEnvUiRefs?.ddgiIntensity, 'ddgi.intensity', (v) => { worldEnvState.ddgi.intensity = v; });
+    wireSlider(worldEnvUiRefs?.ddgiLightIntensity, 'ddgi.lightIntensity', (v) => { worldEnvState.ddgi.lightIntensity = v; });
+    wireToggle(worldEnvUiRefs?.ddgiProbeDebugOff, worldEnvUiRefs?.ddgiProbeDebugOn,
+        () => { worldEnvState.ddgi.debugProbes = false; },
+        () => { worldEnvState.ddgi.debugProbes = true; });
+    wireToggle(worldEnvUiRefs?.ddgiRayDebugOff, worldEnvUiRefs?.ddgiRayDebugOn,
+        () => { worldEnvState.ddgi.rayDebug = false; },
+        () => { worldEnvState.ddgi.rayDebug = true; });
+    wireToggle(worldEnvUiRefs?.ddgiSolidTestOff, worldEnvUiRefs?.ddgiSolidTestOn,
+        () => { worldEnvState.ddgi.solidTest = false; },
+        () => { worldEnvState.ddgi.solidTest = true; });
+    wireToggle(worldEnvUiRefs?.ddgiViewLit, worldEnvUiRefs?.ddgiViewContribution,
+        () => { worldEnvState.ddgi.contributionView = false; },
+        () => { worldEnvState.ddgi.contributionView = true; });
 
     wireToggle(worldEnvUiRefs?.shadowsOff, worldEnvUiRefs?.shadowsOn,
         () => { worldEnvState.shadows.enabled = false; },
@@ -5337,6 +5733,7 @@ async function init() {
     camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
     camera.position.copy(SHOWCASE_CAMERA_POSITION);
     camera.rotation.order = 'YXZ';
+    camera.layers.enable(getDDGIManager().getDebugLayer?.() ?? 30);
     syncShowcaseAnglesFromTarget(SHOWCASE_CAMERA_TARGET);
     applyShowcaseCameraRotation();
     scene.add(camera);
@@ -5394,6 +5791,7 @@ async function init() {
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
     transformControl.setSize(1.5); // Make gizmo hit area larger
+    markDDGISkipCapture(transformControl.getHelper());
     transformControl.addEventListener('change', () => {
         if (blueprintState.active) {
             updateBlueprintDetailsUI();
@@ -5501,6 +5899,41 @@ async function init() {
     scene.add(mainDirectionalLight);
     scene.add(mainDirectionalLight.target);
     updateMainDirectionalLightShadowFocus();
+    ensureDDGITestRig();
+    clearGrassAroundDDGITestRig();
+    // Patch the cornell rig's DDGIMeshStandardNodeMaterial instances
+    // immediately so `ddgiIrradianceNode` is set BEFORE the WebGPU
+    // material build kicks off. If we wait for the first tick(), the
+    // material gets built once with `ddgiIrradianceNode === null`,
+    // setupLightMap returns super.setupLightMap() (which is a no-op
+    // without mat.lightMap), and the cached compiled shader has GI
+    // permanently disabled until the engine forces a rebuild.
+    try {
+        getDDGIManager().patchSceneMaterials?.(scene);
+    } catch (e) {
+        console.warn('[DDGI] initial patch failed', e);
+    }
+    loadWorldEnvFromStorage();
+    applyWorldEnvState({ persist: false });
+    setPerfModeEnabled(PERF_MODE_DEFAULT_ENABLED);
+
+    // Diagnostic on the fix/ddgi-correctness branch — surfaces the resolved DDGI
+    // state at boot so anyone testing knows whether the path is actually live.
+    // Remove before merging to a regular branch.
+    try {
+        const ddgi = getDDGIManager();
+        const snap = ddgi.getSnapshot?.() || {};
+        // eslint-disable-next-line no-console
+        console.info('[DDGI] boot state', {
+            perfModeEnabled,
+            'worldEnvState.ddgi.enabled': worldEnvState.ddgi.enabled,
+            'worldEnvState.ddgi.intensity': worldEnvState.ddgi.intensity,
+            managerEnabled: snap.enabled,
+            managerInjectionEnabled: snap.injectionEnabled,
+            activeVolumeType: snap.activeVolumeType,
+            probeCount: snap.probeCount,
+        });
+    } catch (e) { /* boot order — DDGI may not be live yet */ }
 
     // Create example widgets
     createExampleWidgets();
@@ -5581,11 +6014,15 @@ async function init() {
             postProcessVolumeManager?.update(delta);
         }
         const _ddgiStart = performance.now();
-        if (!perfModeEnabled) {
-            getDDGIManager().tick(delta);
-        }
+        const ddgiManager = getDDGIManager();
+        // fix/ddgi-correctness: tick DDGI regardless of perf mode. The runtime
+        // enabled flag (set by applyWorldEnvState) is the single source of truth.
+        ddgiManager.tick(delta);
         const _ddgiMs = performance.now() - _ddgiStart;
         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
+        // Cornell ray debug: redraw the rays cast from the chosen probe
+        // every frame so a moving / rebaking world stays in sync.
+        updateCornellRayDebug();
         updateObjectAnimations(delta);
         tickForceAllSceneMeshShadows();
 
@@ -5618,6 +6055,7 @@ async function init() {
                 physicsCollisions: physicsMetrics.collisions,
                 scripts: scriptDuration,
                 render: performance.now() - renderStart,
+                ddgi: _ddgiMs,
                 delta,
             });
         } catch (e) {
@@ -8284,6 +8722,7 @@ function wireExtractedModules() {
         setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
         resetMobileInputState, updateWorldPresentation, updateGameplayUI,
         isEditableElement,
+        getDDGIManager,
     });
 
     setupMobileControls({

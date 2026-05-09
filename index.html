@@ -514,6 +514,7 @@
                                 <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-master-on">All On</button>
                                 <button class="btn viewer-toggle-btn" id="we-master-off">All Off</button>
                                 <button class="btn viewer-toggle-btn" id="we-master-perf">Performance</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-cornell">Cornell Test</button>
                             </div>
                             <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off DDGI / Fog / Bloom in one click.</div>
 
@@ -650,20 +651,62 @@
                                 <summary class="viewer-menu-section-summary">Global Illumination (DDGI)</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-off">Off</button>
-                                        <button class="btn viewer-toggle-btn" id="we-ddgi-on">On</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ddgi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note">Off by default — DDGI is the most expensive subsystem. Turn on for prettier indirect lighting.</div>
+                                    <div class="viewer-inline-note">DDGI starts on so new colored objects can contribute bounce; use Performance mode to pause it.</div>
                                     <div class="viewer-slider-group">
-                                        <div class="viewer-slider-label">Probes / Frame</div>
-                                        <input id="we-ddgi-probes" type="range" min="1" max="32" step="1" value="4">
-                                        <div class="viewer-slider-value" id="we-ddgi-probes-value">4</div>
+                                        <div class="viewer-slider-label">Live Bake</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-live-bake-off">Off</button>
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-live-bake-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bake Every N</div>
+                                        <input id="we-ddgi-bake-every-n" type="range" min="1" max="16" step="1" value="4">
+                                        <div class="viewer-slider-value" id="we-ddgi-bake-every-n-value">4</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Intensity</div>
-                                        <input id="we-ddgi-intensity" type="range" min="0" max="1.5" step="0.01" value="0.18">
-                                        <div class="viewer-slider-value" id="we-ddgi-intensity-value">0.18</div>
+                                        <input id="we-ddgi-intensity" type="range" min="0" max="16" step="0.05" value="12.0">
+                                        <div class="viewer-slider-value" id="we-ddgi-intensity-value">12.0</div>
                                     </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Light Intensity</div>
+                                        <input id="we-ddgi-light-intensity" type="range" min="0" max="8" step="0.05" value="0.35">
+                                        <div class="viewer-slider-value" id="we-ddgi-light-intensity-value">0.35</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probe Debug</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-probe-debug-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-probe-debug-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Ray Debug</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-ray-debug-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-ray-debug-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Solid Test</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-solid-test-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-solid-test-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">View</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-view-lit">Lit</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-view-contribution">DDGI Only</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-inline-note">Solid Test bypasses probes and injects fixed amber GI so you can verify the receive path independently of probe capture.</div>
+                                    <div class="viewer-inline-note">DDGI Only replaces the lit scene with the indirect-light contribution so you can inspect exactly what bounce is adding.</div>
                                 </div>
                             </details>
 
@@ -823,10 +866,10 @@
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-inline-note">Turns off DDGI global illumination, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-off">Off</button>
-                                        <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
+                                        <button class="btn viewer-toggle-btn" id="perf-mode-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full DDGI + fog + post-process active.</div>
+                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode on. DDGI, volumetric fog, and post-process bloom are paused.</div>
                                 </div>
                             </details>
 
@@ -917,7 +960,7 @@
                 </div>
 
                 <div class="debug-stats-overlay" id="debug-stats-overlay" aria-live="polite"></div>
-                <div class="engine-audio-debug" id="engine-audio-debug" aria-live="polite">Engine: --</div>
+                <div class="engine-audio-debug" id="engine-audio-debug" aria-live="polite" hidden>Engine: --</div>
 
                 <div class="debug-console" id="debug-console" hidden>
                     <div class="debug-console-header">

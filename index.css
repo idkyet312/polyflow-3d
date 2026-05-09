@@ -1084,6 +1084,31 @@ main {
   color: var(--text-color);
 }
 
+.debug-stat-atlas {
+  margin-top: 0.75rem;
+}
+
+.debug-stat-atlas-label {
+  margin-bottom: 0.35rem;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.debug-stat-atlas-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 56px;
+  max-height: 132px;
+  image-rendering: pixelated;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
 .debug-console {
   position: absolute;
   left: 50%;
