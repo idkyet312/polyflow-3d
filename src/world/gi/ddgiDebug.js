@@ -71,7 +71,8 @@ export function createDDGIDebug({ scene, layer = 30 }) {
     probeMat.colorNode = irradianceNode();
     probeMat.toneMapped = false;
     probeMat.fog = false;
-    probeMat.depthTest = false;
+    // Keep probe debug visible only when not occluded by scene geometry.
+    probeMat.depthTest = true;
     probeMat.depthWrite = false;
 
     let probeMesh = null;

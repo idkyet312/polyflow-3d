@@ -314,8 +314,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     backface = dot(rd, h.nrm) > 0.0;
     let albedo = U.matAlbedo[h.matId].xyz;
     let emissive = U.matEmissive[h.matId].xyz;
-    let compressedE = emissive / (vec3<f32>(1.0) + emissive * 0.8);
-    radiance = compressedE;
+    // Let emissive materials inject directly into probe radiance and boost
+    // their DDGI contribution so emissive bounce reads clearly in-scene.
+    radiance = max(emissive * vec3<f32>(3.0), vec3<f32>(0.0));
 
     let numLights = u32(U.numLightsF.x);
     for (var li: u32 = 0u; li < numLights; li = li + 1u) {
@@ -349,7 +350,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let indirect = max(sampleProbeGridOct(h.pos, h.nrm), vec3<f32>(0.0));
     radiance = radiance + albedo * indirect * U.rtMeta.w / PI;
   }
-  radiance = min(radiance, vec3<f32>(3.0));
+  radiance = min(radiance, vec3<f32>(12.0));
   let signedDist = select(hitDist, -hitDist, backface);
   rayHits[rayId] = vec4<f32>(radiance, signedDist);
 }

@@ -14,13 +14,15 @@ function isCollectable(obj) {
     if ((obj.layers?.mask & DDGI_CAPTURE_LAYER_MASK) !== 0) return false;
     if (obj.isInstancedMesh) return false;
     if (!obj.geometry) return false;
-    const mat = Array.isArray(obj.material) ? obj.material[0] : obj.material;
-    if (!mat) return false;
-    if ((mat.opacity ?? 1) < 0.05) return false;
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    if (!mats.length) return false;
+    const hasVisibleMaterial = mats.some((mat) => mat && (mat.opacity ?? 1) >= 0.05);
+    if (!hasVisibleMaterial) return false;
     return true;
 }
 
 function materialKey(mat) {
+    if (!mat) return 'default';
     const c = mat.color || { r: 1, g: 1, b: 1 };
     const e = mat.emissive || { r: 0, g: 0, b: 0 };
     const ei = mat.emissiveIntensity ?? 1;
@@ -251,9 +253,34 @@ export function buildDDGIBVH(scene) {
     const normalMat = new THREE.Matrix3();
 
     for (const m of meshes) {
-        const mat = Array.isArray(m.material) ? m.material[0] : m.material;
-        const slot = allocSlot(mat);
+        const materials = Array.isArray(m.material) ? m.material : [m.material];
         const geom = m.geometry;
+        const groups = Array.isArray(geom.groups) && geom.groups.length
+            ? [...geom.groups].sort((left, right) => left.start - right.start)
+            : null;
+        let groupCursor = 0;
+
+        const getTriangleMaterialSlot = (triIndex) => {
+            if (!groups) {
+                return allocSlot(materials[0]);
+            }
+
+            const triStart = triIndex * 3;
+            while (
+                groupCursor + 1 < groups.length
+                && triStart >= (groups[groupCursor].start + groups[groupCursor].count)
+            ) {
+                groupCursor++;
+            }
+
+            const group = groups[groupCursor];
+            const rawMaterialIndex = group && triStart >= group.start && triStart < (group.start + group.count)
+                ? (group.materialIndex ?? 0)
+                : 0;
+            const materialIndex = Math.max(0, Math.min(materials.length - 1, rawMaterialIndex | 0));
+            return allocSlot(materials[materialIndex] || materials[0]);
+        };
+
         m.updateWorldMatrix(true, false);
         normalMat.getNormalMatrix(m.matrixWorld);
         const pos = geom.attributes.position;
@@ -320,7 +347,7 @@ export function buildDDGIBVH(scene) {
             triCenters[boundsBase + 1] = (minY + maxY) * 0.5;
             triCenters[boundsBase + 2] = (minZ + maxZ) * 0.5;
 
-            mergedMatIds[triCursor] = slot;
+            mergedMatIds[triCursor] = getTriangleMaterialSlot(t);
             triCursor++;
         }
     }
