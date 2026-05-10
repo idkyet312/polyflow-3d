@@ -45,6 +45,15 @@ export function createProbeGrid({
         return probePosition(ix, iy, iz, out);
     }
 
+    function containsPoint(target, margin = 0) {
+        const halfX = state.bounds.x * 0.5 + margin;
+        const halfY = state.bounds.y * 0.5 + margin;
+        const halfZ = state.bounds.z * 0.5 + margin;
+        return target.x >= state.anchor.x - halfX && target.x <= state.anchor.x + halfX
+            && target.y >= state.anchor.y - halfY && target.y <= state.anchor.y + halfY
+            && target.z >= state.anchor.z - halfZ && target.z <= state.anchor.z + halfZ;
+    }
+
     /**
      * Snap anchor to camera position floored to cellSize. Returns true if anchor moved.
      */
@@ -58,6 +67,11 @@ export function createProbeGrid({
             return true;
         }
         return false;
+    }
+
+    function snapAnchorToIfOutside(target, margin = 0) {
+        if (containsPoint(target, margin)) return false;
+        return snapAnchorTo(target);
     }
 
     /**
@@ -124,7 +138,9 @@ export function createProbeGrid({
         probeIndex,
         probePosition,
         probePositionByIndex,
+        containsPoint,
         snapAnchorTo,
+        snapAnchorToIfOutside,
         lookup8,
         setDims,
         setCellSize,

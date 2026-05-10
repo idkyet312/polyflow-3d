@@ -15,6 +15,10 @@ const _tmpMax = new THREE.Vector3();
 const _tmpLightPos = new THREE.Vector3();
 const _tmpLightTarget = new THREE.Vector3();
 const _tmpDir = new THREE.Vector3();
+const _tmpBox = new THREE.Box3();
+const _tmpSphere = new THREE.Sphere();
+const _tmpFrustum = new THREE.Frustum();
+const _tmpProjScreen = new THREE.Matrix4();
 
 export function createDDGIManager() {
     const state = {
@@ -211,6 +215,21 @@ export function createDDGIManager() {
         return box.getCenter(out);
     }
 
+    function isVolumeVisible(volume) {
+        const camera = state.camera;
+        const mesh = volume?.owner?.mesh || volume?.owner?.root;
+        if (!camera || !mesh) return false;
+
+        mesh.updateWorldMatrix?.(true, false);
+        camera.updateMatrixWorld?.(true);
+        _tmpBox.setFromObject(mesh);
+        if (_tmpBox.isEmpty()) return false;
+        _tmpBox.getBoundingSphere(_tmpSphere);
+        _tmpProjScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+        _tmpFrustum.setFromProjectionMatrix(_tmpProjScreen);
+        return _tmpFrustum.intersectsSphere(_tmpSphere);
+    }
+
     function registerVolume(volume) {
         if (!volume) return;
         if (!state.volumes.includes(volume)) state.volumes.push(volume);
@@ -238,6 +257,28 @@ export function createDDGIManager() {
                 }
             }
         }
+
+        if (state.activeVolume && state.activeVolume !== state._implicitVolume && isVolumeVisible(state.activeVolume)) {
+            return;
+        }
+
+        let bestVisible = null;
+        let bestDistanceSq = Infinity;
+        for (const v of state.volumes) {
+            if (!isVolumeVisible(v)) continue;
+            const anchor = v.owner?.mesh || v.owner?.root;
+            anchor?.getWorldPosition?.(_tmpPos);
+            const distSq = camPos ? camPos.distanceToSquared(_tmpPos) : 0;
+            if (distSq < bestDistanceSq) {
+                bestDistanceSq = distSq;
+                bestVisible = v;
+            }
+        }
+        if (bestVisible) {
+            applyVolume(bestVisible);
+            return;
+        }
+
         applyVolume(state._implicitVolume || state.volumes[0]);
     }
 
@@ -333,8 +374,6 @@ export function createDDGIManager() {
         if (state.activeVolume && state.activeVolume !== state._implicitVolume) {
             const anchor = activeVolumeAnchor(_tmpPos);
             if (anchor) state.grid.anchor.copy(anchor);
-        } else {
-            state.grid.snapAnchorTo(state.camera.position);
         }
         if (previousKey && gridKey() !== previousKey) markGridMoved();
 

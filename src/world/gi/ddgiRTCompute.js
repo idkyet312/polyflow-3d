@@ -46,12 +46,11 @@ fn nodeBoundsMax(nodeI: u32) -> vec3<f32> {
   return vec3<f32>(bitcast<f32>(bvhNodes[b+3u]), bitcast<f32>(bvhNodes[b+4u]), bitcast<f32>(bvhNodes[b+5u]));
 }
 fn nodeIsLeaf(nodeI: u32) -> bool {
-  let b = nodeI * 8u;
-  return ((bvhNodes[b+7u] >> 16u) & 0xFFFFu) == 0xFFFFu;
+  return bvhNodes[nodeI * 8u + 7u] > 0u;
 }
-fn nodeOffset(nodeI: u32) -> u32 { return bvhNodes[nodeI * 8u + 6u]; }
-fn nodeCount(nodeI: u32)  -> u32 { return bvhNodes[nodeI * 8u + 7u] & 0xFFFFu; }
-fn nodeRight(nodeI: u32)  -> u32 { return bvhNodes[nodeI * 8u + 6u] / 8u; }
+fn nodeLeftFirst(nodeI: u32) -> u32 { return bvhNodes[nodeI * 8u + 6u]; }
+fn nodeCount(nodeI: u32)  -> u32 { return bvhNodes[nodeI * 8u + 7u]; }
+fn nodeRight(nodeI: u32)  -> u32 { return nodeLeftFirst(nodeI) + 1u; }
 
 fn rayAabb(ro: vec3<f32>, invRd: vec3<f32>, bMin: vec3<f32>, bMax: vec3<f32>, tMaxIn: f32) -> vec2<f32> {
   let t1 = (bMin - ro) * invRd;
@@ -103,7 +102,7 @@ fn traceScene(roIn: vec3<f32>, rd: vec3<f32>, tMaxIn: f32) -> SceneHit {
   let safeRdY = select(rd.y, 1e-20, abs(rd.y) < 1e-20);
   let safeRdZ = select(rd.z, 1e-20, abs(rd.z) < 1e-20);
   let invRd = vec3<f32>(1.0 / safeRdX, 1.0 / safeRdY, 1.0 / safeRdZ);
-  var stack: array<u32, 32>;
+  var stack: array<u32, 64>;
   var sp: i32 = 0;
   stack[0] = 0u;
   sp = 1;
@@ -117,11 +116,10 @@ fn traceScene(roIn: vec3<f32>, rd: vec3<f32>, tMaxIn: f32) -> SceneHit {
     if (aabb.x > aabb.y || aabb.x > result.t) { continue; }
 
     if (nodeIsLeaf(nodeI)) {
-      let off = nodeOffset(nodeI);
+      let off = nodeLeftFirst(nodeI);
       let cnt = nodeCount(nodeI);
-      let vertOff = off * 3u;
       for (var i: u32 = 0u; i < cnt; i = i + 1u) {
-        let triId = bvhTriIdx[vertOff + i * 3u] / 3u;
+        let triId = bvhTriIdx[off + i];
         let base = triId * 18u;
         let v0 = vec3<f32>(triData[base+0u],  triData[base+1u],  triData[base+2u]);
         let v1 = vec3<f32>(triData[base+6u],  triData[base+7u],  triData[base+8u]);
@@ -140,11 +138,26 @@ fn traceScene(roIn: vec3<f32>, rd: vec3<f32>, tMaxIn: f32) -> SceneHit {
         }
       }
     } else {
-      if (sp < 30) {
-        stack[sp] = nodeI + 1u;
-        sp = sp + 1;
-        stack[sp] = nodeRight(nodeI);
-        sp = sp + 1;
+      let leftI = nodeLeftFirst(nodeI);
+      let rightI = nodeRight(nodeI);
+      let leftAabb = rayAabb(roIn, invRd, nodeBoundsMin(leftI), nodeBoundsMax(leftI), result.t);
+      let rightAabb = rayAabb(roIn, invRd, nodeBoundsMin(rightI), nodeBoundsMax(rightI), result.t);
+      let leftHit = leftAabb.x <= leftAabb.y && leftAabb.x <= result.t;
+      let rightHit = rightAabb.x <= rightAabb.y && rightAabb.x <= result.t;
+      if (sp < 62) {
+        if (leftHit && rightHit) {
+          let visitLeftFirst = leftAabb.x <= rightAabb.x;
+          stack[sp] = select(leftI, rightI, visitLeftFirst);
+          sp = sp + 1;
+          stack[sp] = select(rightI, leftI, visitLeftFirst);
+          sp = sp + 1;
+        } else if (leftHit) {
+          stack[sp] = leftI;
+          sp = sp + 1;
+        } else if (rightHit) {
+          stack[sp] = rightI;
+          sp = sp + 1;
+        }
       }
     }
   }
@@ -156,7 +169,7 @@ fn occluded(ro: vec3<f32>, rd: vec3<f32>, tMax: f32) -> bool {
   let safeRdY = select(rd.y, 1e-20, abs(rd.y) < 1e-20);
   let safeRdZ = select(rd.z, 1e-20, abs(rd.z) < 1e-20);
   let invRd = vec3<f32>(1.0 / safeRdX, 1.0 / safeRdY, 1.0 / safeRdZ);
-  var stack: array<u32, 32>;
+  var stack: array<u32, 64>;
   var sp: i32 = 0;
   stack[0] = 0u;
   sp = 1;
@@ -167,11 +180,10 @@ fn occluded(ro: vec3<f32>, rd: vec3<f32>, tMax: f32) -> bool {
     let aabb = rayAabb(ro, invRd, nodeBoundsMin(nodeI), nodeBoundsMax(nodeI), tMax);
     if (aabb.x > aabb.y) { continue; }
     if (nodeIsLeaf(nodeI)) {
-      let off = nodeOffset(nodeI);
+      let off = nodeLeftFirst(nodeI);
       let cnt = nodeCount(nodeI);
-      let vertOff = off * 3u;
       for (var i: u32 = 0u; i < cnt; i = i + 1u) {
-        let triId = bvhTriIdx[vertOff + i * 3u] / 3u;
+        let triId = bvhTriIdx[off + i];
         let base = triId * 18u;
         let v0 = vec3<f32>(triData[base+0u],  triData[base+1u],  triData[base+2u]);
         let v1 = vec3<f32>(triData[base+6u],  triData[base+7u],  triData[base+8u]);
@@ -180,9 +192,22 @@ fn occluded(ro: vec3<f32>, rd: vec3<f32>, tMax: f32) -> bool {
         if (h.t > 0.0 && h.t < tMax) { return true; }
       }
     } else {
-      if (sp < 30) {
-        stack[sp] = nodeI + 1u; sp = sp + 1;
-        stack[sp] = nodeRight(nodeI); sp = sp + 1;
+      let leftI = nodeLeftFirst(nodeI);
+      let rightI = nodeRight(nodeI);
+      let leftAabb = rayAabb(ro, invRd, nodeBoundsMin(leftI), nodeBoundsMax(leftI), tMax);
+      let rightAabb = rayAabb(ro, invRd, nodeBoundsMin(rightI), nodeBoundsMax(rightI), tMax);
+      let leftHit = leftAabb.x <= leftAabb.y;
+      let rightHit = rightAabb.x <= rightAabb.y;
+      if (sp < 62) {
+        if (leftHit && rightHit) {
+          let visitLeftFirst = leftAabb.x <= rightAabb.x;
+          stack[sp] = select(leftI, rightI, visitLeftFirst); sp = sp + 1;
+          stack[sp] = select(rightI, leftI, visitLeftFirst); sp = sp + 1;
+        } else if (leftHit) {
+          stack[sp] = leftI; sp = sp + 1;
+        } else if (rightHit) {
+          stack[sp] = rightI; sp = sp + 1;
+        }
       }
     }
   }

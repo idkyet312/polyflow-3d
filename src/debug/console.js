@@ -182,6 +182,8 @@ export function createDebugStatPanel(name) {
         ? 'Stat Unit'
         : name === 'physics'
             ? 'Stat Physics'
+            : name === 'raytracing'
+                ? 'Stat Raytracing'
             : name === 'ddgi'
                 ? 'Stat DDGI'
                 : 'Stat GPU';
@@ -208,6 +210,8 @@ export function createDebugStatPanel(name) {
         ? ['Frame', 'FPS', 'Update', 'Physics', 'Render', 'Scripts']
         : name === 'physics'
             ? ['Step', 'Sync', 'Collisions', 'Bodies', 'Passes', 'Delta']
+            : name === 'raytracing'
+                ? ['BVH Build']
             : name === 'ddgi'
                 ? ['Enabled', 'Volume', 'Probes', 'Ready', 'Bake N', 'Intensity', 'Invalidate', 'DDGI']
                 : ['GPU', 'Render', 'Frame', 'FPS'];
@@ -407,6 +411,16 @@ export function updateDebugStatPanels() {
             return;
         }
 
+        if (name === 'raytracing') {
+            const ddgi = getDDGIManager?.();
+            const snap = ddgi?.getSnapshot?.() || {};
+            ref.meta.textContent = snap.bvhDirty
+                ? `BVH dirty${snap.lastInvalidateReason ? `: ${snap.lastInvalidateReason}` : ''}`
+                : 'DDGI BVH build timing';
+            ref.rows['bvh build'].textContent = formatTimingMs(snap.lastBVHBuildMs || 0);
+            return;
+        }
+
         ref.meta.textContent = 'WebGPU render submission timing';
         if (ref.badge) {
             ref.badge.textContent = debugConsoleState.gpuTimingMode === 'approximate' ? 'Approx' : 'GPU';
@@ -432,7 +446,7 @@ export function setDebugStatPanel(name, isEnabled) {
 
 export function runStatCommand(args) {
     if (!args.length) {
-        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, ddgi, none.', 'warn');
+        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, ddgi, raytracing, none.', 'warn');
         return;
     }
 
@@ -447,7 +461,7 @@ export function runStatCommand(args) {
         return;
     }
 
-    if (!['gpu', 'physics', 'unit', 'ddgi'].includes(panel)) {
+    if (!['gpu', 'physics', 'unit', 'ddgi', 'raytracing'].includes(panel)) {
         pushDebugConsoleLine(`Unknown stat target: ${panel}.`, 'error');
         return;
     }
