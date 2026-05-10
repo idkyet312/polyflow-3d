@@ -431,6 +431,7 @@ function getActorKindLabel(kind = 'sphere') {
     if (kind === 'imported') return 'Imported Actor';
     if (kind === 'sphere') return 'Sphere Actor';
     if (kind === 'cube') return 'Cube Actor';
+    if (kind === 'cylinder') return 'Cylinder Actor';
     if (kind === 'capsule') return 'Simple AI Actor';
     if (kind === 'ddgiVolume') return 'DDGI Volume';
     if (kind === 'pointLight') return 'Point Light Actor';
@@ -440,6 +441,7 @@ function getActorKindLabel(kind = 'sphere') {
 
 function getActorKindDefaultScale(kind = 'sphere') {
     if (kind === 'cube') return '2.0';
+    if (kind === 'cylinder') return '1.0';
     if (kind === 'ddgiVolume') return '16.0';
     if (kind === 'pointLight') return '8.0';
     if (kind === 'spotLight') return '10.0';
@@ -527,8 +529,8 @@ const JOLT_OBJECT_LAYER_COUNT = 2;
 const JOLT_BROAD_PHASE_LAYER_COUNT = 2;
 const PLAYER_SETTINGS = {
     eyeHeight: 1.7,
-    walkSpeed: 4.5,
-    sprintSpeed: 7.2,
+    walkSpeed: 8.5,
+    sprintSpeed: 15.2,
     jumpSpeed: 6.8,
     gravity: 18,
     collisionRadius: 0.6,
@@ -766,6 +768,9 @@ const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
 const mainDirectionalLightOffset = new THREE.Vector3(5, 10, 5);
 const mainDirectionalLightShadowFocus = new THREE.Vector3();
+const MAIN_SHADOW_EXTENT = 64;
+const MAIN_SHADOW_FORWARD_FOCUS = 48;
+const MAIN_SHADOW_FAR = 240;
 const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
@@ -2419,6 +2424,21 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
             friction: 0.82,
             ...options,
         };
+    } else if (kind === 'cylinder') {
+        const radius = normalizedScale;
+        const halfHeight = normalizedScale;
+        if (includeCollisionBody) {
+            const halfExtentVector = new Jolt.Vec3(radius, halfHeight, radius);
+            shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
+            Jolt.destroy(halfExtentVector);
+        }
+        mesh = buildPrimitiveActorMesh('cylinder');
+        mesh.scale.set(radius, halfHeight, radius);
+        bodyOptions = {
+            restitution: 0.1,
+            friction: 0.8,
+            ...options,
+        };
     } else if (kind === 'capsule') {
         const halfExtent = normalizedScale;
         if (includeCollisionBody) {
@@ -2480,6 +2500,13 @@ function syncDynamicPhysicsBodies() {
 }
 
 function rebuildTerrainPhysicsBody() {
+    if (currentMesh?.userData?.hideTerrainPresentation) {
+        if (physics.terrainBody) {
+            destroyPhysicsBody(physics.terrainBody);
+            physics.terrainBody = null;
+        }
+        return;
+    }
     physicsCore?.rebuildTerrainPhysicsBody();
 }
 
@@ -2740,6 +2767,11 @@ function isObjectWithinRoot(object, root) {
         current = current.parent;
     }
     return false;
+}
+
+function actorBelongsToCurrentMesh(actor) {
+    const root = getActorRenderObject(actor);
+    return !!(root && currentMesh && isObjectWithinRoot(root, currentMesh));
 }
 
 function getActorSelectionObject(prop, preferredObject = null) {
@@ -3102,6 +3134,18 @@ function buildPrimitiveActorMesh(kind) {
         })
     );
 }
+    if (kind === 'cylinder') {
+        return new THREE.Mesh(
+            new THREE.CylinderGeometry(1, 1, 2, 32, 1, false),
+            new THREE.MeshStandardMaterial({
+                color: 0x94a3b8,
+                metalness: 0.1,
+                roughness: 0.46,
+                emissive: 0x0f172a,
+                emissiveIntensity: 0.16,
+            })
+        );
+    }
     if (kind === 'capsule') {
         return new THREE.Mesh(
             new THREE.CapsuleGeometry(1, 2, 8, 16),
@@ -4153,10 +4197,10 @@ function createCollisionLineSegments(geometry, color) {
     return lines;
 }
 
-function createCollisionOverlayFromObject(sourceRoot, color) {
+function createCollisionOverlayFromObject(sourceRoot, color, { includeMesh = () => true } = {}) {
     if (!sourceRoot) return null;
 
-    const overlayRoot = sourceRoot.isMesh && sourceRoot.geometry
+    const overlayRoot = sourceRoot.isMesh && sourceRoot.geometry && includeMesh(sourceRoot)
         ? createCollisionLineSegments(sourceRoot.geometry, color)
         : new THREE.Group();
     const sourceMap = new Map([[sourceRoot, overlayRoot]]);
@@ -4167,7 +4211,7 @@ function createCollisionOverlayFromObject(sourceRoot, color) {
 
         source.children.forEach((child) => {
             let overlayChild;
-            if (child.isMesh && child.geometry) {
+            if (child.isMesh && child.geometry && includeMesh(child)) {
                 overlayChild = createCollisionLineSegments(child.geometry, color);
             } else {
                 overlayChild = new THREE.Group();
@@ -4182,6 +4226,23 @@ function createCollisionOverlayFromObject(sourceRoot, color) {
     });
 
     return overlayRoot;
+}
+
+function buildWorldCollisionOverlay() {
+    if (!currentMesh) return null;
+
+    let colliderCount = 0;
+    const overlay = createCollisionOverlayFromObject(currentMesh, 0x38bdf8, {
+        includeMesh: (mesh) => {
+            const include = !mesh.userData?.skipPhysicsCollision;
+            if (include) colliderCount++;
+            return include;
+        },
+    });
+
+    if (!overlay || colliderCount === 0) return null;
+    overlay.name = 'world-collision-debug-overlay';
+    return overlay;
 }
 
 function createImportedSimpleCollisionOverlay(template, color) {
@@ -4261,8 +4322,15 @@ function refreshCollisionDebugOverlays() {
 
     clearCollisionDebugOverlays();
 
+    const worldOverlay = buildWorldCollisionOverlay();
+    if (worldOverlay && currentMesh) {
+        currentMesh.add(worldOverlay);
+        collisionDebugState.overlays.push(worldOverlay);
+    }
+
     for (const actor of sceneSystem?.actors || []) {
         const actorMesh = getActorRenderObject(actor);
+        if (actorMesh && currentMesh && isObjectWithinRoot(actorMesh, currentMesh)) continue;
         const overlay = buildActorCollisionOverlay(actor);
         if (!overlay || !actorMesh) continue;
 
@@ -5659,6 +5727,10 @@ function applySceneActorTransformDetailsFromUI() {
 
     syncTransformToPhysics();
 
+    if (actorBelongsToCurrentMesh(actor)) {
+        refreshGameplayWorld({ resetCamera: false });
+    }
+
     const ddgi = getActorDDGIVolumeComponent(actor);
     if (ddgi) {
         syncDDGIVolumeComponentToActorBounds(ddgi);
@@ -6590,6 +6662,9 @@ async function init() {
                 const actor = getSelectedSceneActor();
                 const rootMesh = getActorRenderObject(actor);
                 const ddgi = getActorDDGIVolumeComponent(actor);
+                if (actorBelongsToCurrentMesh(actor) && transformControl.object === rootMesh) {
+                    refreshGameplayWorld({ resetCamera: false });
+                }
                 if (ddgi && transformControl.object === rootMesh) {
                     syncDDGIVolumeComponentToActorBounds(ddgi);
                 }
@@ -6679,11 +6754,11 @@ async function init() {
     mainDirectionalLight.shadow.mapSize.width = 4096;
     mainDirectionalLight.shadow.mapSize.height = 4096;
     mainDirectionalLight.shadow.camera.near = 0.5;
-    mainDirectionalLight.shadow.camera.far = 60;
-    mainDirectionalLight.shadow.camera.left = -24;
-    mainDirectionalLight.shadow.camera.right = 24;
-    mainDirectionalLight.shadow.camera.top = 24;
-    mainDirectionalLight.shadow.camera.bottom = -24;
+    mainDirectionalLight.shadow.camera.far = 700;
+    mainDirectionalLight.shadow.camera.left = -96;
+    mainDirectionalLight.shadow.camera.right = 96;
+    mainDirectionalLight.shadow.camera.top = 96;
+    mainDirectionalLight.shadow.camera.bottom = -96;
     mainDirectionalLight.shadow.bias = -0.001;
     mainDirectionalLight.shadow.normalBias = 0.02;
     scene.add(mainDirectionalLight);
@@ -6852,183 +6927,144 @@ async function init() {
     });
 }
 
-function makeSampleLevelPart(name, geometry, material, position, rotation = [0, 0, 0], { castShadow = true, receiveShadow = true } = {}) {
-    const mesh = new THREE.Mesh(geometry, material);
+function makeSampleLevelPart(name, shape, material, position, rotation = [0, 0, 0], { castShadow = true, receiveShadow = true, skipPhysicsCollision = false } = {}) {
+    const kind = shape?.kind;
+    const mesh = kind ? buildPrimitiveActorMesh(kind) : null;
+    if (!mesh) return null;
+
+    const defaultMaterial = mesh.material;
+    if (Array.isArray(defaultMaterial)) {
+        defaultMaterial.forEach((entry) => entry?.dispose?.());
+    } else {
+        defaultMaterial?.dispose?.();
+    }
+
+    mesh.material = material;
     mesh.name = name;
     mesh.position.fromArray(position);
     mesh.rotation.set(...rotation);
+    if (Array.isArray(shape?.scale) && shape.scale.length === 3) {
+        mesh.scale.fromArray(shape.scale);
+    }
+    mesh.userData.hasMaterialOverrides = true;
+    mesh.userData.skipPhysicsCollision = !!skipPhysicsCollision;
     mesh.castShadow = castShadow;
     mesh.receiveShadow = receiveShadow;
-    return mesh;
+
+    return createDynamicPropActor({
+        body: null,
+        mesh,
+        kind,
+        userData: {
+            label: name,
+            sampleLevelPart: true,
+        },
+        includeScripts: false,
+    });
 }
 
 function createFpsStarterLevel() {
+    const MAP_SCALE = 2;
+    const scaleScalar = (value) => value * MAP_SCALE;
+    const scaleVector = (values) => values.map((value) => value * MAP_SCALE);
+    const makeBoxShape = (size) => ({
+        kind: 'cube',
+        scale: [scaleScalar(size[0]) * 0.5, scaleScalar(size[1]) * 0.5, scaleScalar(size[2]) * 0.5],
+    });
+    const makeCylinderShape = (radius, height) => ({
+        kind: 'cylinder',
+        scale: [scaleScalar(radius), scaleScalar(height) * 0.5, scaleScalar(radius)],
+    });
+
     const root = new THREE.Group();
     root.name = 'PolyFlow_FPS_Starter_Level';
     root.userData.sampleType = 'fpsStarterLevel';
     root.userData.hideTerrainPresentation = true;
     root.userData.skipNormalization = true;
+    root.userData.sampleMapScale = MAP_SCALE;
 
     root.userData.preferredSpawn = {
-        position: [0.0, 0.3, 8.6],
+        position: scaleVector([0.0, 0.3, 8.6]),
         yaw: Math.PI,
         pitch: -0.06,
     };
     root.userData.preferredShowcase = {
-        position: [20.0, 13.5, 16.5],
-        target: [0.0, 1.7, -1.0],
+        position: scaleVector([20.0, 13.5, 16.5]),
+        target: scaleVector([0.0, 1.7, -1.0]),
     };
 
     const stylePresets = {
-        light: { baseColor: '#d4cec8', lineColor: '#97918a', roughness: 0.97, metalness: 0.02, cell: 1.25 },
-        dark: { baseColor: '#5a5d61', lineColor: '#35383d', roughness: 0.92, metalness: 0.05, cell: 1.25 },
-        blue: { baseColor: '#149cff', lineColor: '#8fd8ff', roughness: 0.34, metalness: 0.04, cell: 1.4 },
+        light: { baseColor: '#d4cec8', roughness: 0.97, metalness: 0.02 },
+        floor: { baseColor: '#a7adb4', roughness: 0.96, metalness: 0.02 },
+        dark: { baseColor: '#5a5d61', roughness: 0.92, metalness: 0.05 },
+        blue: { baseColor: '#149cff', roughness: 0.34, metalness: 0.04 },
     };
 
-    const createGridMaterial = ({ baseColor, lineColor, repeat = [6, 6], roughness = 0.95, metalness = 0.02 }) => {
-        const canvas = document.createElement('canvas');
-        canvas.width = 256;
-        canvas.height = 256;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-            ctx.fillStyle = baseColor;
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            ctx.strokeStyle = lineColor;
-            ctx.lineWidth = 1.5;
-            for (let i = 0; i <= 8; i++) {
-                const t = Math.round((i / 8) * canvas.width);
-                ctx.beginPath();
-                ctx.moveTo(t, 0);
-                ctx.lineTo(t, canvas.height);
-                ctx.stroke();
-                ctx.beginPath();
-                ctx.moveTo(0, t);
-                ctx.lineTo(canvas.width, t);
-                ctx.stroke();
-            }
-            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-            ctx.lineWidth = 1;
-            for (let i = 0; i <= 4; i++) {
-                const t = Math.round((i / 4) * canvas.width);
-                ctx.beginPath();
-                ctx.moveTo(t, 0);
-                ctx.lineTo(t, canvas.height);
-                ctx.stroke();
-                ctx.beginPath();
-                ctx.moveTo(0, t);
-                ctx.lineTo(canvas.width, t);
-                ctx.stroke();
-            }
-        }
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.wrapS = THREE.RepeatWrapping;
-        texture.wrapT = THREE.RepeatWrapping;
-        texture.repeat.set(Math.max(1, repeat[0]), Math.max(1, repeat[1]));
-        if (renderer?.capabilities?.getMaxAnisotropy) {
-            texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-        }
-        const material = new THREE.MeshStandardMaterial({
-            color: 0xffffff,
-            map: texture,
+    const createGridMaterial = ({ baseColor, roughness = 0.95, metalness = 0.02 }) => {
+        return new THREE.MeshStandardMaterial({
+            color: new THREE.Color(baseColor),
             roughness,
             metalness,
         });
-        material.userData = {
-            ...(material.userData || {}),
-            ownedMaps: [texture],
-        };
-        return material;
     };
 
-    const createMaterialForBox = (styleName, size) => {
+    const createMaterial = (styleName) => {
         const style = stylePresets[styleName] ?? stylePresets.light;
         return createGridMaterial({
             baseColor: style.baseColor,
-            lineColor: style.lineColor,
-            repeat: [Math.max(1, Math.max(size[0], size[2]) / style.cell), Math.max(1, size[1] / style.cell)],
-            roughness: style.roughness,
-            metalness: style.metalness,
-        });
-    };
-
-    const createMaterialForCylinder = (styleName, radius, height) => {
-        const style = stylePresets[styleName] ?? stylePresets.light;
-        return createGridMaterial({
-            baseColor: style.baseColor,
-            lineColor: style.lineColor,
-            repeat: [Math.max(1, (Math.PI * radius * 2) / style.cell), Math.max(1, height / style.cell)],
             roughness: style.roughness,
             metalness: style.metalness,
         });
     };
 
     const createBoxNode = (name, size, position, styleName = 'light', options = {}) => {
-        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
-        const material = createMaterialForBox(styleName, size);
-        return makeSampleLevelPart(name, geometry, material, position, options.rotation || [0, 0, 0], options);
+        return makeSampleLevelPart(name, makeBoxShape(size), createMaterial(styleName), scaleVector(position), options.rotation || [0, 0, 0], options);
     };
 
     const createCylinderNode = (name, radius, height, position, styleName = 'light', options = {}) => {
-        const geometry = new THREE.CylinderGeometry(radius, radius, height, 32, Math.max(1, Math.round(height * 2)), false);
-        const material = createMaterialForCylinder(styleName, radius, height);
-        return makeSampleLevelPart(name, geometry, material, position, options.rotation || [0, 0, 0], options);
+        return makeSampleLevelPart(name, makeCylinderShape(radius, height), createMaterial(styleName), scaleVector(position), options.rotation || [0, 0, 0], options);
     };
 
-    const addNode = (node) => {
-        root.add(node);
-        return node;
+    const addNode = (actor) => {
+        const mesh = getActorRenderObject(actor);
+        if (mesh) {
+            root.add(mesh);
+        }
+        return actor;
     };
 
     const addBox = (name, size, position, styleName = 'light', options = {}) => addNode(createBoxNode(name, size, position, styleName, options));
     const addCylinder = (name, radius, height, position, styleName = 'light', options = {}) => addNode(createCylinderNode(name, radius, height, position, styleName, options));
-
-    const addRoundedBar = (name, length, height, width, position, styleName = 'dark', axis = 'x') => {
-        const group = new THREE.Group();
-        group.name = name;
-        group.position.fromArray(position);
-        const centerLength = Math.max(0.5, length - width);
-        if (axis === 'x') {
-            group.add(createBoxNode(`${name}_center`, [centerLength, height, width], [0, height * 0.5, 0], styleName));
-            group.add(createCylinderNode(`${name}_leftCap`, width * 0.5, height, [-centerLength * 0.5, height * 0.5, 0], styleName));
-            group.add(createCylinderNode(`${name}_rightCap`, width * 0.5, height, [centerLength * 0.5, height * 0.5, 0], styleName));
-        } else {
-            group.add(createBoxNode(`${name}_center`, [width, height, centerLength], [0, height * 0.5, 0], styleName));
-            group.add(createCylinderNode(`${name}_frontCap`, width * 0.5, height, [0, height * 0.5, -centerLength * 0.5], styleName));
-            group.add(createCylinderNode(`${name}_backCap`, width * 0.5, height, [0, height * 0.5, centerLength * 0.5], styleName));
-        }
-        root.add(group);
-        return group;
+    const addCollisionPlane = (name, size, position) => {
+        const mesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(scaleScalar(size[0]), scaleScalar(size[1])),
+            new THREE.MeshBasicMaterial({ visible: false })
+        );
+        mesh.name = name;
+        mesh.position.fromArray(scaleVector(position));
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.visible = false;
+        mesh.userData.collisionOnly = true;
+        root.add(mesh);
+        return mesh;
     };
 
-    addBox('Graybox_Floor', [36, 0.2, 22], [0, 0.1, 0], 'light');
+    addBox('Graybox_Floor', [36, 0.2, 22], [0, 0.1, 0], 'floor', { skipPhysicsCollision: true });
+    addCollisionPlane('Graybox_Floor_Collision', [36, 22], [0, 0.21, 0]);
     addBox('Graybox_LeftWall', [0.45, 5.4, 22], [-17.78, 2.7, 0], 'dark');
     addBox('Graybox_RightWall', [0.45, 5.4, 22], [17.78, 2.7, 0], 'dark');
     addBox('Graybox_BackWall', [36, 5.4, 0.45], [0, 2.7, -10.78], 'light');
-    addBox('Graybox_FrontCurb', [36, 0.65, 0.6], [0, 0.325, 10.8], 'light');
+    addBox('Graybox_FrontWall', [36, 5.4, 0.45], [0, 2.7, 10.78], 'light');
     addBox('Graybox_BackRightPanel', [10.5, 5.2, 0.18], [11.6, 2.6, -10.56], 'dark', { castShadow: false });
     addBox('Graybox_RightRearPanel', [0.18, 5.2, 8.4], [17.62, 2.6, -6.35], 'dark', { castShadow: false });
 
     addBox('Graybox_LeftBlock', [5.8, 2.6, 4.4], [-8.6, 1.3, -0.9], 'light');
     addBox('Graybox_LeftRamp', [4.2, 0.34, 6.0], [-12.4, 1.06, -2.7], 'dark', { rotation: [0.28, 0, 0] });
-    addRoundedBar('Graybox_CenterBackBar', 11.0, 2.7, 2.2, [2.0, 0, -2.8], 'dark', 'x');
-    addRoundedBar('Graybox_CenterFrontBar', 7.2, 2.25, 2.05, [2.0, 0, 3.0], 'dark', 'z');
-    addRoundedBar('Graybox_RightFrontBar', 10.0, 2.5, 2.35, [10.6, 0, 4.2], 'dark', 'x');
+    addBox('Graybox_CenterBackBar', [11.0, 2.7, 2.2], [2.0, 1.35, -2.8], 'dark');
+    addBox('Graybox_CenterFrontBar', [2.05, 2.25, 7.2], [2.0, 1.125, 3.0], 'dark');
+    addBox('Graybox_RightFrontBar', [10.0, 2.5, 2.35], [10.6, 1.25, 4.2], 'dark');
     addCylinder('Graybox_RightCylinder', 1.8, 2.2, [9.4, 1.1, -2.7], 'light');
     addBox('Graybox_RightRearShelf', [6.6, 0.8, 2.2], [10.9, 0.4, -6.1], 'dark');
-
-    addBox('Graybox_BlueCube_A', [1.7, 1.7, 1.7], [-13.7, 0.85, 4.3], 'blue');
-    addBox('Graybox_BlueCube_B', [1.7, 1.7, 1.7], [-12.0, 0.85, 4.3], 'blue');
-    addBox('Graybox_BlueCube_C', [1.7, 1.7, 1.7], [-13.0, 2.55, 4.3], 'blue');
-    addBox('Graybox_BlueCube_D', [1.45, 1.45, 1.45], [-3.8, 0.73, -0.4], 'blue');
-    addBox('Graybox_BlueCube_E', [1.45, 1.45, 1.45], [7.0, 0.73, -2.7], 'blue');
-    addBox('Graybox_BlueCube_F', [1.45, 1.45, 1.45], [8.45, 0.73, -2.7], 'blue');
-    addBox('Graybox_BlueCube_G', [1.45, 1.45, 1.45], [7.72, 2.18, -2.7], 'blue');
-    addBox('Graybox_BlueCube_H', [1.45, 1.45, 1.45], [13.1, 0.73, 0.0], 'blue');
-    addBox('Graybox_BluePad_A', [1.55, 0.32, 0.82], [4.9, 2.86, -2.8], 'blue');
-    addBox('Graybox_BluePad_B', [1.55, 0.32, 0.82], [11.7, 2.66, 4.2], 'blue');
-    addBox('Graybox_BlueMarker_A', [1.2, 0.04, 0.78], [-8.2, 0.13, 9.1], 'blue', { castShadow: false, receiveShadow: false, rotation: [0, -0.3, 0] });
-    addBox('Graybox_BlueMarker_B', [1.2, 0.04, 0.78], [0.0, 0.13, 8.6], 'blue', { castShadow: false, receiveShadow: false, rotation: [0, 0.2, 0] });
 
     return root;
 }
@@ -7075,7 +7111,7 @@ function onWindowResize() {
 
 function clearCurrentMesh() {
     exitGameplay();
-    clearDynamicPhysicsProps();
+    clearSceneActors();
 
     if (sampleDDGIVolumeActor) {
         destroyDDGIVolumeActor(sampleDDGIVolumeActor);
@@ -7135,7 +7171,7 @@ function syncSampleWorldPresentation() {
     samplePresentationState.overridden = false;
 }
 
-function refreshGameplayWorld() {
+function refreshGameplayWorld({ resetCamera = true } = {}) {
     if (!currentMesh) {
         gameplay.canPlay = physics.ready;
         updateGameplayUI();
@@ -7178,7 +7214,9 @@ function refreshGameplayWorld() {
     }
     gameplay.canPlay = !!physics.character;
     updateWorldPresentation();
-    resetShowcaseCamera(false);
+    if (resetCamera) {
+        resetShowcaseCamera(false);
+    }
     updateGameplayUI();
 }
 
@@ -8553,7 +8591,7 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
         }
     }
 
-    if (includeFloor && worldFloor) {
+    if (includeFloor && worldFloor && !currentMesh?.userData?.hideTerrainPresentation) {
         const terrainHeight = sampleTerrainHeightAt(x, z);
         if (terrainHeight !== null && originY >= terrainHeight) {
             hits.push({
@@ -9674,13 +9712,13 @@ function wireExtractedModules() {
     setupDebugConsole({
         debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter,
         debugStatsOverlay,
-        debugConsoleState, mobileState, shadowDebugState, raycastDebugState,
+        debugConsoleState, mobileState, shadowDebugState, raycastDebugState, collisionDebugState,
         gameplay, physics,
         DEBUG_CONSOLE_LOG_LIMIT, DEBUG_CONSOLE_HISTORY_LIMIT,
         DEBUG_TIMING_SAMPLE_LIMIT,
         closeObjectScriptMenu, closeObjectScriptEditor, resetMovementInputState,
         renderer, setRayDebugEnabled, forceAllSceneMeshShadows,
-        setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
+        setCollisionDebugEnabled, setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
         resetMobileInputState, updateWorldPresentation, updateGameplayUI,
         isEditableElement,
         getDDGIManager,
@@ -9724,6 +9762,7 @@ function wireExtractedModules() {
         sceneSystem, scene, transformControl, gameplay, blueprintState,
         objectScriptState, importedPropState, physics,
         getDynamicPropById, getActorRenderObject, getActorBody,
+        destroyDynamicPhysicsProp,
         serializeImportedPropTemplate, registerImportedPropTemplateFromSerializedData,
         saveObjectScriptDrafts, refreshSceneUI, selectShowcaseActor,
         buildPrimitiveActorMesh, applyObjectMaterialState, serializeObjectMaterialState,

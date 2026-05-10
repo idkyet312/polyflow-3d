@@ -1,7 +1,7 @@
 :root {
   --bg-color: #050505;
-  --accent-color: #7000ff;
-  --accent-glow: rgba(112, 0, 255, 0.4);
+  --accent-color: #0066ff;
+  --accent-glow: rgba(0, 102, 255, 0.4);
   --text-color: #ffffff;
   --text-dim: #a0a0a0;
   --glass-bg: rgba(255, 255, 255, 0.03);
@@ -99,6 +99,8 @@ main {
 
 .scene-ui-panel {
   width: clamp(340px, 24vw, 390px);
+  height: 100dvh;
+  max-height: 100dvh;
   order: 2;
   flex-shrink: 0;
   display: flex;
@@ -128,7 +130,7 @@ main {
 }
 
 .scene-side-card-fill {
-  flex: 1 1 auto;
+  flex: 1 1 0;
 }
 
 .scene-ui-header {
@@ -162,10 +164,12 @@ main {
 }
 
 .scene-actor-details-card {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  max-height: min(54dvh, 34rem);
   padding: 0.85rem;
   gap: 0.7rem;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .scene-actor-details-head {
@@ -490,8 +494,8 @@ main {
 }
 
 #canvas-container.drag-active {
-  border-color: rgba(112, 0, 255, 0.75);
-  box-shadow: 0 0 0 1px rgba(112, 0, 255, 0.45), 0 0 28px rgba(112, 0, 255, 0.2);
+  border-color: rgba(0, 102, 255, 0.75);
+  box-shadow: 0 0 0 1px rgba(0, 102, 255, 0.45), 0 0 28px rgba(0, 102, 255, 0.2);
 }
 
 .viewer-menu {
@@ -657,8 +661,8 @@ main {
 }
 
 .viewer-code-textarea:focus {
-  border-color: rgba(112, 0, 255, 0.65);
-  box-shadow: 0 0 0 3px rgba(112, 0, 255, 0.16);
+  border-color: rgba(0, 102, 255, 0.65);
+  box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.16);
   background: rgba(0, 0, 0, 0.62);
 }
 
@@ -774,8 +778,8 @@ main {
 }
 
 .viewer-text-input:focus {
-  border-color: rgba(112, 0, 255, 0.65);
-  box-shadow: 0 0 0 3px rgba(112, 0, 255, 0.16);
+  border-color: rgba(0, 102, 255, 0.65);
+  box-shadow: 0 0 0 3px rgba(0, 102, 255, 0.16);
   background: rgba(0, 0, 0, 0.58);
 }
 
@@ -965,7 +969,7 @@ main {
 
 .viewer-context-menu-item:hover,
 .viewer-context-menu-item:focus-visible {
-  background: rgba(112, 0, 255, 0.18);
+  background: rgba(0, 102, 255, 0.18);
   color: #fff;
   outline: none;
 }
@@ -1117,7 +1121,7 @@ main {
 }
 
 .viewer-script-event-select:focus {
-  outline: 2px solid rgba(112, 0, 255, 0.45);
+  outline: 2px solid rgba(0, 102, 255, 0.45);
   outline-offset: 2px;
 }
 
@@ -1223,8 +1227,8 @@ main {
   flex: 0 0 auto;
   padding: 0.2rem 0.5rem;
   border-radius: 999px;
-  background: rgba(112, 0, 255, 0.18);
-  color: #d7bdff;
+  background: rgba(0, 102, 255, 0.18);
+  color: #cfe1ff;
   font-size: 0.63rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -1562,7 +1566,7 @@ main {
 }
 
 .webgpu-badge {
-  background: linear-gradient(90deg, #7000ff, #00ffaa);
+  background: linear-gradient(90deg, #0066ff, #00ffaa);
   padding: 0.2rem 0.6rem;
   border-radius: 4px;
   font-size: 0.6rem;

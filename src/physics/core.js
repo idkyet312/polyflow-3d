@@ -52,6 +52,7 @@ export function createPhysicsCore({
         let totalTriangles = 0;
 
         root?.traverse((child) => {
+            if (child.userData?.skipPhysicsCollision) return;
             if (!child.isMesh || !child.geometry?.attributes?.position) return;
 
             const index = child.geometry.getIndex();
@@ -75,6 +76,7 @@ export function createPhysicsCore({
         let triangleIndex = 0;
 
         root.traverse((child) => {
+            if (child.userData?.skipPhysicsCollision) return;
             if (!child.isMesh || !child.geometry?.attributes?.position) return;
 
             const position = child.geometry.getAttribute('position');

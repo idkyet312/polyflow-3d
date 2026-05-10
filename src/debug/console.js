@@ -10,7 +10,7 @@ let debugConsole, debugConsoleOutput, debugConsoleInput, debugConsoleFooter,
     debugStatsOverlay;
 
 // State objects passed by reference from main.js
-let debugConsoleState, mobileState, shadowDebugState, raycastDebugState,
+let debugConsoleState, mobileState, shadowDebugState, raycastDebugState, collisionDebugState,
     gameplay, physics;
 
 // Constants passed from main.js
@@ -19,7 +19,7 @@ let DEBUG_CONSOLE_LOG_LIMIT, DEBUG_CONSOLE_HISTORY_LIMIT, DEBUG_TIMING_SAMPLE_LI
 // Functions from main.js that the console commands call into
 let closeObjectScriptMenu, closeObjectScriptEditor, resetMovementInputState,
     renderer, setRayDebugEnabled, forceAllSceneMeshShadows,
-    setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
+    setCollisionDebugEnabled, setForceAllSceneMeshShadowsEnabled, updateMobileButtons,
     resetMobileInputState, updateWorldPresentation, updateGameplayUI,
     isEditableElement, getDDGIManager;
 
@@ -34,6 +34,7 @@ export function setupDebugConsole(deps) {
         mobileState,
         shadowDebugState,
         raycastDebugState,
+        collisionDebugState,
         gameplay,
         physics,
         DEBUG_CONSOLE_LOG_LIMIT,
@@ -44,6 +45,7 @@ export function setupDebugConsole(deps) {
         resetMovementInputState,
         renderer,
         setRayDebugEnabled,
+        setCollisionDebugEnabled,
         forceAllSceneMeshShadows,
         setForceAllSceneMeshShadowsEnabled,
         updateMobileButtons,
@@ -554,6 +556,27 @@ export function runRayDebugCommand(args) {
     pushDebugConsoleLine('Usage: raydebug on, raydebug off, or raydebug toggle.', 'warn');
 }
 
+export function runCollisionDebugCommand(args) {
+    const action = args[0]?.toLowerCase() || 'toggle';
+
+    if (['on', '1', 'true', 'show', 'enable'].includes(action)) {
+        setCollisionDebugEnabled(true);
+        return;
+    }
+
+    if (['off', '0', 'false', 'hide', 'disable'].includes(action)) {
+        setCollisionDebugEnabled(false);
+        return;
+    }
+
+    if (['toggle', 'switch'].includes(action)) {
+        setCollisionDebugEnabled(!collisionDebugState.enabled);
+        return;
+    }
+
+    pushDebugConsoleLine('Usage: collision on, collision off, or collision toggle.', 'warn');
+}
+
 export function runMeshShadowsCommand(args) {
     const action = args[0]?.toLowerCase() || 'apply';
 
@@ -592,6 +615,7 @@ export const debugCommandRegistry = {
     stat: runStatCommand,
     mobile: runMobileCommand,
     raydebug: runRayDebugCommand,
+    collision: runCollisionDebugCommand,
     meshshadows: runMeshShadowsCommand,
 };
 
