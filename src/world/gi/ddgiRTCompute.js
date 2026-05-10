@@ -881,69 +881,82 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
 
     let _readbackBusy = false;
     let _hasBaked = false;
+    let _activeBakePromise = null;
+    let _disposePending = false;
+    let _destroyed = false;
+
+    function destroyBuffers() {
+      if (_destroyed) return;
+      _destroyed = true;
+      for (const b of [bvhNodeBuf, bvhIdxBuf, triBuf, triMatBuf, probePosBuf, rayHitsBuf, probeOctBuf, probeOctPrevBuf, probeDepthBuf, probeOctReadBuf, probeDepthReadBuf, rtUniBuf, seedUniBuf, intUniBuf, smoothUniBuf]) {
+        try { b?.unmap?.(); } catch (e) { /* */ }
+        try { b?.destroy?.(); } catch (e) { /* */ }
+      }
+    }
 
     async function bake({ lights, indirectScale = 1.0, hysteresis = 0.92, bounces = 1 }) {
-        if (!rtBindGroup) return null;
+      if (!rtBindGroup || _disposePending || _destroyed) return null;
 
+      const runBake = (async () => {
         for (let b = 0; b < bounces; b++) {
-            const enc = device.createCommandEncoder({ label: 'ddgi-bake' });
-            // snapshot prev at the very start of bake
-            if (b === 0) enc.copyBufferToBuffer(probeOctBuf, 0, probeOctPrevBuf, 0, probeOctBufBytes);
-            const seed = Math.random();
-            packRTUniforms({ lights, panelEmission: { x: 0, y: 0, z: 0 }, frameSeed: seed, indirectScale, probeMin: currentProbeMin, probeMax: currentProbeMax });
-            const isLastBounce = b === bounces - 1;
-            writeIntegrateUniforms({
-                frameSeed: seed,
-                hysteresis: isLastBounce ? hysteresis : 0.0,
-                firstBake: !_hasBaked,
-            });
+          const enc = device.createCommandEncoder({ label: 'ddgi-bake' });
+          // snapshot prev at the very start of bake
+          if (b === 0) enc.copyBufferToBuffer(probeOctBuf, 0, probeOctPrevBuf, 0, probeOctBufBytes);
+          const seed = Math.random();
+          packRTUniforms({ lights, panelEmission: { x: 0, y: 0, z: 0 }, frameSeed: seed, indirectScale, probeMin: currentProbeMin, probeMax: currentProbeMax });
+          const isLastBounce = b === bounces - 1;
+          writeIntegrateUniforms({
+            frameSeed: seed,
+            hysteresis: isLastBounce ? hysteresis : 0.0,
+            firstBake: !_hasBaked,
+          });
 
-            // RT
-            {
-                const pass = enc.beginComputePass({ label: 'ddgi-rt-pass' });
-                pass.setPipeline(rtPipeline);
-                pass.setBindGroup(0, rtBindGroup);
-                pass.dispatchWorkgroups(Math.ceil(TOTAL_RAYS / 64));
-                pass.end();
-            }
-            // Integrate
-            {
-                const pass = enc.beginComputePass({ label: 'ddgi-int-pass' });
-                pass.setPipeline(intPipeline);
-                pass.setBindGroup(0, intBindGroup);
-                pass.dispatchWorkgroups(Math.ceil(PROBE_COUNT / 64));
-                pass.end();
-            }
-            // Seed (trapped)
-            {
-                const pass = enc.beginComputePass({ label: 'ddgi-seed-pass' });
-                pass.setPipeline(seedPipeline);
-                pass.setBindGroup(0, seedBindGroup);
-                pass.dispatchWorkgroups(Math.ceil(PROBE_COUNT / 64));
-                pass.end();
-            }
-            // Smooth (read prev → write current)
-            enc.copyBufferToBuffer(probeOctBuf, 0, probeOctPrevBuf, 0, probeOctBufBytes);
-            {
-                const pass = enc.beginComputePass({ label: 'ddgi-smooth-pass' });
-                pass.setPipeline(smoothPipeline);
-                pass.setBindGroup(0, smoothBindGroup);
-                pass.dispatchWorkgroups(PROBE_COUNT);
-                pass.end();
-            }
-            // Border mirror
-            {
-                const pass = enc.beginComputePass({ label: 'ddgi-border-pass' });
-                pass.setPipeline(borderPipeline);
-                pass.setBindGroup(0, borderBindGroup);
-                pass.dispatchWorkgroups(PROBE_COUNT);
-                pass.end();
-            }
-            device.queue.submit([enc.finish()]);
+          // RT
+          {
+            const pass = enc.beginComputePass({ label: 'ddgi-rt-pass' });
+            pass.setPipeline(rtPipeline);
+            pass.setBindGroup(0, rtBindGroup);
+            pass.dispatchWorkgroups(Math.ceil(TOTAL_RAYS / 64));
+            pass.end();
+          }
+          // Integrate
+          {
+            const pass = enc.beginComputePass({ label: 'ddgi-int-pass' });
+            pass.setPipeline(intPipeline);
+            pass.setBindGroup(0, intBindGroup);
+            pass.dispatchWorkgroups(Math.ceil(PROBE_COUNT / 64));
+            pass.end();
+          }
+          // Seed (trapped)
+          {
+            const pass = enc.beginComputePass({ label: 'ddgi-seed-pass' });
+            pass.setPipeline(seedPipeline);
+            pass.setBindGroup(0, seedBindGroup);
+            pass.dispatchWorkgroups(Math.ceil(PROBE_COUNT / 64));
+            pass.end();
+          }
+          // Smooth (read prev → write current)
+          enc.copyBufferToBuffer(probeOctBuf, 0, probeOctPrevBuf, 0, probeOctBufBytes);
+          {
+            const pass = enc.beginComputePass({ label: 'ddgi-smooth-pass' });
+            pass.setPipeline(smoothPipeline);
+            pass.setBindGroup(0, smoothBindGroup);
+            pass.dispatchWorkgroups(PROBE_COUNT);
+            pass.end();
+          }
+          // Border mirror
+          {
+            const pass = enc.beginComputePass({ label: 'ddgi-border-pass' });
+            pass.setPipeline(borderPipeline);
+            pass.setBindGroup(0, borderBindGroup);
+            pass.dispatchWorkgroups(PROBE_COUNT);
+            pass.end();
+          }
+          device.queue.submit([enc.finish()]);
         }
         _hasBaked = true;
 
-        if (_readbackBusy) return null;
+        if (_readbackBusy || _disposePending || _destroyed) return null;
         _readbackBusy = true;
         const readEnc = device.createCommandEncoder({ label: 'ddgi-readback' });
         readEnc.copyBufferToBuffer(probeOctBuf, 0, probeOctReadBuf, 0, probeOctBufBytes);
@@ -951,24 +964,38 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
         device.queue.submit([readEnc.finish()]);
 
         try {
-            await Promise.all([
-                probeOctReadBuf.mapAsync(GPUMapMode.READ),
-                probeDepthReadBuf.mapAsync(GPUMapMode.READ),
-            ]);
-            const oct = new Float32Array(probeOctReadBuf.getMappedRange().slice(0));
-            const depth = new Float32Array(probeDepthReadBuf.getMappedRange().slice(0));
-            probeOctReadBuf.unmap();
-            probeDepthReadBuf.unmap();
-            return { oct, depth };
+          await Promise.all([
+            probeOctReadBuf.mapAsync(GPUMapMode.READ),
+            probeDepthReadBuf.mapAsync(GPUMapMode.READ),
+          ]);
+          const oct = new Float32Array(probeOctReadBuf.getMappedRange().slice(0));
+          const depth = new Float32Array(probeDepthReadBuf.getMappedRange().slice(0));
+          probeOctReadBuf.unmap();
+          probeDepthReadBuf.unmap();
+          if (_disposePending || _destroyed) return null;
+          return { oct, depth };
         } finally {
-            _readbackBusy = false;
+          _readbackBusy = false;
         }
+      })();
+
+      _activeBakePromise = runBake;
+      try {
+        return await runBake;
+      } finally {
+        if (_activeBakePromise === runBake) {
+          _activeBakePromise = null;
+        }
+        if (_disposePending) {
+          destroyBuffers();
+        }
+      }
     }
 
     function dispose() {
-        for (const b of [bvhNodeBuf, bvhIdxBuf, triBuf, triMatBuf, probePosBuf, rayHitsBuf, probeOctBuf, probeOctPrevBuf, probeDepthBuf, probeOctReadBuf, probeDepthReadBuf, rtUniBuf, seedUniBuf, intUniBuf, smoothUniBuf]) {
-            try { b?.destroy?.(); } catch (e) { /* */ }
-        }
+      _disposePending = true;
+      if (_activeBakePromise) return;
+      destroyBuffers();
     }
 
     function reset() {

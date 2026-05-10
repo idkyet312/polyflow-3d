@@ -7061,7 +7061,6 @@ function loadSample() {
         applyShowcaseCameraRotation();
         showcase.velocity.set(0, 0, 0);
     }
-    ensureSampleDDGIVolume(currentMesh);
     updateLoadedAssetStats('PolyFlow_FPS_Starter_Level.scene', 420000, currentMesh);
     enableOptimizationPipeline();
 }

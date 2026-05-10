@@ -1,9 +1,13 @@
 import * as THREE from 'three';
 import { DEPTH_RANGE, OCT_PAD, OCT_RES, OCT_RES_P, OCT_TEXELS } from './ddgiRTCompute.js';
+import { chooseTilesPerRow } from './ddgiAtlas.js';
 
 export function createDDGIAtlasTexture({ probeCount }) {
-    const width = Math.max(1, probeCount) * OCT_RES_P;
-    const height = OCT_RES_P;
+    const safeProbeCount = Math.max(1, probeCount | 0);
+    const tilesPerRow = chooseTilesPerRow(safeProbeCount);
+    const rowCount = Math.max(1, Math.ceil(safeProbeCount / tilesPerRow));
+    const width = tilesPerRow * OCT_RES_P;
+    const height = rowCount * OCT_RES_P;
     const data = new Float32Array(width * height * 4);
     const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.FloatType);
     texture.minFilter = THREE.LinearFilter;
@@ -30,10 +34,13 @@ export function createDDGIAtlasTexture({ probeCount }) {
         if (!oct || !depth) return;
         for (let p = 0; p < probeCount; p++) {
             const srcProbe = p * OCT_TEXELS * 4;
-            const dstProbeX = p * OCT_RES_P;
+            const dstProbeCol = p % tilesPerRow;
+            const dstProbeRow = (p / tilesPerRow) | 0;
+            const dstProbeX = dstProbeCol * OCT_RES_P;
+            const dstProbeY = dstProbeRow * OCT_RES_P;
             for (let y = 0; y < OCT_RES_P; y++) {
                 const srcOff = srcProbe + y * OCT_RES_P * 4;
-                const dstOff = (y * width + dstProbeX) * 4;
+                const dstOff = ((dstProbeY + y) * width + dstProbeX) * 4;
                 data.set(oct.subarray(srcOff, srcOff + OCT_RES_P * 4), dstOff);
             }
             depthMean[p] = depth[p * 4 + 0] || DEPTH_RANGE;
@@ -49,7 +56,7 @@ export function createDDGIAtlasTexture({ probeCount }) {
         height,
         tile: OCT_RES,
         gutter: OCT_PAD,
-        tilesPerRow: Math.max(1, probeCount),
+        tilesPerRow,
         probeCount,
         data,
         texture,

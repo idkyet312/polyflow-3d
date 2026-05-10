@@ -233,6 +233,16 @@ export function createDDGIManager() {
     function registerVolume(volume) {
         if (!volume) return;
         if (!state.volumes.includes(volume)) state.volumes.push(volume);
+
+        // Volume settings can change in-place from the actor details panel.
+        // If this is already the active volume, reapply immediately so grid
+        // dims / cell size / bake cadence refresh without waiting for a volume
+        // switch.
+        if (state.activeVolume === volume) {
+            applyVolume(volume);
+            return;
+        }
+
         chooseActiveVolume();
     }
 

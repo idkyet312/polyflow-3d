@@ -30,6 +30,7 @@ export function createDDGISampler({
     getSolidTestColor,
 }) {
     const uAtlasSize = uniform(new THREE.Vector2(1, 1));
+    const uTilesPerRow = uniform(1);
     const uProbeMin = uniform(new THREE.Vector3());
     const uProbeMax = uniform(new THREE.Vector3(1, 1, 1));
     const uGridDims = uniform(new THREE.Vector3(1, 1, 1));
@@ -53,10 +54,13 @@ export function createDDGISampler({
         const atlas = getAtlas?.();
         const intensity = captureBypass ? 0 : (getIntensity?.() ?? 1.0);
         if (!grid || !atlas) {
+            uAtlasSize.value.set(1, 1);
+            uTilesPerRow.value = 1;
             uIntensity.value = 0.0;
             return;
         }
         uAtlasSize.value.set(atlas.width, atlas.height);
+        uTilesPerRow.value = Math.max(1, atlas.tilesPerRow || 1);
         uGridDims.value.set(grid.dims.x, grid.dims.y, grid.dims.z);
         grid.probePosition(0, 0, 0, tmpMin);
         grid.probePosition(grid.dims.x - 1, grid.dims.y - 1, grid.dims.z - 1, tmpMax);
@@ -95,8 +99,12 @@ export function createDDGISampler({
 
     const sampleProbeOct = (probeIndex, n) => {
         const uv01 = octEncode(n).clamp(vec2(0), vec2(1));
-        const px = float(probeIndex).mul(float(OCT_RES_P)).add(float(OCT_PAD)).add(uv01.x.mul(float(OCT_RES)));
-        const py = float(OCT_PAD).add(uv01.y.mul(float(OCT_RES)));
+        const probeIndexF = float(probeIndex);
+        const tilesPerRow = float(uTilesPerRow).max(float(1));
+        const tileRow = probeIndexF.div(tilesPerRow).floor();
+        const tileCol = probeIndexF.sub(tileRow.mul(tilesPerRow));
+        const px = tileCol.mul(float(OCT_RES_P)).add(float(OCT_PAD)).add(uv01.x.mul(float(OCT_RES)));
+        const py = tileRow.mul(float(OCT_RES_P)).add(float(OCT_PAD)).add(uv01.y.mul(float(OCT_RES)));
         return atlasTex.sample(vec2(px.div(uAtlasSize.x), py.div(uAtlasSize.y))).rgb;
     };
 
