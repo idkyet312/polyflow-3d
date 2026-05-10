@@ -475,6 +475,7 @@ const WORLD_ENV_DEFAULTS = Object.freeze({
 let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
 let worldEnvUiRefs = null;
 let ddgiTestVolumeActor = null;
+let ddgiTestRigActor = null;
 let cornellRayDebug = null;
 let cornellPanelLight = null;
 const cornellRayDebugOrigin = new THREE.Vector3();
@@ -2756,6 +2757,8 @@ function selectShowcaseActor(actorId, selectionObject = null) {
         }
         refreshSceneUI();
     }
+
+    updateSceneActorDetailsUI();
 }
 
 function syncTransformControlState() {
@@ -3277,6 +3280,15 @@ function ensureDDGITestVolume(rig) {
     if (ddgiTestVolumeActor?.mesh?.parent !== scene) {
         ddgiTestVolumeActor = null;
     }
+    if (!ddgiTestVolumeActor && sceneSystem?.actors?.size) {
+        for (const actor of sceneSystem.actors) {
+            const mesh = getActorRenderObject(actor);
+            if (mesh?.name === 'ddgi-test-volume') {
+                ddgiTestVolumeActor = actor;
+                break;
+            }
+        }
+    }
     if (ddgiTestVolumeActor) return ddgiTestVolumeActor;
 
     // Volume mesh is fitted to the Cornell rig — its centre is the room
@@ -3324,10 +3336,14 @@ function ensureDDGITestVolume(rig) {
     const actor = createActor({
         mesh,
         kind: 'ddgiVolume',
-        userData: { internalSample: true, label: 'ddgi-test-volume' },
-        name: 'ddgi-test-volume',
+        userData: { internalSample: true, label: 'DDGI Test Volume' },
+        name: 'DDGI Test Volume',
     });
-    actor.addComponent(new TransformComponent());
+    if (!actor.hasComponent(TransformComponent)) {
+        actor.addComponent(new TransformComponent());
+    }
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
     const ddgi = new DDGIVolumeComponent({
         gridDims,
         cellSize,
@@ -3355,13 +3371,53 @@ function ensureDDGITestVolume(rig) {
         };
     })();
     actor.addComponent(ddgi);
-    scene.add(mesh);
-    try {
-        ddgi.beginPlay();
-    } catch (e) {
-        console.warn('[DDGI] test volume beginPlay failed', e);
-    }
+    ensureActorIdentity(actor);
+    ensureActorScriptState(actor);
+    sceneSystem?.addActor(actor);
     ddgiTestVolumeActor = actor;
+    return actor;
+}
+
+function findDDGITestRigActor(rig = null) {
+    if (ddgiTestRigActor?.mesh?.parent === scene && (!rig || ddgiTestRigActor.mesh === rig)) {
+        return ddgiTestRigActor;
+    }
+    ddgiTestRigActor = null;
+    if (!sceneSystem?.actors?.size) return null;
+    for (const actor of sceneSystem.actors) {
+        const mesh = getActorRenderObject(actor);
+        if (!mesh) continue;
+        if (rig ? mesh === rig : mesh.name === 'ddgi-test-rig') {
+            ddgiTestRigActor = actor;
+            return actor;
+        }
+    }
+    return null;
+}
+
+function ensureDDGITestRigActor(rig) {
+    if (!scene || !rig) return null;
+    const existingActor = findDDGITestRigActor(rig);
+    if (existingActor) return existingActor;
+
+    const actor = createActor({
+        mesh: rig,
+        kind: 'cornellBox',
+        userData: { internalSample: true, label: 'Cornell Box', ddgiSampleRig: true },
+        name: 'Cornell Box',
+    });
+    if (!actor.hasComponent(TransformComponent)) {
+        actor.addComponent(new TransformComponent());
+    }
+
+    ensureActorIdentity(actor);
+    ensureActorScriptState(actor);
+    sceneSystem?.addActor(actor);
+
+    const lightPanelMesh = rig.getObjectByName('cornell-light-panel');
+    if (lightPanelMesh) lightPanelMesh.castShadow = false;
+
+    ddgiTestRigActor = actor;
     return actor;
 }
 
@@ -3370,6 +3426,7 @@ function ensureDDGITestRig() {
     const existing = scene.getObjectByName('ddgi-test-rig');
     if (existing) {
         cornellPanelLight = existing.getObjectByName('cornell-panel-light') || cornellPanelLight;
+        ensureDDGITestRigActor(existing);
         ensureDDGITestVolume(existing);
         return existing;
     }
@@ -3478,10 +3535,10 @@ function ensureDDGITestRig() {
     cornellPanelLight.position.set(0, BY - 0.15, 0);
     cornellPanelLight.castShadow = true;
     cornellPanelLight.shadow.mapSize.set(1024, 1024);
-    cornellPanelLight.shadow.bias = -0.001;
+    cornellPanelLight.shadow.bias = 0.002;
     rig.add(cornellPanelLight);
 
-    scene.add(rig);
+    ensureDDGITestRigActor(rig);
     ensureDDGITestVolume(rig);
     return rig;
 }
@@ -5011,6 +5068,196 @@ function applyBlueprintPhysicsEditor() {
     refreshBlueprintComponents();
 }
 
+function getSceneActorDetailsRefs() {
+    return {
+        empty: document.getElementById('scene-actor-details-empty'),
+        body: document.getElementById('scene-actor-details-body'),
+        name: document.getElementById('scene-actor-details-name'),
+        type: document.getElementById('scene-actor-details-type'),
+        modeTranslate: document.getElementById('scene-actor-mode-translate'),
+        modeRotate: document.getElementById('scene-actor-mode-rotate'),
+        modeScale: document.getElementById('scene-actor-mode-scale'),
+        spaceLocal: document.getElementById('scene-actor-space-local'),
+        spaceWorld: document.getElementById('scene-actor-space-world'),
+        locX: document.getElementById('scene-actor-loc-x'),
+        locY: document.getElementById('scene-actor-loc-y'),
+        locZ: document.getElementById('scene-actor-loc-z'),
+        rotX: document.getElementById('scene-actor-rot-x'),
+        rotY: document.getElementById('scene-actor-rot-y'),
+        rotZ: document.getElementById('scene-actor-rot-z'),
+        sclX: document.getElementById('scene-actor-scl-x'),
+        sclY: document.getElementById('scene-actor-scl-y'),
+        sclZ: document.getElementById('scene-actor-scl-z'),
+        ddgiSection: document.getElementById('scene-actor-ddgi-section'),
+        ddgiDimX: document.getElementById('scene-actor-ddgi-dim-x'),
+        ddgiDimY: document.getElementById('scene-actor-ddgi-dim-y'),
+        ddgiDimZ: document.getElementById('scene-actor-ddgi-dim-z'),
+        ddgiSizeX: document.getElementById('scene-actor-ddgi-size-x'),
+        ddgiSizeY: document.getElementById('scene-actor-ddgi-size-y'),
+        ddgiSizeZ: document.getElementById('scene-actor-ddgi-size-z'),
+        ddgiTotal: document.getElementById('scene-actor-ddgi-total'),
+        ddgiCell: document.getElementById('scene-actor-ddgi-cell'),
+        ddgiIntensity: document.getElementById('scene-actor-ddgi-intensity'),
+        ddgiHysteresis: document.getElementById('scene-actor-ddgi-hysteresis'),
+        ddgiNormalBias: document.getElementById('scene-actor-ddgi-normal-bias'),
+        ddgiProbesPerFrame: document.getElementById('scene-actor-ddgi-probes-per-frame'),
+    };
+}
+
+function getSelectedSceneActor() {
+    const actorId = objectScriptState.targetPropId;
+    return actorId ? getDynamicPropById(actorId) : null;
+}
+
+function getActorDDGIVolumeComponent(actor) {
+    if (!actor) return null;
+    return actor.getComponentByClass?.(DDGIVolumeComponent)
+        || actor.GetComponent?.(DDGIVolumeComponent)
+        || null;
+}
+
+function syncDDGIVolumeComponentToActorBounds(ddgi) {
+    if (!ddgi) return;
+    ddgi.syncCellSizeToOwnerBounds?.();
+    ddgi.probesPerFrame = Math.max(1, Math.min(120, ddgi.probesPerFrame | 0));
+    ddgi.bakeEveryN = ddgi.probesPerFrame;
+    try {
+        getDDGIManager().registerVolume(ddgi);
+    } catch {
+        // DDGI manager can be unavailable during early init or teardown.
+    }
+}
+
+function updateSceneActorDetailsTransformButtons(refs = getSceneActorDetailsRefs()) {
+    const mode = transformControl?.getMode?.() || 'translate';
+    const space = transformControl?.space || 'local';
+    if (refs.modeTranslate) refs.modeTranslate.style.background = mode === 'translate' ? 'rgba(112,0,255,0.4)' : '';
+    if (refs.modeRotate) refs.modeRotate.style.background = mode === 'rotate' ? 'rgba(112,0,255,0.4)' : '';
+    if (refs.modeScale) refs.modeScale.style.background = mode === 'scale' ? 'rgba(112,0,255,0.4)' : '';
+    if (refs.spaceLocal) refs.spaceLocal.style.background = space === 'local' ? 'rgba(112,0,255,0.4)' : '';
+    if (refs.spaceWorld) refs.spaceWorld.style.background = space === 'world' ? 'rgba(112,0,255,0.4)' : '';
+}
+
+function updateSceneActorDetailsUI() {
+    const refs = getSceneActorDetailsRefs();
+    if (!refs.empty || !refs.body || !refs.type) return;
+
+    const actor = getSelectedSceneActor();
+    const mesh = getActorRenderObject(actor);
+    updateSceneActorDetailsTransformButtons(refs);
+
+    if (blueprintState.active || !actor || !mesh) {
+        refs.empty.hidden = false;
+        refs.body.hidden = true;
+        refs.type.textContent = 'Select actor';
+        if (refs.name) refs.name.textContent = 'No Actor Selected';
+        if (refs.ddgiSection) refs.ddgiSection.hidden = true;
+        return;
+    }
+
+    refs.empty.hidden = true;
+    refs.body.hidden = false;
+    if (refs.name) refs.name.textContent = actor.rootNode?.name || actor.id || 'Actor';
+    refs.type.textContent = actorInheritsCore(actor) ? 'instance' : (actor.kind || 'actor');
+
+    if (refs.locX) refs.locX.value = mesh.position.x.toFixed(3);
+    if (refs.locY) refs.locY.value = mesh.position.y.toFixed(3);
+    if (refs.locZ) refs.locZ.value = mesh.position.z.toFixed(3);
+    if (refs.rotX) refs.rotX.value = THREE.MathUtils.radToDeg(mesh.rotation.x).toFixed(1);
+    if (refs.rotY) refs.rotY.value = THREE.MathUtils.radToDeg(mesh.rotation.y).toFixed(1);
+    if (refs.rotZ) refs.rotZ.value = THREE.MathUtils.radToDeg(mesh.rotation.z).toFixed(1);
+    if (refs.sclX) refs.sclX.value = mesh.scale.x.toFixed(3);
+    if (refs.sclY) refs.sclY.value = mesh.scale.y.toFixed(3);
+    if (refs.sclZ) refs.sclZ.value = mesh.scale.z.toFixed(3);
+
+    const ddgi = getActorDDGIVolumeComponent(actor);
+    if (!refs.ddgiSection) return;
+    refs.ddgiSection.hidden = !ddgi;
+    if (!ddgi) return;
+
+    const size = ddgi.getOwnerVolumeSize?.(new THREE.Vector3()) || new THREE.Vector3();
+    const totalProbes = ddgi.getProbeCount?.() || (ddgi.gridDims.x * ddgi.gridDims.y * ddgi.gridDims.z);
+    const derivedCellSize = Math.max(
+        size.x / Math.max(2, ddgi.gridDims.x),
+        size.y / Math.max(2, ddgi.gridDims.y),
+        size.z / Math.max(2, ddgi.gridDims.z),
+        0.05,
+    );
+
+    if (refs.ddgiDimX) refs.ddgiDimX.value = String(ddgi.gridDims.x);
+    if (refs.ddgiDimY) refs.ddgiDimY.value = String(ddgi.gridDims.y);
+    if (refs.ddgiDimZ) refs.ddgiDimZ.value = String(ddgi.gridDims.z);
+    if (refs.ddgiSizeX) refs.ddgiSizeX.value = size.x.toFixed(2);
+    if (refs.ddgiSizeY) refs.ddgiSizeY.value = size.y.toFixed(2);
+    if (refs.ddgiSizeZ) refs.ddgiSizeZ.value = size.z.toFixed(2);
+    if (refs.ddgiTotal) refs.ddgiTotal.value = String(totalProbes);
+    if (refs.ddgiCell) refs.ddgiCell.value = derivedCellSize.toFixed(3);
+    if (refs.ddgiIntensity) refs.ddgiIntensity.value = Number(ddgi.intensity ?? 0).toFixed(3);
+    if (refs.ddgiHysteresis) refs.ddgiHysteresis.value = Number(ddgi.hysteresis ?? 0).toFixed(3);
+    if (refs.ddgiNormalBias) refs.ddgiNormalBias.value = Number(ddgi.normalBias ?? 0).toFixed(3);
+    if (refs.ddgiProbesPerFrame) refs.ddgiProbesPerFrame.value = String(ddgi.probesPerFrame | 0);
+}
+
+function applySceneActorTransformDetailsFromUI() {
+    const actor = getSelectedSceneActor();
+    const mesh = getActorRenderObject(actor);
+    const refs = getSceneActorDetailsRefs();
+    if (!actor || !mesh || !refs.locX) return;
+
+    mesh.position.set(
+        Number.parseFloat(refs.locX.value) || 0,
+        Number.parseFloat(refs.locY.value) || 0,
+        Number.parseFloat(refs.locZ.value) || 0,
+    );
+    mesh.rotation.set(
+        THREE.MathUtils.degToRad(Number.parseFloat(refs.rotX?.value) || 0),
+        THREE.MathUtils.degToRad(Number.parseFloat(refs.rotY?.value) || 0),
+        THREE.MathUtils.degToRad(Number.parseFloat(refs.rotZ?.value) || 0),
+    );
+    mesh.scale.set(
+        Math.max(0.01, Number.parseFloat(refs.sclX?.value) || 1),
+        Math.max(0.01, Number.parseFloat(refs.sclY?.value) || 1),
+        Math.max(0.01, Number.parseFloat(refs.sclZ?.value) || 1),
+    );
+    mesh.updateMatrixWorld(true);
+
+    if (transformControl && transformControl.object !== mesh) {
+        transformControl.attach(mesh);
+    }
+
+    syncTransformToPhysics();
+
+    const ddgi = getActorDDGIVolumeComponent(actor);
+    if (ddgi) {
+        syncDDGIVolumeComponentToActorBounds(ddgi);
+        invalidateDDGI('ddgi volume transformed from details');
+    } else {
+        invalidateDDGI('scene actor transformed from details');
+    }
+
+    refreshSceneUI();
+    updateSceneActorDetailsUI();
+}
+
+function applySceneActorDDGIDetailsFromUI() {
+    const actor = getSelectedSceneActor();
+    const ddgi = getActorDDGIVolumeComponent(actor);
+    const refs = getSceneActorDetailsRefs();
+    if (!actor || !ddgi || !refs.ddgiDimX) return;
+
+    const dimsX = Math.max(2, Math.floor(Number.parseFloat(refs.ddgiDimX.value) || ddgi.gridDims.x));
+    const dimsY = Math.max(2, Math.floor(Number.parseFloat(refs.ddgiDimY.value) || ddgi.gridDims.y));
+    const dimsZ = Math.max(2, Math.floor(Number.parseFloat(refs.ddgiDimZ.value) || ddgi.gridDims.z));
+    ddgi.setGridDims(dimsX, dimsY, dimsZ);
+    ddgi.intensity = Math.max(0, Math.min(16, Number.parseFloat(refs.ddgiIntensity?.value) || ddgi.intensity));
+    ddgi.hysteresis = Math.max(0, Math.min(0.999, Number.parseFloat(refs.ddgiHysteresis?.value) || ddgi.hysteresis));
+    ddgi.normalBias = Math.max(0, Math.min(2, Number.parseFloat(refs.ddgiNormalBias?.value) || ddgi.normalBias));
+    ddgi.probesPerFrame = Math.max(1, Math.min(120, Math.floor(Number.parseFloat(refs.ddgiProbesPerFrame?.value) || ddgi.probesPerFrame)));
+    syncDDGIVolumeComponentToActorBounds(ddgi);
+    invalidateDDGI('ddgi volume settings changed');
+    updateSceneActorDetailsUI();
+}
+
 function createSceneActorItem(actor, { isChild = false } = {}) {
     const item = document.createElement('div');
     item.className = isChild ? 'scene-ui-item scene-ui-child-item' : 'scene-ui-item';
@@ -5072,6 +5319,7 @@ function refreshSceneUI() {
 
     if (!sceneSystem || sceneSystem.actors.size === 0) {
         sceneUiCount.textContent = '0 Actors';
+        updateSceneActorDetailsUI();
         return;
     }
 
@@ -5115,6 +5363,7 @@ function refreshSceneUI() {
 
         sceneUiList.appendChild(folder);
     }
+    updateSceneActorDetailsUI();
     return;
 
     actors.forEach(actor => {
@@ -5248,6 +5497,47 @@ async function init() {
     vehicleTemplateImportInput = document.getElementById('vehicle-template-import-input');
     actorComponentCollisionInput = document.getElementById('actor-component-collision');
     actorComponentPhysicsInput = document.getElementById('actor-component-physics');
+    ['scene-actor-loc-x', 'scene-actor-loc-y', 'scene-actor-loc-z', 'scene-actor-rot-x', 'scene-actor-rot-y', 'scene-actor-rot-z', 'scene-actor-scl-x', 'scene-actor-scl-y', 'scene-actor-scl-z'].forEach((id) => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            editorHistory.captureState();
+            applySceneActorTransformDetailsFromUI();
+        });
+    });
+    ['scene-actor-ddgi-dim-x', 'scene-actor-ddgi-dim-y', 'scene-actor-ddgi-dim-z', 'scene-actor-ddgi-intensity', 'scene-actor-ddgi-hysteresis', 'scene-actor-ddgi-normal-bias', 'scene-actor-ddgi-probes-per-frame'].forEach((id) => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            editorHistory.captureState();
+            applySceneActorDDGIDetailsFromUI();
+        });
+    });
+    document.getElementById('scene-actor-mode-translate')?.addEventListener('click', () => {
+        const actor = getSelectedSceneActor();
+        const mesh = getActorRenderObject(actor);
+        if (mesh && transformControl) transformControl.attach(mesh);
+        transformControl?.setMode('translate');
+        updateSceneActorDetailsUI();
+    });
+    document.getElementById('scene-actor-mode-rotate')?.addEventListener('click', () => {
+        const actor = getSelectedSceneActor();
+        const mesh = getActorRenderObject(actor);
+        if (mesh && transformControl) transformControl.attach(mesh);
+        transformControl?.setMode('rotate');
+        updateSceneActorDetailsUI();
+    });
+    document.getElementById('scene-actor-mode-scale')?.addEventListener('click', () => {
+        const actor = getSelectedSceneActor();
+        const mesh = getActorRenderObject(actor);
+        if (mesh && transformControl) transformControl.attach(mesh);
+        transformControl?.setMode('scale');
+        updateSceneActorDetailsUI();
+    });
+    document.getElementById('scene-actor-space-local')?.addEventListener('click', () => {
+        transformControl?.setSpace('local');
+        updateSceneActorDetailsUI();
+    });
+    document.getElementById('scene-actor-space-world')?.addEventListener('click', () => {
+        transformControl?.setSpace('world');
+        updateSceneActorDetailsUI();
+    });
     actorComponentScriptsInput = document.getElementById('actor-component-scripts');
     actorEditorCreateBtn = document.getElementById('actor-editor-create');
     actorEditorOpenScriptBtn = document.getElementById('actor-editor-open-script');
@@ -5796,6 +6086,7 @@ async function init() {
         if (blueprintState.active) {
             updateBlueprintDetailsUI();
         }
+        updateSceneActorDetailsUI();
     });
     transformControl.addEventListener('dragging-changed', (event) => {
         showcase.looking = false;
@@ -5805,11 +6096,18 @@ async function init() {
                 if (prop) rebuildActorPhysics(prop);
             } else {
                 syncTransformToPhysics();
+                const actor = getSelectedSceneActor();
+                const rootMesh = getActorRenderObject(actor);
+                const ddgi = getActorDDGIVolumeComponent(actor);
+                if (ddgi && transformControl.object === rootMesh) {
+                    syncDDGIVolumeComponentToActorBounds(ddgi);
+                }
             }
             invalidateDDGI('scene object transformed');
             transformControl.justFinishedDragging = true;
             editorHistory.captureState();
             setTimeout(() => transformControl.justFinishedDragging = false, 100);
+            updateSceneActorDetailsUI();
         }
     });
     scene.add(transformControl.getHelper());

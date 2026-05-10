@@ -32,6 +32,80 @@
                 <div id="scene-ui-list" class="scene-ui-list">
                     <!-- Actor items will be injected here -->
                 </div>
+                <div id="scene-actor-details"
+                    style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08); display: flex; flex-direction: column; gap: 8px;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                        <div class="scene-ui-title" style="font-size: 12px;">Actor Details</div>
+                        <div class="scene-ui-subtitle" id="scene-actor-details-type" style="font-size: 10px;">Select actor</div>
+                    </div>
+                    <div id="scene-actor-details-empty" class="scene-ui-subtitle" style="font-size: 11px;">Select actor in scene or hierarchy.</div>
+                    <div id="scene-actor-details-body" hidden style="display: flex; flex-direction: column; gap: 8px;">
+                        <div id="scene-actor-details-name" class="scene-ui-item-name" style="padding: 0;"></div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 4px;">
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-translate" style="padding: 4px 8px; flex: 1; font-size: 11px;">Move</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-rotate" style="padding: 4px 8px; flex: 1; font-size: 11px;">Rotate</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-scale" style="padding: 4px 8px; flex: 1; font-size: 11px;">Scale</button>
+                        </div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 4px;">
+                            <button class="btn viewer-menu-btn" id="scene-actor-space-local" style="padding: 4px 8px; flex: 1; font-size: 11px;">Local</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-space-world" style="padding: 4px 8px; flex: 1; font-size: 11px;">World</button>
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 4px; background: rgba(0,0,0,0.2); padding: 6px; border-radius: 4px;">
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Loc</span>
+                                <input type="number" id="scene-actor-loc-x" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-loc-y" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-loc-z" class="ui-input" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Rot</span>
+                                <input type="number" id="scene-actor-rot-x" class="ui-input" step="5" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-rot-y" class="ui-input" step="5" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-rot-z" class="ui-input" step="5" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Scale</span>
+                                <input type="number" id="scene-actor-scl-x" class="ui-input" step="0.1" min="0.01" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-scl-y" class="ui-input" step="0.1" min="0.01" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-scl-z" class="ui-input" step="0.1" min="0.01" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                        </div>
+                        <div id="scene-actor-ddgi-section" hidden style="display: flex; flex-direction: column; gap: 6px; background: rgba(77,255,210,0.08); border: 1px solid rgba(77,255,210,0.14); padding: 6px; border-radius: 4px;">
+                            <div class="scene-ui-subtitle" style="font-size: 10px;">DDGI Volume</div>
+                            <div style="font-size: 10px; color: #9fd8ca;">Scale actor to resize coverage. Probe cell size updates from current volume size.</div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Probe Dims</span>
+                                <input type="number" id="scene-actor-ddgi-dim-x" class="ui-input" min="2" step="1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-ddgi-dim-y" class="ui-input" min="2" step="1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="scene-actor-ddgi-dim-z" class="ui-input" min="2" step="1" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Coverage</span>
+                                <input type="number" id="scene-actor-ddgi-size-x" class="ui-input" readonly style="flex:1; font-size: 10px; padding: 2px; opacity: 0.8;">
+                                <input type="number" id="scene-actor-ddgi-size-y" class="ui-input" readonly style="flex:1; font-size: 10px; padding: 2px; opacity: 0.8;">
+                                <input type="number" id="scene-actor-ddgi-size-z" class="ui-input" readonly style="flex:1; font-size: 10px; padding: 2px; opacity: 0.8;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Total</span>
+                                <input type="number" id="scene-actor-ddgi-total" class="ui-input" readonly style="flex:1; font-size: 10px; padding: 2px; opacity: 0.8;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Cell Size</span>
+                                <input type="number" id="scene-actor-ddgi-cell" class="ui-input" readonly style="flex:1; font-size: 10px; padding: 2px; opacity: 0.8;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Intensity</span>
+                                <input type="number" id="scene-actor-ddgi-intensity" class="ui-input" min="0" max="16" step="0.1" style="flex:1; font-size: 10px; padding: 2px;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Hysteresis</span>
+                                <input type="number" id="scene-actor-ddgi-hysteresis" class="ui-input" min="0" max="0.999" step="0.01" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Normal Bias</span>
+                                <input type="number" id="scene-actor-ddgi-normal-bias" class="ui-input" min="0" max="2" step="0.01" style="flex:1; font-size: 10px; padding: 2px;">
+                                <span style="font-size: 10px; width: 72px; color: #aaa;">Bake N</span>
+                                <input type="number" id="scene-actor-ddgi-probes-per-frame" class="ui-input" min="1" max="120" step="1" style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </aside>
             <div id="canvas-container">
                 <div class="viewer-menu" aria-label="Viewer controls">

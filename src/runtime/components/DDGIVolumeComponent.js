@@ -3,6 +3,9 @@ import { ActorComponent } from './ActorComponent.js';
 import { getDDGIManager } from '../../world/gi/ddgiManager.js';
 
 const DEFAULT_DIMS = { x: 8, y: 4, z: 8 };
+const _tmpSize = new THREE.Vector3();
+const _tmpWorldScale = new THREE.Vector3();
+const _tmpBox = new THREE.Box3();
 
 export class DDGIVolumeComponent extends ActorComponent {
     static componentKey = 'DDGIVolumeComponent';
@@ -46,14 +49,52 @@ export class DDGIVolumeComponent extends ActorComponent {
         return box.containsPoint(point);
     }
 
+    getOwnerVolumeSize(out = new THREE.Vector3()) {
+        const mesh = this.owner?.mesh || this.owner?.root;
+        if (!mesh) return out.set(0, 0, 0);
+
+        const geometry = mesh.geometry;
+        geometry?.computeBoundingBox?.();
+        if (geometry?.boundingBox) {
+            out.copy(geometry.boundingBox.getSize(_tmpSize));
+            mesh.getWorldScale(_tmpWorldScale);
+            out.x *= Math.abs(_tmpWorldScale.x);
+            out.y *= Math.abs(_tmpWorldScale.y);
+            out.z *= Math.abs(_tmpWorldScale.z);
+            return out;
+        }
+
+        _tmpBox.setFromObject(mesh);
+        if (_tmpBox.isEmpty()) return out.set(0, 0, 0);
+        return _tmpBox.getSize(out);
+    }
+
+    syncCellSizeToOwnerBounds() {
+        const size = this.getOwnerVolumeSize(_tmpSize);
+        this.cellSize = Math.max(
+            size.x / Math.max(2, this.gridDims.x),
+            size.y / Math.max(2, this.gridDims.y),
+            size.z / Math.max(2, this.gridDims.z),
+            0.05,
+        );
+        return this.cellSize;
+    }
+
+    getProbeCount() {
+        return this.gridDims.x * this.gridDims.y * this.gridDims.z;
+    }
+
     setGridDims(x, y, z) {
         this.gridDims.x = Math.max(2, x | 0);
         this.gridDims.y = Math.max(2, y | 0);
         this.gridDims.z = Math.max(2, z | 0);
+        if (this.owner) this.syncCellSizeToOwnerBounds();
+        return this.gridDims;
     }
 
     setCellSize(v) {
         this.cellSize = Math.max(0.05, +v);
+        return this.cellSize;
     }
 
     serialize() {
