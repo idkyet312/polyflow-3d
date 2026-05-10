@@ -178,7 +178,8 @@ main {
 .scene-actor-details-heading,
 .scene-actor-details-meta,
 .scene-actor-details-empty,
-.scene-actor-ddgi-title {
+.scene-actor-ddgi-title,
+.scene-actor-light-title {
   margin-top: 0;
 }
 
@@ -190,7 +191,8 @@ main {
 }
 
 .scene-actor-details-body[hidden],
-.scene-actor-ddgi-card[hidden] {
+.scene-actor-ddgi-card[hidden],
+.scene-actor-light-card[hidden] {
   display: none !important;
 }
 
@@ -217,7 +219,8 @@ main {
 }
 
 .scene-actor-transform-box,
-.scene-actor-ddgi-card {
+.scene-actor-ddgi-card,
+.scene-actor-light-card {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
@@ -235,10 +238,23 @@ main {
   border: 1px solid rgba(71, 113, 108, 0.38);
 }
 
-.scene-actor-ddgi-hint {
+.scene-actor-light-card {
+  background: linear-gradient(180deg, rgba(33, 25, 18, 0.98) 0%, rgba(25, 18, 13, 0.98) 100%);
+  border: 1px solid rgba(162, 122, 68, 0.4);
+}
+
+.scene-actor-ddgi-hint,
+.scene-actor-light-hint {
   font-size: 0.66rem;
   line-height: 1.45;
+}
+
+.scene-actor-ddgi-hint {
   color: #86b8af;
+}
+
+.scene-actor-light-hint {
+  color: #d7b27a;
 }
 
 .scene-actor-details-row {
@@ -258,6 +274,12 @@ main {
   border: 1px solid rgba(88, 95, 104, 0.74);
   background: rgba(8, 9, 11, 0.88);
   color: #f3f6f8;
+}
+
+.scene-actor-light-color.ui-input {
+  padding: 0.14rem;
+  min-height: 1.55rem;
+  cursor: pointer;
 }
 
 .scene-actor-details-label {

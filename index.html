@@ -105,6 +105,37 @@
                                 <input type="number" id="scene-actor-ddgi-probes-per-frame" class="ui-input" min="1" max="120" step="1">
                             </div>
                         </div>
+                        <div id="scene-actor-light-section" class="scene-actor-light-card" hidden>
+                            <div class="scene-ui-subtitle scene-actor-light-title">Light</div>
+                            <div class="scene-actor-light-hint">Controls direct lighting and DDGI contribution for this light actor.</div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Color</span>
+                                <input type="color" id="scene-actor-light-color" class="ui-input scene-actor-light-color" value="#fff1c2">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Intensity</span>
+                                <input type="number" id="scene-actor-light-intensity" class="ui-input" min="0" max="100" step="0.1">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Range</span>
+                                <input type="number" id="scene-actor-light-distance" class="ui-input" min="0" max="500" step="0.1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Decay</span>
+                                <input type="number" id="scene-actor-light-decay" class="ui-input" min="0" max="8" step="0.1">
+                            </div>
+                            <div id="scene-actor-light-spot-row" class="scene-actor-details-row scene-actor-details-row-split" hidden>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Angle</span>
+                                <input type="number" id="scene-actor-light-angle" class="ui-input" min="1" max="89" step="1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Penumbra</span>
+                                <input type="number" id="scene-actor-light-penumbra" class="ui-input" min="0" max="1" step="0.01">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Shadow</span>
+                                <select id="scene-actor-light-shadow" class="ui-input">
+                                    <option value="on">On</option>
+                                    <option value="off">Off</option>
+                                </select>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Type</span>
+                                <input type="text" id="scene-actor-light-kind" class="ui-input" readonly>
+                            </div>
+                        </div>
                     </div>
                 </section>
             </aside>

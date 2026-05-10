@@ -2746,6 +2746,10 @@ function getActorSelectionObject(prop, preferredObject = null) {
     const root = getActorRenderObject(prop);
     if (!root) return null;
 
+    if (!blueprintState.active) {
+        return root;
+    }
+
     if (preferredObject && isObjectWithinRoot(preferredObject, root)) {
         return preferredObject;
     }
@@ -3342,6 +3346,7 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
     const decay = Number.isFinite(savedLight.decay) && savedLight.decay > 0 ? savedLight.decay : 2.0;
     const angle = Number.isFinite(savedLight.angle) && savedLight.angle > 0 ? savedLight.angle : Math.PI / 6;
     const penumbra = Number.isFinite(savedLight.penumbra) ? savedLight.penumbra : 0.35;
+    const castShadow = savedLight.castShadow !== false;
 
     const group = new THREE.Group();
     group.position.copy(spawnPos);
@@ -3354,34 +3359,51 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         metalness: 0.06,
     });
 
-    const markHelperMesh = (mesh) => {
-        if (!mesh) return mesh;
-        mesh.castShadow = false;
-        mesh.receiveShadow = false;
-        mesh.userData.ddgiSkipCapture = true;
-        mesh.userData.ddgiSkipReceive = true;
-        mesh.userData.ignoreForcedSceneShadows = true;
-        return mesh;
+    const markHelperObject = (object) => {
+        if (!object) return object;
+        object.traverse((node) => {
+            if (!node.userData) node.userData = {};
+            node.userData.ddgiSkipCapture = true;
+            node.userData.ddgiSkipReceive = true;
+            node.userData.ignoreForcedSceneShadows = true;
+            if ('castShadow' in node) node.castShadow = false;
+            if ('receiveShadow' in node) node.receiveShadow = false;
+        });
+        return object;
     };
 
     let light = null;
     if (kind === 'pointLight') {
-        const helper = markHelperMesh(new THREE.Mesh(
+        const helper = markHelperObject(new THREE.Mesh(
             new THREE.SphereGeometry(Math.max(0.18, radius * 0.08), 20, 16),
             helperMaterial,
         ));
         helper.name = 'point-light-helper';
         group.add(helper);
 
+        const rangeViz = markHelperObject(new THREE.Mesh(
+            new THREE.SphereGeometry(1, 24, 18),
+            new THREE.MeshBasicMaterial({
+                color: lightColor.clone(),
+                wireframe: true,
+                transparent: true,
+                opacity: 0.16,
+                depthWrite: false,
+                toneMapped: false,
+            }),
+        ));
+        rangeViz.name = 'point-light-range';
+        group.add(rangeViz);
+
         light = new THREE.PointLight(lightColor, intensity, distance, decay);
         light.name = 'point-light-source';
-        light.castShadow = true;
+        light.castShadow = castShadow;
         light.shadow.mapSize.set(512, 512);
         light.shadow.bias = 0.0005;
         if ('normalBias' in light.shadow) light.shadow.normalBias = 0.02;
         group.add(light);
     } else if (kind === 'spotLight') {
-        const housing = markHelperMesh(new THREE.Mesh(
+        const housing = markHelperObject(new THREE.Mesh(
             new THREE.CylinderGeometry(0.14, 0.22, 0.38, 18),
             helperMaterial,
         ));
@@ -3389,7 +3411,7 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         housing.rotation.x = Math.PI * 0.5;
         group.add(housing);
 
-        const cone = markHelperMesh(new THREE.Mesh(
+        const cone = markHelperObject(new THREE.Mesh(
             new THREE.ConeGeometry(Math.max(0.18, radius * 0.06), Math.max(0.55, radius * 0.18), 20, 1, true),
             helperMaterial.clone(),
         ));
@@ -3398,9 +3420,40 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         cone.position.z = -Math.max(0.4, radius * 0.12);
         group.add(cone);
 
+        const volumeViz = markHelperObject(new THREE.Mesh(
+            new THREE.ConeGeometry(1, 1, 28, 1, true),
+            new THREE.MeshBasicMaterial({
+                color: lightColor.clone(),
+                wireframe: true,
+                transparent: true,
+                opacity: 0.16,
+                depthWrite: false,
+                toneMapped: false,
+            }),
+        ));
+        volumeViz.name = 'spot-light-volume';
+        volumeViz.rotation.x = -Math.PI * 0.5;
+        group.add(volumeViz);
+
+        const aimViz = markHelperObject(new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(0, 0, -1),
+            ]),
+            new THREE.LineBasicMaterial({
+                color: lightColor.clone(),
+                transparent: true,
+                opacity: 0.4,
+                depthWrite: false,
+                toneMapped: false,
+            }),
+        ));
+        aimViz.name = 'spot-light-aim';
+        group.add(aimViz);
+
         light = new THREE.SpotLight(lightColor, intensity, distance, angle, penumbra, decay);
         light.name = 'spot-light-source';
-        light.castShadow = true;
+        light.castShadow = castShadow;
         light.shadow.mapSize.set(1024, 1024);
         light.shadow.bias = 0.0002;
         if ('normalBias' in light.shadow) light.shadow.normalBias = 0.02;
@@ -3428,6 +3481,7 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
             intensity,
             distance,
             decay,
+            castShadow,
             angle,
             penumbra,
         },
@@ -3453,6 +3507,7 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         child.userData.ddgiSkipReceive = true;
         child.userData.ignoreForcedSceneShadows = true;
     });
+    syncActorLightHelperVisuals(actor);
     light.target?.updateMatrixWorld?.(true);
     invalidateDDGI(`${kind} spawned`);
     return actor;
@@ -5348,6 +5403,16 @@ function getSceneActorDetailsRefs() {
         sclX: document.getElementById('scene-actor-scl-x'),
         sclY: document.getElementById('scene-actor-scl-y'),
         sclZ: document.getElementById('scene-actor-scl-z'),
+        lightSection: document.getElementById('scene-actor-light-section'),
+        lightColor: document.getElementById('scene-actor-light-color'),
+        lightIntensity: document.getElementById('scene-actor-light-intensity'),
+        lightDistance: document.getElementById('scene-actor-light-distance'),
+        lightDecay: document.getElementById('scene-actor-light-decay'),
+        lightSpotRow: document.getElementById('scene-actor-light-spot-row'),
+        lightAngle: document.getElementById('scene-actor-light-angle'),
+        lightPenumbra: document.getElementById('scene-actor-light-penumbra'),
+        lightShadow: document.getElementById('scene-actor-light-shadow'),
+        lightKind: document.getElementById('scene-actor-light-kind'),
         ddgiSection: document.getElementById('scene-actor-ddgi-section'),
         ddgiDimX: document.getElementById('scene-actor-ddgi-dim-x'),
         ddgiDimY: document.getElementById('scene-actor-ddgi-dim-y'),
@@ -5374,6 +5439,90 @@ function getActorDDGIVolumeComponent(actor) {
     return actor.getComponentByClass?.(DDGIVolumeComponent)
         || actor.GetComponent?.(DDGIVolumeComponent)
         || null;
+}
+
+function getActorLightObject(actor) {
+    const root = getActorRenderObject(actor);
+    if (!root) return null;
+
+    let light = null;
+    root.traverse((node) => {
+        if (light || (!node?.isPointLight && !node?.isSpotLight)) return;
+        light = node;
+    });
+    return light;
+}
+
+function syncActorLightStateFromObject(actor, light) {
+    if (!actor || !light) return;
+
+    const previousLightState = actor.userData?.light || {};
+    actor.userData = {
+        ...(actor.userData || {}),
+        light: {
+            ...previousLightState,
+            kind: actor.kind || previousLightState.kind,
+            color: `#${light.color.getHexString()}`,
+            intensity: light.intensity,
+            distance: light.distance,
+            decay: light.decay,
+            castShadow: light.castShadow === true,
+            ...(light.isSpotLight ? {
+                angle: light.angle,
+                penumbra: light.penumbra,
+            } : {}),
+        },
+    };
+}
+
+function syncActorLightHelperVisuals(actor) {
+    const root = getActorRenderObject(actor);
+    const light = getActorLightObject(actor);
+    if (!root || !light) return;
+
+    const lightState = actor?.userData?.light || {};
+    const helperColor = light.color.clone();
+    const range = Math.max(light.distance > 0 ? light.distance : ((Number.isFinite(lightState.radius) && lightState.radius > 0) ? lightState.radius * 4 : 12), 0.25);
+
+    root.traverse((node) => {
+        if (!node?.material) return;
+        const mats = Array.isArray(node.material) ? node.material : [node.material];
+        mats.forEach((mat) => {
+            if (mat.color) mat.color.copy(helperColor);
+            if (mat.emissive) mat.emissive.copy(helperColor).multiplyScalar(0.35);
+        });
+    });
+
+    const pointRange = root.getObjectByName('point-light-range');
+    if (pointRange) {
+        pointRange.scale.setScalar(range);
+    }
+
+    const spotTarget = root.getObjectByName('spot-light-target');
+    const spotVolume = root.getObjectByName('spot-light-volume');
+    const spotAim = root.getObjectByName('spot-light-aim');
+    if (spotTarget) {
+        spotTarget.position.set(0, 0, -Math.max(1.5, range));
+        spotTarget.updateMatrixWorld(true);
+    }
+    if (spotVolume && light.isSpotLight) {
+        const coneRadius = Math.max(0.08, Math.tan(light.angle ?? (Math.PI / 6)) * range);
+        spotVolume.scale.set(coneRadius, range, coneRadius);
+        spotVolume.position.set(0, 0, -range * 0.5);
+    }
+    if (spotAim?.geometry?.attributes?.position) {
+        const positions = spotAim.geometry.attributes.position.array;
+        positions[0] = 0;
+        positions[1] = 0;
+        positions[2] = 0;
+        positions[3] = 0;
+        positions[4] = 0;
+        positions[5] = -Math.max(1.5, range);
+        spotAim.geometry.attributes.position.needsUpdate = true;
+        spotAim.geometry.computeBoundingSphere?.();
+    }
+
+    light.target?.updateMatrixWorld?.(true);
 }
 
 function syncDDGIVolumeComponentToActorBounds(ddgi) {
@@ -5411,6 +5560,7 @@ function updateSceneActorDetailsUI() {
         refs.body.hidden = true;
         refs.type.textContent = 'Select actor';
         if (refs.name) refs.name.textContent = 'No Actor Selected';
+        if (refs.lightSection) refs.lightSection.hidden = true;
         if (refs.ddgiSection) refs.ddgiSection.hidden = true;
         return;
     }
@@ -5430,9 +5580,31 @@ function updateSceneActorDetailsUI() {
     if (refs.sclY) refs.sclY.value = mesh.scale.y.toFixed(3);
     if (refs.sclZ) refs.sclZ.value = mesh.scale.z.toFixed(3);
 
+    const light = getActorLightObject(actor);
+    if (refs.lightSection) {
+        refs.lightSection.hidden = !light;
+    }
+    if (refs.lightSpotRow) {
+        refs.lightSpotRow.hidden = !light?.isSpotLight;
+    }
+    if (light) {
+        syncActorLightStateFromObject(actor, light);
+        syncActorLightHelperVisuals(actor);
+        const lightState = actor.userData?.light || {};
+        if (refs.lightColor) refs.lightColor.value = lightState.color || `#${light.color.getHexString()}`;
+        if (refs.lightIntensity) refs.lightIntensity.value = Number(light.intensity ?? 0).toFixed(3);
+        if (refs.lightDistance) refs.lightDistance.value = Number(light.distance ?? 0).toFixed(3);
+        if (refs.lightDecay) refs.lightDecay.value = Number(light.decay ?? 0).toFixed(3);
+        if (refs.lightShadow) refs.lightShadow.value = light.castShadow ? 'on' : 'off';
+        if (refs.lightKind) refs.lightKind.value = light.isSpotLight ? 'Spot Light' : 'Point Light';
+        if (refs.lightAngle) refs.lightAngle.value = THREE.MathUtils.radToDeg(light.angle ?? (Math.PI / 6)).toFixed(1);
+        if (refs.lightPenumbra) refs.lightPenumbra.value = Number(light.penumbra ?? 0).toFixed(3);
+    }
+
     const ddgi = getActorDDGIVolumeComponent(actor);
-    if (!refs.ddgiSection) return;
-    refs.ddgiSection.hidden = !ddgi;
+    if (refs.ddgiSection) {
+        refs.ddgiSection.hidden = !ddgi;
+    }
     if (!ddgi) return;
 
     const size = ddgi.getOwnerVolumeSize?.(new THREE.Vector3()) || new THREE.Vector3();
@@ -5515,6 +5687,59 @@ function applySceneActorDDGIDetailsFromUI() {
     ddgi.probesPerFrame = Math.max(1, Math.min(120, Math.floor(Number.parseFloat(refs.ddgiProbesPerFrame?.value) || ddgi.probesPerFrame)));
     syncDDGIVolumeComponentToActorBounds(ddgi);
     invalidateDDGI('ddgi volume settings changed');
+    updateSceneActorDetailsUI();
+}
+
+function applySceneActorLightDetailsFromUI() {
+    const actor = getSelectedSceneActor();
+    const light = getActorLightObject(actor);
+    const refs = getSceneActorDetailsRefs();
+    if (!actor || !light || !refs.lightIntensity) return;
+
+    const colorValue = typeof refs.lightColor?.value === 'string' && refs.lightColor.value.length
+        ? refs.lightColor.value
+        : `#${light.color.getHexString()}`;
+    if (colorValue !== `#${light.color.getHexString()}`) {
+        setActorColor(actor, colorValue);
+    }
+
+    const intensity = Number.parseFloat(refs.lightIntensity.value);
+    if (Number.isFinite(intensity)) {
+        light.intensity = Math.max(0, intensity);
+    }
+
+    const distance = Number.parseFloat(refs.lightDistance?.value);
+    if (Number.isFinite(distance)) {
+        light.distance = Math.max(0, distance);
+    }
+
+    const decay = Number.parseFloat(refs.lightDecay?.value);
+    if (Number.isFinite(decay)) {
+        light.decay = Math.max(0, decay);
+    }
+
+    light.castShadow = refs.lightShadow?.value !== 'off';
+    if (light.shadow) {
+        light.shadow.needsUpdate = true;
+    }
+
+    if (light.isSpotLight) {
+        const angleDegrees = Number.parseFloat(refs.lightAngle?.value);
+        if (Number.isFinite(angleDegrees)) {
+            light.angle = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(angleDegrees, 1, 89));
+        }
+
+        const penumbra = Number.parseFloat(refs.lightPenumbra?.value);
+        if (Number.isFinite(penumbra)) {
+            light.penumbra = THREE.MathUtils.clamp(penumbra, 0, 1);
+        }
+
+        light.target?.updateMatrixWorld?.(true);
+    }
+
+    syncActorLightStateFromObject(actor, light);
+    syncActorLightHelperVisuals(actor);
+    invalidateDDGI('light actor settings changed');
     updateSceneActorDetailsUI();
 }
 
@@ -5767,6 +5992,12 @@ async function init() {
         document.getElementById(id)?.addEventListener('change', () => {
             editorHistory.captureState();
             applySceneActorDDGIDetailsFromUI();
+        });
+    });
+    ['scene-actor-light-color', 'scene-actor-light-intensity', 'scene-actor-light-distance', 'scene-actor-light-decay', 'scene-actor-light-angle', 'scene-actor-light-penumbra', 'scene-actor-light-shadow'].forEach((id) => {
+        document.getElementById(id)?.addEventListener('change', () => {
+            editorHistory.captureState();
+            applySceneActorLightDetailsFromUI();
         });
     });
     document.getElementById('scene-actor-mode-translate')?.addEventListener('click', () => {
