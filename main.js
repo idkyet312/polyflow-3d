@@ -371,6 +371,7 @@ function createExampleWidgets() {
     if (!widgetManager) return;
 
     const hud = getRuntimeHud();
+    const visible = !!gameplay.active;
 
     const scoreWidget = hud.CreateWidget(UTextWidget, {
         Text: 'Score: 0',
@@ -378,7 +379,7 @@ function createExampleWidgets() {
         color: '#ffff00',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
         position: { x: 0.05, y: 0.9 },
-        visible: true,
+        visible,
     });
     scoreWidget.AddToViewport(20);
 
@@ -389,7 +390,7 @@ function createExampleWidgets() {
         fillColor: '#00ff00',
         backgroundColor: '#333333',
         position: { x: 0.05, y: 0.8 },
-        visible: true,
+        visible,
     });
     healthBar.AddToViewport(20);
 
@@ -399,7 +400,7 @@ function createExampleWidgets() {
         color: '#00ffff',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
         position: { x: 0.05, y: 0.7 },
-        visible: true,
+        visible,
     });
     speedWidget.AddToViewport(20);
 
@@ -2835,6 +2836,7 @@ function selectShowcaseActor(actorId, selectionObject = null) {
         refreshSceneUI();
     }
 
+    updateLightRangeVisualVisibility();
     updateSceneActorDetailsUI();
 }
 
@@ -3403,10 +3405,11 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
 
     const helperMaterial = new THREE.MeshStandardMaterial({
         color: lightColor.clone(),
-        emissive: lightColor.clone().multiplyScalar(0.35),
-        emissiveIntensity: 1.0,
-        roughness: 0.26,
-        metalness: 0.06,
+        emissive: lightColor.clone(),
+        emissiveIntensity: 4.5,
+        roughness: 0.12,
+        metalness: 0.0,
+        toneMapped: false,
     });
 
     const markHelperObject = (object) => {
@@ -3431,6 +3434,21 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         helper.name = 'point-light-helper';
         group.add(helper);
 
+        const glow = markHelperObject(new THREE.Mesh(
+            new THREE.SphereGeometry(Math.max(0.32, radius * 0.14), 28, 20),
+            new THREE.MeshBasicMaterial({
+                color: lightColor.clone(),
+                transparent: true,
+                opacity: 0.32,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                toneMapped: false,
+            }),
+        ));
+        glow.name = 'point-light-glow';
+        glow.raycast = () => {};
+        group.add(glow);
+
         const rangeViz = markHelperObject(new THREE.Mesh(
             new THREE.SphereGeometry(1, 24, 18),
             new THREE.MeshBasicMaterial({
@@ -3443,6 +3461,9 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
             }),
         ));
         rangeViz.name = 'point-light-range';
+        rangeViz.userData.lightRangeVisual = true;
+        rangeViz.visible = false;
+        rangeViz.raycast = () => {};
         group.add(rangeViz);
 
         light = new THREE.PointLight(lightColor, intensity, distance, decay);
@@ -3470,6 +3491,21 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         cone.position.z = -Math.max(0.4, radius * 0.12);
         group.add(cone);
 
+        const glow = markHelperObject(new THREE.Mesh(
+            new THREE.SphereGeometry(Math.max(0.28, radius * 0.12), 24, 16),
+            new THREE.MeshBasicMaterial({
+                color: lightColor.clone(),
+                transparent: true,
+                opacity: 0.28,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                toneMapped: false,
+            }),
+        ));
+        glow.name = 'spot-light-glow';
+        glow.raycast = () => {};
+        group.add(glow);
+
         const volumeViz = markHelperObject(new THREE.Mesh(
             new THREE.ConeGeometry(1, 1, 28, 1, true),
             new THREE.MeshBasicMaterial({
@@ -3482,6 +3518,9 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
             }),
         ));
         volumeViz.name = 'spot-light-volume';
+        volumeViz.userData.lightRangeVisual = true;
+        volumeViz.visible = false;
+        volumeViz.raycast = () => {};
         volumeViz.rotation.x = -Math.PI * 0.5;
         group.add(volumeViz);
 
@@ -3499,6 +3538,9 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
             }),
         ));
         aimViz.name = 'spot-light-aim';
+        aimViz.userData.lightRangeVisual = true;
+        aimViz.visible = false;
+        aimViz.raycast = () => {};
         group.add(aimViz);
 
         light = new THREE.SpotLight(lightColor, intensity, distance, angle, penumbra, decay);
@@ -4556,6 +4598,13 @@ function updatePerfModeUi() {
     }
 }
 
+function setExampleWidgetsVisible(visible) {
+    if (!window.exampleWidgets) return;
+    Object.values(window.exampleWidgets).forEach((widget) => {
+        widget?.SetVisibility?.(visible);
+    });
+}
+
 // Performance toggle: turn DDGI, volumetric fog, and post-process bloom off
 // (or on) at runtime without changing engine defaults. Each subsystem owns its
 // own enabled flag — we flip those here AND also gate the per-frame update
@@ -5601,12 +5650,17 @@ function syncActorLightHelperVisuals(actor) {
         const mats = Array.isArray(node.material) ? node.material : [node.material];
         mats.forEach((mat) => {
             if (mat.color) mat.color.copy(helperColor);
-            if (mat.emissive) mat.emissive.copy(helperColor).multiplyScalar(0.35);
+            if (mat.emissive) {
+                mat.emissive.copy(helperColor);
+                mat.emissiveIntensity = Math.max(mat.emissiveIntensity ?? 1, 4.5);
+                mat.toneMapped = false;
+            }
         });
     });
 
     const pointRange = root.getObjectByName('point-light-range');
     if (pointRange) {
+        pointRange.userData.lightRangeVisual = true;
         pointRange.scale.setScalar(range);
     }
 
@@ -5618,11 +5672,13 @@ function syncActorLightHelperVisuals(actor) {
         spotTarget.updateMatrixWorld(true);
     }
     if (spotVolume && light.isSpotLight) {
+        spotVolume.userData.lightRangeVisual = true;
         const coneRadius = Math.max(0.08, Math.tan(light.angle ?? (Math.PI / 6)) * range);
         spotVolume.scale.set(coneRadius, range, coneRadius);
         spotVolume.position.set(0, 0, -range * 0.5);
     }
     if (spotAim?.geometry?.attributes?.position) {
+        spotAim.userData.lightRangeVisual = true;
         const positions = spotAim.geometry.attributes.position.array;
         positions[0] = 0;
         positions[1] = 0;
@@ -5634,7 +5690,27 @@ function syncActorLightHelperVisuals(actor) {
         spotAim.geometry.computeBoundingSphere?.();
     }
 
+    root.traverse((node) => {
+        if (node?.userData?.lightRangeVisual) {
+            node.visible = actor?.id === objectScriptState.targetPropId;
+        }
+    });
+
     light.target?.updateMatrixWorld?.(true);
+}
+
+function updateLightRangeVisualVisibility() {
+    if (!sceneSystem?.actors) return;
+    for (const actor of sceneSystem.actors) {
+        const root = getActorRenderObject(actor);
+        if (!root) continue;
+        const visible = actor.id === objectScriptState.targetPropId;
+        root.traverse((node) => {
+            if (node?.userData?.lightRangeVisual) {
+                node.visible = visible;
+            }
+        });
+    }
 }
 
 function syncDDGIVolumeComponentToActorBounds(ddgi) {
@@ -8296,6 +8372,7 @@ function updateGameplayUI() {
     }
 
     updateMobileButtons();
+    setExampleWidgetsVisible(gameplay.active);
     updateMouseActionStatus();
     updateWorldPresentation();
 }
