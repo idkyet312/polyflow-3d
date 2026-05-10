@@ -5361,6 +5361,19 @@ function focusSceneActor(actor) {
     focusShowcaseCameraOnObject(actorMesh);
 }
 
+function focusCurrentShowcaseSelection() {
+    if (gameplay.active) return false;
+
+    const actor = getDynamicPropById(objectScriptState.targetPropId);
+    if (!actor) return false;
+
+    const focusObject = getActorSelectionObject(actor);
+    if (!focusObject) return false;
+
+    focusShowcaseCameraOnObject(focusObject, { duration: 0.55 });
+    return true;
+}
+
 function getObjectFocusFrame(object) {
     if (!object) return null;
 
@@ -7966,6 +7979,12 @@ function handleGameplayKeyEvent(event) {
                 return;
             }
         }
+        if (!event.repeat && event.code === 'KeyF' && !isEditableElement(eventTarget)) {
+            if (focusCurrentShowcaseSelection()) {
+                event.preventDefault();
+            }
+            return;
+        }
         if (!showcase.looking && event.code === 'KeyW') {
             transformControl?.setMode('translate');
             if (blueprintState.active) updateBlueprintTransformUI();
@@ -8211,6 +8230,7 @@ function handlePointerLockChange() {
     physics.desiredVelocity.set(0, 0, 0);
     resetMovementInputState();
     restoreSceneState();
+    repairSampleCollisionHierarchyAfterRestore();
     syncTransformControlState();
 
     updateWorldPresentation();
@@ -8243,6 +8263,24 @@ function enterGameplay() {
     }
 }
 
+function repairSampleCollisionHierarchyAfterRestore() {
+    if (!currentMesh || currentMesh.userData?.sampleType !== 'fpsStarterLevel' || !sceneSystem?.actors?.size) return;
+
+    let reparented = 0;
+    for (const actor of sceneSystem.actors) {
+        if (!actor?.userData?.sampleLevelPart) continue;
+        const actorMesh = getActorRenderObject(actor);
+        if (!actorMesh || actorMesh.parent === currentMesh) continue;
+        currentMesh.add(actorMesh);
+        reparented++;
+    }
+
+    if (reparented > 0) {
+        rebuildModelPhysicsBody();
+        if (collisionDebugState.enabled) refreshCollisionDebugOverlays();
+    }
+}
+
 function exitGameplay() {
     if (!mobileState.enabled && document.pointerLockElement === renderer.domElement) {
         document.exitPointerLock();
@@ -8255,6 +8293,7 @@ function exitGameplay() {
     gameplay.active = false;
     clearActiveVehicle();
     restoreSceneState();
+    repairSampleCollisionHierarchyAfterRestore();
     gameplay.velocity.set(0, 0, 0);
     physics.jumpQueued = false;
     physics.desiredVelocity.set(0, 0, 0);

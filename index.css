@@ -505,21 +505,28 @@ main {
   bottom: 1.25rem;
   display: flex;
   flex-direction: column;
-  gap: 0.9rem;
+  gap: 1rem;
   width: min(440px, calc(100% - 2.5rem));
   max-height: none;
   overflow-y: auto;
   overscroll-behavior: contain;
+  padding: 1rem;
   padding-bottom: 3rem;
+  background: linear-gradient(180deg, rgba(24, 27, 31, 0.96) 0%, rgba(15, 17, 20, 0.96) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  backdrop-filter: blur(14px);
+  box-shadow: -18px 0 42px rgba(0, 0, 0, 0.24);
+  scrollbar-gutter: stable;
   z-index: 16;
 }
 
 .viewer-menu-card {
-  background: linear-gradient(180deg, rgba(27, 31, 36, 0.92) 0%, rgba(18, 21, 25, 0.92) 100%);
-  border: 1px solid rgba(78, 86, 96, 0.42);
-  border-radius: 12px;
-  backdrop-filter: blur(16px);
-  box-shadow: 0 16px 30px rgba(0, 0, 0, 0.22);
+  background: linear-gradient(180deg, rgba(27, 31, 36, 0.98) 0%, rgba(20, 23, 27, 0.98) 100%);
+  border: 1px solid rgba(84, 92, 102, 0.42);
+  border-radius: 10px;
+  backdrop-filter: blur(14px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02), inset 0 0 0 1px rgba(0, 0, 0, 0.24);
   padding: 0.82rem;
 }
 
