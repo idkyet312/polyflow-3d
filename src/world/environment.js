@@ -54,6 +54,7 @@ function getHdriUrl(slug, resolution) {
 
 export function createEnvironmentController({ scene, getAmbientLight, getHemiLight }) {
     const hdriCache = {};
+    const hdriPendingLoads = {};
     let currentEnvironment = 'sunny-sky';
     let currentResolution = '1k';
 
@@ -75,26 +76,40 @@ export function createEnvironmentController({ scene, getAmbientLight, getHemiLig
         pendingBlurriness = blurriness;
     }
 
-    function loadHdriIntoScene(url, blurriness) {
-        console.log(`Loading HDRI: ${url}`);
-
+    async function loadHdriTexture(url) {
         if (hdriCache[url]) {
-            applyTextureToScene(hdriCache[url], blurriness);
-            return;
+            return hdriCache[url];
         }
 
-        const loader = new HDRLoader();
-        loader.load(url, (texture) => {
-            texture.mapping = THREE.EquirectangularReflectionMapping;
-            hdriCache[url] = texture;
-            applyTextureToScene(texture, blurriness);
-            console.log(`Successfully loaded HDRI: ${url}`);
-        }, undefined, (error) => {
-            console.error('Failed to load HDRI:', url, error);
-        });
+        if (!hdriPendingLoads[url]) {
+            console.log(`Loading HDRI: ${url}`);
+            const loader = new HDRLoader();
+            hdriPendingLoads[url] = loader.loadAsync(url)
+                .then((texture) => {
+                    texture.mapping = THREE.EquirectangularReflectionMapping;
+                    hdriCache[url] = texture;
+                    console.log(`Successfully loaded HDRI: ${url}`);
+                    return texture;
+                })
+                .catch((error) => {
+                    console.error('Failed to load HDRI:', url, error);
+                    throw error;
+                })
+                .finally(() => {
+                    delete hdriPendingLoads[url];
+                });
+        }
+
+        return hdriPendingLoads[url];
     }
 
-    function switchEnvironment(key) {
+    async function loadHdriIntoScene(url, blurriness) {
+        const texture = await loadHdriTexture(url);
+        applyTextureToScene(texture, blurriness);
+        return texture;
+    }
+
+    async function switchEnvironment(key) {
         const environment = ENVIRONMENTS[key];
         if (!environment) return;
 
@@ -113,17 +128,17 @@ export function createEnvironmentController({ scene, getAmbientLight, getHemiLig
             hemiLight.intensity = environment.hemi.intensity;
         }
 
-        loadHdriIntoScene(getHdriUrl(environment.slug, currentResolution), environment.blurriness);
+        return loadHdriIntoScene(getHdriUrl(environment.slug, currentResolution), environment.blurriness);
     }
 
-    function setResolution(resolution) {
+    async function setResolution(resolution) {
         currentResolution = resolution;
 
         document.querySelectorAll('.res-btn').forEach((button) => {
             button.classList.toggle('res-btn-active', button.dataset.res === resolution);
         });
 
-        switchEnvironment(currentEnvironment);
+        return switchEnvironment(currentEnvironment);
     }
 
     // World Environment control: toggle the IBL/sky on/off without losing the

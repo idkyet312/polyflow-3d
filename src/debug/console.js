@@ -370,6 +370,7 @@ export function updateDebugStatPanels() {
     const averagePhysicsSync = getAverageTiming('physicsSync');
     const averagePhysicsCollisions = getAverageTiming('physicsCollisions');
     const averageScripts = getAverageTiming('scripts');
+    const averageGpu = getAverageTiming('gpu');
     const averageRender = getAverageTiming('render');
     const averageDDGI = getAverageTiming('ddgi');
     const averageFps = averageFrame > 0 ? 1000 / averageFrame : 0;
@@ -423,11 +424,15 @@ export function updateDebugStatPanels() {
             return;
         }
 
-        ref.meta.textContent = 'WebGPU render submission timing';
+        ref.meta.textContent = debugConsoleState.gpuTimingMode === 'gpu'
+            ? 'CPU render submit vs. GPU timestamp'
+            : 'GPU timestamp unsupported; showing CPU approximation';
         if (ref.badge) {
             ref.badge.textContent = debugConsoleState.gpuTimingMode === 'approximate' ? 'Approx' : 'GPU';
         }
-        ref.rows.gpu.textContent = formatTimingMs(averageRender);
+        ref.rows.gpu.textContent = debugConsoleState.gpuTimingMode === 'gpu'
+            ? (averageGpu > 0 ? formatTimingMs(averageGpu) : '--')
+            : formatTimingMs(averageRender);
         ref.rows.render.textContent = formatTimingMs(averageRender);
         ref.rows.frame.textContent = formatTimingMs(averageFrame);
         ref.rows.fps.textContent = `${averageFps.toFixed(1)} fps`;
@@ -706,6 +711,7 @@ export function recordDebugFrameMetrics(metrics) {
     debugConsoleState.latest.physicsSync = metrics.physicsSync;
     debugConsoleState.latest.physicsCollisions = metrics.physicsCollisions;
     debugConsoleState.latest.scripts = metrics.scripts;
+    debugConsoleState.latest.gpu = metrics.gpu ?? 0;
     debugConsoleState.latest.render = metrics.render;
     debugConsoleState.latest.ddgi = metrics.ddgi ?? 0;
     debugConsoleState.latest.fps = metrics.frame > 0 ? 1000 / metrics.frame : 0;
@@ -718,6 +724,7 @@ export function recordDebugFrameMetrics(metrics) {
     pushTimingSample('physicsSync', metrics.physicsSync);
     pushTimingSample('physicsCollisions', metrics.physicsCollisions);
     pushTimingSample('scripts', metrics.scripts);
+    pushTimingSample('gpu', metrics.gpu ?? 0);
     pushTimingSample('render', metrics.render);
     pushTimingSample('ddgi', metrics.ddgi ?? 0);
 }

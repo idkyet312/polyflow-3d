@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WebGPURenderer, PostProcessing } from 'three/webgpu';
+import { WebGPURenderer, RenderPipeline } from 'three/webgpu';
 import { pass, mrt, output, emissive, normalView, uniform, vec3, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
@@ -452,6 +452,8 @@ function getActorKindDefaultScale(kind = 'sphere') {
 
 // --- Configuration ---
 let scene, camera, renderer, currentMesh, transformControl, postProcessing, mainDirectionalLight;
+let gpuTimestampResolvePending = null;
+let latestGpuRenderMs = 0;
 let originalTriCount = 0;
 let optimizedTriCount = 0;
 let scanPlane;
@@ -735,6 +737,7 @@ const debugConsoleState = {
         physicsSync: 0,
         physicsCollisions: 0,
         scripts: 0,
+        gpu: 0,
         render: 0,
         ddgi: 0,
         fps: 0,
@@ -749,6 +752,7 @@ const debugConsoleState = {
         physicsSync: [],
         physicsCollisions: [],
         scripts: [],
+        gpu: [],
         render: [],
         ddgi: [],
     },
@@ -758,7 +762,10 @@ const multiplayerState = {
     defaultRoom: 'sandbox',
 };
 
-const clock = new THREE.Clock();
+const frameTimer = new THREE.Timer();
+if (typeof document !== 'undefined') {
+    frameTimer.connect(document);
+}
 const downVector = new THREE.Vector3(0, -1, 0);
 const upVector = new THREE.Vector3(0, 1, 0);
 const gameplayBounds = new THREE.Box3();
@@ -1007,11 +1014,29 @@ physicsRuntime = createPhysicsRuntime({
 });
 
 function switchEnvironment(key) {
-    environmentController?.switchEnvironment(key);
+    return environmentController?.switchEnvironment(key);
 }
 
 function setResolution(res) {
-    environmentController?.setResolution(res);
+    return environmentController?.setResolution(res);
+}
+
+function scheduleGpuRenderTimingResolve() {
+    if (!debugConsoleState.panels.has('gpu')) return;
+    if (!renderer?.backend?.trackTimestamp || gpuTimestampResolvePending) return;
+
+    gpuTimestampResolvePending = renderer.resolveTimestampsAsync?.('render')
+        ?.then((duration) => {
+            if (!Number.isFinite(duration) || duration < 0) return;
+            latestGpuRenderMs = duration;
+            debugConsoleState.gpuTimingMode = 'gpu';
+        })
+        .catch(() => {
+            debugConsoleState.gpuTimingMode = 'approximate';
+        })
+        .finally(() => {
+            gpuTimestampResolvePending = null;
+        }) ?? null;
 }
 
 function sampleTerrainHeightAt(worldX, worldZ) {
@@ -3377,6 +3402,42 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     return actor;
 }
 
+function requestLightShadowRefresh(light) {
+    if (!light?.castShadow || !light.shadow) return;
+    if (light.isPointLight && light.shadow.camera) {
+        light.shadow.camera.near = 0.1;
+        light.shadow.camera.far = Math.max(light.distance > 0 ? light.distance : 24, 0.5);
+        light.shadow.camera.updateProjectionMatrix?.();
+    }
+    light.shadow.needsUpdate = true;
+    if (renderer?.shadowMap) {
+        renderer.shadowMap.needsUpdate = true;
+    }
+}
+
+function configurePointLightShadow(light, {
+    mapSize = 512,
+    bias = 0.0005,
+    normalBias = 0.02,
+    radius = 2.5,
+} = {}) {
+    if (!light?.isPointLight || !light.shadow) return light;
+    light.shadow.mapSize.set(mapSize, mapSize);
+    light.shadow.bias = bias;
+    light.shadow.radius = radius;
+    if ('normalBias' in light.shadow) light.shadow.normalBias = normalBias;
+    light.shadow.autoUpdate = false;
+    requestLightShadowRefresh(light);
+    return light;
+}
+
+function requestScenePointLightShadowRefresh(root = scene) {
+    root?.traverse?.((obj) => {
+        if (!obj?.isPointLight || !obj.castShadow) return;
+        requestLightShadowRefresh(obj);
+    });
+}
+
 function spawnLightActor(kind, { userData = null, position = null, scale = 8, includeScripts = true } = {}) {
     if (!scene || !camera) return null;
 
@@ -3469,9 +3530,12 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         light = new THREE.PointLight(lightColor, intensity, distance, decay);
         light.name = 'point-light-source';
         light.castShadow = castShadow;
-        light.shadow.mapSize.set(512, 512);
-        light.shadow.bias = 0.0005;
-        if ('normalBias' in light.shadow) light.shadow.normalBias = 0.02;
+        configurePointLightShadow(light, {
+            mapSize: 512,
+            bias: 0.0005,
+            normalBias: 0.02,
+            radius: 2.5,
+        });
         group.add(light);
     } else if (kind === 'spotLight') {
         const housing = markHelperObject(new THREE.Mesh(
@@ -3938,8 +4002,12 @@ function ensureDDGITestRig() {
     cornellPanelLight.name = 'cornell-panel-light';
     cornellPanelLight.position.set(0, BY - 0.15, 0);
     cornellPanelLight.castShadow = true;
-    cornellPanelLight.shadow.mapSize.set(1024, 1024);
-    cornellPanelLight.shadow.bias = 0.002;
+    configurePointLightShadow(cornellPanelLight, {
+        mapSize: 512,
+        bias: 0.002,
+        normalBias: 0.02,
+        radius: 2.5,
+    });
     rig.add(cornellPanelLight);
 
     ensureDDGITestRigActor(rig);
@@ -4651,15 +4719,28 @@ function saveWorldEnvToStorage() {
     } catch (e) { /* private mode / quota — ignore */ }
 }
 
+function shouldUsePostProcessingPipeline() {
+    return !!((worldEnvState.bloom?.enabled && !perfModeEnabled)
+        || (worldEnvState.ssgi?.enabled && !perfModeEnabled));
+}
+
 function rebuildPostProcessingOutputNode() {
     if (!postProcessing || !postProcessNodes) return;
     const { sceneColor, bloomNode, ssgiOutput } = postProcessNodes;
-    let outputNode = sceneColor.add(bloomNode);
+    if (!shouldUsePostProcessingPipeline()) {
+        postProcessing.outputNode = sceneColor;
+        return;
+    }
+
+    let outputNode = sceneColor;
+    if (worldEnvState.bloom?.enabled && !perfModeEnabled) {
+        outputNode = outputNode.add(bloomNode);
+    }
     if (worldEnvState.ssgi?.enabled && !perfModeEnabled && ssgiOutput) {
         outputNode = sceneColor
             .mul(vec4(vec3(ssgiOutput.a), 1))
             .add(vec4(ssgiOutput.rgb, 0))
-            .add(bloomNode);
+            .add(worldEnvState.bloom?.enabled && !perfModeEnabled ? bloomNode : vec4(0, 0, 0, 0));
     }
     postProcessing.outputNode = outputNode;
 }
@@ -5924,9 +6005,7 @@ function applySceneActorLightDetailsFromUI() {
     }
 
     light.castShadow = refs.lightShadow?.value !== 'off';
-    if (light.shadow) {
-        light.shadow.needsUpdate = true;
-    }
+    requestLightShadowRefresh(light);
 
     if (light.isSpotLight) {
         const angleDegrees = Number.parseFloat(refs.lightAngle?.value);
@@ -6738,16 +6817,17 @@ async function init() {
     runtimeAudio.listener = new SoundGeneratorAudioListener();
     camera.add(runtimeAudio.listener);
 
-    renderer = new WebGPURenderer({ antialias: true, alpha: true });
+    renderer = new WebGPURenderer({ antialias: true, alpha: true, trackTimestamp: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
     await renderer.init();
+    debugConsoleState.gpuTimingMode = renderer.backend?.trackTimestamp ? 'gpu' : 'approximate';
 
     // ── Post-processing: bloom over the scene's emissive output ─────────────
     // Uses an MRT pass so bloom only picks up materials with non-zero emissive
@@ -6767,7 +6847,7 @@ async function init() {
     const ssgiNode = ssgi(sceneColor, sceneDepth, sceneNormal, camera);
     ssgiNode.useTemporalFiltering = false;
     const ssgiOutput = ssgiNode.getTextureNode();
-    postProcessing = new PostProcessing(renderer);
+    postProcessing = new RenderPipeline(renderer);
     postProcessNodes = { sceneColor, bloomNode, ssgiNode, ssgiOutput };
     applySSGISettings();
     rebuildPostProcessingOutputNode();
@@ -6818,6 +6898,7 @@ async function init() {
                     syncDDGIVolumeComponentToActorBounds(ddgi);
                 }
             }
+            requestScenePointLightShadowRefresh();
             invalidateDDGI('scene object transformed');
             transformControl.justFinishedDragging = true;
             editorHistory.captureState();
@@ -6851,9 +6932,6 @@ async function init() {
         scene,
         onStateChange: updateMultiplayerUiState,
     });
-
-    // Load initial HDR Environment
-    switchEnvironment('sunny-sky');
 
     // Pedestal
     const pedestalGeo = new THREE.CylinderGeometry(2.5, 2.5, 0.02, 64);
@@ -6922,7 +7000,12 @@ async function init() {
         console.warn('[DDGI] initial patch failed', e);
     }
     loadWorldEnvFromStorage();
-    applyWorldEnvState({ persist: false });
+    try {
+        await switchEnvironment(worldEnvState?.sky?.preset || 'sunny-sky');
+    } catch (e) {
+        console.warn('[Env] initial HDRI warmup failed', e);
+    }
+    applyWorldEnvState({ persist: false, switchSky: false });
     setPerfModeEnabled(PERF_MODE_DEFAULT_ENABLED);
 
     // Diagnostic on the fix/ddgi-correctness branch — surfaces the resolved DDGI
@@ -6991,9 +7074,15 @@ async function init() {
         loadSample();
     }
     updateGameplayUI();
+    try {
+        await renderer.compileAsync?.(scene, camera);
+    } catch (e) {
+        console.warn('[Renderer] initial compile warmup failed', e);
+    }
 
-    renderer.setAnimationLoop(() => {
-        const delta = Math.min(clock.getDelta(), 0.05);
+    renderer.setAnimationLoop((timestamp) => {
+        frameTimer.update(timestamp);
+        const delta = Math.min(frameTimer.getDelta(), 0.05);
 
         const updateStart = performance.now();
         if (gameplay.active) {
@@ -7049,13 +7138,15 @@ async function init() {
             runObjectTickScripts(delta);
             const scriptDuration = performance.now() - scriptStart;
 
-            const renderStart = performance.now();
             tickRaycastDebugLine();
-            if (postProcessing) {
+            const renderStart = performance.now();
+            if (postProcessing && shouldUsePostProcessingPipeline()) {
                 postProcessing.render();
             } else {
                 renderer.render(scene, camera);
             }
+            const renderDuration = performance.now() - renderStart;
+            scheduleGpuRenderTimingResolve();
 
             recordDebugFrameMetrics({
                 frame: delta * 1000,
@@ -7065,7 +7156,8 @@ async function init() {
                 physicsSync: physicsMetrics.sync,
                 physicsCollisions: physicsMetrics.collisions,
                 scripts: scriptDuration,
-                render: performance.now() - renderStart,
+                gpu: latestGpuRenderMs,
+                render: renderDuration,
                 ddgi: _ddgiMs,
                 delta,
             });
@@ -9704,6 +9796,12 @@ document.getElementById('btn-add-comp-light')?.addEventListener('click', () => {
     const light = new THREE.PointLight(0xffddaa, 2, 10);
     light.position.set(0, 2, 0);
     light.castShadow = true;
+    configurePointLightShadow(light, {
+        mapSize: 512,
+        bias: 0.0005,
+        normalBias: 0.02,
+        radius: 2.5,
+    });
     light.name = 'Point Light';
     parent.add(light);
     blueprintState.selectedComponent = light;
