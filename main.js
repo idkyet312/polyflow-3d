@@ -768,9 +768,9 @@ const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
 const mainDirectionalLightOffset = new THREE.Vector3(5, 10, 5);
 const mainDirectionalLightShadowFocus = new THREE.Vector3();
-const MAIN_SHADOW_EXTENT = 64;
-const MAIN_SHADOW_FORWARD_FOCUS = 48;
-const MAIN_SHADOW_FAR = 240;
+const MAIN_SHADOW_EXTENT = 72;
+const MAIN_SHADOW_FORWARD_FOCUS = 52;
+const MAIN_SHADOW_FAR = 220;
 const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
 const tempQuaternionB = new THREE.Quaternion();
@@ -5923,6 +5923,7 @@ function refreshSceneUI() {
     updateSceneActorDetailsUI();
     return;
 
+    /*
     actors.forEach(actor => {
         const item = document.createElement('div');
         item.className = 'scene-ui-item';
@@ -6003,6 +6004,7 @@ function refreshSceneUI() {
 
         sceneUiList.appendChild(item);
     });
+    */
 }
 
 // --- Initialization ---
@@ -6754,13 +6756,14 @@ async function init() {
     mainDirectionalLight.shadow.mapSize.width = 4096;
     mainDirectionalLight.shadow.mapSize.height = 4096;
     mainDirectionalLight.shadow.camera.near = 0.5;
-    mainDirectionalLight.shadow.camera.far = 700;
-    mainDirectionalLight.shadow.camera.left = -96;
-    mainDirectionalLight.shadow.camera.right = 96;
-    mainDirectionalLight.shadow.camera.top = 96;
-    mainDirectionalLight.shadow.camera.bottom = -96;
-    mainDirectionalLight.shadow.bias = -0.001;
-    mainDirectionalLight.shadow.normalBias = 0.02;
+    mainDirectionalLight.shadow.camera.far = MAIN_SHADOW_FAR;
+    mainDirectionalLight.shadow.camera.left = -MAIN_SHADOW_EXTENT;
+    mainDirectionalLight.shadow.camera.right = MAIN_SHADOW_EXTENT;
+    mainDirectionalLight.shadow.camera.top = MAIN_SHADOW_EXTENT;
+    mainDirectionalLight.shadow.camera.bottom = -MAIN_SHADOW_EXTENT;
+    mainDirectionalLight.shadow.bias = -0.00004;
+    mainDirectionalLight.shadow.normalBias = 0.0;
+    mainDirectionalLight.shadow.radius = 2.0;
     scene.add(mainDirectionalLight);
     scene.add(mainDirectionalLight.target);
     updateMainDirectionalLightShadowFocus();
@@ -7017,6 +7020,87 @@ function createFpsStarterLevel() {
         });
     };
 
+    const contactShadowMaterialCache = new Map();
+    const smoothstep = (edge0, edge1, value) => {
+        const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
+        return t * t * (3 - 2 * t);
+    };
+    const createDistanceFieldContactShadowMaterial = (width, depth, spread = 2.2, strength = 0.55) => {
+        const key = `${width.toFixed(2)}:${depth.toFixed(2)}:${spread.toFixed(2)}:${strength.toFixed(2)}`;
+        if (contactShadowMaterialCache.has(key)) {
+            return contactShadowMaterialCache.get(key).clone();
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = 192;
+        canvas.height = 192;
+        const ctx = canvas.getContext('2d');
+        const image = ctx.createImageData(canvas.width, canvas.height);
+        const planeWidth = width + spread * 2;
+        const planeDepth = depth + spread * 2;
+
+        for (let y = 0; y < canvas.height; y++) {
+            for (let x = 0; x < canvas.width; x++) {
+                const u = (x + 0.5) / canvas.width - 0.5;
+                const v = (y + 0.5) / canvas.height - 0.5;
+                const px = u * planeWidth;
+                const pz = v * planeDepth;
+                const dx = Math.max(Math.abs(px) - width * 0.5, 0);
+                const dz = Math.max(Math.abs(pz) - depth * 0.5, 0);
+                const dist = Math.sqrt(dx * dx + dz * dz);
+                const contact = 1 - smoothstep(0, spread, dist);
+                const insideFade = smoothstep(-0.05, 0.45, Math.max(dx, dz));
+                const alpha = Math.round(255 * strength * Math.max(contact, insideFade * contact));
+                const index = (y * canvas.width + x) * 4;
+                image.data[index] = 0;
+                image.data[index + 1] = 0;
+                image.data[index + 2] = 0;
+                image.data[index + 3] = alpha;
+            }
+        }
+        ctx.putImageData(image, 0, 0);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        const material = new THREE.MeshBasicMaterial({
+            color: 0x000000,
+            map: texture,
+            transparent: true,
+            depthTest: true,
+            depthWrite: false,
+            opacity: 1,
+            toneMapped: false,
+        });
+        material.userData = { ownedMaps: [texture] };
+        contactShadowMaterialCache.set(key, material);
+        return material.clone();
+    };
+    const addDistanceFieldContactShadow = (name, size, position, options = {}) => {
+        if (options.contactShadow === false || options.rotation) return null;
+        if ((position[1] - size[1] * 0.5) > 0.25 || size[1] < 0.5) return null;
+
+        const width = scaleScalar(Math.max(size[0], 0.35));
+        const depth = scaleScalar(Math.max(size[2], 0.35));
+        const spread = THREE.MathUtils.clamp(Math.min(width, depth) * 0.72, 2.0, 5.5);
+        const mesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(width + spread * 2, depth + spread * 2),
+            createDistanceFieldContactShadowMaterial(width, depth, spread)
+        );
+        mesh.name = `${name}_DistanceFieldContactShadow`;
+        const scaledPosition = scaleVector(position);
+        mesh.position.set(scaledPosition[0], 0.455, scaledPosition[2]);
+        mesh.rotation.x = -Math.PI / 2;
+        mesh.renderOrder = 6;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.userData.skipPhysicsCollision = true;
+        markDDGISkipCapture(mesh);
+        root.add(mesh);
+        return mesh;
+    };
+
     const createBoxNode = (name, size, position, styleName = 'light', options = {}) => {
         return makeSampleLevelPart(name, makeBoxShape(size), createMaterial(styleName), scaleVector(position), options.rotation || [0, 0, 0], options);
     };
@@ -7033,7 +7117,11 @@ function createFpsStarterLevel() {
         return actor;
     };
 
-    const addBox = (name, size, position, styleName = 'light', options = {}) => addNode(createBoxNode(name, size, position, styleName, options));
+    const addBox = (name, size, position, styleName = 'light', options = {}) => {
+        const actor = addNode(createBoxNode(name, size, position, styleName, options));
+        addDistanceFieldContactShadow(name, size, position, options);
+        return actor;
+    };
     const addCylinder = (name, radius, height, position, styleName = 'light', options = {}) => addNode(createCylinderNode(name, radius, height, position, styleName, options));
     const addCollisionPlane = (name, size, position) => {
         const mesh = new THREE.Mesh(
@@ -7049,7 +7137,7 @@ function createFpsStarterLevel() {
         return mesh;
     };
 
-    addBox('Graybox_Floor', [36, 0.2, 22], [0, 0.1, 0], 'floor', { skipPhysicsCollision: true });
+    addBox('Graybox_Floor', [36, 0.2, 22], [0, 0.1, 0], 'floor', { skipPhysicsCollision: true, contactShadow: false });
     addCollisionPlane('Graybox_Floor_Collision', [36, 22], [0, 0.21, 0]);
     addBox('Graybox_LeftWall', [0.45, 5.4, 22], [-17.78, 2.7, 0], 'dark');
     addBox('Graybox_RightWall', [0.45, 5.4, 22], [17.78, 2.7, 0], 'dark');
@@ -8086,6 +8174,11 @@ function updateMainDirectionalLightShadowFocus() {
     if (!mainDirectionalLight || !camera) return;
 
     mainDirectionalLightShadowFocus.copy(camera.position);
+    camera.getWorldDirection(tempVectorA);
+    tempVectorA.y = 0;
+    if (tempVectorA.lengthSq() > 1e-6) {
+        mainDirectionalLightShadowFocus.addScaledVector(tempVectorA.normalize(), MAIN_SHADOW_FORWARD_FOCUS);
+    }
     mainDirectionalLightShadowFocus.y = worldFloor?.position?.y ?? 0;
 
     mainDirectionalLight.position.copy(mainDirectionalLightShadowFocus).add(mainDirectionalLightOffset);
