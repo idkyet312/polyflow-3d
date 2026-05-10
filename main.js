@@ -769,7 +769,6 @@ const tempVectorE = new THREE.Vector3();
 const mainDirectionalLightOffset = new THREE.Vector3(5, 10, 5);
 const mainDirectionalLightShadowFocus = new THREE.Vector3();
 const MAIN_SHADOW_EXTENT = 72;
-const MAIN_SHADOW_FORWARD_FOCUS = 52;
 const MAIN_SHADOW_FAR = 220;
 const tempBoxA = new THREE.Box3();
 const tempQuaternionA = new THREE.Quaternion();
@@ -3020,8 +3019,12 @@ function rebuildActorPhysics(prop) {
                 subShapes.push(subShape);
                 
                 // Calculate relative position/rotation to the root
-                const pos = new Jolt.Vec3(node.position.x, node.position.y, node.position.z);
-                const rot = new Jolt.Quat(node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w);
+                const pos = isRoot
+                    ? new Jolt.Vec3(0, 0, 0)
+                    : new Jolt.Vec3(node.position.x, node.position.y, node.position.z);
+                const rot = isRoot
+                    ? new Jolt.Quat(0, 0, 0, 1)
+                    : new Jolt.Quat(node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w);
                 
                 compoundSettings.AddShapeShape(pos, rot, subShape, 0);
                 Jolt.destroy(pos);
@@ -7078,7 +7081,9 @@ function createFpsStarterLevel() {
         return material.clone();
     };
     const addDistanceFieldContactShadow = (name, size, position, options = {}) => {
-        if (options.contactShadow === false || options.rotation) return null;
+        if (options.contactShadow === false) return null;
+        const rotation = Array.isArray(options.rotation) ? options.rotation : [0, 0, 0];
+        if (Math.abs(rotation[0] || 0) > 1e-4 || Math.abs(rotation[2] || 0) > 1e-4) return null;
         if ((position[1] - size[1] * 0.5) > 0.25 || size[1] < 0.5) return null;
 
         const width = scaleScalar(Math.max(size[0], 0.35));
@@ -7091,7 +7096,7 @@ function createFpsStarterLevel() {
         mesh.name = `${name}_DistanceFieldContactShadow`;
         const scaledPosition = scaleVector(position);
         mesh.position.set(scaledPosition[0], 0.455, scaledPosition[2]);
-        mesh.rotation.x = -Math.PI / 2;
+        mesh.rotation.set(-Math.PI / 2, 0, -(rotation[1] || 0));
         mesh.renderOrder = 6;
         mesh.castShadow = false;
         mesh.receiveShadow = false;
@@ -8174,12 +8179,10 @@ function updateMainDirectionalLightShadowFocus() {
     if (!mainDirectionalLight || !camera) return;
 
     mainDirectionalLightShadowFocus.copy(camera.position);
-    camera.getWorldDirection(tempVectorA);
-    tempVectorA.y = 0;
-    if (tempVectorA.lengthSq() > 1e-6) {
-        mainDirectionalLightShadowFocus.addScaledVector(tempVectorA.normalize(), MAIN_SHADOW_FORWARD_FOCUS);
-    }
     mainDirectionalLightShadowFocus.y = worldFloor?.position?.y ?? 0;
+    const shadowTexelSize = (MAIN_SHADOW_EXTENT * 2) / (mainDirectionalLight.shadow.mapSize.width || 4096);
+    mainDirectionalLightShadowFocus.x = Math.round(mainDirectionalLightShadowFocus.x / shadowTexelSize) * shadowTexelSize;
+    mainDirectionalLightShadowFocus.z = Math.round(mainDirectionalLightShadowFocus.z / shadowTexelSize) * shadowTexelSize;
 
     mainDirectionalLight.position.copy(mainDirectionalLightShadowFocus).add(mainDirectionalLightOffset);
     mainDirectionalLight.target.position.copy(mainDirectionalLightShadowFocus);
