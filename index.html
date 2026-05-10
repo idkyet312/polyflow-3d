@@ -624,7 +624,7 @@
                                 <button class="btn viewer-toggle-btn" id="we-master-perf">Performance</button>
                                 <button class="btn viewer-toggle-btn" id="we-master-cornell">Cornell Test</button>
                             </div>
-                            <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off DDGI / Fog / Bloom in one click.</div>
+                            <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off SSGI / Fog / Bloom in one click.</div>
 
                             <details class="viewer-menu-section" open>
                                 <summary class="viewer-menu-section-summary">Background / Sky</summary>
@@ -732,6 +732,17 @@
                                         <input id="we-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
                                         <div class="viewer-slider-value" id="we-bloom-threshold-value">0.48</div>
                                     </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Screen Space GI (SSGI)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssgi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ssgi-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Screen-space bounce light over the current view. Performance mode pauses it.</div>
                                 </div>
                             </details>
 
@@ -972,12 +983,12 @@
                             <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Performance</summary>
                                 <div class="viewer-menu-section-body">
-                                    <div class="viewer-inline-note">Turns off DDGI global illumination, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
+                                    <div class="viewer-inline-note">Turns off screen-space GI, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
                                         <button class="btn viewer-toggle-btn" id="perf-mode-off">Off</button>
                                         <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode on. DDGI, volumetric fog, and post-process bloom are paused.</div>
+                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode on. SSGI, volumetric fog, and post-process bloom are paused.</div>
                                 </div>
                             </details>
 

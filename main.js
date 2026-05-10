@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { WebGPURenderer, PostProcessing } from 'three/webgpu';
-import { pass, mrt, output, emissive, uniform } from 'three/tsl';
+import { pass, mrt, output, emissive, normalView, uniform, vec3, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
@@ -461,6 +462,7 @@ const globalPostProcessUniforms = {
     bloomRadius: uniform(0.95),
     bloomThreshold: uniform(0.48)
 };
+let postProcessNodes = null;
 
 // Performance toggle: when on, skips volumetric fog update and post-process
 // volume update. (DDGI no longer respects this on fix/ddgi-correctness — see
@@ -493,6 +495,7 @@ const WORLD_ENV_DEFAULTS = Object.freeze({
     sun: { enabled: true, castShadow: true, intensity: 2.5 },
     tonemap: { exposure: 1.0 },
     bloom: { enabled: true, strength: 0.6, radius: 0.95, threshold: 0.9 },
+    ssgi: { enabled: false, giIntensity: 2.0, aoIntensity: 1.0, radius: 8.0, thickness: 0.6, sliceCount: 1, stepCount: 8 },
     fog: { enabled: true, density: 0.012, opacity: 0.055 },
     ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
     shadows: { enabled: true },
@@ -3977,6 +3980,7 @@ function applyCornellTestPreset() {
     worldEnvState.hemi.enabled = false;
     worldEnvState.sun.enabled = false;
     worldEnvState.bloom.enabled = false;
+    worldEnvState.ssgi.enabled = false;
     worldEnvState.fog.enabled = false;
     worldEnvState.shadows.enabled = true;
     worldEnvState.tonemap.exposure = 1.0;
@@ -4547,8 +4551,8 @@ function updatePerfModeUi() {
     perfModeUiRefs.onBtn?.classList.toggle('viewer-toggle-btn-active', perfModeEnabled);
     if (perfModeUiRefs.status) {
         perfModeUiRefs.status.textContent = perfModeEnabled
-            ? 'Performance mode on. DDGI, volumetric fog, and post-process bloom are paused.'
-            : 'Performance mode off. Full DDGI + fog + post-process active.';
+            ? 'Performance mode on. SSGI, volumetric fog, and post-process bloom are paused.'
+            : 'Performance mode off. Full SSGI + fog + post-process active.';
     }
 }
 
@@ -4596,6 +4600,31 @@ function saveWorldEnvToStorage() {
     try {
         localStorage.setItem(WORLD_ENV_STORAGE_KEY, JSON.stringify(worldEnvState));
     } catch (e) { /* private mode / quota — ignore */ }
+}
+
+function rebuildPostProcessingOutputNode() {
+    if (!postProcessing || !postProcessNodes) return;
+    const { sceneColor, bloomNode, ssgiOutput } = postProcessNodes;
+    let outputNode = sceneColor.add(bloomNode);
+    if (worldEnvState.ssgi?.enabled && !perfModeEnabled && ssgiOutput) {
+        outputNode = sceneColor
+            .mul(vec4(vec3(ssgiOutput.a), 1))
+            .add(vec4(ssgiOutput.rgb, 0))
+            .add(bloomNode);
+    }
+    postProcessing.outputNode = outputNode;
+}
+
+function applySSGISettings() {
+    const node = postProcessNodes?.ssgiNode;
+    const s = worldEnvState.ssgi || WORLD_ENV_DEFAULTS.ssgi;
+    if (!node) return;
+    node.giIntensity.value = s.giIntensity;
+    node.aoIntensity.value = s.aoIntensity;
+    node.radius.value = s.radius;
+    node.thickness.value = s.thickness;
+    node.sliceCount.value = Math.max(1, Math.min(4, Math.round(s.sliceCount)));
+    node.stepCount.value = Math.max(1, Math.min(32, Math.round(s.stepCount)));
 }
 
 function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
@@ -4656,6 +4685,10 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     } else {
         postProcessVolumeManager?.setEnabled?.(false);
     }
+
+    // Screen Space GI
+    applySSGISettings();
+    rebuildPostProcessingOutputNode();
 
     // Fog
     if (volumetricFogController) {
@@ -4718,6 +4751,8 @@ function updateWorldEnvUi() {
     setSlider(worldEnvUiRefs.bloomRadius, worldEnvUiRefs.bloomRadiusValue, s.bloom.radius, 2);
     setSlider(worldEnvUiRefs.bloomThreshold, worldEnvUiRefs.bloomThresholdValue, s.bloom.threshold, 2);
 
+    setToggle(worldEnvUiRefs.ssgiOff, worldEnvUiRefs.ssgiOn, s.ssgi.enabled);
+
     setToggle(worldEnvUiRefs.fogOff, worldEnvUiRefs.fogOn, s.fog.enabled);
     setSlider(worldEnvUiRefs.fogDensity, worldEnvUiRefs.fogDensityValue, s.fog.density, 3);
     setSlider(worldEnvUiRefs.fogOpacity, worldEnvUiRefs.fogOpacityValue, s.fog.opacity, 3);
@@ -4740,19 +4775,22 @@ function updateWorldEnvUi() {
         const off = [];
         if (!s.sky.enabled) off.push('Sky');
         if (!s.bloom.enabled) off.push('Bloom');
+        if (!s.ssgi.enabled) off.push('SSGI');
         if (!s.fog.enabled) off.push('Fog');
         if (!s.ddgi.enabled) off.push('DDGI');
         if (!s.shadows.enabled) off.push('Shadows');
         worldEnvUiRefs.summaryValue.textContent = off.length ? `Off: ${off.join(' · ')}` : 'All effects active';
     }
     if (worldEnvUiRefs.masterStatus) {
-        const allCoreOn = s.sky.enabled && s.ambient.enabled && s.hemi.enabled && s.sun.enabled && s.bloom.enabled && s.fog.enabled && s.shadows.enabled;
-        const perfPreset = !s.bloom.enabled && !s.fog.enabled && !s.ddgi.enabled && s.sky.enabled && s.sun.enabled;
+        const allCoreOn = s.sky.enabled && s.ambient.enabled && s.hemi.enabled && s.sun.enabled && s.bloom.enabled && s.ssgi.enabled && s.fog.enabled && s.shadows.enabled;
+        const perfPreset = !s.bloom.enabled && !s.ssgi.enabled && !s.fog.enabled && !s.ddgi.enabled && s.sky.enabled && s.sun.enabled;
         const cornellPreset = !s.sky.enabled && !s.ambient.enabled && !s.hemi.enabled && !s.sun.enabled
-            && !s.bloom.enabled && !s.fog.enabled && s.shadows.enabled
+            && !s.bloom.enabled && !s.ssgi.enabled && !s.fog.enabled && s.shadows.enabled
             && s.ddgi.enabled && Math.abs(s.ddgi.intensity - WORLD_ENV_DEFAULTS.ddgi.intensity) < 0.001;
         if (s.ddgi.enabled && s.ddgi.contributionView) {
             worldEnvUiRefs.masterStatus.textContent = 'DDGI contribution view active.';
+        } else if (s.ssgi.enabled && !perfModeEnabled) {
+            worldEnvUiRefs.masterStatus.textContent = 'Screen Space GI active.';
         } else if (s.ddgi.enabled && s.ddgi.solidTest) {
             worldEnvUiRefs.masterStatus.textContent = 'Solid DDGI test active. Probes bypassed with fixed amber GI.';
         } else if (s.ddgi.debugProbes) {
@@ -4762,9 +4800,9 @@ function updateWorldEnvUi() {
         } else if (allCoreOn && !s.ddgi.enabled) {
             worldEnvUiRefs.masterStatus.textContent = 'Everything on (DDGI off — opt in for prettier indirect lighting).';
         } else if (allCoreOn && s.ddgi.enabled) {
-            worldEnvUiRefs.masterStatus.textContent = 'Everything on, including DDGI.';
+            worldEnvUiRefs.masterStatus.textContent = 'Everything on, including DDGI + SSGI.';
         } else if (perfPreset) {
-            worldEnvUiRefs.masterStatus.textContent = 'Performance preset active. Bloom + Fog + DDGI paused.';
+            worldEnvUiRefs.masterStatus.textContent = 'Performance preset active. Bloom + SSGI + Fog + DDGI paused.';
         } else {
             worldEnvUiRefs.masterStatus.textContent = 'Custom configuration.';
         }
@@ -4779,6 +4817,7 @@ function setWorldEnvMaster(mode) {
         s.hemi.enabled = true;
         s.sun.enabled = true;
         s.bloom.enabled = true;
+        s.ssgi.enabled = true;
         s.fog.enabled = true;
         s.shadows.enabled = true;
         // DDGI is opt-in even with All On — too expensive for a default.
@@ -4788,12 +4827,14 @@ function setWorldEnvMaster(mode) {
         s.hemi.enabled = false;
         s.sun.enabled = false;
         s.bloom.enabled = false;
+        s.ssgi.enabled = false;
         s.fog.enabled = false;
         s.ddgi.enabled = false;
         s.shadows.enabled = false;
     } else if (mode === 'perf') {
         // Performance preset: only the heavy effects go off.
         s.bloom.enabled = false;
+        s.ssgi.enabled = false;
         s.fog.enabled = false;
         s.ddgi.enabled = false;
     } else if (mode === 'cornell') {
@@ -6221,6 +6262,8 @@ async function init() {
         bloomRadiusValue: document.getElementById('we-bloom-radius-value'),
         bloomThreshold: document.getElementById('we-bloom-threshold'),
         bloomThresholdValue: document.getElementById('we-bloom-threshold-value'),
+        ssgiOff: document.getElementById('we-ssgi-off'),
+        ssgiOn: document.getElementById('we-ssgi-on'),
         fogOff: document.getElementById('we-fog-off'),
         fogOn: document.getElementById('we-fog-on'),
         fogDensity: document.getElementById('we-fog-density'),
@@ -6385,6 +6428,10 @@ async function init() {
     wireSlider(worldEnvUiRefs?.bloomStrength, 'bloom.strength', (v) => { worldEnvState.bloom.strength = v; });
     wireSlider(worldEnvUiRefs?.bloomRadius, 'bloom.radius', (v) => { worldEnvState.bloom.radius = v; });
     wireSlider(worldEnvUiRefs?.bloomThreshold, 'bloom.threshold', (v) => { worldEnvState.bloom.threshold = v; });
+
+    wireToggle(worldEnvUiRefs?.ssgiOff, worldEnvUiRefs?.ssgiOn,
+        () => { worldEnvState.ssgi.enabled = false; },
+        () => { worldEnvState.ssgi.enabled = true; });
 
     wireToggle(worldEnvUiRefs?.fogOff, worldEnvUiRefs?.fogOn,
         () => { worldEnvState.fog.enabled = false; },
@@ -6621,12 +6668,20 @@ async function init() {
     scenePass.setMRT(mrt({
         output: output,
         emissive: emissive,
+        normal: normalView,
     }));
     const sceneColor = scenePass.getTextureNode('output');
     const sceneEmissive = scenePass.getTextureNode('emissive');
+    const sceneNormal = scenePass.getTextureNode('normal');
+    const sceneDepth = scenePass.getTextureNode('depth');
     const bloomNode = bloom(sceneEmissive, globalPostProcessUniforms.bloomStrength, globalPostProcessUniforms.bloomRadius, globalPostProcessUniforms.bloomThreshold);
+    const ssgiNode = ssgi(sceneColor, sceneDepth, sceneNormal, camera);
+    ssgiNode.useTemporalFiltering = false;
+    const ssgiOutput = ssgiNode.getTextureNode();
     postProcessing = new PostProcessing(renderer);
-    postProcessing.outputNode = sceneColor.add(bloomNode);
+    postProcessNodes = { sceneColor, bloomNode, ssgiNode, ssgiOutput };
+    applySSGISettings();
+    rebuildPostProcessingOutputNode();
 
     postProcessVolumeManager = createPostProcessVolumeManager({
         scene,
