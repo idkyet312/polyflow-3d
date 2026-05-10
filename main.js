@@ -569,6 +569,12 @@ const TEST_SOUND_ID = 'polyflow:test';
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
 let grassField = null;
 let water = null;
+const samplePresentationState = {
+    overridden: false,
+    terrainVisible: true,
+    grassVisible: true,
+    waterVisible: true,
+};
 const litePools = [];
 let playHint, gameplayStatus, resetViewBtn, showcaseModeBtn, playModeBtn, browseModelBtn, openActorEditorBtn;
 let playTestSoundBtn, playTestSoundStatus;
@@ -1300,15 +1306,24 @@ function disposeRenderableObject(root) {
 
     stopObjectAnimations(root);
 
+    const disposeMaterial = (material) => {
+        if (!material) return;
+        const ownedMaps = material.userData?.ownedMaps;
+        if (Array.isArray(ownedMaps)) {
+            ownedMaps.forEach((map) => map?.dispose?.());
+        }
+        material.dispose?.();
+    };
+
     root.traverse((child) => {
         if (!child.isMesh) return;
 
         child.geometry?.dispose();
 
         if (Array.isArray(child.material)) {
-            child.material.forEach((material) => material?.dispose());
+            child.material.forEach(disposeMaterial);
         } else {
-            child.material?.dispose();
+            disposeMaterial(child.material);
         }
     });
 }
@@ -5131,11 +5146,11 @@ function syncDDGIVolumeComponentToActorBounds(ddgi) {
 function updateSceneActorDetailsTransformButtons(refs = getSceneActorDetailsRefs()) {
     const mode = transformControl?.getMode?.() || 'translate';
     const space = transformControl?.space || 'local';
-    if (refs.modeTranslate) refs.modeTranslate.style.background = mode === 'translate' ? 'rgba(112,0,255,0.4)' : '';
-    if (refs.modeRotate) refs.modeRotate.style.background = mode === 'rotate' ? 'rgba(112,0,255,0.4)' : '';
-    if (refs.modeScale) refs.modeScale.style.background = mode === 'scale' ? 'rgba(112,0,255,0.4)' : '';
-    if (refs.spaceLocal) refs.spaceLocal.style.background = space === 'local' ? 'rgba(112,0,255,0.4)' : '';
-    if (refs.spaceWorld) refs.spaceWorld.style.background = space === 'world' ? 'rgba(112,0,255,0.4)' : '';
+    if (refs.modeTranslate) refs.modeTranslate.style.background = mode === 'translate' ? 'linear-gradient(180deg, rgba(242, 163, 58, 0.94) 0%, rgba(199, 122, 30, 0.94) 100%)' : '';
+    if (refs.modeRotate) refs.modeRotate.style.background = mode === 'rotate' ? 'linear-gradient(180deg, rgba(242, 163, 58, 0.94) 0%, rgba(199, 122, 30, 0.94) 100%)' : '';
+    if (refs.modeScale) refs.modeScale.style.background = mode === 'scale' ? 'linear-gradient(180deg, rgba(242, 163, 58, 0.94) 0%, rgba(199, 122, 30, 0.94) 100%)' : '';
+    if (refs.spaceLocal) refs.spaceLocal.style.background = space === 'local' ? 'linear-gradient(180deg, rgba(242, 163, 58, 0.94) 0%, rgba(199, 122, 30, 0.94) 100%)' : '';
+    if (refs.spaceWorld) refs.spaceWorld.style.background = space === 'world' ? 'linear-gradient(180deg, rgba(242, 163, 58, 0.94) 0%, rgba(199, 122, 30, 0.94) 100%)' : '';
 }
 
 function updateSceneActorDetailsUI() {
@@ -5264,8 +5279,8 @@ function createSceneActorItem(actor, { isChild = false } = {}) {
     item.dataset.id = actor.id;
 
     if (objectScriptState.targetPropId === actor.id) {
-        item.style.background = 'rgba(255, 255, 255, 0.12)';
-        item.style.borderColor = 'rgba(112, 0, 255, 0.45)';
+        item.style.background = 'linear-gradient(180deg, rgba(58, 43, 22, 0.98) 0%, rgba(42, 30, 15, 0.98) 100%)';
+        item.style.borderColor = 'rgba(242, 163, 58, 0.58)';
         if (!blueprintState.active) {
             const actorBtnRow = document.createElement('div');
             actorBtnRow.className = 'scene-ui-item-actions';
@@ -5372,8 +5387,8 @@ function refreshSceneUI() {
         item.dataset.id = actor.id;
 
         if (objectScriptState.targetPropId === actor.id) {
-            item.style.background = 'rgba(255, 255, 255, 0.12)';
-            item.style.borderColor = 'rgba(112, 0, 255, 0.45)';
+            item.style.background = 'linear-gradient(180deg, rgba(58, 43, 22, 0.98) 0%, rgba(42, 30, 15, 0.98) 100%)';
+            item.style.borderColor = 'rgba(242, 163, 58, 0.58)';
             
             if (!blueprintState.active) {
                 const actorBtnRow = document.createElement('div');
@@ -6198,15 +6213,8 @@ async function init() {
     scene.add(mainDirectionalLight);
     scene.add(mainDirectionalLight.target);
     updateMainDirectionalLightShadowFocus();
-    ensureDDGITestRig();
-    clearGrassAroundDDGITestRig();
-    // Patch the cornell rig's DDGIMeshStandardNodeMaterial instances
-    // immediately so `ddgiIrradianceNode` is set BEFORE the WebGPU
-    // material build kicks off. If we wait for the first tick(), the
-    // material gets built once with `ddgiIrradianceNode === null`,
-    // setupLightMap returns super.setupLightMap() (which is a no-op
-    // without mat.lightMap), and the cached compiled shader has GI
-    // permanently disabled until the engine forces a rebuild.
+    // Patch any existing scene materials immediately so DDGI-enabled
+    // materials are ready before the first WebGPU material build.
     try {
         getDDGIManager().patchSceneMaterials?.(scene);
     } catch (e) {
@@ -6278,6 +6286,9 @@ async function init() {
     initializeMouseActionScripts();
     setupGameplayEvents();
     setupTerrainPanel();
+    if (!currentMesh) {
+        loadSample();
+    }
     updateGameplayUI();
 
     renderer.setAnimationLoop(() => {
@@ -6365,62 +6376,183 @@ async function init() {
     });
 }
 
-function makeAnimatedSampleQuatTrack(name, eulers) {
-    const values = [];
-    const quaternion = new THREE.Quaternion();
-    eulers.forEach(([x, y, z]) => {
-        quaternion.setFromEuler(new THREE.Euler(x, y, z));
-        values.push(quaternion.x, quaternion.y, quaternion.z, quaternion.w);
-    });
-    return new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, [0, 0.5, 1.0, 1.5, 2.0], values);
-}
-
-function makeAnimatedSamplePart(name, geometry, material, position, rotation = [0, 0, 0]) {
+function makeSampleLevelPart(name, geometry, material, position, rotation = [0, 0, 0], { castShadow = true, receiveShadow = true } = {}) {
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = name;
     mesh.position.fromArray(position);
     mesh.rotation.set(...rotation);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = receiveShadow;
     return mesh;
 }
 
-function createAnimatedSampleModel() {
+function createFpsStarterLevel() {
     const root = new THREE.Group();
-    root.name = 'PolyFlow_Animated_Test_Rig';
+    root.name = 'PolyFlow_FPS_Starter_Level';
+    root.userData.sampleType = 'fpsStarterLevel';
+    root.userData.hideTerrainPresentation = true;
+    root.userData.skipNormalization = true;
 
-    const chrome = new THREE.MeshStandardMaterial({ color: 0xd9f0ff, metalness: 0.45, roughness: 0.22 });
-    const teal = new THREE.MeshStandardMaterial({ color: 0x00d8ff, emissive: 0x006b80, emissiveIntensity: 0.8, metalness: 0.12, roughness: 0.3 });
-    const coral = new THREE.MeshStandardMaterial({ color: 0xff5e7a, emissive: 0x6b1022, emissiveIntensity: 0.55, metalness: 0.08, roughness: 0.36 });
-    const dark = new THREE.MeshStandardMaterial({ color: 0x182033, metalness: 0.2, roughness: 0.48 });
-    const gold = new THREE.MeshStandardMaterial({ color: 0xffd36a, emissive: 0x8a4b00, emissiveIntensity: 0.35, metalness: 0.2, roughness: 0.28 });
+    root.userData.preferredSpawn = {
+        position: [0.0, 0.3, 8.6],
+        yaw: Math.PI,
+        pitch: -0.06,
+    };
+    root.userData.preferredShowcase = {
+        position: [20.0, 13.5, 16.5],
+        target: [0.0, 1.7, -1.0],
+    };
 
-    root.add(
-        makeAnimatedSamplePart('Rig_Base', new THREE.CylinderGeometry(0.8, 0.95, 0.08, 64), dark, [0, 0, 0]),
-        makeAnimatedSamplePart('Rig_Body', new THREE.CapsuleGeometry(0.34, 0.78, 8, 18), chrome, [0, 1.42, 0]),
-        makeAnimatedSamplePart('Rig_Chest_Core', new THREE.TorusGeometry(0.28, 0.025, 12, 48), teal, [0, 1.54, -0.31]),
-        makeAnimatedSamplePart('Rig_Head', new THREE.SphereGeometry(0.27, 32, 20), chrome, [0, 2.1, 0]),
-        makeAnimatedSamplePart('Rig_Visor', new THREE.BoxGeometry(0.38, 0.08, 0.035), teal, [0, 2.13, -0.24]),
-        makeAnimatedSamplePart('Rig_LeftArm', new THREE.CapsuleGeometry(0.08, 0.72, 6, 12), coral, [-0.5, 1.5, 0], [0, 0.2, -0.22]),
-        makeAnimatedSamplePart('Rig_RightArm', new THREE.CapsuleGeometry(0.08, 0.72, 6, 12), coral, [0.5, 1.5, 0], [0, -0.2, 0.22]),
-        makeAnimatedSamplePart('Rig_LeftLeg', new THREE.CapsuleGeometry(0.1, 0.82, 6, 12), dark, [-0.18, 0.62, 0], [0.08, 0, 0.06]),
-        makeAnimatedSamplePart('Rig_RightLeg', new THREE.CapsuleGeometry(0.1, 0.82, 6, 12), dark, [0.18, 0.62, 0], [-0.08, 0, -0.06]),
-        makeAnimatedSamplePart('Rig_Halo', new THREE.TorusGeometry(0.62, 0.018, 12, 96), gold, [0, 2.12, 0], [Math.PI / 2, 0, 0]),
-        makeAnimatedSamplePart('Rig_Energy_Ring', new THREE.TorusGeometry(0.9, 0.02, 12, 128), teal, [0, 0.06, 0], [Math.PI / 2, 0, 0])
-    );
+    const stylePresets = {
+        light: { baseColor: '#d4cec8', lineColor: '#97918a', roughness: 0.97, metalness: 0.02, cell: 1.25 },
+        dark: { baseColor: '#5a5d61', lineColor: '#35383d', roughness: 0.92, metalness: 0.05, cell: 1.25 },
+        blue: { baseColor: '#149cff', lineColor: '#8fd8ff', roughness: 0.34, metalness: 0.04, cell: 1.4 },
+    };
 
-    const times = [0, 0.5, 1.0, 1.5, 2.0];
-    root.animations = [new THREE.AnimationClip('Neon_Run_Loop', 2, [
-        new THREE.VectorKeyframeTrack('Rig_Body.position', times, [0, 1.42, 0, 0, 1.56, -0.04, 0, 1.42, 0, 0, 1.56, 0.04, 0, 1.42, 0]),
-        new THREE.VectorKeyframeTrack('Rig_Head.position', times, [0, 2.1, 0, 0, 2.22, -0.03, 0, 2.1, 0, 0, 2.22, 0.03, 0, 2.1, 0]),
-        new THREE.VectorKeyframeTrack('Rig_Energy_Ring.scale', times, [1, 1, 1, 1.12, 1.12, 1.12, 1, 1, 1, 1.12, 1.12, 1.12, 1, 1, 1]),
-        makeAnimatedSampleQuatTrack('Rig_LeftArm', [[0.9, 0, -0.35], [-0.95, 0, -0.22], [0.9, 0, -0.35], [-0.95, 0, -0.22], [0.9, 0, -0.35]]),
-        makeAnimatedSampleQuatTrack('Rig_RightArm', [[-0.9, 0, 0.35], [0.95, 0, 0.22], [-0.9, 0, 0.35], [0.95, 0, 0.22], [-0.9, 0, 0.35]]),
-        makeAnimatedSampleQuatTrack('Rig_LeftLeg', [[-0.55, 0, 0.08], [0.62, 0, 0.02], [-0.55, 0, 0.08], [0.62, 0, 0.02], [-0.55, 0, 0.08]]),
-        makeAnimatedSampleQuatTrack('Rig_RightLeg', [[0.62, 0, -0.02], [-0.55, 0, -0.08], [0.62, 0, -0.02], [-0.55, 0, -0.08], [0.62, 0, -0.02]]),
-        makeAnimatedSampleQuatTrack('Rig_Halo', [[Math.PI / 2, 0, 0], [Math.PI / 2, 0, Math.PI], [Math.PI / 2, 0, Math.PI * 2], [Math.PI / 2, 0, Math.PI * 3], [Math.PI / 2, 0, Math.PI * 4]]),
-        makeAnimatedSampleQuatTrack('Rig_Energy_Ring', [[Math.PI / 2, 0, 0], [Math.PI / 2, 0, -Math.PI], [Math.PI / 2, 0, -Math.PI * 2], [Math.PI / 2, 0, -Math.PI * 3], [Math.PI / 2, 0, -Math.PI * 4]]),
-    ])];
+    const createGridMaterial = ({ baseColor, lineColor, repeat = [6, 6], roughness = 0.95, metalness = 0.02 }) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            ctx.fillStyle = baseColor;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = lineColor;
+            ctx.lineWidth = 1.5;
+            for (let i = 0; i <= 8; i++) {
+                const t = Math.round((i / 8) * canvas.width);
+                ctx.beginPath();
+                ctx.moveTo(t, 0);
+                ctx.lineTo(t, canvas.height);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, t);
+                ctx.lineTo(canvas.width, t);
+                ctx.stroke();
+            }
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {
+                const t = Math.round((i / 4) * canvas.width);
+                ctx.beginPath();
+                ctx.moveTo(t, 0);
+                ctx.lineTo(t, canvas.height);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, t);
+                ctx.lineTo(canvas.width, t);
+                ctx.stroke();
+            }
+        }
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.wrapS = THREE.RepeatWrapping;
+        texture.wrapT = THREE.RepeatWrapping;
+        texture.repeat.set(Math.max(1, repeat[0]), Math.max(1, repeat[1]));
+        if (renderer?.capabilities?.getMaxAnisotropy) {
+            texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+        }
+        const material = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            map: texture,
+            roughness,
+            metalness,
+        });
+        material.userData = {
+            ...(material.userData || {}),
+            ownedMaps: [texture],
+        };
+        return material;
+    };
+
+    const createMaterialForBox = (styleName, size) => {
+        const style = stylePresets[styleName] ?? stylePresets.light;
+        return createGridMaterial({
+            baseColor: style.baseColor,
+            lineColor: style.lineColor,
+            repeat: [Math.max(1, Math.max(size[0], size[2]) / style.cell), Math.max(1, size[1] / style.cell)],
+            roughness: style.roughness,
+            metalness: style.metalness,
+        });
+    };
+
+    const createMaterialForCylinder = (styleName, radius, height) => {
+        const style = stylePresets[styleName] ?? stylePresets.light;
+        return createGridMaterial({
+            baseColor: style.baseColor,
+            lineColor: style.lineColor,
+            repeat: [Math.max(1, (Math.PI * radius * 2) / style.cell), Math.max(1, height / style.cell)],
+            roughness: style.roughness,
+            metalness: style.metalness,
+        });
+    };
+
+    const createBoxNode = (name, size, position, styleName = 'light', options = {}) => {
+        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+        const material = createMaterialForBox(styleName, size);
+        return makeSampleLevelPart(name, geometry, material, position, options.rotation || [0, 0, 0], options);
+    };
+
+    const createCylinderNode = (name, radius, height, position, styleName = 'light', options = {}) => {
+        const geometry = new THREE.CylinderGeometry(radius, radius, height, 32, Math.max(1, Math.round(height * 2)), false);
+        const material = createMaterialForCylinder(styleName, radius, height);
+        return makeSampleLevelPart(name, geometry, material, position, options.rotation || [0, 0, 0], options);
+    };
+
+    const addNode = (node) => {
+        root.add(node);
+        return node;
+    };
+
+    const addBox = (name, size, position, styleName = 'light', options = {}) => addNode(createBoxNode(name, size, position, styleName, options));
+    const addCylinder = (name, radius, height, position, styleName = 'light', options = {}) => addNode(createCylinderNode(name, radius, height, position, styleName, options));
+
+    const addRoundedBar = (name, length, height, width, position, styleName = 'dark', axis = 'x') => {
+        const group = new THREE.Group();
+        group.name = name;
+        group.position.fromArray(position);
+        const centerLength = Math.max(0.5, length - width);
+        if (axis === 'x') {
+            group.add(createBoxNode(`${name}_center`, [centerLength, height, width], [0, height * 0.5, 0], styleName));
+            group.add(createCylinderNode(`${name}_leftCap`, width * 0.5, height, [-centerLength * 0.5, height * 0.5, 0], styleName));
+            group.add(createCylinderNode(`${name}_rightCap`, width * 0.5, height, [centerLength * 0.5, height * 0.5, 0], styleName));
+        } else {
+            group.add(createBoxNode(`${name}_center`, [width, height, centerLength], [0, height * 0.5, 0], styleName));
+            group.add(createCylinderNode(`${name}_frontCap`, width * 0.5, height, [0, height * 0.5, -centerLength * 0.5], styleName));
+            group.add(createCylinderNode(`${name}_backCap`, width * 0.5, height, [0, height * 0.5, centerLength * 0.5], styleName));
+        }
+        root.add(group);
+        return group;
+    };
+
+    addBox('Graybox_Floor', [36, 0.2, 22], [0, 0.1, 0], 'light');
+    addBox('Graybox_LeftWall', [0.45, 5.4, 22], [-17.78, 2.7, 0], 'dark');
+    addBox('Graybox_RightWall', [0.45, 5.4, 22], [17.78, 2.7, 0], 'dark');
+    addBox('Graybox_BackWall', [36, 5.4, 0.45], [0, 2.7, -10.78], 'light');
+    addBox('Graybox_FrontCurb', [36, 0.65, 0.6], [0, 0.325, 10.8], 'light');
+    addBox('Graybox_BackRightPanel', [10.5, 5.2, 0.18], [11.6, 2.6, -10.56], 'dark', { castShadow: false });
+    addBox('Graybox_RightRearPanel', [0.18, 5.2, 8.4], [17.62, 2.6, -6.35], 'dark', { castShadow: false });
+
+    addBox('Graybox_LeftBlock', [5.8, 2.6, 4.4], [-8.6, 1.3, -0.9], 'light');
+    addBox('Graybox_LeftRamp', [4.2, 0.34, 6.0], [-12.4, 1.06, -2.7], 'dark', { rotation: [0.28, 0, 0] });
+    addRoundedBar('Graybox_CenterBackBar', 11.0, 2.7, 2.2, [2.0, 0, -2.8], 'dark', 'x');
+    addRoundedBar('Graybox_CenterFrontBar', 7.2, 2.25, 2.05, [2.0, 0, 3.0], 'dark', 'z');
+    addRoundedBar('Graybox_RightFrontBar', 10.0, 2.5, 2.35, [10.6, 0, 4.2], 'dark', 'x');
+    addCylinder('Graybox_RightCylinder', 1.8, 2.2, [9.4, 1.1, -2.7], 'light');
+    addBox('Graybox_RightRearShelf', [6.6, 0.8, 2.2], [10.9, 0.4, -6.1], 'dark');
+
+    addBox('Graybox_BlueCube_A', [1.7, 1.7, 1.7], [-13.7, 0.85, 4.3], 'blue');
+    addBox('Graybox_BlueCube_B', [1.7, 1.7, 1.7], [-12.0, 0.85, 4.3], 'blue');
+    addBox('Graybox_BlueCube_C', [1.7, 1.7, 1.7], [-13.0, 2.55, 4.3], 'blue');
+    addBox('Graybox_BlueCube_D', [1.45, 1.45, 1.45], [-3.8, 0.73, -0.4], 'blue');
+    addBox('Graybox_BlueCube_E', [1.45, 1.45, 1.45], [7.0, 0.73, -2.7], 'blue');
+    addBox('Graybox_BlueCube_F', [1.45, 1.45, 1.45], [8.45, 0.73, -2.7], 'blue');
+    addBox('Graybox_BlueCube_G', [1.45, 1.45, 1.45], [7.72, 2.18, -2.7], 'blue');
+    addBox('Graybox_BlueCube_H', [1.45, 1.45, 1.45], [13.1, 0.73, 0.0], 'blue');
+    addBox('Graybox_BluePad_A', [1.55, 0.32, 0.82], [4.9, 2.86, -2.8], 'blue');
+    addBox('Graybox_BluePad_B', [1.55, 0.32, 0.82], [11.7, 2.66, 4.2], 'blue');
+    addBox('Graybox_BlueMarker_A', [1.2, 0.04, 0.78], [-8.2, 0.13, 9.1], 'blue', { castShadow: false, receiveShadow: false, rotation: [0, -0.3, 0] });
+    addBox('Graybox_BlueMarker_B', [1.2, 0.04, 0.78], [0.0, 0.13, 8.6], 'blue', { castShadow: false, receiveShadow: false, rotation: [0, 0.2, 0] });
 
     return root;
 }
@@ -6428,12 +6560,32 @@ function createAnimatedSampleModel() {
 function loadSample() {
     clearCurrentMesh();
 
-    currentMesh = createAnimatedSampleModel();
+    currentMesh = createFpsStarterLevel();
     scene.add(currentMesh);
-    normalizeCurrentMesh();
-    playObjectAnimation(currentMesh);
+    if (!currentMesh.userData?.skipNormalization) {
+        normalizeCurrentMesh();
+    }
     refreshGameplayWorld();
-    updateLoadedAssetStats('PolyFlow_Animated_Test_Rig.glb', 5400000, currentMesh);
+    const preferredSpawn = currentMesh.userData?.preferredSpawn;
+    if (preferredSpawn?.position?.length === 3) {
+        tempVectorA.set(preferredSpawn.position[0], preferredSpawn.position[1], preferredSpawn.position[2]);
+        currentMesh.localToWorld(tempVectorA);
+        gameplay.spawnPoint.copy(tempVectorA);
+        if (Number.isFinite(preferredSpawn.yaw)) gameplay.spawnYaw = preferredSpawn.yaw;
+        if (Number.isFinite(preferredSpawn.pitch)) gameplay.spawnPitch = preferredSpawn.pitch;
+    }
+    const preferredShowcase = currentMesh.userData?.preferredShowcase;
+    if (!gameplay.active && preferredShowcase?.position?.length === 3 && preferredShowcase?.target?.length === 3) {
+        tempVectorA.set(preferredShowcase.position[0], preferredShowcase.position[1], preferredShowcase.position[2]);
+        tempVectorB.set(preferredShowcase.target[0], preferredShowcase.target[1], preferredShowcase.target[2]);
+        currentMesh.localToWorld(tempVectorA);
+        currentMesh.localToWorld(tempVectorB);
+        camera.position.copy(tempVectorA);
+        syncShowcaseAnglesFromTarget(tempVectorB);
+        applyShowcaseCameraRotation();
+        showcase.velocity.set(0, 0, 0);
+    }
+    updateLoadedAssetStats('PolyFlow_FPS_Starter_Level.scene', 420000, currentMesh);
     enableOptimizationPipeline();
 }
 
@@ -6472,6 +6624,34 @@ function clearCurrentMesh() {
 function normalizeCurrentMesh(targetDimension = MODEL_TARGET_MAX_DIMENSION) {
     if (!currentMesh) return;
     normalizeObjectToDimension(currentMesh, targetDimension, true);
+}
+
+function syncSampleWorldPresentation() {
+    const hideTerrain = !!currentMesh?.userData?.hideTerrainPresentation;
+
+    if (hideTerrain) {
+        if (!samplePresentationState.overridden) {
+            samplePresentationState.overridden = true;
+            samplePresentationState.terrainVisible = worldFloor?.visible ?? true;
+            samplePresentationState.grassVisible = grassField?.mesh?.visible ?? true;
+            samplePresentationState.waterVisible = water?.mesh?.visible ?? true;
+        }
+
+        if (worldFloor) worldFloor.visible = false;
+        if (water?.mesh) water.mesh.visible = false;
+        if (grassField?.setVisible) grassField.setVisible(false);
+        else if (grassField?.mesh) grassField.mesh.visible = false;
+        return;
+    }
+
+    if (!samplePresentationState.overridden) return;
+
+    if (worldFloor) worldFloor.visible = samplePresentationState.terrainVisible;
+    if (water?.mesh) water.mesh.visible = samplePresentationState.waterVisible;
+    if (grassField?.setVisible) grassField.setVisible(samplePresentationState.grassVisible);
+    else if (grassField?.mesh) grassField.mesh.visible = samplePresentationState.grassVisible;
+
+    samplePresentationState.overridden = false;
 }
 
 function refreshGameplayWorld() {
@@ -7372,7 +7552,8 @@ function forceExitGameplayForWorldLoad() {
 }
 
 function updateWorldPresentation() {
-    if (pedestal) pedestal.visible = !gameplay.active;
+    syncSampleWorldPresentation();
+    if (pedestal) pedestal.visible = !gameplay.active && !currentMesh?.userData?.hideTerrainPresentation;
     document.body.classList.toggle('play-ready', gameplay.canPlay);
     const wasActive = document.body.classList.contains('play-active');
     document.body.classList.toggle('play-active', gameplay.active);
