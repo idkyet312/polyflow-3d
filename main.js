@@ -376,7 +376,7 @@ function createExampleWidgets() {
         fontSize: 20,
         color: '#ffff00',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
-        position: { x: 0.05, y: 0.9 }, // Top-left corner
+        position: { x: 0.05, y: 0.9 },
         visible: true,
     });
     scoreWidget.AddToViewport(20);
@@ -387,30 +387,27 @@ function createExampleWidgets() {
         height: 20,
         fillColor: '#00ff00',
         backgroundColor: '#333333',
-        position: { x: 0.05, y: 0.8 }, // Below score
+        position: { x: 0.05, y: 0.8 },
         visible: true,
     });
-    healthBar.AddToViewport(19);
+    healthBar.AddToViewport(20);
 
     const speedWidget = hud.CreateWidget(UTextWidget, {
         Text: 'Speed: 0 km/h',
         fontSize: 16,
         color: '#00ffff',
         backgroundColor: 'rgba(0, 0, 0, 0.7)',
-        position: { x: 0.05, y: 0.7 }, // Below health bar
+        position: { x: 0.05, y: 0.7 },
         visible: true,
     });
-    speedWidget.AddToViewport(18);
+    speedWidget.AddToViewport(20);
 
-    // Store widget handles globally for easy access
     window.exampleWidgets = {
         score: scoreWidget,
         health: healthBar,
         speed: speedWidget,
     };
     window.gameHud = hud;
-
-    // Initialize score system
     window.gameScore = 0;
 
     if (window.DEBUG_WIDGET_API) {
@@ -421,6 +418,32 @@ function createExampleWidgets() {
         console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
         console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
     }
+}
+
+const LIGHT_ACTOR_KINDS = new Set(['pointLight', 'spotLight']);
+
+function isLightActorKind(kind = '') {
+    return LIGHT_ACTOR_KINDS.has(kind);
+}
+
+function getActorKindLabel(kind = 'sphere') {
+    if (kind === 'vehicle') return 'Vehicle Actor';
+    if (kind === 'imported') return 'Imported Actor';
+    if (kind === 'sphere') return 'Sphere Actor';
+    if (kind === 'cube') return 'Cube Actor';
+    if (kind === 'capsule') return 'Simple AI Actor';
+    if (kind === 'ddgiVolume') return 'DDGI Volume';
+    if (kind === 'pointLight') return 'Point Light Actor';
+    if (kind === 'spotLight') return 'Spot Light Actor';
+    return 'Actor';
+}
+
+function getActorKindDefaultScale(kind = 'sphere') {
+    if (kind === 'cube') return '2.0';
+    if (kind === 'ddgiVolume') return '16.0';
+    if (kind === 'pointLight') return '8.0';
+    if (kind === 'spotLight') return '10.0';
+    return '0.5';
 }
 
 // --- Configuration ---
@@ -476,6 +499,7 @@ let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
 let worldEnvUiRefs = null;
 let ddgiTestVolumeActor = null;
 let ddgiTestRigActor = null;
+let sampleDDGIVolumeActor = null;
 let cornellRayDebug = null;
 let cornellPanelLight = null;
 const cornellRayDebugOrigin = new THREE.Vector3();
@@ -3163,6 +3187,8 @@ function syncActorEditorUi() {
     const kind = actorKindSelect.value || 'sphere';
     const isImported = kind === 'imported';
     const isVehicle = kind === 'vehicle';
+    const isLight = isLightActorKind(kind);
+    const hadCollisionDisabled = actorComponentCollisionInput.disabled;
 
     actorImportedTemplateSelect.disabled = !isImported;
     if (actorVehicleBodyTemplateSelect) {
@@ -3171,27 +3197,32 @@ function syncActorEditorUi() {
     if (actorVehicleWheelTemplateSelect) {
         actorVehicleWheelTemplateSelect.disabled = !isVehicle;
     }
-    actorComponentCollisionInput.disabled = isVehicle;
-    actorComponentPhysicsInput.disabled = isVehicle || !actorComponentCollisionInput.checked;
+    actorComponentCollisionInput.disabled = isVehicle || isLight;
     if (isVehicle) {
+        actorComponentCollisionInput.checked = true;
+        actorComponentPhysicsInput.checked = true;
+    } else if (isLight) {
+        actorComponentCollisionInput.checked = false;
+        actorComponentPhysicsInput.checked = false;
+    } else if (hadCollisionDisabled && !actorComponentCollisionInput.checked) {
         actorComponentCollisionInput.checked = true;
         actorComponentPhysicsInput.checked = true;
     } else if (!actorComponentCollisionInput.checked) {
         actorComponentPhysicsInput.checked = false;
     }
+    actorComponentPhysicsInput.disabled = isVehicle || isLight || !actorComponentCollisionInput.checked;
 
-    const typeLabel = kind === 'vehicle'
-        ? 'Vehicle Actor'
-        : kind === 'imported'
-            ? 'Imported Actor'
-            : kind === 'sphere'
-                ? 'Sphere Actor'
-                : 'Cube Actor';
+    const typeLabel = getActorKindLabel(kind);
 
     actorEditorSummary.textContent = `Type: ${typeLabel}`;
 
     if (isImported && !importedPropState.templates.length) {
         actorEditorStatus.textContent = 'Import a prop source first, then create an imported actor instance from it.';
+        return;
+    }
+
+    if (isLight) {
+        actorEditorStatus.textContent = `${typeLabel} will spawn with a visible helper and a live scene light. DDGI can collect it for indirect bounce when enabled.`;
         return;
     }
 
@@ -3221,7 +3252,7 @@ function openActorEditor({ kind = 'cube', templateId = '', label = '', vehicleBo
         actorLabelInput.value = label;
     }
     if (actorScaleInput) {
-        actorScaleInput.value = kind === 'cube' ? '2.0' : '0.5';
+        actorScaleInput.value = getActorKindDefaultScale(kind);
     }
     const actorColorEnabledReset = document.getElementById('actor-color-enabled');
     const actorColorInputReset = document.getElementById('actor-color-input');
@@ -3287,6 +3318,217 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     // gameplay-mode lifecycle would otherwise wait for play).
     try { ddgi.beginPlay(); } catch (e) { console.warn('[DDGI] beginPlay failed', e); }
 
+    return actor;
+}
+
+function spawnLightActor(kind, { userData = null, position = null, scale = 8, includeScripts = true } = {}) {
+    if (!scene || !camera) return null;
+
+    const camDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const spawnPos = position
+        ? position.clone()
+        : camera.position.clone().addScaledVector(camDir, 6).add(new THREE.Vector3(0, 0.6, 0));
+    const savedLight = userData?.light || {};
+    const radius = Number.isFinite(savedLight.radius) && savedLight.radius > 0
+        ? savedLight.radius
+        : (Number.isFinite(scale) && scale > 0 ? scale : 8);
+    const lightColor = new THREE.Color(savedLight.color || 0xfff1c2);
+    const intensity = Number.isFinite(savedLight.intensity) && savedLight.intensity > 0
+        ? savedLight.intensity
+        : Math.max(kind === 'spotLight' ? 4.0 : 2.0, radius * (kind === 'spotLight' ? 0.9 : 0.6));
+    const distance = Number.isFinite(savedLight.distance) && savedLight.distance > 0
+        ? savedLight.distance
+        : Math.max(kind === 'spotLight' ? 16 : 12, radius * (kind === 'spotLight' ? 6.0 : 5.0));
+    const decay = Number.isFinite(savedLight.decay) && savedLight.decay > 0 ? savedLight.decay : 2.0;
+    const angle = Number.isFinite(savedLight.angle) && savedLight.angle > 0 ? savedLight.angle : Math.PI / 6;
+    const penumbra = Number.isFinite(savedLight.penumbra) ? savedLight.penumbra : 0.35;
+
+    const group = new THREE.Group();
+    group.position.copy(spawnPos);
+
+    const helperMaterial = new THREE.MeshStandardMaterial({
+        color: lightColor.clone(),
+        emissive: lightColor.clone().multiplyScalar(0.35),
+        emissiveIntensity: 1.0,
+        roughness: 0.26,
+        metalness: 0.06,
+    });
+
+    const markHelperMesh = (mesh) => {
+        if (!mesh) return mesh;
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.userData.ddgiSkipCapture = true;
+        mesh.userData.ddgiSkipReceive = true;
+        mesh.userData.ignoreForcedSceneShadows = true;
+        return mesh;
+    };
+
+    let light = null;
+    if (kind === 'pointLight') {
+        const helper = markHelperMesh(new THREE.Mesh(
+            new THREE.SphereGeometry(Math.max(0.18, radius * 0.08), 20, 16),
+            helperMaterial,
+        ));
+        helper.name = 'point-light-helper';
+        group.add(helper);
+
+        light = new THREE.PointLight(lightColor, intensity, distance, decay);
+        light.name = 'point-light-source';
+        light.castShadow = true;
+        light.shadow.mapSize.set(512, 512);
+        light.shadow.bias = 0.0005;
+        if ('normalBias' in light.shadow) light.shadow.normalBias = 0.02;
+        group.add(light);
+    } else if (kind === 'spotLight') {
+        const housing = markHelperMesh(new THREE.Mesh(
+            new THREE.CylinderGeometry(0.14, 0.22, 0.38, 18),
+            helperMaterial,
+        ));
+        housing.name = 'spot-light-housing';
+        housing.rotation.x = Math.PI * 0.5;
+        group.add(housing);
+
+        const cone = markHelperMesh(new THREE.Mesh(
+            new THREE.ConeGeometry(Math.max(0.18, radius * 0.06), Math.max(0.55, radius * 0.18), 20, 1, true),
+            helperMaterial.clone(),
+        ));
+        cone.name = 'spot-light-helper';
+        cone.rotation.x = -Math.PI * 0.5;
+        cone.position.z = -Math.max(0.4, radius * 0.12);
+        group.add(cone);
+
+        light = new THREE.SpotLight(lightColor, intensity, distance, angle, penumbra, decay);
+        light.name = 'spot-light-source';
+        light.castShadow = true;
+        light.shadow.mapSize.set(1024, 1024);
+        light.shadow.bias = 0.0002;
+        if ('normalBias' in light.shadow) light.shadow.normalBias = 0.02;
+        const target = new THREE.Object3D();
+        target.name = 'spot-light-target';
+        target.position.set(0, 0, -Math.max(4, radius * 2));
+        group.add(target);
+        light.target = target;
+        group.add(light);
+    }
+
+    if (!light) {
+        helperMaterial.dispose();
+        return null;
+    }
+
+    light.userData.ddgiActorLight = true;
+    const mergedUserData = {
+        ...(userData || {}),
+        light: {
+            ...(savedLight || {}),
+            kind,
+            color: `#${lightColor.getHexString()}`,
+            radius,
+            intensity,
+            distance,
+            decay,
+            angle,
+            penumbra,
+        },
+    };
+
+    const actor = createDynamicPropActor({
+        body: null,
+        mesh: group,
+        kind,
+        userData: mergedUserData,
+        includeScripts,
+    });
+    setActorComponentFlags(actor, {
+        collision: false,
+        physics: false,
+        scripts: includeScripts,
+    });
+    group.traverse((child) => {
+        if (!child.isMesh) return;
+        child.castShadow = false;
+        child.receiveShadow = false;
+        child.userData.ddgiSkipCapture = true;
+        child.userData.ddgiSkipReceive = true;
+        child.userData.ignoreForcedSceneShadows = true;
+    });
+    light.target?.updateMatrixWorld?.(true);
+    invalidateDDGI(`${kind} spawned`);
+    return actor;
+}
+
+function destroyDDGIVolumeActor(actor) {
+    if (!actor) return;
+    const ddgi = getActorDDGIVolumeComponent(actor);
+    if (ddgi) {
+        try {
+            ddgi.endPlay?.();
+        } catch (e) {
+            console.warn('[DDGI] volume endPlay failed', e);
+        }
+    }
+    sceneSystem?.removeActor?.(actor);
+    actor.mesh?.geometry?.dispose?.();
+    actor.mesh?.material?.dispose?.();
+}
+
+function ensureSampleDDGIVolume(root = currentMesh) {
+    if (!scene || !root) return null;
+    if (sampleDDGIVolumeActor?.mesh?.parent !== scene) {
+        sampleDDGIVolumeActor = null;
+    }
+    if (sampleDDGIVolumeActor) return sampleDDGIVolumeActor;
+
+    const bounds = new THREE.Box3().setFromObject(root);
+    if (bounds.isEmpty()) return null;
+    bounds.expandByScalar(1.5);
+
+    const center = bounds.getCenter(new THREE.Vector3());
+    const size = bounds.getSize(new THREE.Vector3());
+    const gridDims = {
+        x: THREE.MathUtils.clamp(Math.round(size.x / 4), 6, 12),
+        y: THREE.MathUtils.clamp(Math.round(size.y / 2), 3, 6),
+        z: THREE.MathUtils.clamp(Math.round(size.z / 4), 4, 10),
+    };
+    const cellSize = Math.max(
+        size.x / gridDims.x,
+        size.y / gridDims.y,
+        size.z / gridDims.z,
+        0.4,
+    );
+
+    const actor = spawnDDGIVolumeActor({
+        userData: { internalSample: true, label: 'Debug Map DDGI Volume' },
+        position: center,
+        size,
+        options: {
+            gridDims,
+            cellSize,
+            intensity: 3.0,
+            hysteresis: 0.94,
+            normalBias: 0.12,
+            probesPerFrame: Math.max(4, WORLD_ENV_DEFAULTS.ddgi.probesPerFrame | 0),
+        },
+    });
+    actor.mesh.name = 'sample-ddgi-volume';
+    if (actor.mesh.material) {
+        actor.mesh.material.opacity = 0.0;
+        actor.mesh.material.transparent = true;
+        actor.mesh.material.needsUpdate = true;
+    }
+
+    const ddgi = getActorDDGIVolumeComponent(actor);
+    if (ddgi) {
+        ddgi.containsPoint = (() => {
+            const expanded = bounds.clone().expandByScalar(10);
+            return (point) => expanded.containsPoint(point);
+        })();
+        syncDDGIVolumeComponentToActorBounds(ddgi);
+    }
+
+    sampleDDGIVolumeActor = actor;
+    invalidateDDGI('debug map ddgi volume loaded', 6);
     return actor;
 }
 
@@ -3655,7 +3897,8 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
     const simulatePhysics = kind === 'vehicle' ? true : !!actorComponentPhysicsInput?.checked;
     const includeScripts = !!actorComponentScriptsInput?.checked;
     const parsedScale = Number.parseFloat(actorScaleInput?.value ?? '0.5');
-    const scale = Number.isFinite(parsedScale) && parsedScale > 0 ? parsedScale : (kind === 'cube' ? 0.3 : 0.5);
+    const scaleDefault = Number.parseFloat(getActorKindDefaultScale(kind));
+    const scale = Number.isFinite(parsedScale) && parsedScale > 0 ? parsedScale : scaleDefault;
     const displayName = actorLabelInput?.value?.trim() || '';
     const userData = displayName ? { label: displayName } : undefined;
     let actor = null;
@@ -3666,6 +3909,8 @@ function spawnActorFromEditor({ openScriptEditor = false } = {}) {
         actor = spawnDrivableCar({ includeScripts, userData, bodyTemplateId, wheelTemplateId });
     } else if (kind === 'ddgiVolume') {
         actor = spawnDDGIVolumeActor({ userData });
+    } else if (isLightActorKind(kind)) {
+        actor = spawnLightActor(kind, { userData, scale, includeScripts });
     } else if (kind === 'imported') {
         const templateId = actorImportedTemplateSelect?.value || '';
         if (!templateId) {
@@ -6585,6 +6830,7 @@ function loadSample() {
         applyShowcaseCameraRotation();
         showcase.velocity.set(0, 0, 0);
     }
+    ensureSampleDDGIVolume(currentMesh);
     updateLoadedAssetStats('PolyFlow_FPS_Starter_Level.scene', 420000, currentMesh);
     enableOptimizationPipeline();
 }
@@ -6600,6 +6846,11 @@ function onWindowResize() {
 function clearCurrentMesh() {
     exitGameplay();
     clearDynamicPhysicsProps();
+
+    if (sampleDDGIVolumeActor) {
+        destroyDDGIVolumeActor(sampleDDGIVolumeActor);
+        sampleDDGIVolumeActor = null;
+    }
 
     if (physics.modelBody) {
         destroyPhysicsBody(physics.modelBody);
@@ -9220,7 +9471,7 @@ function wireExtractedModules() {
         serializeObjectMaterialState, serializeObjectMaterialOverrides,
         applyObjectMaterialState, applyObjectMaterialOverrides,
         serializeImportedPropTemplate, registerImportedPropTemplateFromSerializedData,
-        spawnDrivableCar, spawnImportedProp, spawnDDGIVolumeActor, spawnDynamicPrimitive,
+        spawnDrivableCar, spawnImportedProp, spawnDDGIVolumeActor, spawnDynamicPrimitive, spawnLightActor,
         syncRuntimePropIdCounter, rebuildActorPhysics, syncPropScriptState,
         destroyDynamicPhysicsProp, getDynamicPropDisplayName, saveObjectScriptDrafts,
         refreshSceneUI, selectShowcaseActor, ensureVehicleVisualState,

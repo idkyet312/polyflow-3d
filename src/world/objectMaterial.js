@@ -33,13 +33,26 @@ export function setActorColor(actor, hexColor) {
     if (!mesh) return;
     const color = new THREE.Color(hexColor);
     mesh.traverse((child) => {
+        if (child.isLight && child.color) {
+            child.color.copy(color);
+        }
         if (child.isMesh && child.material) {
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const mat of mats) {
                 if (mat.color) mat.color.copy(color);
+                if (mat.emissive) mat.emissive.copy(color).multiplyScalar(0.35);
             }
         }
     });
+    if (actor?.userData?.light) {
+        actor.userData = {
+            ...(actor.userData || {}),
+            light: {
+                ...(actor.userData.light || {}),
+                color: `#${color.getHexString()}`,
+            },
+        };
+    }
     // Mark this actor as having user-authored material edits so .actor save
     // includes the per-mesh overrides instead of taking the fast path that
     // relies on template defaults.

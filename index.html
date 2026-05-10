@@ -148,6 +148,8 @@
                                     <select id="actor-kind-select" class="viewer-text-input">
                                         <option value="sphere">Sphere Actor</option>
                                         <option value="cube">Cube Actor</option>
+                                        <option value="pointLight">Point Light Actor</option>
+                                        <option value="spotLight">Spot Light Actor</option>
                                         <option value="vehicle">Vehicle Actor</option>
                                         <option value="imported">Imported Actor</option>
                                         <option value="capsule">Simple AI Actor</option>
@@ -162,7 +164,7 @@
                                 <label class="viewer-code-field" for="actor-scale-input">
                                     <span class="viewer-code-field-label">Scale / Radius</span>
                                     <input id="actor-scale-input" class="viewer-text-input" type="number" min="0.1"
-                                        max="6" step="0.1" value="0.5">
+                                        max="40" step="0.1" value="0.5">
                                 </label>
                                 <label class="viewer-code-field" for="actor-color-input">
                                     <span class="viewer-code-field-label">

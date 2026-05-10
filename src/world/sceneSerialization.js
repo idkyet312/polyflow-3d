@@ -11,7 +11,7 @@ let getActorBody, getActorRenderObject, getActorScriptState;
 let serializeObjectMaterialState, serializeObjectMaterialOverrides;
 let applyObjectMaterialState, applyObjectMaterialOverrides;
 let serializeImportedPropTemplate, registerImportedPropTemplateFromSerializedData;
-let spawnDrivableCar, spawnImportedProp, spawnDDGIVolumeActor, spawnDynamicPrimitive;
+let spawnDrivableCar, spawnImportedProp, spawnDDGIVolumeActor, spawnDynamicPrimitive, spawnLightActor;
 let syncRuntimePropIdCounter, rebuildActorPhysics, syncPropScriptState;
 let destroyDynamicPhysicsProp, getDynamicPropDisplayName;
 let saveObjectScriptDrafts, refreshSceneUI, selectShowcaseActor;
@@ -43,6 +43,7 @@ export function setupSceneSerialization(deps) {
         spawnImportedProp,
         spawnDDGIVolumeActor,
         spawnDynamicPrimitive,
+        spawnLightActor,
         syncRuntimePropIdCounter,
         rebuildActorPhysics,
         syncPropScriptState,
@@ -301,6 +302,16 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
             userData: actorData.userData,
             includeCollisionBody: componentFlags.collision,
             simulatePhysics: componentFlags.physics,
+        });
+    } else if (actorData.kind === 'pointLight' || actorData.kind === 'spotLight') {
+        const savedPos = spawnInFrontOfPlayer
+            ? computeCameraFrontSpawn(6, 0.6)
+            : new THREE.Vector3().fromArray(actorData.transform.position);
+        actor = spawnLightActor(actorData.kind, {
+            includeScripts: componentFlags.scripts,
+            userData: actorData.userData || null,
+            position: savedPos,
+            scale: actorData.userData?.light?.radius ?? 8,
         });
     } else if (actorData.kind === 'ddgiVolume') {
         const savedPos = spawnInFrontOfPlayer

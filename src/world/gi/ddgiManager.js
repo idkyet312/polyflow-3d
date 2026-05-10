@@ -297,32 +297,65 @@ export function createDDGIManager() {
     }
 
     function collectLights() {
-        const lights = [];
-        const panel = state.scene?.getObjectByName?.('cornell-panel-light');
-        if (panel?.isPointLight && panel.visible && panel.intensity > 0) {
-            panel.getWorldPosition(_tmpLightPos);
-            lights.push({
-                type: 'point',
-                posI: new THREE.Vector4(_tmpLightPos.x, _tmpLightPos.y, _tmpLightPos.z, panel.intensity),
-                color: panel.color.clone(),
-            });
-        }
+        const directionalLights = [];
+        const localLights = [];
+        const seen = new Set();
 
-        const sun = state.getDirectionalLight?.();
-        if (sun?.isDirectionalLight && sun.visible && sun.intensity > 0) {
-            sun.updateWorldMatrix?.(true, false);
-            sun.target?.updateWorldMatrix?.(true, false);
-            sun.getWorldPosition(_tmpLightPos);
-            sun.target?.getWorldPosition(_tmpLightTarget);
-            _tmpDir.copy(_tmpLightPos).sub(_tmpLightTarget).normalize();
-            lights.push({
+        const pushDirectionalLight = (light) => {
+            if (!light?.isDirectionalLight || seen.has(light.uuid) || !light.visible || light.intensity <= 0) return;
+            seen.add(light.uuid);
+            light.updateWorldMatrix?.(true, false);
+            light.target?.updateWorldMatrix?.(true, false);
+            light.getWorldPosition(_tmpLightPos);
+            if (light.target?.getWorldPosition) {
+                light.target.getWorldPosition(_tmpLightTarget);
+                _tmpDir.copy(_tmpLightPos).sub(_tmpLightTarget);
+            } else {
+                light.getWorldDirection?.(_tmpDir);
+                _tmpDir.multiplyScalar(-1);
+            }
+            if (_tmpDir.lengthSq() < 1e-6) {
+                _tmpDir.set(0, -1, 0);
+            } else {
+                _tmpDir.normalize();
+            }
+            directionalLights.push({
                 type: 'directional',
-                posI: new THREE.Vector4(0, 0, 0, sun.intensity),
-                color: sun.color.clone(),
+                posI: new THREE.Vector4(0, 0, 0, light.intensity),
+                color: light.color.clone(),
                 dir: _tmpDir.clone(),
             });
+        };
+
+        const pushPointLikeLight = (light) => {
+            if ((!light?.isPointLight && !light?.isSpotLight) || seen.has(light.uuid) || !light.visible || light.intensity <= 0) return;
+            seen.add(light.uuid);
+            light.updateWorldMatrix?.(true, false);
+            light.getWorldPosition(_tmpLightPos);
+            localLights.push({
+                type: 'point',
+                posI: new THREE.Vector4(_tmpLightPos.x, _tmpLightPos.y, _tmpLightPos.z, light.intensity),
+                color: light.color.clone(),
+            });
+        };
+
+        state.scene?.traverseVisible?.((obj) => {
+            if (!obj?.isLight) return;
+            if (obj.isAmbientLight || obj.isHemisphereLight || obj.isRectAreaLight) return;
+            if (obj.isDirectionalLight) {
+                pushDirectionalLight(obj);
+            } else if (obj.isPointLight || obj.isSpotLight) {
+                pushPointLikeLight(obj);
+            }
+        });
+
+        const sun = state.getDirectionalLight?.();
+        if (sun?.isDirectionalLight) {
+            pushDirectionalLight(sun);
         }
-        return lights;
+
+        localLights.sort((left, right) => (right.posI?.w ?? 0) - (left.posI?.w ?? 0));
+        return directionalLights.concat(localLights);
     }
 
     function rebuildBVHIfNeeded() {
