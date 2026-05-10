@@ -9,9 +9,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-2GyDwxhy.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-D-C_dBx0.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-D60nX-TY.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-BAUHLHbC.css">
 </head>
 
 <body>
@@ -27,13 +27,119 @@
 
         <div class="workspace">
             <aside id="scene-ui-panel" class="scene-ui-panel" aria-label="Scene Graph">
-                <div class="scene-ui-header">
-                    <div class="scene-ui-title">Scene Hierarchy</div>
-                    <div class="scene-ui-subtitle" id="scene-ui-count">0 Actors</div>
-                </div>
-                <div id="scene-ui-list" class="scene-ui-list">
-                    <!-- Actor items will be injected here -->
-                </div>
+                <section class="scene-side-card scene-side-card-fill">
+                    <div class="scene-ui-header">
+                        <div class="scene-ui-title">Scene Hierarchy</div>
+                        <div class="scene-ui-subtitle" id="scene-ui-count">0 Actors</div>
+                    </div>
+                    <div id="scene-ui-list" class="scene-ui-list">
+                        <!-- Actor items will be injected here -->
+                    </div>
+                </section>
+                <section id="scene-actor-details" class="scene-side-card scene-actor-details-card">
+                    <div class="scene-actor-details-head">
+                        <div class="scene-ui-title scene-actor-details-heading">Actor Details</div>
+                        <div class="scene-ui-subtitle scene-actor-details-meta" id="scene-actor-details-type">Select actor</div>
+                    </div>
+                    <div id="scene-actor-details-empty" class="scene-ui-subtitle scene-actor-details-empty">Select actor in scene or hierarchy.</div>
+                    <div id="scene-actor-details-body" class="scene-actor-details-body" hidden>
+                        <div id="scene-actor-details-name" class="scene-ui-item-name scene-actor-details-name"></div>
+                        <div class="viewer-menu-actions scene-actor-details-actions">
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-translate">Move</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-rotate">Rotate</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-scale">Scale</button>
+                        </div>
+                        <div class="viewer-menu-actions scene-actor-details-actions">
+                            <button class="btn viewer-menu-btn" id="scene-actor-space-local">Local</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-space-world">World</button>
+                        </div>
+                        <div class="scene-actor-transform-box">
+                            <div class="scene-actor-details-row">
+                                <span class="scene-actor-details-label">Loc</span>
+                                <input type="number" id="scene-actor-loc-x" class="ui-input" step="0.1">
+                                <input type="number" id="scene-actor-loc-y" class="ui-input" step="0.1">
+                                <input type="number" id="scene-actor-loc-z" class="ui-input" step="0.1">
+                            </div>
+                            <div class="scene-actor-details-row">
+                                <span class="scene-actor-details-label">Rot</span>
+                                <input type="number" id="scene-actor-rot-x" class="ui-input" step="5">
+                                <input type="number" id="scene-actor-rot-y" class="ui-input" step="5">
+                                <input type="number" id="scene-actor-rot-z" class="ui-input" step="5">
+                            </div>
+                            <div class="scene-actor-details-row">
+                                <span class="scene-actor-details-label">Scale</span>
+                                <input type="number" id="scene-actor-scl-x" class="ui-input" step="0.1" min="0.01">
+                                <input type="number" id="scene-actor-scl-y" class="ui-input" step="0.1" min="0.01">
+                                <input type="number" id="scene-actor-scl-z" class="ui-input" step="0.1" min="0.01">
+                            </div>
+                        </div>
+                        <div id="scene-actor-ddgi-section" class="scene-actor-ddgi-card" hidden>
+                            <div class="scene-ui-subtitle scene-actor-ddgi-title">DDGI Volume</div>
+                            <div class="scene-actor-ddgi-hint">Scale actor to resize coverage. Probe cell size updates from current volume size.</div>
+                            <div class="scene-actor-details-row scene-actor-details-row-wide">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Probe Dims</span>
+                                <input type="number" id="scene-actor-ddgi-dim-x" class="ui-input" min="2" step="1">
+                                <input type="number" id="scene-actor-ddgi-dim-y" class="ui-input" min="2" step="1">
+                                <input type="number" id="scene-actor-ddgi-dim-z" class="ui-input" min="2" step="1">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-wide">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Coverage</span>
+                                <input type="number" id="scene-actor-ddgi-size-x" class="ui-input" readonly>
+                                <input type="number" id="scene-actor-ddgi-size-y" class="ui-input" readonly>
+                                <input type="number" id="scene-actor-ddgi-size-z" class="ui-input" readonly>
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Total</span>
+                                <input type="number" id="scene-actor-ddgi-total" class="ui-input" readonly>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Cell Size</span>
+                                <input type="number" id="scene-actor-ddgi-cell" class="ui-input" readonly>
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Intensity</span>
+                                <input type="number" id="scene-actor-ddgi-intensity" class="ui-input" min="0" max="16" step="0.1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Hysteresis</span>
+                                <input type="number" id="scene-actor-ddgi-hysteresis" class="ui-input" min="0" max="0.999" step="0.01">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Normal Bias</span>
+                                <input type="number" id="scene-actor-ddgi-normal-bias" class="ui-input" min="0" max="2" step="0.01">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Bake N</span>
+                                <input type="number" id="scene-actor-ddgi-probes-per-frame" class="ui-input" min="1" max="120" step="1">
+                            </div>
+                        </div>
+                        <div id="scene-actor-light-section" class="scene-actor-light-card" hidden>
+                            <div class="scene-ui-subtitle scene-actor-light-title">Light</div>
+                            <div class="scene-actor-light-hint">Controls direct lighting and DDGI contribution for this light actor.</div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Color</span>
+                                <input type="color" id="scene-actor-light-color" class="ui-input scene-actor-light-color" value="#fff1c2">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Intensity</span>
+                                <input type="number" id="scene-actor-light-intensity" class="ui-input" min="0" max="100" step="0.1">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Range</span>
+                                <input type="number" id="scene-actor-light-distance" class="ui-input" min="0" max="500" step="0.1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Decay</span>
+                                <input type="number" id="scene-actor-light-decay" class="ui-input" min="0" max="8" step="0.1">
+                            </div>
+                            <div id="scene-actor-light-spot-row" class="scene-actor-details-row scene-actor-details-row-split" hidden>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Angle</span>
+                                <input type="number" id="scene-actor-light-angle" class="ui-input" min="1" max="89" step="1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Penumbra</span>
+                                <input type="number" id="scene-actor-light-penumbra" class="ui-input" min="0" max="1" step="0.01">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Shadow</span>
+                                <select id="scene-actor-light-shadow" class="ui-input">
+                                    <option value="on">On</option>
+                                    <option value="off">Off</option>
+                                </select>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Type</span>
+                                <input type="text" id="scene-actor-light-kind" class="ui-input" readonly>
+                            </div>
+                        </div>
+                    </div>
+                </section>
             </aside>
             <div id="canvas-container">
                 <div class="viewer-menu" aria-label="Viewer controls">
@@ -75,6 +181,8 @@
                                     <select id="actor-kind-select" class="viewer-text-input">
                                         <option value="sphere">Sphere Actor</option>
                                         <option value="cube">Cube Actor</option>
+                                        <option value="pointLight">Point Light Actor</option>
+                                        <option value="spotLight">Spot Light Actor</option>
                                         <option value="vehicle">Vehicle Actor</option>
                                         <option value="imported">Imported Actor</option>
                                         <option value="capsule">Simple AI Actor</option>
@@ -89,7 +197,7 @@
                                 <label class="viewer-code-field" for="actor-scale-input">
                                     <span class="viewer-code-field-label">Scale / Radius</span>
                                     <input id="actor-scale-input" class="viewer-text-input" type="number" min="0.1"
-                                        max="6" step="0.1" value="0.5">
+                                        max="40" step="0.1" value="0.5">
                                 </label>
                                 <label class="viewer-code-field" for="actor-color-input">
                                     <span class="viewer-code-field-label">
@@ -332,12 +440,34 @@
                                 Cube</button>
                             <button class="btn viewer-menu-btn" id="btn-add-comp-sphere" style="padding: 6px;">Add
                                 Sphere</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-collision-box"
+                                style="padding: 6px;">Add Collision Box</button>
                             <button class="btn viewer-menu-btn" id="btn-add-comp-light" style="padding: 6px;">Add Point
                                 Light</button>
                             <button class="btn viewer-menu-btn" id="btn-add-comp-spot-light" style="padding: 6px;">Add Spot
                                 Light</button>
                             <button class="btn viewer-menu-btn" id="btn-delete-comp"
                                 style="padding: 6px; border-color: rgba(255,50,50,0.3);">Delete Selected</button>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-top: 12px; margin-bottom: 4px;">Physics:</div>
+                        <div class="bp-material-grid" style="margin-bottom: 12px;">
+                            <label class="bp-material-row" for="bp-physics-mass">
+                                <span class="bp-material-label">Mass</span>
+                                <input type="number" id="bp-physics-mass" class="viewer-text-input bp-material-number" min="0.01" max="100000" step="0.5" value="12">
+                                <span></span>
+                            </label>
+                            <label class="bp-material-row" for="bp-physics-friction">
+                                <span class="bp-material-label">Friction</span>
+                                <input type="number" id="bp-physics-friction" class="viewer-text-input bp-material-number" min="0" max="2" step="0.05" value="0.5">
+                                <span></span>
+                            </label>
+                            <label class="bp-material-row" for="bp-physics-restitution">
+                                <span class="bp-material-label">Bounce</span>
+                                <input type="number" id="bp-physics-restitution" class="viewer-text-input bp-material-number" min="0" max="1" step="0.05" value="0.3">
+                                <span></span>
+                            </label>
+                            <button class="btn btn-primary viewer-menu-btn" id="btn-bp-apply-physics" style="padding: 6px;">Apply Physics</button>
                         </div>
 
                         <div class="viewer-inline-note" style="margin-top: 12px; margin-bottom: 4px;">Actor File:</div>
@@ -387,6 +517,56 @@
                                 <button class="btn viewer-menu-btn" id="terrain-load-image">⬆ Load Image…</button>
                                 <input type="file" id="terrain-image-input" accept="image/*" style="display:none;">
                             </div>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Sculpt</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="terrain-sculpt-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="terrain-sculpt-on">On</button>
+                                    </div>
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Tool</div>
+                                    <select id="terrain-sculpt-tool" class="viewer-text-input">
+                                        <option value="raise">Raise / Lower</option>
+                                        <option value="smooth">Smooth</option>
+                                        <option value="flatten">Flatten</option>
+                                        <option value="paint">Paint Texture</option>
+                                        <option value="foliage">Paint Foliage</option>
+                                        <option value="erase-foliage">Erase Foliage</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Brush Radius</div>
+                                        <input id="terrain-sculpt-radius" type="range" min="1" max="18" step="0.5" value="5">
+                                        <div class="viewer-slider-value" id="terrain-sculpt-radius-value">5.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Strength</div>
+                                        <input id="terrain-sculpt-strength" type="range" min="0.01" max="0.8" step="0.01" value="0.18">
+                                        <div class="viewer-slider-value" id="terrain-sculpt-strength-value">0.18</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Flatten Height</div>
+                                        <input id="terrain-flatten-height" type="range" min="-3" max="3" step="0.1" value="0">
+                                        <div class="viewer-slider-value" id="terrain-flatten-height-value">0.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Paint Color</div>
+                                        <input id="terrain-paint-color" type="color" value="#5f8f35" class="viewer-text-input" style="height:32px; padding:2px;">
+                                    </div>
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Foliage Type</div>
+                                    <select id="terrain-foliage-type" class="viewer-text-input">
+                                        <option value="grass">Grass</option>
+                                        <option value="tree">Basic Tree</option>
+                                        <option value="bush">Bush</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Foliage Density</div>
+                                        <input id="terrain-foliage-density" type="range" min="5" max="300" step="5" value="80">
+                                        <div class="viewer-slider-value" id="terrain-foliage-density-value">80</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Left drag paints. Shift reverses raise or erases foliage.</div>
+                                </div>
+                            </details>
 
                             <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Grass</summary>
@@ -444,8 +624,9 @@
                                 <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-master-on">All On</button>
                                 <button class="btn viewer-toggle-btn" id="we-master-off">All Off</button>
                                 <button class="btn viewer-toggle-btn" id="we-master-perf">Performance</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-cornell">Cornell Test</button>
                             </div>
-                            <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off DDGI / Fog / Bloom in one click.</div>
+                            <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off SSGI / Fog / Bloom in one click.</div>
 
                             <details class="viewer-menu-section" open>
                                 <summary class="viewer-menu-section-summary">Background / Sky</summary>
@@ -557,6 +738,17 @@
                             </details>
 
                             <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Screen Space GI (SSGI)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssgi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ssgi-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Screen-space bounce light over the current view. Performance mode pauses it.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Fog (Volumetric)</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
@@ -580,20 +772,62 @@
                                 <summary class="viewer-menu-section-summary">Global Illumination (DDGI)</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-off">Off</button>
-                                        <button class="btn viewer-toggle-btn" id="we-ddgi-on">On</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ddgi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note">Off by default — DDGI is the most expensive subsystem. Turn on for prettier indirect lighting.</div>
+                                    <div class="viewer-inline-note">DDGI starts on so new colored objects can contribute bounce; use Performance mode to pause it.</div>
                                     <div class="viewer-slider-group">
-                                        <div class="viewer-slider-label">Probes / Frame</div>
-                                        <input id="we-ddgi-probes" type="range" min="1" max="32" step="1" value="4">
-                                        <div class="viewer-slider-value" id="we-ddgi-probes-value">4</div>
+                                        <div class="viewer-slider-label">Live Bake</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-live-bake-off">Off</button>
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-live-bake-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bake Every N</div>
+                                        <input id="we-ddgi-bake-every-n" type="range" min="1" max="16" step="1" value="4">
+                                        <div class="viewer-slider-value" id="we-ddgi-bake-every-n-value">4</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Intensity</div>
-                                        <input id="we-ddgi-intensity" type="range" min="0" max="1.5" step="0.01" value="0.18">
-                                        <div class="viewer-slider-value" id="we-ddgi-intensity-value">0.18</div>
+                                        <input id="we-ddgi-intensity" type="range" min="0" max="16" step="0.05" value="12.0">
+                                        <div class="viewer-slider-value" id="we-ddgi-intensity-value">12.0</div>
                                     </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Light Intensity</div>
+                                        <input id="we-ddgi-light-intensity" type="range" min="0" max="8" step="0.05" value="0.35">
+                                        <div class="viewer-slider-value" id="we-ddgi-light-intensity-value">0.35</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probe Debug</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-probe-debug-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-probe-debug-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Ray Debug</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-ray-debug-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-ray-debug-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Solid Test</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-solid-test-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-solid-test-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">View</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-view-lit">Lit</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-view-contribution">DDGI Only</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-inline-note">Solid Test bypasses probes and injects fixed amber GI so you can verify the receive path independently of probe capture.</div>
+                                    <div class="viewer-inline-note">DDGI Only replaces the lit scene with the indirect-light contribution so you can inspect exactly what bounce is adding.</div>
                                 </div>
                             </details>
 
@@ -629,7 +863,7 @@
                                     <div class="viewer-menu-actions">
                                         <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse
                                             Files</button>
-                                        <button class="btn viewer-menu-btn" id="load-sample">Load Sample</button>
+                                        <button class="btn viewer-menu-btn" id="load-sample">Load FPS Starter Level</button>
                                     </div>
                                     <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx"
                                         style="display: none;">
@@ -751,12 +985,12 @@
                             <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Performance</summary>
                                 <div class="viewer-menu-section-body">
-                                    <div class="viewer-inline-note">Turns off DDGI global illumination, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
+                                    <div class="viewer-inline-note">Turns off screen-space GI, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-off">Off</button>
-                                        <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
+                                        <button class="btn viewer-toggle-btn" id="perf-mode-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full DDGI + fog + post-process active.</div>
+                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode on. SSGI, volumetric fog, and post-process bloom are paused.</div>
                                 </div>
                             </details>
 
@@ -847,7 +1081,7 @@
                 </div>
 
                 <div class="debug-stats-overlay" id="debug-stats-overlay" aria-live="polite"></div>
-                <div class="engine-audio-debug" id="engine-audio-debug" aria-live="polite">Engine: --</div>
+                <div class="engine-audio-debug" id="engine-audio-debug" aria-live="polite" hidden>Engine: --</div>
 
                 <div class="debug-console" id="debug-console" hidden>
                     <div class="debug-console-header">
