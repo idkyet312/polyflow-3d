@@ -158,6 +158,17 @@
                             <button class="btn viewer-menu-btn" id="load-actor-btn">⬆ Load Actor</button>
                             <button class="btn viewer-menu-btn" id="load-prefab-btn">Load Prefab</button>
                         </div>
+                        <label class="viewer-input-stack" for="level-select" style="margin-top: 0.55rem;">
+                            <span class="viewer-input-label">Level</span>
+                            <select class="viewer-text-input" id="level-select">
+                                <option value="fpsStarter">Sample Level</option>
+                                <option value="soccerField" selected>Soccer Field</option>
+                                <option value="soccerFieldTerrain">Terrain</option>
+                            </select>
+                        </label>
+                        <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
+                            <button class="btn viewer-menu-btn" id="load-level">Load Level</button>
+                        </div>
                         <div class="viewer-menu-actions">
                             <button class="btn viewer-menu-btn" id="play-test-sound-btn">Test 3D Sound</button>
                         </div>
@@ -871,17 +882,6 @@
                             <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Load Level / Model</summary>
                                 <div class="viewer-menu-section-body">
-                                    <label class="viewer-input-stack" for="level-select">
-                                        <span class="viewer-input-label">Level</span>
-                                        <select class="viewer-text-input" id="level-select">
-                                            <option value="fpsStarter">Original Scene</option>
-                                            <option value="soccerField" selected>Soccer Field 3x</option>
-                                            <option value="soccerFieldTerrain">Flat Terrain</option>
-                                        </select>
-                                    </label>
-                                    <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
-                                        <button class="btn viewer-menu-btn" id="load-level">Load Level</button>
-                                    </div>
                                     <div class="viewer-menu-actions">
                                         <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse
                                             Files</button>

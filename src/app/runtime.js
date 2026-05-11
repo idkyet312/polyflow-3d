@@ -7841,8 +7841,8 @@ function spawnSoccerBall() {
 
 function createSoccerLevelDefinition({
     id = 'soccerField',
-    assetName = 'PolyFlow_Soccer_Target_Field_3x.scene',
-    sceneName = 'PolyFlow_Soccer_Target_Field',
+    assetName = 'Soccer Field',
+    sceneName = 'Soccer_Field',
     hideTerrainPresentation = true,
 } = {}) {
     return {
@@ -7873,8 +7873,8 @@ function createSoccerLevelDefinition({
 
 function createFlatTerrainLevelDefinition({
     id = 'soccerFieldTerrain',
-    assetName = 'PolyFlow_Flat_Terrain.scene',
-    sceneName = 'PolyFlow_Flat_Terrain',
+    assetName = 'Terrain',
+    sceneName = 'Terrain',
 } = {}) {
     return {
         id,
@@ -7936,7 +7936,7 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
     if (levelId === 'fpsStarter') {
         return {
             id: 'fpsStarter',
-            assetName: 'PolyFlow_FPS_Starter_Level.scene',
+            assetName: 'Sample Level',
             fileSize: 420000,
             create: createFpsStarterLevel,
         };
