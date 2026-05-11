@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
     <link rel="icon" href="/polyflow-3d/favicon.svg" type="image/svg+xml">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-ZFkgqe3a.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-DMcotLXi.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
   <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-xY0wX8Tk.css">
 </head>
@@ -159,6 +159,17 @@
                             <button class="btn btn-primary viewer-menu-btn" id="open-actor-editor">Add Actor</button>
                             <button class="btn viewer-menu-btn" id="load-actor-btn">⬆ Load Actor</button>
                             <button class="btn viewer-menu-btn" id="load-prefab-btn">Load Prefab</button>
+                        </div>
+                        <label class="viewer-input-stack" for="level-select" style="margin-top: 0.55rem;">
+                            <span class="viewer-input-label">Level</span>
+                            <select class="viewer-text-input" id="level-select">
+                                <option value="fpsStarter">Sample Level</option>
+                                <option value="soccerField" selected>Soccer Field</option>
+                                <option value="soccerFieldTerrain">Terrain</option>
+                            </select>
+                        </label>
+                        <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
+                            <button class="btn viewer-menu-btn" id="load-level">Load Level</button>
                         </div>
                         <div class="viewer-menu-actions">
                             <button class="btn viewer-menu-btn" id="play-test-sound-btn">Test 3D Sound</button>
@@ -873,17 +884,6 @@
                             <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Load Level / Model</summary>
                                 <div class="viewer-menu-section-body">
-                                    <label class="viewer-input-stack" for="level-select">
-                                        <span class="viewer-input-label">Level</span>
-                                        <select class="viewer-text-input" id="level-select">
-                                            <option value="fpsStarter">Original Scene</option>
-                                            <option value="soccerField" selected>Soccer Field 3x</option>
-                                            <option value="soccerFieldTerrain">Flat Terrain</option>
-                                        </select>
-                                    </label>
-                                    <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
-                                        <button class="btn viewer-menu-btn" id="load-level">Load Level</button>
-                                    </div>
                                     <div class="viewer-menu-actions">
                                         <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse
                                             Files</button>
