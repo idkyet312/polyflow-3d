@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Teleporter">
+  <rect width="640" height="480" fill="#11151b"/>
+  <ellipse cx="320" cy="360" rx="168" ry="54" fill="#22d3ee" opacity=".35"/>
+  <ellipse cx="320" cy="360" rx="112" ry="32" fill="#67e8f9" opacity=".7"/>
+  <path d="M230 116h180l-62 98h92L286 392l42-134h-92z" fill="#a78bfa" stroke="#f5f3ff" stroke-width="12" stroke-linejoin="round"/>
+</svg>
