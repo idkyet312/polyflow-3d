@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Cylinder">
+  <rect width="640" height="480" fill="#11151b"/>
+  <path d="M196 154c0-48 248-48 248 0v172c0 48-248 48-248 0z" fill="#22c55e"/>
+  <ellipse cx="320" cy="154" rx="124" ry="44" fill="#86efac"/>
+  <ellipse cx="320" cy="326" rx="124" ry="44" fill="#16a34a"/>
+  <path d="M196 154v172c0 48 248 48 248 0V154" fill="none" stroke="#dcfce7" stroke-width="10"/>
+</svg>
