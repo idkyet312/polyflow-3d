@@ -265,7 +265,6 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
         const lateral = Math.abs(data.lateralSpeed);
         const slip = data.drifting || data.brakeHeld || lateral > 2.6;
         const dustAmount = THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.dustSpeed) / 13, 0, 1);
-        const smokeAmount = THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.smokeSpeed) / 12 + lateral / 8, 0, 1);
         const skidAmount = slip ? THREE.MathUtils.clamp((speed - VEHICLE_FX_SETTINGS.skidSpeed) / 18 + lateral / 10, 0, 1) : 0;
         const rearCorners = data.cornerSamples.slice(2);
 
@@ -296,17 +295,6 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
                     data.flatForward.clone().multiplyScalar(-speed * (0.16 + Math.random() * 0.1)).addScaledVector(_upVector, 0.22 + Math.random() * 0.22),
                     0.34 + dustAmount * 0.62 + Math.random() * 0.16,
                     0.55 + Math.random() * 0.55
-                );
-            }
-            if (smokeAmount > 0.08 && slip && Math.random() < smokeAmount * 26 * delta) {
-                emitParticle(
-                    'smoke',
-                    plumeBasePos.clone().addScaledVector(data.flatRight, (Math.random() - 0.5) * 0.24),
-                    data.flatForward.clone().multiplyScalar(-1.25 - Math.random() * 1.35)
-                        .addScaledVector(data.flatRight, (Math.random() - 0.5) * 0.65)
-                        .addScaledVector(_upVector, 0.32 + Math.random() * 0.28),
-                    0.62 + smokeAmount * 1.05 + Math.random() * 0.28,
-                    1.05 + Math.random() * 0.95
                 );
             }
             if (skidAmount > 0.05) {

@@ -519,8 +519,12 @@ export function yieldToPaint() {
 
 // ─── lines 9967–10034 ────────────────────────────────────────────────────────────────────
 
-export async function loadActorFromFile(file) {
+export async function loadActorFromFile(file, options = {}) {
     if (!file) return;
+    const {
+        askSpawnLocation = true,
+        spawnInFrontOfPlayer = false,
+    } = options;
 
     const fileSizeMb = (file.size / (1024 * 1024)).toFixed(1);
     progressOverlay.show('Loading Actor', `Reading ${file.name} (${fileSizeMb} MB)...`);
@@ -558,12 +562,16 @@ export async function loadActorFromFile(file) {
         await yieldToPaint();
 
         const actorData = data.actor;
-        // OK = saved location, Cancel = in front of camera.
-        const useSavedLocation = window.confirm(
-            'Spawn actor at its saved location?\n\nOK  = Saved location\nCancel = In front of camera'
-        );
+        let shouldSpawnInFront = spawnInFrontOfPlayer;
+        if (askSpawnLocation) {
+            // OK = saved location, Cancel = in front of camera.
+            const useSavedLocation = window.confirm(
+                'Spawn actor at its saved location?\n\nOK  = Saved location\nCancel = In front of camera'
+            );
+            shouldSpawnInFront = !useSavedLocation;
+        }
         const actor = spawnActorFromSerializedData(actorData, {
-            spawnInFrontOfPlayer: !useSavedLocation,
+            spawnInFrontOfPlayer: shouldSpawnInFront,
         });
 
         if (!actor) {

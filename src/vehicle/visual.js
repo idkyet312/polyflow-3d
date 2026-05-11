@@ -1,5 +1,23 @@
 import * as THREE from 'three';
 
+const VEHICLE_LIGHT_NAME_RE = /(head|tail|brake|reverse|signal|indicator|turn|lamp|light|emiss)/i;
+
+function boostVehicleLightMaterial(node, material) {
+    if (!material) return;
+    const text = `${node?.name || ''} ${material.name || ''}`;
+    const hasEmissive = !!material.emissive
+        && (material.emissive.r > 0.01 || material.emissive.g > 0.01 || material.emissive.b > 0.01);
+    if (!VEHICLE_LIGHT_NAME_RE.test(text) && !hasEmissive && !material.emissiveMap) return;
+
+    const rear = /(tail|brake|rear|stop)/i.test(text);
+    const signal = /(signal|indicator|turn|amber|orange)/i.test(text);
+    const lightColor = new THREE.Color(signal ? 0xff9a2a : (rear ? 0xff1f1f : 0xfff1c4));
+    material.emissive?.copy(lightColor);
+    material.emissiveIntensity = Math.max(material.emissiveIntensity ?? 0, rear ? 4.5 : 6.0);
+    material.toneMapped = false;
+    material.needsUpdate = true;
+}
+
 export function createVehicleWheelAssembly({ tireMaterial, rimMaterial, wheelRadius, wheelWidth, wheelTemplate = null, mirrorX = false, cloneDisposableObject }) {
     const steeringPivot = new THREE.Group();
     const spinGroup = new THREE.Group();
@@ -150,6 +168,7 @@ export function createDrivableCarVisual({ bodyTemplateId = '', wheelTemplateId =
             mats.forEach((mat) => {
                 if (!mat) return;
                 mat.side = THREE.DoubleSide;
+                boostVehicleLightMaterial(child, mat);
                 mat.needsUpdate = true;
             });
         });
@@ -165,7 +184,7 @@ export function createDrivableCarVisual({ bodyTemplateId = '', wheelTemplateId =
             color: 0xdce8f5, metalness: 0.08, roughness: 0.16, transparent: true, opacity: 0.72,
         });
         const lightMaterial = new THREE.MeshStandardMaterial({
-            color: 0xf8f1d0, emissive: 0x8c6d1f, emissiveIntensity: 0.2, roughness: 0.28, metalness: 0.02, fog: false,
+            color: 0xf8f1d0, emissive: 0xfff1c4, emissiveIntensity: 6.0, roughness: 0.28, metalness: 0.02, fog: false, toneMapped: false,
         });
 
         const lowerBody = new THREE.Mesh(
@@ -251,7 +270,7 @@ export function createDrivableCarVisual({ bodyTemplateId = '', wheelTemplateId =
         visualGroup.add(headlightLeft, headlightRight);
 
         const taillightMat = new THREE.MeshStandardMaterial({
-            color: 0xff2222, emissive: 0x991111, emissiveIntensity: 0.3, roughness: 0.3, metalness: 0.02, fog: false,
+            color: 0xff2222, emissive: 0xff1f1f, emissiveIntensity: 4.5, roughness: 0.3, metalness: 0.02, fog: false, toneMapped: false,
         });
         const taillightLeft = new THREE.Mesh(
             new THREE.BoxGeometry(W * 0.12, H * 0.05, L * 0.02),

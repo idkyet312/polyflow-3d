@@ -11,6 +11,7 @@ export function createPhysicsRuntime({
     copyJoltQuaternion,
     createOwnedShape,
     onRemoveDynamicProp,
+    onDynamicBodiesSynced,
     onCollisionScriptsUpdate,
     onCollisionStepsChange,
 }) {
@@ -101,7 +102,10 @@ export function createPhysicsRuntime({
 
     function syncDynamicPhysicsBodies() {
         const worldFloor = getWorldFloor?.();
-        if (!physics.dynamicBodies.length || !worldFloor) return;
+        if (!physics.dynamicBodies.length || !worldFloor) {
+            onDynamicBodiesSynced?.();
+            return;
+        }
 
         for (let index = physics.dynamicBodies.length - 1; index >= 0; index--) {
             const prop = physics.dynamicBodies[index];
@@ -122,6 +126,8 @@ export function createPhysicsRuntime({
                 onRemoveDynamicProp?.(prop, index);
             }
         }
+
+        onDynamicBodiesSynced?.();
     }
 
     function syncCameraToCharacter() {
