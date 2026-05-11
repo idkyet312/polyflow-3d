@@ -1067,6 +1067,35 @@ main {
   margin-top: 1rem;
 }
 
+.prefab-category-heading {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.35rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.prefab-category-heading:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.prefab-category-title {
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-color);
+}
+
+.prefab-category-count {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
 .prefab-browser-item {
   display: flex;
   flex-direction: column;

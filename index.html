@@ -869,12 +869,22 @@
                                 only shows camera actions and actor creation.</div>
 
                             <details class="viewer-menu-section">
-                                <summary class="viewer-menu-section-summary">Load Model</summary>
+                                <summary class="viewer-menu-section-summary">Load Level / Model</summary>
                                 <div class="viewer-menu-section-body">
+                                    <label class="viewer-input-stack" for="level-select">
+                                        <span class="viewer-input-label">Level</span>
+                                        <select class="viewer-text-input" id="level-select">
+                                            <option value="fpsStarter">Original Scene</option>
+                                            <option value="soccerField" selected>Soccer Field 3x</option>
+                                            <option value="soccerFieldTerrain">Flat Terrain</option>
+                                        </select>
+                                    </label>
+                                    <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
+                                        <button class="btn viewer-menu-btn" id="load-level">Load Level</button>
+                                    </div>
                                     <div class="viewer-menu-actions">
                                         <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse
                                             Files</button>
-                                        <button class="btn viewer-menu-btn" id="load-sample">Load FPS Starter Level</button>
                                     </div>
                                     <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx"
                                         style="display: none;">

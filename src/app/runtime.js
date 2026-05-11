@@ -859,6 +859,12 @@ const gameplay = {
         sprint: false,
     },
 };
+const gameplayPrefabState = {
+    teleporterCooldownUntil: 0,
+};
+const soccerGoalieState = {
+    elapsed: 0,
+};
 const vehicleState = {
     activePropId: '',
     brakeHeld: false,
@@ -961,6 +967,7 @@ const terrainBrushState = {
     helper: null,
     helperScale: 1,
     dirtyPhysics: false,
+    targetObject: null,
 };
 const physics = {
     ready: false,
@@ -1736,6 +1743,7 @@ function destroyDynamicPhysicsProp(prop) {
 
     const mesh = getActorRenderObject(prop);
     if (mesh) {
+        mesh.parent?.remove?.(mesh);
         disposeRenderableObject(mesh);
 
         prop.mesh = null;
@@ -2244,6 +2252,7 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
 
     const { Jolt, bodyInterface } = physics;
     const simulatePhysics = options.simulatePhysics !== false;
+    const kinematic = options.kinematic === true;
     const bodyPosition = new Jolt.RVec3(position.x, position.y, position.z);
     const rotation = options.rotation;
     const bodyRotation = new Jolt.Quat(
@@ -2256,8 +2265,8 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
         shape,
         bodyPosition,
         bodyRotation,
-        simulatePhysics ? Jolt.EMotionType_Dynamic : Jolt.EMotionType_Static,
-        simulatePhysics ? JOLT_MOVING_LAYER : JOLT_NON_MOVING_LAYER
+        kinematic ? Jolt.EMotionType_Kinematic : simulatePhysics ? Jolt.EMotionType_Dynamic : Jolt.EMotionType_Static,
+        (simulatePhysics || kinematic) ? JOLT_MOVING_LAYER : JOLT_NON_MOVING_LAYER
     );
     creationSettings.mFriction = options.friction ?? 0.68;
     creationSettings.mRestitution = options.restitution ?? 0.16;
@@ -2286,7 +2295,7 @@ function createDynamicPrimitiveBody(shape, position, impulse, options = {}) {
     }
     bodyInterface.AddBody(
         body.GetID(),
-        !simulatePhysics || options.activate === false ? Jolt.EActivation_DontActivate : Jolt.EActivation_Activate
+        (!simulatePhysics && !kinematic) || options.activate === false ? Jolt.EActivation_DontActivate : Jolt.EActivation_Activate
     );
 
     if (simulatePhysics && impulse && options.skipImpulse !== true) {
@@ -2433,6 +2442,406 @@ function spawnDynamicPrimitive(kind, offset, scale, options = {}) {
 
     invalidateDDGI(`${kind} spawned`);
     return options.returnActor === true ? actor : body;
+}
+
+function tagGameplayPrefabActor(actor, gameplayPrefab, options = {}) {
+    if (!actor) return null;
+    actor.userData = {
+        ...(actor.userData || {}),
+        gameplayPrefab,
+        triggerRadius: options.triggerRadius ?? 1.2,
+        scoreValue: options.scoreValue ?? 0,
+        collected: false,
+    };
+    const mesh = getActorRenderObject(actor);
+    if (mesh) {
+        mesh.userData.gameplayPrefab = gameplayPrefab;
+        mesh.userData.triggerRadius = actor.userData.triggerRadius;
+        mesh.userData.scoreValue = actor.userData.scoreValue;
+        const groundY = getGroundHeightAt(mesh.position.x, mesh.position.z, true, { ignoreActor: actor });
+        if (groundY !== null) {
+            mesh.position.y = groundY + (options.groundOffset ?? 0.05);
+        }
+        mesh.updateMatrixWorld(true);
+    }
+    return actor;
+}
+
+function tintGameplayPrefabActor(actor, color, emissive = null, emissiveIntensity = 0) {
+    setActorColor(actor, color);
+    const mesh = getActorRenderObject(actor);
+    mesh?.traverse?.((node) => {
+        const materials = node?.material
+            ? (Array.isArray(node.material) ? node.material : [node.material])
+            : [];
+        materials.forEach((mat) => {
+            if (!mat?.emissive || !emissive) return;
+            mat.emissive.set(emissive);
+            mat.emissiveIntensity = emissiveIntensity;
+            mat.toneMapped = false;
+            mat.needsUpdate = true;
+        });
+    });
+}
+
+function getSoccerGoalieActors() {
+    if (!sceneSystem?.actors?.size) return [];
+    return Array.from(sceneSystem.actors).filter((actor) => {
+        return !!(actor?.userData?.soccerGoalie || getActorRenderObject(actor)?.userData?.soccerGoalie);
+    });
+}
+
+function applyPlayerSpawnFromActor(actor) {
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return false;
+    mesh.updateMatrixWorld(true);
+    mesh.getWorldPosition(tempVectorA);
+    gameplay.spawnPoint.set(tempVectorA.x, tempVectorA.y + PLAYER_SETTINGS.floorOffset, tempVectorA.z);
+    gameplay.spawnYaw = 0;
+    gameplay.spawnPitch = -0.1;
+    return true;
+}
+
+function getGameplayPrefabActors(type = '') {
+    if (!sceneSystem?.actors?.size) return [];
+    return Array.from(sceneSystem.actors).filter((actor) => {
+        const prefabType = actor?.userData?.gameplayPrefab || getActorRenderObject(actor)?.userData?.gameplayPrefab || '';
+        return prefabType && (!type || prefabType === type);
+    });
+}
+
+function syncGameplaySpawnFromPlayerSpawnActor() {
+    return applyPlayerSpawnFromActor(getGameplayPrefabActors('playerSpawn')[0]);
+}
+
+function spawnGameplayPrefab(type) {
+    let actor = null;
+    if (type === 'playerSpawn') {
+        actor = spawnDynamicPrimitive('capsule', undefined, 0.45, {
+            includeCollisionBody: false,
+            includeScripts: false,
+            userData: { label: 'Player Spawn' },
+            returnActor: true,
+        });
+        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.8, groundOffset: 0.45 });
+        tintGameplayPrefabActor(actor, '#22c55e', '#22c55e', 1.8);
+        applyPlayerSpawnFromActor(actor);
+    } else if (type === 'teleporter') {
+        actor = spawnDynamicPrimitive('cylinder', undefined, 1, {
+            includeCollisionBody: false,
+            includeScripts: false,
+            userData: { label: 'Teleporter' },
+            returnActor: true,
+        });
+        const mesh = getActorRenderObject(actor);
+        if (mesh) mesh.scale.set(1.4, 0.08, 1.4);
+        tagGameplayPrefabActor(actor, type, { triggerRadius: 1.45, groundOffset: 0.06 });
+        tintGameplayPrefabActor(actor, '#22d3ee', '#22d3ee', 2.6);
+    } else if (type === 'coin') {
+        actor = spawnDynamicPrimitive('sphere', undefined, 0.35, {
+            includeCollisionBody: false,
+            includeScripts: false,
+            userData: { label: 'Coin +10' },
+            returnActor: true,
+        });
+        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.95, groundOffset: 1.0, scoreValue: 10 });
+        tintGameplayPrefabActor(actor, '#facc15', '#facc15', 2.8);
+    } else if (type === 'target') {
+        actor = spawnDynamicPrimitive('cylinder', undefined, 0.6, {
+            includeCollisionBody: true,
+            simulatePhysics: false,
+            includeScripts: false,
+            userData: { label: 'Target +25' },
+            returnActor: true,
+        });
+        const mesh = getActorRenderObject(actor);
+        if (mesh) mesh.scale.set(0.6, 0.12, 0.6);
+        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.75, groundOffset: 1.1, scoreValue: 25 });
+        tintGameplayPrefabActor(actor, '#ef4444', '#ef4444', 1.2);
+        rebuildActorPhysics(actor);
+    }
+
+    if (actor) {
+        refreshSceneUI();
+        selectShowcaseActor(actor.id);
+    }
+    return actor;
+}
+
+function addGameScore(amount) {
+    const value = Number(amount) || 0;
+    window.gameScore = (Number(window.gameScore) || 0) + value;
+    window.exampleWidgets?.score?.SetText(`Score: ${Math.floor(window.gameScore)}`);
+}
+
+function resetGameplayPrefabs() {
+    gameplayPrefabState.teleporterCooldownUntil = 0;
+    window.gameScore = 0;
+    window.exampleWidgets?.score?.SetText('Score: 0');
+
+    getGameplayPrefabActors().forEach((actor) => {
+        actor.userData.collected = false;
+        actor.userData.hitCooldownUntil = 0;
+        const mesh = getActorRenderObject(actor);
+        if (mesh) mesh.visible = actor.userData.gameplayPrefab !== 'playerSpawn' || !gameplay.active;
+    });
+
+    syncGameplaySpawnFromPlayerSpawnActor();
+}
+
+function setActorResetTransform(actor, position, quaternion = null) {
+    if (!actor || !Array.isArray(position)) return actor;
+    actor.userData = {
+        ...(actor.userData || {}),
+        resetTransform: {
+            position: [...position],
+            quaternion: quaternion
+                ? [quaternion.x, quaternion.y, quaternion.z, quaternion.w]
+                : null,
+        },
+    };
+    return actor;
+}
+
+function syncActorBodyToRenderTransform(actor, activation = null) {
+    const mesh = getActorRenderObject(actor);
+    const body = getActorBody(actor);
+    if (!mesh || !body || !physics.ready) return false;
+
+    const pos = new physics.Jolt.RVec3(mesh.position.x, mesh.position.y, mesh.position.z);
+    const rot = new physics.Jolt.Quat(mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w);
+    physics.bodyInterface.SetPositionAndRotation(
+        body.GetID(),
+        pos,
+        rot,
+        activation ?? physics.Jolt.EActivation_DontActivate
+    );
+    physics.Jolt.destroy(pos);
+    physics.Jolt.destroy(rot);
+    return true;
+}
+
+function resetActorToStoredTransform(actor) {
+    const reset = actor?.userData?.resetTransform;
+    const mesh = getActorRenderObject(actor);
+    if (!reset || !mesh) return false;
+
+    mesh.position.fromArray(reset.position);
+    if (Array.isArray(reset.quaternion)) {
+        mesh.quaternion.fromArray(reset.quaternion);
+    }
+    mesh.visible = actor.userData?.gameplayPrefab !== 'playerSpawn' || !gameplay.active;
+    mesh.updateMatrixWorld(true);
+
+    const body = getActorBody(actor);
+    if (body && physics.ready) {
+        syncActorBodyToRenderTransform(actor, physics.Jolt.EActivation_Activate);
+        if (physics.dynamicBodies.includes(actor)) {
+            physics.bodyInterface.SetLinearVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
+            physics.bodyInterface.SetAngularVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
+            dynamicBodySpatial.updateEntry(actor);
+        }
+    }
+    return true;
+}
+
+function resetSoccerLevelState() {
+    if (currentMesh?.userData?.sampleType !== 'soccerTargetField') return false;
+
+    soccerGoalieState.elapsed = 0;
+    resetGameplayPrefabs();
+    for (const actor of Array.from(sceneSystem?.actors || [])) {
+        resetActorToStoredTransform(actor);
+    }
+    updateSoccerGoalies(0);
+    syncGameplaySpawnFromPlayerSpawnActor();
+    return true;
+}
+
+function updateSoccerGoalies(delta = 0) {
+    if (currentMesh?.userData?.sampleType !== 'soccerTargetField') return;
+
+    const goalies = getSoccerGoalieActors();
+    if (!goalies.length) return;
+
+    soccerGoalieState.elapsed = Math.max(0, soccerGoalieState.elapsed + Math.max(0, delta));
+    const activation = gameplay.active && physics.ready
+        ? physics.Jolt.EActivation_Activate
+        : physics?.Jolt?.EActivation_DontActivate;
+
+    for (const actor of goalies) {
+        const mesh = getActorRenderObject(actor);
+        const motion = actor?.userData?.soccerGoalieMotion;
+        if (!mesh || !Array.isArray(motion?.homePosition) || motion.homePosition.length !== 3) continue;
+
+        const axis = Array.isArray(motion.axis) && motion.axis.length === 3 ? motion.axis : [1, 0, 0];
+        const amplitude = Number.isFinite(motion.amplitude) ? motion.amplitude : 0;
+        const speed = Number.isFinite(motion.speed) ? motion.speed : 1;
+        const phase = Number.isFinite(motion.phase) ? motion.phase : 0;
+        const offset = Math.sin(soccerGoalieState.elapsed * speed + phase) * amplitude;
+
+        mesh.position.set(
+            motion.homePosition[0] + axis[0] * offset,
+            motion.homePosition[1] + axis[1] * offset,
+            motion.homePosition[2] + axis[2] * offset
+        );
+        mesh.updateMatrixWorld(true);
+        syncActorBodyToRenderTransform(actor, activation);
+    }
+}
+
+function syncGameplayPrefabVisibility() {
+    for (const actor of getGameplayPrefabActors('playerSpawn')) {
+        const mesh = getActorRenderObject(actor);
+        if (mesh) mesh.visible = !gameplay.active;
+    }
+}
+
+function teleportActiveGameplaySubject(destination) {
+    if (!destination) return false;
+    if (isDrivingVehicle()) {
+        const vehicle = getActiveVehicleProp();
+        const body = getActorBody(vehicle);
+        if (!vehicle || !body || !physics.ready) return false;
+        const pos = new physics.Jolt.RVec3(destination.x, destination.y + 0.75, destination.z);
+        const rot = physics.bodyInterface.GetRotation(body.GetID());
+        physics.bodyInterface.SetPositionAndRotation(body.GetID(), pos, rot, physics.Jolt.EActivation_Activate);
+        physics.bodyInterface.SetLinearVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
+        physics.bodyInterface.SetAngularVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
+        physics.Jolt.destroy(pos);
+        const mesh = getActorRenderObject(vehicle);
+        if (mesh) mesh.position.set(destination.x, destination.y + 0.75, destination.z);
+        return true;
+    }
+
+    if (!physics.character) return false;
+    const pos = new physics.Jolt.RVec3(destination.x, destination.y + PLAYER_SETTINGS.floorOffset, destination.z);
+    physics.character.SetPosition(pos);
+    physics.character.SetLinearVelocity(physics.Jolt.Vec3.prototype.sZero());
+    physics.Jolt.destroy(pos);
+    syncCameraToCharacter();
+    return true;
+}
+
+function teleportActorTo(actor, destination) {
+    if (!actor || !destination || actor.userData?.gameplayPrefab) return false;
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return false;
+
+    mesh.position.set(destination.x, destination.y + 0.75, destination.z);
+    mesh.updateMatrixWorld(true);
+
+    const body = getActorBody(actor);
+    if (body && physics.ready) {
+        const pos = new physics.Jolt.RVec3(mesh.position.x, mesh.position.y, mesh.position.z);
+        const rot = new physics.Jolt.Quat(mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w);
+        physics.bodyInterface.SetPositionAndRotation(body.GetID(), pos, rot, physics.Jolt.EActivation_Activate);
+        physics.bodyInterface.SetLinearVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
+        physics.bodyInterface.SetAngularVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
+        physics.Jolt.destroy(pos);
+        physics.Jolt.destroy(rot);
+        dynamicBodySpatial.updateEntry(actor);
+    }
+
+    return true;
+}
+
+function getGameplaySubjectPosition(target = tempVectorA) {
+    if (isDrivingVehicle()) {
+        const vehicle = getActiveVehicleProp();
+        const body = getActorBody(vehicle);
+        if (!body || !physics.ready) return null;
+        return copyJoltVector(target, physics.bodyInterface.GetPosition(body.GetID()));
+    }
+    if (!physics.character) return null;
+    return copyJoltVector(target, physics.character.GetPosition());
+}
+
+function isSubjectInsideTrigger(subjectPosition, actor) {
+    const mesh = getActorRenderObject(actor);
+    if (!mesh || actor?.userData?.collected) return false;
+    mesh.updateMatrixWorld(true);
+    mesh.getWorldPosition(tempVectorB);
+    const radius = Number(actor.userData?.triggerRadius ?? mesh.userData?.triggerRadius ?? 1.2);
+    const dx = subjectPosition.x - tempVectorB.x;
+    const dz = subjectPosition.z - tempVectorB.z;
+    const dy = Math.abs(subjectPosition.y - tempVectorB.y);
+    return dx * dx + dz * dz <= radius * radius && dy <= 2.25;
+}
+
+function processGameplayPrefabs() {
+    if (!gameplay.active) return;
+    const subjectPosition = getGameplaySubjectPosition(tempVectorC);
+    if (!subjectPosition) return;
+
+    for (const coin of getGameplayPrefabActors('coin')) {
+        if (!isSubjectInsideTrigger(subjectPosition, coin)) continue;
+        coin.userData.collected = true;
+        const mesh = getActorRenderObject(coin);
+        if (mesh) mesh.visible = false;
+        addGameScore(coin.userData.scoreValue ?? 10);
+    }
+
+    const now = performance.now?.() || Date.now();
+    for (const target of getGameplayPrefabActors('target')) {
+        if ((target.userData.hitCooldownUntil || 0) > now) continue;
+        const targetMesh = getActorRenderObject(target);
+        if (!targetMesh?.visible) continue;
+        targetMesh.getWorldPosition(tempVectorA);
+        const radius = Number(target.userData?.triggerRadius ?? 1.55);
+
+        for (const actor of Array.from(physics.dynamicBodies || [])) {
+            if (!actor || actor.userData?.gameplayPrefab) continue;
+            const body = getActorBody(actor);
+            const mesh = getActorRenderObject(actor);
+            if (!body || !mesh?.visible || !physics.ready) continue;
+
+            mesh.getWorldPosition(tempVectorC);
+            const dx = tempVectorC.x - tempVectorA.x;
+            const dz = tempVectorC.z - tempVectorA.z;
+            const dy = Math.abs(tempVectorC.y - tempVectorA.y);
+            if (dx * dx + dz * dz <= radius * radius && dy <= 2.6) {
+                addGameScore(target.userData.scoreValue ?? 25);
+                target.userData.hitCooldownUntil = now + 650;
+                break;
+            }
+        }
+    }
+
+    if (now < gameplayPrefabState.teleporterCooldownUntil) return;
+
+    const teleporters = getGameplayPrefabActors('teleporter')
+        .filter((actor) => getActorRenderObject(actor)?.visible !== false);
+    const sourceIndex = teleporters.findIndex((actor) => isSubjectInsideTrigger(subjectPosition, actor));
+    if (sourceIndex < 0) return;
+
+    const destinationActor = teleporters.length > 1
+        ? teleporters[(sourceIndex + 1) % teleporters.length]
+        : getGameplayPrefabActors('playerSpawn')[0];
+    const destinationMesh = getActorRenderObject(destinationActor);
+    const destination = destinationMesh
+        ? destinationMesh.getWorldPosition(new THREE.Vector3())
+        : gameplay.spawnPoint.clone();
+    teleportActiveGameplaySubject(destination);
+
+    const sourceMesh = getActorRenderObject(teleporters[sourceIndex]);
+    const sourcePosition = sourceMesh?.getWorldPosition(new THREE.Vector3());
+    const sourceRadius = Number(teleporters[sourceIndex]?.userData?.triggerRadius ?? 1.45);
+    if (sourcePosition) {
+        for (const actor of Array.from(sceneSystem?.actors || [])) {
+            if (!actor || actor === teleporters[sourceIndex] || actor === destinationActor) continue;
+            const mesh = getActorRenderObject(actor);
+            if (!mesh?.visible) continue;
+            mesh.getWorldPosition(tempVectorA);
+            const dx = tempVectorA.x - sourcePosition.x;
+            const dz = tempVectorA.z - sourcePosition.z;
+            const dy = Math.abs(tempVectorA.y - sourcePosition.y);
+            if (dx * dx + dz * dz <= sourceRadius * sourceRadius && dy <= 2.5) {
+                teleportActorTo(actor, destination);
+            }
+        }
+    }
+    gameplayPrefabState.teleporterCooldownUntil = now + 900;
 }
 
 function syncDynamicPhysicsBodies() {
@@ -2714,6 +3123,20 @@ function actorBelongsToCurrentMesh(actor) {
     return !!(root && currentMesh && isObjectWithinRoot(root, currentMesh));
 }
 
+function reattachRestoredActor(actor, actorData = null) {
+    if (!currentMesh) return;
+
+    const shouldAttachToCurrentMesh = !!(
+        actorData?.userData?.sampleLevelPart
+        || actor?.userData?.sampleLevelPart
+    );
+    if (!shouldAttachToCurrentMesh) return;
+
+    const actorMesh = getActorRenderObject(actor);
+    if (!actorMesh || actorMesh.parent === currentMesh) return;
+    currentMesh.add(actorMesh);
+}
+
 function getActorSelectionObject(prop, preferredObject = null) {
     const root = getActorRenderObject(prop);
     if (!root) return null;
@@ -2938,11 +3361,19 @@ function rebuildActorPhysics(prop) {
                 const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
                 shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
                 Jolt.destroy(halfExtents);
+            } else if (geo?.type === 'CylinderGeometry') {
+                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
+                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
+                Jolt.destroy(halfExtents);
             } else if (geo?.type === 'CapsuleGeometry') {
                 shapeSetting = new Jolt.CapsuleShapeSettings(scale.y, scale.x);
             } else if (isRoot && prop.kind === 'sphere') {
                 shapeSetting = new Jolt.SphereShapeSettings(scale.x);
             } else if (isRoot && prop.kind === 'cube') {
+                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
+                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
+                Jolt.destroy(halfExtents);
+            } else if (isRoot && prop.kind === 'cylinder') {
                 const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
                 shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
                 Jolt.destroy(halfExtents);
@@ -3369,10 +3800,10 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
     const lightColor = new THREE.Color(savedLight.color || 0xfff1c2);
     const intensity = Number.isFinite(savedLight.intensity) && savedLight.intensity > 0
         ? savedLight.intensity
-        : Math.max(kind === 'spotLight' ? 4.0 : 2.0, radius * (kind === 'spotLight' ? 0.9 : 0.6));
+        : 100;
     const distance = Number.isFinite(savedLight.distance) && savedLight.distance > 0
         ? savedLight.distance
-        : Math.max(kind === 'spotLight' ? 16 : 12, radius * (kind === 'spotLight' ? 6.0 : 5.0));
+        : 500;
     const decay = Number.isFinite(savedLight.decay) && savedLight.decay > 0 ? savedLight.decay : 2.0;
     const angle = Number.isFinite(savedLight.angle) && savedLight.angle > 0 ? savedLight.angle : Math.PI / 6;
     const penumbra = Number.isFinite(savedLight.penumbra) ? savedLight.penumbra : 0.35;
@@ -5899,9 +6330,10 @@ async function init() {
     document.body.classList.toggle('is-mobile', isMobile);
 
     // Add listeners immediately so UI is responsive even if WASM is loading
-    document.getElementById('load-sample').addEventListener('click', (e) => {
+    document.getElementById('load-level')?.addEventListener('click', (e) => {
         e.stopPropagation();
-        loadSample();
+        const levelId = document.getElementById('level-select')?.value || 'soccerField';
+        loadSample(levelId);
     });
 
     browseModelBtn = document.getElementById('open-model-menu');
@@ -6765,6 +7197,8 @@ async function init() {
         updateGameplayDebugRay();
         const updateDuration = performance.now() - updateStart;
 
+        updateSoccerGoalies(delta);
+
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
         if (gameplay.active) {
             physicsMetrics = stepPhysics(delta);
@@ -6869,6 +7303,37 @@ function makeSampleLevelPart(name, shape, material, position, rotation = [0, 0, 
         userData: {
             label: name,
             sampleLevelPart: true,
+        },
+        includeScripts: false,
+    });
+}
+
+function makeSampleLevelMeshActor(name, mesh, {
+    kind = 'imported',
+    castShadow = false,
+    receiveShadow = true,
+    skipPhysicsCollision = false,
+    userData = {},
+} = {}) {
+    if (!mesh) return null;
+
+    mesh.name = name;
+    mesh.userData = {
+        ...(mesh.userData || {}),
+        hasMaterialOverrides: true,
+        skipPhysicsCollision: !!skipPhysicsCollision,
+    };
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = receiveShadow;
+
+    return createDynamicPropActor({
+        body: null,
+        mesh,
+        kind,
+        userData: {
+            label: name,
+            sampleLevelPart: true,
+            ...userData,
         },
         includeScripts: false,
     });
@@ -7067,10 +7532,428 @@ function createFpsStarterLevel() {
     return root;
 }
 
-function loadSample() {
+const SOCCER_FIELD_LEVEL_SCALE = 3;
+
+function createSoccerTargetFieldScene({
+    name = 'PolyFlow_Soccer_Target_Field',
+    hideTerrainPresentation = true,
+} = {}) {
+    const S = SOCCER_FIELD_LEVEL_SCALE;
+    const FIELD_WIDTH = 18 * S;
+    const FIELD_LENGTH = 28 * S;
+    const GOAL_Z = FIELD_LENGTH * 0.5 - 0.45 * S;
+    const LINE_Y = 0.145 * S;
+
+    const root = new THREE.Group();
+    root.name = name;
+    root.userData.sampleType = 'soccerTargetField';
+    root.userData.hideTerrainPresentation = hideTerrainPresentation;
+    root.userData.skipNormalization = true;
+    root.userData.preferredSpawn = {
+        position: [0, 0.24 * S, FIELD_LENGTH * 0.34],
+        yaw: Math.PI,
+        pitch: -0.08,
+    };
+    root.userData.preferredShowcase = {
+        position: [12.5 * S, 9.2 * S, 19.5 * S],
+        target: [0, 0.45 * S, 0],
+    };
+    root.userData.soccerGoalTargets = [
+        { position: [-2.2 * S, 1.35 * S, -GOAL_Z], rotationY: Math.PI, label: 'North Goal Target L', scale: S },
+        { position: [2.2 * S, 1.35 * S, -GOAL_Z], rotationY: Math.PI, label: 'North Goal Target R', scale: S },
+        { position: [-2.2 * S, 1.35 * S, GOAL_Z], rotationY: 0, label: 'South Goal Target L', scale: S },
+        { position: [2.2 * S, 1.35 * S, GOAL_Z], rotationY: 0, label: 'South Goal Target R', scale: S },
+    ];
+    root.userData.soccerGoalies = [
+        {
+            position: [0, 0.78 * S, -GOAL_Z + 0.9 * S],
+            size: [1.7 * S, 1.35 * S, 0.24 * S],
+            axis: [1, 0, 0],
+            amplitude: 1.65 * S,
+            speed: 1.7,
+            phase: 0,
+            label: 'North Goalie Wall',
+        },
+        {
+            position: [0, 0.78 * S, GOAL_Z - 0.9 * S],
+            size: [1.7 * S, 1.35 * S, 0.24 * S],
+            axis: [1, 0, 0],
+            amplitude: 1.65 * S,
+            speed: 1.7,
+            phase: Math.PI,
+            label: 'South Goalie Wall',
+        },
+    ];
+    root.userData.soccerPlayerSpawns = [
+        { playerIndex: 1, position: [0, 0.85, FIELD_LENGTH * 0.34], label: 'Player 1 Spawn', color: '#22c55e' },
+        { playerIndex: 2, position: [0, 0.85, -FIELD_LENGTH * 0.34], label: 'Player 2 Spawn', color: '#38bdf8' },
+    ];
+
+    const materials = {
+        turf: new THREE.MeshStandardMaterial({ color: 0x2f7d32, roughness: 0.86, metalness: 0.02 }),
+        turfStripe: new THREE.MeshStandardMaterial({ color: 0x3f9a42, roughness: 0.88, metalness: 0.02 }),
+        line: new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.62, metalness: 0.0 }),
+        goalFrame: new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.54, metalness: 0.04 }),
+        net: new THREE.MeshStandardMaterial({
+            color: 0xdbeafe,
+            roughness: 0.6,
+            metalness: 0,
+            transparent: true,
+            opacity: 0.24,
+            side: THREE.DoubleSide,
+        }),
+    };
+
+    const addBox = (name, size, position, material, options = {}) => {
+        const actor = makeSampleLevelPart(
+            name,
+            { kind: 'cube', scale: [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5] },
+            material,
+            position,
+            options.rotation || [0, 0, 0],
+            options
+        );
+        const mesh = getActorRenderObject(actor);
+        if (mesh) root.add(mesh);
+        return mesh;
+    };
+
+    addBox('Soccer_Field_Surface', [FIELD_WIDTH, 0.12 * S, FIELD_LENGTH], [0, 0.06 * S, 0], materials.turf, {
+        contactShadow: false,
+        receiveShadow: true,
+    });
+
+    for (let index = -3; index <= 3; index += 1) {
+        addBox(
+            `Soccer_Turf_Stripe_${index + 4}`,
+            [FIELD_WIDTH - 0.18 * S, 0.012 * S, FIELD_LENGTH / 7 - 0.08 * S],
+            [0, 0.132 * S, index * FIELD_LENGTH / 7],
+            index % 2 === 0 ? materials.turfStripe : materials.turf,
+            { skipPhysicsCollision: true, castShadow: false, receiveShadow: false }
+        );
+    }
+
+    const addLine = (name, size, position) => addBox(name, size, position, materials.line, {
+        skipPhysicsCollision: true,
+        castShadow: false,
+        receiveShadow: false,
+    });
+
+    addLine('Soccer_Line_LeftTouch', [0.08 * S, 0.026 * S, FIELD_LENGTH], [-FIELD_WIDTH * 0.5, LINE_Y, 0]);
+    addLine('Soccer_Line_RightTouch', [0.08 * S, 0.026 * S, FIELD_LENGTH], [FIELD_WIDTH * 0.5, LINE_Y, 0]);
+    addLine('Soccer_Line_NorthGoal', [FIELD_WIDTH, 0.026 * S, 0.08 * S], [0, LINE_Y, -FIELD_LENGTH * 0.5]);
+    addLine('Soccer_Line_SouthGoal', [FIELD_WIDTH, 0.026 * S, 0.08 * S], [0, LINE_Y, FIELD_LENGTH * 0.5]);
+    addLine('Soccer_Line_Midfield', [FIELD_WIDTH, 0.026 * S, 0.07 * S], [0, LINE_Y, 0]);
+    addLine('Soccer_Box_North_Back', [6.7 * S, 0.026 * S, 0.07 * S], [0, LINE_Y, -FIELD_LENGTH * 0.5 + 3.9 * S]);
+    addLine('Soccer_Box_North_Left', [0.07 * S, 0.026 * S, 3.9 * S], [-3.35 * S, LINE_Y, -FIELD_LENGTH * 0.5 + 1.95 * S]);
+    addLine('Soccer_Box_North_Right', [0.07 * S, 0.026 * S, 3.9 * S], [3.35 * S, LINE_Y, -FIELD_LENGTH * 0.5 + 1.95 * S]);
+    addLine('Soccer_Box_South_Back', [6.7 * S, 0.026 * S, 0.07 * S], [0, LINE_Y, FIELD_LENGTH * 0.5 - 3.9 * S]);
+    addLine('Soccer_Box_South_Left', [0.07 * S, 0.026 * S, 3.9 * S], [-3.35 * S, LINE_Y, FIELD_LENGTH * 0.5 - 1.95 * S]);
+    addLine('Soccer_Box_South_Right', [0.07 * S, 0.026 * S, 3.9 * S], [3.35 * S, LINE_Y, FIELD_LENGTH * 0.5 - 1.95 * S]);
+
+    const centerCircle = new THREE.Mesh(
+        new THREE.TorusGeometry(2.25 * S, 0.035 * S, 8, 96),
+        materials.line.clone()
+    );
+    centerCircle.name = 'Soccer_Line_CenterCircle';
+    centerCircle.position.set(0, LINE_Y + 0.018 * S, 0);
+    centerCircle.rotation.x = Math.PI / 2;
+    centerCircle.castShadow = false;
+    centerCircle.receiveShadow = false;
+    centerCircle.userData.skipPhysicsCollision = true;
+    root.add(centerCircle);
+
+    const addGoalFrame = (prefix, z, dir) => {
+        const depth = 1.2 * S;
+        const mouthWidth = 5.6 * S;
+        const postHeight = 1.85 * S;
+        const postThickness = 0.12 * S;
+        const backZ = z + dir * depth;
+        const postY = 0.12 * S + postHeight * 0.5;
+        const topY = 0.12 * S + postHeight;
+
+        addBox(`${prefix}_LeftPost`, [postThickness, postHeight, postThickness], [-mouthWidth * 0.5, postY, z], materials.goalFrame, { skipPhysicsCollision: true });
+        addBox(`${prefix}_RightPost`, [postThickness, postHeight, postThickness], [mouthWidth * 0.5, postY, z], materials.goalFrame, { skipPhysicsCollision: true });
+        addBox(`${prefix}_Crossbar`, [mouthWidth + postThickness, postThickness, postThickness], [0, topY, z], materials.goalFrame, { skipPhysicsCollision: true });
+        addBox(`${prefix}_BackBar`, [mouthWidth + postThickness, postThickness, postThickness], [0, topY, backZ], materials.goalFrame, { skipPhysicsCollision: true });
+        addBox(`${prefix}_LeftDepth`, [postThickness, postThickness, depth], [-mouthWidth * 0.5, topY, z + dir * depth * 0.5], materials.goalFrame, { skipPhysicsCollision: true });
+        addBox(`${prefix}_RightDepth`, [postThickness, postThickness, depth], [mouthWidth * 0.5, topY, z + dir * depth * 0.5], materials.goalFrame, { skipPhysicsCollision: true });
+        addBox(`${prefix}_Net`, [mouthWidth, postHeight, 0.035], [0, postY, backZ], materials.net, {
+            skipPhysicsCollision: true,
+            castShadow: false,
+            receiveShadow: false,
+        });
+    };
+
+    addGoalFrame('Soccer_NorthGoal', -GOAL_Z, -1);
+    addGoalFrame('Soccer_SouthGoal', GOAL_Z, 1);
+
+    return root;
+}
+
+function spawnSoccerGoalTarget(spec) {
+    const targetScale = Number.isFinite(spec.scale) && spec.scale > 0 ? spec.scale : 1;
+    const actor = spawnDynamicPrimitive('cylinder', new THREE.Vector3(...spec.position), 0.6 * targetScale, {
+        local: false,
+        includeCollisionBody: true,
+        simulatePhysics: false,
+        includeScripts: false,
+        skipImpulse: true,
+        userData: { label: spec.label },
+        returnActor: true,
+    });
+    const mesh = getActorRenderObject(actor);
+    if (!actor || !mesh) return null;
+
+    mesh.position.fromArray(spec.position);
+    mesh.rotation.set(Math.PI / 2, spec.rotationY || 0, 0);
+    mesh.scale.set(0.45 * targetScale, 0.06 * targetScale, 0.45 * targetScale);
+    mesh.name = spec.label;
+    tagGameplayPrefabActor(actor, 'target', { triggerRadius: 0.62 * targetScale, groundOffset: spec.position[1], scoreValue: 25 });
+    mesh.position.fromArray(spec.position);
+    mesh.updateMatrixWorld(true);
+    actor.userData.label = spec.label;
+    tintGameplayPrefabActor(actor, '#ef4444', '#ef4444', 1.4);
+    rebuildActorPhysics(actor);
+    setActorResetTransform(actor, spec.position, mesh.quaternion);
+    return actor;
+}
+
+function spawnSoccerGoalie(spec) {
+    if (!Array.isArray(spec?.position) || spec.position.length !== 3) return null;
+
+    const size = Array.isArray(spec.size) && spec.size.length === 3
+        ? spec.size
+        : [SOCCER_FIELD_LEVEL_SCALE * 1.7, SOCCER_FIELD_LEVEL_SCALE * 1.35, SOCCER_FIELD_LEVEL_SCALE * 0.24];
+    const actor = spawnDynamicPrimitive('cube', new THREE.Vector3(...spec.position), 1, {
+        local: false,
+        includeCollisionBody: true,
+        simulatePhysics: false,
+        includeScripts: false,
+        skipImpulse: true,
+        userData: {
+            label: spec.label || 'Soccer Goalie Wall',
+            soccerGoalie: true,
+            kinematic: true,
+            friction: 0.88,
+            restitution: 0.12,
+            soccerGoalieMotion: {
+                homePosition: [...spec.position],
+                axis: Array.isArray(spec.axis) && spec.axis.length === 3 ? [...spec.axis] : [1, 0, 0],
+                amplitude: Number.isFinite(spec.amplitude) ? spec.amplitude : SOCCER_FIELD_LEVEL_SCALE * 1.65,
+                speed: Number.isFinite(spec.speed) ? spec.speed : 1.7,
+                phase: Number.isFinite(spec.phase) ? spec.phase : 0,
+            },
+        },
+        returnActor: true,
+    });
+    const mesh = getActorRenderObject(actor);
+    if (!actor || !mesh) return null;
+
+    mesh.position.fromArray(spec.position);
+    mesh.scale.set(
+        Math.max(0.08, size[0] * 0.5),
+        Math.max(0.08, size[1] * 0.5),
+        Math.max(0.04, size[2] * 0.5)
+    );
+    mesh.name = spec.label || 'Soccer Goalie Wall';
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    actor.userData.label = mesh.name;
+    actor.userData.soccerGoalie = true;
+    tintGameplayPrefabActor(actor, '#ef4444', '#7f1d1d', 0.42);
+    rebuildActorPhysics(actor);
+    setActorResetTransform(actor, spec.position, mesh.quaternion);
+    return actor;
+}
+
+function spawnSoccerPlayerSpawn(spec) {
+    const actor = spawnDynamicPrimitive('capsule', new THREE.Vector3(...spec.position), 0.75, {
+        local: false,
+        includeCollisionBody: false,
+        includeScripts: false,
+        skipImpulse: true,
+        userData: { label: spec.label, playerIndex: spec.playerIndex },
+        returnActor: true,
+    });
+    const mesh = getActorRenderObject(actor);
+    if (!actor || !mesh) return null;
+
+    mesh.position.fromArray(spec.position);
+    mesh.name = spec.label;
+    tagGameplayPrefabActor(actor, 'playerSpawn', { triggerRadius: 0.9, groundOffset: spec.position[1] });
+    mesh.position.fromArray(spec.position);
+    mesh.updateMatrixWorld(true);
+    actor.userData.label = spec.label;
+    actor.userData.playerIndex = spec.playerIndex;
+    tintGameplayPrefabActor(actor, spec.color || '#22c55e', spec.color || '#22c55e', 1.8);
+    setActorResetTransform(actor, spec.position, mesh.quaternion);
+    if (spec.playerIndex === 1) {
+        applyPlayerSpawnFromActor(actor);
+    }
+    return actor;
+}
+
+function spawnSoccerBall() {
+    const actor = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, 0.54, 0), 0.38, {
+        local: false,
+        includeCollisionBody: true,
+        simulatePhysics: true,
+        includeScripts: false,
+        skipImpulse: true,
+        mass: 0.45,
+        restitution: 0.62,
+        friction: 0.72,
+        userData: { label: 'Soccer Ball' },
+        returnActor: true,
+    });
+    if (!actor) return null;
+
+    setActorColor(actor, '#f8fafc');
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return actor;
+
+    mesh.name = 'Soccer Ball';
+    setActorResetTransform(actor, [0, 0.54, 0], mesh.quaternion);
+    const patchMaterial = new THREE.MeshStandardMaterial({
+        color: 0x111827,
+        roughness: 0.56,
+        metalness: 0.02,
+    });
+    const patchPositions = [
+        [0, 0.39, 0],
+        [0.31, 0.14, 0.18],
+        [-0.31, 0.14, 0.18],
+        [0.0, 0.14, -0.36],
+        [0.22, -0.22, -0.24],
+        [-0.22, -0.22, 0.24],
+    ];
+    patchPositions.forEach((position, index) => {
+        const patch = new THREE.Mesh(new THREE.CircleGeometry(0.105, 6), patchMaterial.clone());
+        patch.name = `Soccer_Ball_Patch_${index + 1}`;
+        patch.position.fromArray(position);
+        patch.lookAt(position[0] * 2, position[1] * 2, position[2] * 2);
+        patch.userData.skipPhysicsCollision = true;
+        mesh.add(patch);
+    });
+    return actor;
+}
+
+function createSoccerLevelDefinition({
+    id = 'soccerField',
+    assetName = 'PolyFlow_Soccer_Target_Field_3x.scene',
+    sceneName = 'PolyFlow_Soccer_Target_Field',
+    hideTerrainPresentation = true,
+} = {}) {
+    return {
+        id,
+        assetName,
+        fileSize: 160000,
+        create: () => createSoccerTargetFieldScene({
+            name: sceneName,
+            hideTerrainPresentation,
+        }),
+        afterLoad: () => {
+            soccerGoalieState.elapsed = 0;
+            const playerSpawns = Array.isArray(currentMesh.userData?.soccerPlayerSpawns)
+                ? currentMesh.userData.soccerPlayerSpawns.map(spawnSoccerPlayerSpawn).filter(Boolean)
+                : [];
+            const goalTargets = Array.isArray(currentMesh.userData?.soccerGoalTargets)
+                ? currentMesh.userData.soccerGoalTargets.map(spawnSoccerGoalTarget).filter(Boolean)
+                : [];
+            const goalies = Array.isArray(currentMesh.userData?.soccerGoalies)
+                ? currentMesh.userData.soccerGoalies.map(spawnSoccerGoalie).filter(Boolean)
+                : [];
+            const soccerBall = spawnSoccerBall();
+            updateSoccerGoalies(0);
+            return playerSpawns[0] || goalTargets[0] || goalies[0] || soccerBall || null;
+        },
+    };
+}
+
+function createFlatTerrainLevelDefinition({
+    id = 'soccerFieldTerrain',
+    assetName = 'PolyFlow_Flat_Terrain.scene',
+    sceneName = 'PolyFlow_Flat_Terrain',
+} = {}) {
+    return {
+        id,
+        assetName,
+        fileSize: 48000,
+        create: () => {
+            const root = new THREE.Group();
+            root.name = sceneName;
+            root.userData.sampleType = 'flatTerrainLevel';
+            root.userData.hideTerrainPresentation = true;
+            root.userData.skipNormalization = true;
+            root.userData.preferredSpawn = {
+                position: [0, 1.35, 18],
+                yaw: Math.PI,
+                pitch: -0.08,
+            };
+            root.userData.preferredShowcase = {
+                position: [28, 18, 28],
+                target: [0, 0.4, 0],
+            };
+
+            const terrain = createTerrainMesh();
+            terrain.name = 'Flat_Terrain_Surface';
+            terrain.castShadow = false;
+            terrain.receiveShadow = true;
+            const position = terrain.geometry?.getAttribute?.('position');
+            if (position) {
+                for (let index = 0; index < position.count; index += 1) {
+                    position.setZ(index, 0);
+                }
+                position.needsUpdate = true;
+                terrain.geometry.computeVertexNormals();
+                terrain.geometry.computeBoundingSphere();
+                terrain.geometry.computeBoundingBox();
+            }
+            setTerrainModeGrid(terrain);
+            terrain.material.color.set('#ffffff');
+            terrain.material.roughness = 0.96;
+            terrain.material.metalness = 0.01;
+            terrain.material.needsUpdate = true;
+            const terrainActor = makeSampleLevelMeshActor('Flat_Terrain_Surface', terrain, {
+                kind: 'imported',
+                castShadow: false,
+                receiveShadow: true,
+                userData: {
+                    flatTerrainActor: true,
+                    terrainBrushTarget: true,
+                },
+            });
+            const terrainMesh = getActorRenderObject(terrainActor);
+            if (terrainMesh) root.add(terrainMesh);
+            return root;
+        },
+        afterLoad: () => Array.from(sceneSystem?.actors || []).find((actor) => actorBelongsToCurrentMesh(actor)) || null,
+    };
+}
+
+function getBuiltinLevelDefinition(levelId = 'soccerField') {
+    if (levelId === 'fpsStarter') {
+        return {
+            id: 'fpsStarter',
+            assetName: 'PolyFlow_FPS_Starter_Level.scene',
+            fileSize: 420000,
+            create: createFpsStarterLevel,
+        };
+    }
+
+    if (levelId === 'soccerFieldTerrain') {
+        return createFlatTerrainLevelDefinition();
+    }
+
+    return createSoccerLevelDefinition();
+}
+
+function loadSample(levelId = 'soccerField') {
     clearCurrentMesh();
 
-    currentMesh = createFpsStarterLevel();
+    const level = getBuiltinLevelDefinition(levelId);
+    currentMesh = level.create();
     scene.add(currentMesh);
     if (!currentMesh.userData?.skipNormalization) {
         normalizeCurrentMesh();
@@ -7095,7 +7978,12 @@ function loadSample() {
         applyShowcaseCameraRotation();
         showcase.velocity.set(0, 0, 0);
     }
-    updateLoadedAssetStats('PolyFlow_FPS_Starter_Level.scene', 420000, currentMesh);
+    const selectedActor = level.afterLoad?.() || null;
+    if (selectedActor) {
+        selectShowcaseActor(selectedActor.id);
+    }
+    refreshSceneUI();
+    updateLoadedAssetStats(level.assetName, level.fileSize, currentMesh);
     enableOptimizationPipeline();
 }
 
@@ -7109,6 +7997,7 @@ function onWindowResize() {
 
 function clearCurrentMesh() {
     exitGameplay();
+    soccerGoalieState.elapsed = 0;
     clearSceneActors();
 
     if (sampleDDGIVolumeActor) {
@@ -7238,17 +8127,50 @@ function ensureTerrainBrushHelper() {
     return helper;
 }
 
+function isTerrainBrushTargetActor(actor) {
+    const mesh = getActorRenderObject(actor);
+    return !!(actor && (actor.userData?.terrainBrushTarget || mesh?.userData?.terrainBrushTarget));
+}
+
+function getSelectedTerrainBrushActor() {
+    const actor = getSelectedSceneActor();
+    return isTerrainBrushTargetActor(actor) ? actor : null;
+}
+
+function sceneHasActorTerrainBrushTarget() {
+    if (!sceneSystem?.actors?.size || !currentMesh) return false;
+    for (const actor of sceneSystem.actors) {
+        if (!actorBelongsToCurrentMesh(actor)) continue;
+        if (isTerrainBrushTargetActor(actor)) return true;
+    }
+    return false;
+}
+
+function getTerrainBrushTargetObject() {
+    const selectedActor = getSelectedTerrainBrushActor();
+    if (selectedActor) {
+        return getActorRenderObject(selectedActor);
+    }
+
+    if (sceneHasActorTerrainBrushTarget()) {
+        return null;
+    }
+
+    return worldFloor || null;
+}
+
 function getTerrainHitFromEvent(event) {
-    if (!renderer || !worldFloor) return null;
+    const target = getTerrainBrushTargetObject();
+    if (!renderer || !target) return null;
     const rect = renderer.domElement.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
     pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointerNdc, camera);
-    const hit = raycaster.intersectObject(worldFloor, false)[0];
+    const hit = raycaster.intersectObject(target, true)[0];
     if (!hit) return null;
-    const local = worldFloor.worldToLocal(hit.point.clone());
-    return { hit, local };
+    const local = target.worldToLocal(hit.point.clone());
+    return { hit, local, target };
 }
 
 function updateTerrainBrushPreview(event) {
@@ -7262,6 +8184,10 @@ function updateTerrainBrushPreview(event) {
         helper.visible = false;
         return null;
     }
+    if (helper.parent !== terrainHit.target) {
+        terrainHit.target.add(helper);
+    }
+    terrainBrushState.targetObject = terrainHit.target;
     helper.visible = true;
     helper.position.set(terrainHit.local.x, terrainHit.local.y, terrainHit.local.z + 0.035);
     helper.scale.setScalar(terrainBrushState.radius);
@@ -7278,9 +8204,10 @@ function applyTerrainBrushFromEvent(event) {
     const terrainHit = updateTerrainBrushPreview(event);
     if (!terrainHit) return false;
 
-    const { local } = terrainHit;
+    const { local, target } = terrainHit;
     const tool = terrainBrushState.tool;
     if (tool === 'foliage' || tool === 'erase-foliage') {
+        if (target !== worldFloor) return false;
         grassField?.paintFoliage?.({
             terrain: worldFloor,
             localX: local.x,
@@ -7293,7 +8220,7 @@ function applyTerrainBrushFromEvent(event) {
         return true;
     }
 
-    const changed = applyTerrainSculptBrush(worldFloor, {
+    const changed = applyTerrainSculptBrush(target, {
         localX: local.x,
         localY: local.y,
         radius: terrainBrushState.radius,
@@ -7304,12 +8231,15 @@ function applyTerrainBrushFromEvent(event) {
         invert: event.shiftKey,
     });
     if (changed) {
-        grassField?.syncToTerrain?.(worldFloor, {
-            localX: local.x,
-            localY: local.y,
-            radius: terrainBrushState.radius + 2,
-        });
+        if (target === worldFloor) {
+            grassField?.syncToTerrain?.(worldFloor, {
+                localX: local.x,
+                localY: local.y,
+                radius: terrainBrushState.radius + 2,
+            });
+        }
         terrainBrushState.dirtyPhysics = true;
+        terrainBrushState.targetObject = target;
     }
     return changed;
 }
@@ -7933,7 +8863,11 @@ function handleShowcaseMouseButton(event) {
     if (event.button === 0 && terrainBrushState.active) {
         terrainBrushState.active = false;
         if (terrainBrushState.dirtyPhysics) {
-            rebuildTerrainPhysicsBody();
+            if (terrainBrushState.targetObject && terrainBrushState.targetObject !== worldFloor) {
+                rebuildModelPhysicsBody();
+            } else {
+                rebuildTerrainPhysicsBody();
+            }
             terrainBrushState.dirtyPhysics = false;
         }
         event.preventDefault();
@@ -8007,10 +8941,13 @@ function enterGameplay() {
     if (!gameplay.canPlay) return;
 
     snapshotSceneState();
-    syncGameplaySpawnToCamera();
+    if (!syncGameplaySpawnFromPlayerSpawnActor()) {
+        syncGameplaySpawnToCamera();
+    }
     respawnPlayer(true);
     gameplay.pointerLocked = false;
     gameplay.active = true;
+    syncGameplayPrefabVisibility();
     syncTransformControlState();
     resetAllScriptLifecycleHandles();
     applyMouseActionScripts({ persist: true });
@@ -8025,7 +8962,7 @@ function enterGameplay() {
 }
 
 function repairSampleCollisionHierarchyAfterRestore() {
-    if (!currentMesh || currentMesh.userData?.sampleType !== 'fpsStarterLevel' || !sceneSystem?.actors?.size) return;
+    if (!currentMesh || !currentMesh.userData?.sampleType || !sceneSystem?.actors?.size) return;
 
     let reparented = 0;
     for (const actor of sceneSystem.actors) {
@@ -8055,6 +8992,7 @@ function exitGameplay() {
     clearActiveVehicle();
     restoreSceneState();
     repairSampleCollisionHierarchyAfterRestore();
+    resetSoccerLevelState();
     gameplay.velocity.set(0, 0, 0);
     physics.jumpQueued = false;
     physics.desiredVelocity.set(0, 0, 0);
@@ -8071,6 +9009,7 @@ function exitGameplay() {
     syncTransformControlState();
 
     updateWorldPresentation();
+    syncGameplayPrefabVisibility();
     resetShowcaseCamera(false);
     updateGameplayUI();
 }
@@ -8276,6 +9215,8 @@ function respawnPlayer(useStoredView = false) {
         gameplay.canPlay = true;
     }
     if (!gameplay.canPlay) return;
+
+    resetGameplayPrefabs();
 
     if (isDrivingVehicle()) {
         clearActiveVehicle();
@@ -8578,7 +9519,10 @@ function updateVehicleGameplay(delta) {
     if (vehiclePosition.y < worldFloor.position.y - 24) {
         exitVehicle();
         respawnPlayer(true);
+        return;
     }
+
+    processGameplayPrefabs();
 }
 
 function getGroundHitAt(x, z, includeFloor = true, options = {}) {
@@ -8828,6 +9772,8 @@ function updateGameplay(delta) {
     if (characterPosition.y < worldFloor.position.y - 24) {
         respawnPlayer();
     }
+
+    processGameplayPrefabs();
 
     if (wasGrounded !== gameplay.grounded) {
         updateGameplayUI();
@@ -9363,6 +10309,19 @@ document.getElementById('scene-folder-input')?.addEventListener('change', (e) =>
 });
 
 const PREFAB_MANIFEST_URL = './prefabs/manifest.json';
+const PREFAB_CATEGORY_ORDER = ['Vehicles', 'Lights', 'Shapes', 'Gameplay'];
+const BUILTIN_PREFAB_ITEMS = [
+    { id: 'point-light', name: 'Point Light', category: 'Lights', kind: 'pointLight', image: 'light-point.svg' },
+    { id: 'spot-light', name: 'Spot Light', category: 'Lights', kind: 'spotLight', image: 'light-spot.svg' },
+    { id: 'sphere', name: 'Sphere', category: 'Shapes', kind: 'sphere', image: 'shape-sphere.svg' },
+    { id: 'cube', name: 'Cube', category: 'Shapes', kind: 'cube', image: 'shape-cube.svg' },
+    { id: 'cylinder', name: 'Cylinder', category: 'Shapes', kind: 'cylinder', image: 'shape-cylinder.svg' },
+    { id: 'capsule', name: 'Capsule', category: 'Shapes', kind: 'capsule', image: 'shape-capsule.svg' },
+    { id: 'player-spawn', name: 'Player Spawn', category: 'Gameplay', gameplayPrefab: 'playerSpawn', image: 'gameplay-spawn.svg' },
+    { id: 'teleporter', name: 'Teleporter', category: 'Gameplay', gameplayPrefab: 'teleporter', image: 'gameplay-teleporter.svg' },
+    { id: 'coin', name: 'Coin +10', category: 'Gameplay', gameplayPrefab: 'coin', image: 'gameplay-coin.svg' },
+    { id: 'target', name: 'Target +25', category: 'Gameplay', gameplayPrefab: 'target', image: 'gameplay-target.svg' },
+];
 let prefabManifestCache = null;
 
 async function loadPrefabManifest() {
@@ -9414,9 +10373,77 @@ async function loadPrefab(prefab) {
     }
 }
 
+function prefabAssetUrl(path = 'car.svg') {
+    return new URL(path, new URL(PREFAB_MANIFEST_URL, window.location.href));
+}
+
+function spawnBuiltinPrefab(prefab) {
+    if (prefab?.gameplayPrefab) {
+        spawnGameplayPrefab(prefab.gameplayPrefab);
+        closePrefabBrowser();
+        return;
+    }
+
+    const kind = prefab?.kind || 'sphere';
+    const label = prefab?.name || getActorKindLabel(kind);
+    let actor = null;
+
+    if (isLightActorKind(kind)) {
+        actor = spawnLightActor(kind, {
+            userData: { label },
+            includeScripts: true,
+            scale: Number.parseFloat(getActorKindDefaultScale(kind)),
+        });
+    } else {
+        const scale = Number.parseFloat(getActorKindDefaultScale(kind));
+        actor = spawnDynamicPrimitive(kind, undefined, scale, {
+            includeCollisionBody: true,
+            simulatePhysics: true,
+            includeScripts: true,
+            userData: { label },
+            returnActor: true,
+        });
+    }
+
+    if (!actor) {
+        const status = document.getElementById('prefab-browser-status');
+        if (status) status.textContent = `Failed to spawn ${label}.`;
+        return;
+    }
+
+    refreshSceneUI();
+    selectShowcaseActor(actor.id);
+    closePrefabBrowser();
+}
+
 function closePrefabBrowser() {
     const browser = document.getElementById('prefab-browser');
     if (browser) browser.hidden = true;
+}
+
+function createPrefabBrowserTile(prefab) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'prefab-browser-item';
+
+    const img = document.createElement('img');
+    img.className = 'prefab-browser-thumb';
+    img.alt = prefab.name || 'Prefab';
+    img.src = prefabAssetUrl(prefab.image || 'car.svg');
+
+    const name = document.createElement('div');
+    name.className = 'prefab-browser-name';
+    name.textContent = prefab.name || prefab.file || 'Prefab';
+
+    item.append(img, name);
+    item.addEventListener('click', () => {
+        if (prefab.file) {
+            loadPrefab(prefab);
+        } else {
+            spawnBuiltinPrefab(prefab);
+        }
+    });
+    return item;
 }
 
 async function openPrefabBrowser() {
@@ -9431,30 +10458,48 @@ async function openPrefabBrowser() {
 
     try {
         const manifest = await loadPrefabManifest();
-        const prefabs = Array.isArray(manifest.prefabs) ? manifest.prefabs : [];
+        const manifestPrefabs = Array.isArray(manifest.prefabs) ? manifest.prefabs : [];
+        const prefabs = [
+            ...manifestPrefabs.map((prefab) => ({
+                category: 'Vehicles',
+                ...prefab,
+            })),
+            ...BUILTIN_PREFAB_ITEMS,
+        ];
         if (!prefabs.length) {
             if (status) status.textContent = 'No prefabs found.';
             return;
         }
 
-        for (const prefab of prefabs) {
-            const item = document.createElement('button');
-            item.type = 'button';
-            item.className = 'prefab-browser-item';
+        const grouped = new Map();
+        prefabs.forEach((prefab) => {
+            const category = prefab.category || 'Other';
+            if (!grouped.has(category)) grouped.set(category, []);
+            grouped.get(category).push(prefab);
+        });
 
-            const img = document.createElement('img');
-            img.className = 'prefab-browser-thumb';
-            img.alt = prefab.name || 'Prefab';
-            img.src = new URL(prefab.image || './car.svg', new URL(PREFAB_MANIFEST_URL, window.location.href));
+        const categories = [
+            ...PREFAB_CATEGORY_ORDER.filter((category) => grouped.has(category)),
+            ...Array.from(grouped.keys()).filter((category) => !PREFAB_CATEGORY_ORDER.includes(category)).sort(),
+        ];
 
-            const name = document.createElement('div');
-            name.className = 'prefab-browser-name';
-            name.textContent = prefab.name || prefab.file || 'Prefab';
+        categories.forEach((category) => {
+            const items = grouped.get(category) || [];
+            const heading = document.createElement('div');
+            heading.className = 'prefab-category-heading';
 
-            item.append(img, name);
-            item.addEventListener('click', () => loadPrefab(prefab));
-            grid.appendChild(item);
-        }
+            const title = document.createElement('div');
+            title.className = 'prefab-category-title';
+            title.textContent = category;
+
+            const count = document.createElement('div');
+            count.className = 'prefab-category-count';
+            count.textContent = `${items.length}`;
+
+            heading.append(title, count);
+            grid.appendChild(heading);
+            items.forEach((prefab) => grid.appendChild(createPrefabBrowserTile(prefab)));
+        });
 
         if (status) status.textContent = `${prefabs.length} prefab${prefabs.length === 1 ? '' : 's'}`;
     } catch (err) {
@@ -9490,6 +10535,10 @@ document.getElementById('reset-view')?.addEventListener('click', () => {
         return;
     }
 
+    if (resetSoccerLevelState()) {
+        refreshSceneUI();
+    }
+    syncGameplayPrefabVisibility();
     resetShowcaseCamera(true);
 });
 
@@ -9888,7 +10937,7 @@ function wireExtractedModules() {
         syncRuntimePropIdCounter, rebuildActorPhysics, syncPropScriptState,
         destroyDynamicPhysicsProp, getDynamicPropDisplayName, saveObjectScriptDrafts,
         refreshSceneUI, selectShowcaseActor, ensureVehicleVisualState,
-        serializeComponentTree, deserializeComponentTree, editorHistory,
+        serializeComponentTree, deserializeComponentTree, reattachRestoredActor, editorHistory,
         loadWorldFromJSON,
     });
 

@@ -61,6 +61,45 @@ export function setupSceneHistory(deps) {
 
 let pieSceneSnapshot = null;
 
+function isFlatTerrainActorData(actorData) {
+    return !!actorData?.userData?.flatTerrainActor;
+}
+
+function isFlatTerrainActor(actor) {
+    const mesh = getActorRenderObject?.(actor);
+    return !!(actor?.userData?.flatTerrainActor || mesh?.userData?.flatTerrainActor);
+}
+
+function restoreMissingPieTerrainActors(snapshotScene) {
+    const snapshotActors = Array.isArray(snapshotScene?.actors) ? snapshotScene.actors : [];
+    if (!snapshotActors.length || !sceneSystem) return 0;
+
+    const existingIds = new Set();
+    for (const actor of sceneSystem.actors) {
+        if (!isFlatTerrainActor(actor)) continue;
+        if (actor.id) existingIds.add(actor.id);
+    }
+
+    let restoredCount = 0;
+    for (const actorData of snapshotActors) {
+        if (!isFlatTerrainActorData(actorData)) continue;
+        if (actorData.id && existingIds.has(actorData.id)) continue;
+
+        const actor = spawnActorFromSerializedData(actorData, { preserveId: true });
+        if (!actor) continue;
+
+        restoredCount += 1;
+        if (actor.id) existingIds.add(actor.id);
+    }
+
+    if (restoredCount > 0) {
+        refreshGameplayWorld?.({ resetCamera: false });
+        refreshSceneUI?.();
+    }
+
+    return restoredCount;
+}
+
 export function snapshotSceneState() {
     if (!sceneSystem) return;
 
@@ -73,15 +112,22 @@ export function snapshotSceneState() {
 export function restoreSceneState() {
     if (!pieSceneSnapshot || !sceneSystem) return;
 
-    loadWorldFromJSON(pieSceneSnapshot.scene);
-
-    if (pieSceneSnapshot.activeActorId) {
-        selectShowcaseActor(pieSceneSnapshot.activeActorId);
-    } else {
-        selectShowcaseActor(null);
-    }
-
+    const snapshot = pieSceneSnapshot;
     pieSceneSnapshot = null;
+
+    Promise.resolve(loadWorldFromJSON(snapshot.scene))
+        .then(() => {
+            restoreMissingPieTerrainActors(snapshot.scene);
+
+            if (snapshot.activeActorId) {
+                selectShowcaseActor(snapshot.activeActorId);
+            } else {
+                selectShowcaseActor(null);
+            }
+        })
+        .catch((error) => {
+            console.error('Failed to restore PIE snapshot.', error);
+        });
 }
 
 // ─── lines 11142–11258 ───────────────────────────────────────────────────────────────────

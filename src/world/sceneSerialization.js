@@ -3,7 +3,8 @@
 // All module-scope dependencies are injected once by setupSceneSerialization().
 
 import * as THREE from 'three';
-import { DDGIVolumeComponent } from '../runtime/sceneRuntime.js';
+import { DDGIVolumeComponent, createActor } from '../runtime/sceneRuntime.js';
+import { createTerrainMesh, applySerializedTerrainState, setTerrainModeGrid, serializeTerrainState } from './terrain.js';
 
 // Module-scope deps — populated by setupSceneSerialization, assigned once.
 let scene, camera, sceneSystem, physics, importedPropState, objectScriptState, VEHICLE_SETTINGS;
@@ -16,6 +17,7 @@ let syncRuntimePropIdCounter, rebuildActorPhysics, syncPropScriptState;
 let destroyDynamicPhysicsProp, getDynamicPropDisplayName;
 let saveObjectScriptDrafts, refreshSceneUI, selectShowcaseActor;
 let ensureVehicleVisualState, serializeComponentTree, deserializeComponentTree;
+let reattachRestoredActor;
 // editorHistory and loadWorldFromJSON are injected to avoid a circular import
 // cycle (sceneHistory.js imports serializeActorData / clearSceneActors from
 // this module, so a static import back would be circular).
@@ -55,9 +57,79 @@ export function setupSceneSerialization(deps) {
         ensureVehicleVisualState,
         serializeComponentTree,
         deserializeComponentTree,
+        reattachRestoredActor,
         editorHistory,
         loadWorldFromJSON,
     } = deps);
+}
+
+function getEmbeddedMaterialFallbackType(type = '') {
+    switch (type) {
+    case 'DDGIMeshStandardNodeMaterial':
+    case 'MeshStandardNodeMaterial':
+        return 'MeshStandardMaterial';
+    case 'MeshPhysicalNodeMaterial':
+        return 'MeshPhysicalMaterial';
+    case 'MeshPhongNodeMaterial':
+        return 'MeshPhongMaterial';
+    case 'MeshLambertNodeMaterial':
+        return 'MeshLambertMaterial';
+    case 'MeshBasicNodeMaterial':
+        return 'MeshBasicMaterial';
+    case 'MeshNormalNodeMaterial':
+        return 'MeshNormalMaterial';
+    case 'SpriteNodeMaterial':
+        return 'SpriteMaterial';
+    case 'PointsNodeMaterial':
+        return 'PointsMaterial';
+    case 'LineBasicNodeMaterial':
+        return 'LineBasicMaterial';
+    default:
+        return type;
+    }
+}
+
+function sanitizeEmbeddedMaterialJson(materialJson) {
+    if (!materialJson || typeof materialJson !== 'object') return materialJson;
+
+    const nextType = getEmbeddedMaterialFallbackType(materialJson.type);
+    if (!nextType || nextType === materialJson.type) {
+        return materialJson;
+    }
+
+    materialJson.type = nextType;
+
+    delete materialJson.inputNodes;
+    delete materialJson.nodes;
+    delete materialJson.outputNode;
+    delete materialJson.vertexNode;
+    delete materialJson.fragmentNode;
+    delete materialJson.colorNode;
+    delete materialJson.normalNode;
+    delete materialJson.opacityNode;
+    delete materialJson.backdropNode;
+    delete materialJson.backdropAlphaNode;
+    delete materialJson.alphaTestNode;
+    delete materialJson.positionNode;
+    delete materialJson.depthNode;
+    delete materialJson.shadowNode;
+    delete materialJson.receivedShadowNode;
+    delete materialJson.castShadowNode;
+    delete materialJson.lightsNode;
+    delete materialJson.envNode;
+    delete materialJson.aoNode;
+
+    return materialJson;
+}
+
+function sanitizeEmbeddedRootJson(rootJson) {
+    if (!rootJson || typeof rootJson !== 'object') return rootJson;
+
+    if (Array.isArray(rootJson.materials)) {
+        rootJson.materials.forEach((materialJson) => sanitizeEmbeddedMaterialJson(materialJson));
+    }
+
+    return rootJson;
 }
 
 // ─── lines 9531–9577 ─────────────────────────────────────────────────────────────────────
@@ -215,6 +287,13 @@ export function serializeActorData(actor) {
         && typeof actorCore.coreId === 'string'
         && actorCore.coreId
         && actorCore.coreId !== actor.id;
+    const isFlatTerrainActor = userDataForSerialization?.flatTerrainActor === true;
+    const embeddedRootJson = actor.kind === 'imported' && !actor.templateId && !isFlatTerrainActor
+        ? sanitizeEmbeddedRootJson(mesh.toJSON())
+        : null;
+    const terrainState = isFlatTerrainActor
+        ? serializeTerrainState(mesh)
+        : null;
 
     return {
         id: actor.id,
@@ -234,6 +313,8 @@ export function serializeActorData(actor) {
         scripts: inheritsRules ? null : objectScriptState.drafts[actor.id] || null,
         componentFlags: getActorComponentFlags(actor),
         components: serializeComponentTree(mesh),
+        terrainState,
+        rootJson: embeddedRootJson,
     };
 }
 
@@ -251,6 +332,26 @@ function computeCameraFrontSpawn(distance = 4.5, up = 1.2) {
 function serializedActorInheritsRules(actorData = {}) {
     const core = actorData.userData?.actorCore;
     return core?.inheritsRules === true && typeof core.coreId === 'string' && core.coreId && core.coreId !== actorData.id;
+}
+
+function spawnSerializedFlatTerrainActor(actorData) {
+    const mesh = createTerrainMesh();
+    mesh.name = actorData.name || 'Flat_Terrain_Surface';
+    mesh.castShadow = false;
+    mesh.receiveShadow = true;
+    setTerrainModeGrid(mesh);
+    applySerializedTerrainState(mesh, actorData.terrainState);
+
+    const actor = createActor({
+        name: actorData.name || 'Actor',
+        kind: actorData.kind,
+        mesh,
+        body: null,
+        templateId: actorData.templateId || '',
+        userData: actorData.userData,
+    });
+    sceneSystem?.addActor?.(actor);
+    return actor;
 }
 
 export function spawnActorFromSerializedData(actorData, { preserveId = false, spawnInFrontOfPlayer = false } = {}) {
@@ -272,6 +373,9 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
         scale = actorData.transform.scale[0];
     }
 
+    const hasEmbeddedRoot = !!actorData.rootJson;
+    const isFlatTerrainActor = actorData.userData?.flatTerrainActor === true;
+
     let actor = null;
     if (actorData.kind === 'vehicle') {
         const savedBodyTemplateId = actorData.vehicleBodyTemplateId
@@ -289,20 +393,33 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
             wheelTemplateId: savedWheelTemplateId,
         });
     } else if (actorData.kind === 'imported') {
-        if (!actorData.templateId || !importedPropState.templates.some((template) => template.id === actorData.templateId)) {
+        if (isFlatTerrainActor && actorData.terrainState) {
+            actor = spawnSerializedFlatTerrainActor(actorData);
+        } else if (hasEmbeddedRoot) {
+            const mesh = new THREE.ObjectLoader().parse(sanitizeEmbeddedRootJson(actorData.rootJson));
+            actor = createActor({
+                name: actorData.name || 'Actor',
+                kind: actorData.kind,
+                mesh,
+                body: null,
+                templateId: actorData.templateId || '',
+                userData: actorData.userData,
+            });
+            sceneSystem?.addActor?.(actor);
+        } else if (!actorData.templateId || !importedPropState.templates.some((template) => template.id === actorData.templateId)) {
             if (tempScriptId) {
                 delete objectScriptState.drafts[tempScriptId];
             }
             alert('This actor requires an imported prop source (template) that is not currently loaded. Import the matching prop file first, then try loading this actor again.');
             return null;
+        } else {
+            actor = spawnImportedProp(actorData.templateId, {
+                includeScripts: componentFlags.scripts,
+                userData: actorData.userData,
+                includeCollisionBody: componentFlags.collision,
+                simulatePhysics: componentFlags.physics,
+            });
         }
-
-        actor = spawnImportedProp(actorData.templateId, {
-            includeScripts: componentFlags.scripts,
-            userData: actorData.userData,
-            includeCollisionBody: componentFlags.collision,
-            simulatePhysics: componentFlags.physics,
-        });
     } else if (actorData.kind === 'pointLight' || actorData.kind === 'spotLight') {
         const savedPos = spawnInFrontOfPlayer
             ? computeCameraFrontSpawn(6, 0.6)
@@ -374,6 +491,7 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
 
     const mesh = getActorRenderObject(actor);
     if (mesh) {
+        reattachRestoredActor?.(actor, actorData);
         mesh.userData.dynamicPropId = actor.id;
         if (spawnInFrontOfPlayer) {
             mesh.position.copy(computeCameraFrontSpawn());
