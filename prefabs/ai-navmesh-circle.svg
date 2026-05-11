@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Circle patrol AI">
+  <rect width="640" height="480" fill="#101418"/>
+  <circle cx="320" cy="250" r="150" fill="#083344" opacity=".72"/>
+  <circle cx="320" cy="250" r="150" fill="none" stroke="#22d3ee" stroke-width="18"/>
+  <circle cx="320" cy="250" r="96" fill="none" stroke="#67e8f9" stroke-width="6" stroke-dasharray="18 18" opacity=".72"/>
+  <path d="M443 176c31 28 47 65 47 109" fill="none" stroke="#a3e635" stroke-width="16" stroke-linecap="round"/>
+  <path d="M492 286l-30-38h55z" fill="#a3e635"/>
+  <circle cx="435" cy="176" r="32" fill="#bef264"/>
+  <path d="M390 328c3-61 24-97 45-97s42 36 45 97" fill="#84cc16" stroke="#ecfccb" stroke-width="10"/>
+  <path d="M203 366h234" stroke="#22d3ee" stroke-width="14" stroke-linecap="round"/>
+</svg>
