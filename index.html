@@ -10,9 +10,9 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
     <link rel="icon" href="/polyflow-3d/favicon.svg" type="image/svg+xml">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-C_SWcZEK.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-CGlIDR6V.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-BAUHLHbC.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-BLQ9D1C7.css">
 </head>
 
 <body>
@@ -158,6 +158,7 @@
                         <div class="viewer-menu-actions">
                             <button class="btn btn-primary viewer-menu-btn" id="open-actor-editor">Add Actor</button>
                             <button class="btn viewer-menu-btn" id="load-actor-btn">⬆ Load Actor</button>
+                            <button class="btn viewer-menu-btn" id="load-prefab-btn">Load Prefab</button>
                         </div>
                         <div class="viewer-menu-actions">
                             <button class="btn viewer-menu-btn" id="play-test-sound-btn">Test 3D Sound</button>
@@ -166,6 +167,17 @@
                         <div class="viewer-inline-note">Create a new actor or load a saved .actor file. Importing props,
                             multiplayer, and input scripting now live under Menu Sections.</div>
                         <input type="file" id="actor-file-input" accept=".actor,.json" style="display: none;">
+                    </div>
+
+                    <div class="viewer-modal" id="prefab-browser" hidden>
+                        <div class="viewer-modal-card viewer-prefab-browser-card" role="dialog" aria-modal="true"
+                            aria-labelledby="prefab-browser-title">
+                            <div class="viewer-modal-eyebrow">Prefab Browser</div>
+                            <h2 class="viewer-modal-title" id="prefab-browser-title">Load Prefab</h2>
+                            <div class="prefab-browser-grid" id="prefab-browser-grid"></div>
+                            <div class="viewer-inline-note prefab-browser-status" id="prefab-browser-status">Loading prefabs...</div>
+                            <button class="btn viewer-modal-cancel" id="prefab-browser-close" type="button">Close</button>
+                        </div>
                     </div>
 
                     <div class="viewer-modal" id="actor-editor" hidden>
@@ -988,10 +1000,10 @@
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-inline-note">Turns off screen-space GI, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
-                                        <button class="btn viewer-toggle-btn" id="perf-mode-off">Off</button>
-                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-on">On</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode on. SSGI, volumetric fog, and post-process bloom are paused.</div>
+                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full SSGI + fog + post-process active.</div>
                                 </div>
                             </details>
 
