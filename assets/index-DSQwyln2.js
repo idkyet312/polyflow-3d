@@ -16575,8 +16575,7 @@ function OnInput(Input, DeltaTime) {
 
     rotorSpeed = 30 + (liftUp ? 12 : 0) + Math.abs(throttleFwd) * 6;
 
-    ensureLiftWidget();
-    liftWidget?.SetText('Lift Accel: ' + HELI.liftAccel.toFixed(2));
+    window.exampleWidgets?.speed?.SetText('Lift Accel: ' + HELI.liftAccel.toFixed(2));
 
     const jp = bi.GetPosition(bodyId);
     const position = new THREE.Vector3(jp.GetX(), jp.GetY(), jp.GetZ());
