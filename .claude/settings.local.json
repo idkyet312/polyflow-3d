@@ -9,7 +9,9 @@
       "Bash(node -e \"const p=require\\('c:\\\\\\\\Users\\\\\\\\Bas\\\\\\\\.gemini\\\\\\\\antigravity\\\\\\\\scratch\\\\\\\\polyflow-3d\\\\\\\\node_modules\\\\\\\\three\\\\\\\\package.json'\\); console.log\\(p.version\\)\")",
       "Bash(npx vite *)",
       "Bash(node --check main.js)",
-      "Bash(node --check src/world/sceneSerialization.js)"
+      "Bash(node --check src/world/sceneSerialization.js)",
+      "Bash(npm install *)",
+      "Bash(npm search *)"
     ]
   }
 }

@@ -1760,6 +1760,25 @@ main {
   pointer-events: none;
 }
 
+.desktop-mobile-toggle {
+  position: absolute;
+  left: 1rem;
+  bottom: 1rem;
+  z-index: 19;
+  padding: 0.6rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  backdrop-filter: blur(10px);
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+body.mobile-ui-preview .desktop-mobile-toggle {
+  display: none;
+}
+
 body.play-active #crosshair {
   opacity: 1;
 }
@@ -1881,6 +1900,33 @@ body.mobile-ui-preview .mobile-chip {
 body.mobile-ui-preview .mobile-chip.viewer-toggle-btn-active {
   background: #fff;
   color: #000;
+}
+
+.mobile-exit-play {
+  position: fixed;
+  top: calc(0.85rem + env(safe-area-inset-top, 0px));
+  left: 0.75rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  min-width: 0;
+  padding: 0;
+  border-radius: 50%;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(10px);
+  font-size: 1.1rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+body.play-active .mobile-exit-play {
+  display: flex;
 }
 
 body.mobile-ui-preview .mobile-dock {

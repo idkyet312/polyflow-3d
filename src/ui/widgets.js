@@ -320,10 +320,12 @@ export class ProgressBarWidget extends BaseWidget {
                 overflow: hidden;
             ">
                 <div style="
-                    width: ${this.config.progress * 100}%;
+                    width: 100%;
                     height: 100%;
                     background-color: ${this.config.fillColor};
-                    transition: width 0.3s ease;
+                    transform: scaleX(${Math.max(0, Math.min(1, this.config.progress))});
+                    transform-origin: left center;
+                    transition: transform 0.3s ease;
                 "></div>
             </div>
         `;
@@ -336,7 +338,9 @@ export class ProgressBarWidget extends BaseWidget {
 
         if (updates.progress !== undefined) {
             this.config.progress = Math.max(0, Math.min(1, updates.progress));
-            inner.style.width = (this.config.progress * 100) + '%';
+            inner.style.width = '100%';
+            inner.style.transform = `scaleX(${this.config.progress})`;
+            inner.style.transformOrigin = 'left center';
         }
         if (updates.width !== undefined) {
             this.config.width = updates.width;

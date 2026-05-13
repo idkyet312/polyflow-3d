@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Helicopter prefab">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a2331"/>
+      <stop offset="1" stop-color="#0a0e15"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a6fc9"/>
+      <stop offset="0.55" stop-color="#22468f"/>
+      <stop offset="1" stop-color="#0f2452"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0c44c"/>
+      <stop offset="1" stop-color="#a3781b"/>
+    </linearGradient>
+    <radialGradient id="glass" cx="0.35" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#e8f6ff" stop-opacity="0.95"/>
+      <stop offset="0.6" stop-color="#7fb4dc" stop-opacity="0.65"/>
+      <stop offset="1" stop-color="#1a3b66" stop-opacity="0.85"/>
+    </radialGradient>
+    <linearGradient id="blade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5a6470" stop-opacity="0.2"/>
+      <stop offset="0.5" stop-color="#1a1f26" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#5a6470" stop-opacity="0.2"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="480" fill="url(#bg)"/>
+
+  <!-- horizon shadow -->
+  <ellipse cx="320" cy="420" rx="220" ry="14" fill="#000" opacity="0.45"/>
+
+  <!-- main rotor blur disc -->
+  <ellipse cx="270" cy="142" rx="220" ry="10" fill="url(#blade)" opacity="0.7"/>
+  <ellipse cx="270" cy="142" rx="220" ry="3" fill="#e2e8f0" opacity="0.5"/>
+
+  <!-- rotor mast -->
+  <rect x="266" y="138" width="8" height="34" fill="#9aa3b2"/>
+
+  <!-- tail boom -->
+  <path d="M340 232 L578 252 L582 270 L342 258 Z" fill="url(#body)" stroke="#1c2f5a" stroke-width="2"/>
+
+  <!-- tail fin -->
+  <path d="M560 200 L598 188 L606 252 L592 264 L578 252 Z" fill="url(#body)" stroke="#1c2f5a" stroke-width="2"/>
+
+  <!-- tail stabilizer -->
+  <path d="M538 240 L612 234 L612 248 L540 252 Z" fill="#22468f" stroke="#1c2f5a" stroke-width="1.5"/>
+
+  <!-- tail rotor -->
+  <g transform="translate(602 226)">
+    <ellipse cx="0" cy="0" rx="3" ry="28" fill="url(#blade)" opacity="0.85"/>
+    <ellipse cx="0" cy="0" rx="28" ry="3" fill="url(#blade)" opacity="0.85"/>
+    <circle cx="0" cy="0" r="5" fill="#9aa3b2"/>
+  </g>
+
+  <!-- fuselage main body -->
+  <path d="M104 244 C104 188 156 156 220 156 L322 156 C360 156 380 178 380 218 L380 268 C380 296 358 312 322 312 L168 312 C128 312 104 290 104 244 Z"
+        fill="url(#body)" stroke="#dbeafe" stroke-width="2.5"/>
+
+  <!-- engine hump -->
+  <path d="M250 156 C266 132 320 130 336 156 Z" fill="#22468f" stroke="#1c2f5a" stroke-width="2"/>
+
+  <!-- nose cone -->
+  <path d="M104 244 C104 220 116 208 134 208 L168 208 L168 280 L134 280 C116 280 104 268 104 244 Z"
+        fill="url(#body)" stroke="#dbeafe" stroke-width="2.5"/>
+
+  <!-- cockpit glass -->
+  <path d="M132 222 C132 196 158 182 200 182 L262 182 C282 182 294 194 294 214 L294 254 L132 254 Z"
+        fill="url(#glass)" stroke="#cfe6ff" stroke-width="2"/>
+
+  <!-- window frame divider -->
+  <line x1="210" y1="190" x2="210" y2="252" stroke="#0a1830" stroke-width="2.5"/>
+
+  <!-- exhaust -->
+  <rect x="334" y="232" width="22" height="22" rx="4" fill="#3a4150" stroke="#1c2024" stroke-width="2"/>
+  <rect x="338" y="236" width="14" height="14" rx="2" fill="#0a0d12"/>
+
+  <!-- nav lights -->
+  <circle cx="110" cy="234" r="6" fill="#ffffff" opacity="0.95"/>
+  <circle cx="110" cy="234" r="11" fill="#ffffff" opacity="0.18"/>
+  <circle cx="298" cy="200" r="5" fill="#22c55e"/>
+  <circle cx="298" cy="200" r="9" fill="#22c55e" opacity="0.25"/>
+
+  <!-- accent stripe -->
+  <path d="M120 282 L362 296" stroke="url(#accent)" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- skids -->
+  <rect x="116" y="346" width="252" height="7" rx="3" fill="#b0b8c4"/>
+  <path d="M150 312 L150 346 M250 312 L250 346 M340 312 L340 346" stroke="#b0b8c4" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- antenna on tail -->
+  <line x1="586" y1="200" x2="586" y2="170" stroke="#b0b8c4" stroke-width="3"/>
+  <circle cx="586" cy="168" r="3" fill="#ef4444"/>
+</svg>

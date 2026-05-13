@@ -152,6 +152,13 @@ export function compileObjectEventScript(source) {
                 Tick: typeof Tick === 'function' ? Tick : undefined,
                 OnHit: typeof OnHit === 'function' ? OnHit : undefined,
                 EndPlay: typeof EndPlay === 'function' ? EndPlay : undefined,
+                OnInput: typeof OnInput === 'function' ? OnInput : undefined,
+                OnInputPressed: typeof OnInputPressed === 'function' ? OnInputPressed : undefined,
+                OnInputReleased: typeof OnInputReleased === 'function' ? OnInputReleased : undefined,
+                OnPossessed: typeof OnPossessed === 'function' ? OnPossessed : undefined,
+                OnUnpossessed: typeof OnUnpossessed === 'function' ? OnUnpossessed : undefined,
+                OnTrigger: typeof OnTrigger === 'function' ? OnTrigger : undefined,
+                OnTriggerExit: typeof OnTriggerExit === 'function' ? OnTriggerExit : undefined,
             };
         `);
         wrapped.__ueLifecycle = true;
@@ -206,6 +213,13 @@ export function syncPropScriptState(prop) {
     const mesh = getActorRenderObject(prop);
     if (mesh?.userData) {
         mesh.userData.dynamicPropId = propId;
+    }
+
+    // Pre-warm tick lifecycle handles so prefab actors that have no physics
+    // body (and therefore aren't iterated by runObjectTickScripts) still get
+    // their OnTrigger / OnInput / etc. handlers populated and ready.
+    if (scriptState.tick.enabled && scriptState.tick.compiled?.__ueLifecycle) {
+        ensureScriptHandles(prop);
     }
 
     return prop;
@@ -582,6 +596,16 @@ export function updatePropScriptSource(prop, eventType, source, { persist = true
 
     syncActorsUsingRuleSource(sourceProp.id);
 
+    // Pre-warm handles for tick-script changes so gameplay-prefab actors that
+    // never get a regular tick pass (no physics body) still pick up the new
+    // OnTrigger / OnInput / etc. handlers immediately after Apply.
+    if (eventType === 'tick' && eventState.enabled && !eventState.error) {
+        ensureScriptHandles(sourceProp);
+        // Also reset transient trigger latch so a player still standing in the
+        // volume gets re-triggered with the new code.
+        if (sourceProp.userData) sourceProp.userData._wasInsideTrigger = false;
+    }
+
     updateObjectScriptEditorStatus(
         eventState.error
             ? `${getObjectScriptEventLabel(eventType)} code failed to compile.`
@@ -711,6 +735,34 @@ export function handleObjectScriptRuntimeError(prop, eventType, error) {
     }
 }
 
+/**
+ * Force compile and resolve the tick script's lifecycle handles for an actor.
+ * Useful for prefab actors that aren't part of physics.dynamicBodies and
+ * therefore never get a regular runObjectTickScripts pass.
+ */
+export function ensureScriptHandles(prop) {
+    const eventState = getActorScriptState(prop)?.tick;
+    const compiled = eventState?.compiled;
+    if (!eventState?.enabled || !compiled?.__ueLifecycle) return;
+    if (eventState.handles) return;
+    try {
+        const result = compiled(buildObjectEventApi(prop, 'tick', {}));
+        if (result && typeof result.then === 'function') {
+            eventState.handles = {};
+            result
+                .then((resolved) => { eventState.handles = resolved || {}; })
+                .catch((error) => {
+                    eventState.handles = null;
+                    handleObjectScriptRuntimeError(prop, 'tick', error);
+                });
+        } else {
+            eventState.handles = result || {};
+        }
+    } catch (error) {
+        handleObjectScriptRuntimeError(prop, 'tick', error);
+    }
+}
+
 export function runObjectEventScript(prop, eventType, options = {}) {
     const eventState = getActorScriptState(prop)?.[eventType];
     if (!eventState?.enabled || !eventState.compiled || eventState.running) {
@@ -725,7 +777,21 @@ export function runObjectEventScript(prop, eventType, options = {}) {
     if (compiled.__ueLifecycle) {
         try {
             if (!eventState.handles) {
-                eventState.handles = compiled(api) || {};
+                const result = compiled(api);
+                if (result && typeof result.then === 'function') {
+                    // Compiled wrapper is async (AsyncFunction). Mark pending so we
+                    // don't kick off another invocation, then store the resolved
+                    // handles once the promise settles.
+                    eventState.handles = {};
+                    result
+                        .then((resolved) => { eventState.handles = resolved || {}; })
+                        .catch((error) => {
+                            eventState.handles = null;
+                            handleObjectScriptRuntimeError(prop, eventType, error);
+                        });
+                    return false;
+                }
+                eventState.handles = result || {};
             }
             const handles = eventState.handles;
 
@@ -787,6 +853,141 @@ export function runObjectTickScripts(delta) {
         if (!getActorRenderObject(prop)) continue;
         runObjectEventScript(prop, 'tick', { deltaTime: delta });
     }
+}
+
+/**
+ * Dispatch OnInput / OnInputPressed / OnInputReleased to the *possessed* actor
+ * only (the prop the player is currently driving). Reuses the actor's `tick`
+ * script slot — same compiled module — so authors keep one file per actor.
+ *
+ * @param {number} delta
+ * @param {object} inputState  Snapshot of gameplay.input.
+ * @param {string[]} pressed   Keys that went down this frame.
+ * @param {string[]} released  Keys that went up this frame.
+ */
+export function runObjectInputScripts(delta, inputState, pressed = [], released = []) {
+    if (!gameplay.active) return;
+    const activeId = gameplay.activeVehicleId;
+    if (!activeId) return;
+
+    let prop = null;
+    for (let i = 0; i < physics.dynamicBodies.length; i++) {
+        if (physics.dynamicBodies[i]?.id === activeId) { prop = physics.dynamicBodies[i]; break; }
+    }
+    if (!prop) return;
+
+    const eventState = getActorScriptState(prop)?.tick;
+    const compiled = eventState?.compiled;
+    if (!eventState?.enabled || !compiled?.__ueLifecycle) return;
+
+    if (!eventState.handles) {
+        try {
+            const result = compiled(buildObjectEventApi(prop, 'tick', { deltaTime: delta }));
+            if (result && typeof result.then === 'function') {
+                eventState.handles = {};
+                result
+                    .then((resolved) => { eventState.handles = resolved || {}; })
+                    .catch((error) => {
+                        eventState.handles = null;
+                        handleObjectScriptRuntimeError(prop, 'tick', error);
+                    });
+                return;
+            }
+            eventState.handles = result || {};
+        } catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); return; }
+    }
+    const handles = eventState.handles;
+
+    const api = buildObjectEventApi(prop, 'tick', { deltaTime: delta });
+    const self = api.Self ?? null;
+
+    if (typeof handles.OnInput === 'function') {
+        try { handles.OnInput.call(self, inputState, delta); }
+        catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); }
+    }
+    if (pressed.length && typeof handles.OnInputPressed === 'function') {
+        for (const key of pressed) {
+            try { handles.OnInputPressed.call(self, key); }
+            catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); break; }
+        }
+    }
+    if (released.length && typeof handles.OnInputReleased === 'function') {
+        for (const key of released) {
+            try { handles.OnInputReleased.call(self, key); }
+            catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); break; }
+        }
+    }
+}
+
+/**
+ * Fire OnPossessed / OnUnpossessed once when the player enters/leaves a vehicle.
+ * @param {object} prop  The actor being possessed/unpossessed.
+ * @param {boolean} possessed  true = enter, false = exit.
+ */
+export function dispatchPossessionEvent(prop, possessed) {
+    if (!prop) return;
+    const eventState = getActorScriptState(prop)?.tick;
+    const compiled = eventState?.compiled;
+    if (!eventState?.enabled || !compiled?.__ueLifecycle) return;
+
+    if (!eventState.handles) {
+        try {
+            const result = compiled(buildObjectEventApi(prop, 'tick', {}));
+            if (result && typeof result.then === 'function') {
+                eventState.handles = {};
+                result
+                    .then((resolved) => { eventState.handles = resolved || {}; })
+                    .catch((error) => {
+                        eventState.handles = null;
+                        handleObjectScriptRuntimeError(prop, 'tick', error);
+                    });
+                return;
+            }
+            eventState.handles = result || {};
+        } catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); return; }
+    }
+    const handles = eventState.handles;
+    const fn = possessed ? handles.OnPossessed : handles.OnUnpossessed;
+    if (typeof fn !== 'function') return;
+    const api = buildObjectEventApi(prop, 'tick', {});
+    try { fn.call(api.Self ?? null); }
+    catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); }
+}
+
+/**
+ * Fire OnTrigger / OnTriggerExit on an actor's tick script.
+ * @param {object} prop  Actor whose trigger volume the subject entered/exited.
+ * @param {object|null} subject  Optional info about who entered (player/vehicle).
+ * @param {boolean} entering  true = OnTrigger, false = OnTriggerExit.
+ */
+export function dispatchTriggerEvent(prop, subject, entering) {
+    if (!prop) return;
+    const eventState = getActorScriptState(prop)?.tick;
+    const compiled = eventState?.compiled;
+    if (!eventState?.enabled || !compiled?.__ueLifecycle) return;
+
+    if (!eventState.handles) {
+        try {
+            const result = compiled(buildObjectEventApi(prop, 'tick', {}));
+            if (result && typeof result.then === 'function') {
+                eventState.handles = {};
+                result
+                    .then((resolved) => { eventState.handles = resolved || {}; })
+                    .catch((error) => {
+                        eventState.handles = null;
+                        handleObjectScriptRuntimeError(prop, 'tick', error);
+                    });
+                return;
+            }
+            eventState.handles = result || {};
+        } catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); return; }
+    }
+    const handles = eventState.handles;
+    const fn = entering ? handles.OnTrigger : handles.OnTriggerExit;
+    if (typeof fn !== 'function') return;
+    const api = buildObjectEventApi(prop, 'tick', {});
+    try { fn.call(api.Self ?? null, subject); }
+    catch (error) { handleObjectScriptRuntimeError(prop, 'tick', error); }
 }
 
 /**

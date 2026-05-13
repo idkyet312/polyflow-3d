@@ -149,6 +149,9 @@
                                 id="camera-showcase">Showcase</button>
                             <button class="btn viewer-toggle-btn" id="camera-play">Play</button>
                         </div>
+                        <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
+                            <button class="btn viewer-menu-btn" id="mobile-preview-on" type="button">Mobile On</button>
+                        </div>
                     </div>
 
                     <div class="viewer-menu-card">
@@ -864,6 +867,27 @@
                                 </div>
                             </details>
 
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Baked Lighting</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Resolution</div>
+                                        <input id="we-bake-res" type="range" min="16" max="2048" step="16" value="16">
+                                        <div class="viewer-slider-value" id="we-bake-res-value">16</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Samples</div>
+                                        <input id="we-bake-samples" type="range" min="4" max="1000" step="4" value="4">
+                                        <div class="viewer-slider-value" id="we-bake-samples-value">4</div>
+                                    </div>
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn viewer-menu-btn" id="we-bake-run">Bake Lightmaps</button>
+                                        <button class="btn viewer-menu-btn" id="we-bake-clear">Clear</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="we-bake-status">CPU lightmap bake. Large scenes are guarded to avoid browser freezes.</div>
+                                </div>
+                            </details>
+
                             <div class="viewer-menu-actions viewer-menu-actions-secondary">
                                 <button class="btn viewer-menu-btn" id="we-reset-defaults">Reset to Defaults</button>
                             </div>
@@ -1209,6 +1233,7 @@
 
                 <div id="crosshair" aria-hidden="true"></div>
 
+                <button class="btn desktop-mobile-toggle" id="desktop-mobile-toggle" type="button">Mobile UI</button>
                 <div class="desktop-version-badge" aria-label="Desktop app version">v0.0.1</div>
 
                 <div class="mobile-ui" aria-label="Mobile controls">
@@ -1217,6 +1242,8 @@
                         <button class="btn mobile-chip" id="mobile-menu-toggle" type="button">Menu</button>
                         <button class="btn mobile-chip" id="mobile-mode-toggle" type="button">Play</button>
                     </div>
+                    <button class="btn mobile-exit-play" id="mobile-exit-play" type="button"
+                        aria-label="Exit play mode">X</button>
 
                     <div class="mobile-dock">
                         <div class="mobile-pad mobile-move-pad" id="mobile-move-pad" aria-label="Move pad">

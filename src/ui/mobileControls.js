@@ -7,7 +7,7 @@ import * as THREE from 'three';
 
 // ─── Module-scope deps populated by setupMobileControls ─────────────────────
 let mobileState, gameplay, showcase, vehicleState, physics;
-let mobileMenuToggleBtn, mobileModeToggleBtn;
+let mobileMenuToggleBtn, mobileModeToggleBtn, mobileExitPlayBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
 let mobileJumpBtn, mobileRightActionBtn, mobileAction2Btn;
 
@@ -17,7 +17,11 @@ let MOBILE_MOVE_THRESHOLD, MOBILE_MOVE_RADIUS_FACTOR, MOBILE_LOOK_SENSITIVITY,
 
 // Functions from main.js
 let isDrivingVehicle, setCameraMode, runMouseAction, exitVehicle, enterVehicle,
-    applyGameplayCameraRotation, applyShowcaseCameraRotation;
+    applyGameplayCameraRotation, applyShowcaseCameraRotation, getActiveVehicleProp;
+
+function isFlyingHelicopter() {
+    return !!(isDrivingVehicle?.() && getActiveVehicleProp?.()?.userData?.prefabId === 'helicopter');
+}
 
 export function setupMobileControls(deps) {
     ({
@@ -37,11 +41,13 @@ export function setupMobileControls(deps) {
         enterVehicle,
         applyGameplayCameraRotation,
         applyShowcaseCameraRotation,
+        getActiveVehicleProp,
     } = deps);
 
     // DOM refs are resolved at setup time (same as original main.js)
     mobileMenuToggleBtn = document.getElementById('mobile-menu-toggle');
     mobileModeToggleBtn = document.getElementById('mobile-mode-toggle');
+    mobileExitPlayBtn = document.getElementById('mobile-exit-play');
     mobileMovePad = document.getElementById('mobile-move-pad');
     mobileMoveThumb = document.getElementById('mobile-move-thumb');
     mobileLookPad = document.getElementById('mobile-look-pad');
@@ -52,29 +58,52 @@ export function setupMobileControls(deps) {
 
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
     mobileModeToggleBtn?.addEventListener('click', () => setCameraMode(gameplay.active ? 'showcase' : 'play'));
+    mobileExitPlayBtn?.addEventListener('click', () => setCameraMode('showcase'));
 
     mobileJumpBtn?.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.pointerType === 'mouse') return;
         event.preventDefault();
         if (gameplay.active) {
-            if (isDrivingVehicle()) {
+            if (isFlyingHelicopter()) {
+                gameplay.input.lift = true;
+            } else if (isDrivingVehicle()) {
                 vehicleState.brakeHeld = true;
             } else {
                 physics.jumpQueued = true;
             }
         }
     });
-    mobileJumpBtn?.addEventListener('pointerup', () => {
+    const releaseJumpBtn = () => {
+        gameplay.input.lift = false;
         vehicleState.brakeHeld = false;
-    });
-    mobileJumpBtn?.addEventListener('pointercancel', () => {
-        vehicleState.brakeHeld = false;
-    });
+    };
+    mobileJumpBtn?.addEventListener('pointerup', releaseJumpBtn);
+    mobileJumpBtn?.addEventListener('pointercancel', releaseJumpBtn);
 
     mobileRightActionBtn?.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.pointerType === 'mouse') return;
+        if (gameplay.active && isFlyingHelicopter()) {
+            event.preventDefault();
+            gameplay.input.descend = true;
+            mobileRightActionBtn.setPointerCapture?.(event.pointerId);
+            return;
+        }
+        if (gameplay.active && gameplay.weapon?.type) {
+            event.preventDefault();
+            gameplay.input.fire = true;
+            gameplay.input.firePressed = true;
+            mobileRightActionBtn.setPointerCapture?.(event.pointerId);
+            return;
+        }
         runMouseAction('right', event);
     });
+    const releaseRightActionBtn = () => {
+        gameplay.input.fire = false;
+        gameplay.input.descend = false;
+    };
+    mobileRightActionBtn?.addEventListener('pointerup', releaseRightActionBtn);
+    mobileRightActionBtn?.addEventListener('pointercancel', releaseRightActionBtn);
+    mobileRightActionBtn?.addEventListener('lostpointercapture', releaseRightActionBtn);
 
     mobileAction2Btn?.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.pointerType === 'mouse') return;
@@ -246,6 +275,10 @@ export function syncMobileActionVisibility() {
         mobileModeToggleBtn.textContent = gameplay.active ? 'Showcase' : 'Play';
         mobileModeToggleBtn.classList.toggle('viewer-toggle-btn-active', gameplay.active);
     }
+
+    if (mobileExitPlayBtn) {
+        mobileExitPlayBtn.hidden = !gameplay.active;
+    }
 }
 
 export function updateMobileButtons() {
@@ -254,7 +287,11 @@ export function updateMobileButtons() {
     }
 
     if (mobileJumpBtn) {
-        mobileJumpBtn.textContent = isDrivingVehicle() ? 'Brake' : 'Jump';
+        mobileJumpBtn.textContent = isFlyingHelicopter() ? 'Up' : isDrivingVehicle() ? 'Brake' : 'Jump';
+    }
+
+    if (mobileRightActionBtn) {
+        mobileRightActionBtn.textContent = isFlyingHelicopter() ? 'Down' : gameplay.weapon?.type ? 'Fire' : 'Action';
     }
 
     if (mobileAction2Btn) {

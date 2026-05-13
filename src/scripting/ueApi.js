@@ -1036,7 +1036,7 @@ export class AGameMode extends AGameModeBase {}
 
 // ───────── Lifecycle detection ─────────
 
-const LIFECYCLE_PROBE = /\bfunction\s+(BeginPlay|Tick|OnHit|EndPlay)\s*\(/;
+const LIFECYCLE_PROBE = /\bfunction\s+(BeginPlay|Tick|OnHit|EndPlay|OnInput|OnInputPressed|OnInputReleased|OnPossessed|OnUnpossessed|OnTrigger|OnTriggerExit)\s*\(/;
 
 /**
  * @param {string} source  Raw user script source.
