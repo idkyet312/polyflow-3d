@@ -16493,6 +16493,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 Tick: typeof Tick === 'function' ? Tick : undefined,
                 OnHit: typeof OnHit === 'function' ? OnHit : undefined,
                 EndPlay: typeof EndPlay === 'function' ? EndPlay : undefined,
+                OnInput: typeof OnInput === 'function' ? OnInput : undefined,
+                OnInputPressed: typeof OnInputPressed === 'function' ? OnInputPressed : undefined,
+                OnInputReleased: typeof OnInputReleased === 'function' ? OnInputReleased : undefined,
+                OnPossessed: typeof OnPossessed === 'function' ? OnPossessed : undefined,
+                OnUnpossessed: typeof OnUnpossessed === 'function' ? OnUnpossessed : undefined,
             };
         `);return e.__ueLifecycle=!0,e}let n=new yG(`api`,`
         "use strict";
