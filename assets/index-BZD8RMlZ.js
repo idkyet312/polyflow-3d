@@ -16536,16 +16536,23 @@ const UP = new THREE.Vector3(0, 1, 0);
 let rotorSpeed = 30;
 let liftWidget = null;
 
+function ensureLiftWidget() {
+    if (liftWidget) return;
+    try {
+        liftWidget = CreateWidget(UTextWidget, {
+            Text: 'Lift Accel: ' + HELI.liftAccel,
+            fontSize: 18,
+            color: '#ffd166',
+            backgroundColor: 'rgba(0,0,0,0.6)',
+            position: { x: 0.5, y: 0.05 },
+        });
+        liftWidget?.AddToViewport(30);
+    } catch (e) { console.warn('[heli] widget create failed', e); }
+}
+
 function BeginPlay() {
     rotorSpeed = 30;
-    liftWidget = CreateWidget(UTextWidget, {
-        Text: 'Lift Accel: ' + HELI.liftAccel,
-        fontSize: 18,
-        color: '#ffd166',
-        backgroundColor: 'rgba(0,0,0,0.6)',
-        position: { x: 0.5, y: 0.05 },
-    });
-    liftWidget.AddToViewport(30);
+    ensureLiftWidget();
 }
 
 function Tick(DeltaTime) {
@@ -16568,6 +16575,7 @@ function OnInput(Input, DeltaTime) {
 
     rotorSpeed = 30 + (liftUp ? 12 : 0) + Math.abs(throttleFwd) * 6;
 
+    ensureLiftWidget();
     liftWidget?.SetText('Lift Accel: ' + HELI.liftAccel.toFixed(2));
 
     const jp = bi.GetPosition(bodyId);
