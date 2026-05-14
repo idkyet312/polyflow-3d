@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
     <link rel="icon" href="/polyflow-3d/favicon.svg" type="image/svg+xml">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-C2rJWQR9.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-Buu1YzfF.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/chunk-DECur_0Z.js">
   <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-BWuaKKpa.css">
 </head>
@@ -167,6 +167,8 @@
                             <span class="viewer-input-label">Level</span>
                             <select class="viewer-text-input" id="level-select">
                                 <option value="fpsStarter">Sample Level</option>
+                                <option value="brickRoom">Brick Room (POM Demo)</option>
+                                <option value="doomTest">Doom Test Arena</option>
                                 <option value="soccerField" selected>Soccer Field</option>
                                 <option value="soccerFieldTerrain">Terrain</option>
                             </select>
@@ -865,7 +867,69 @@
                                         <button class="btn viewer-toggle-btn" id="we-shadows-off">Off</button>
                                         <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-shadows-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note">Toggles the renderer shadow pass globally. Per-light cast-shadow stays under each light section.</div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bias</div>
+                                        <input id="we-shadows-bias" type="range" min="-0.05" max="0.05" step="0.0001" value="0">
+                                        <div class="viewer-slider-value" id="we-shadows-bias-value">0.0000</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Normal Bias</div>
+                                        <input id="we-shadows-normal-bias" type="range" min="-2" max="2" step="0.01" value="0">
+                                        <div class="viewer-slider-value" id="we-shadows-normal-bias-value">0.00</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">PCF Radius</div>
+                                        <input id="we-shadows-radius" type="range" min="0" max="16" step="0.1" value="7.9">
+                                        <div class="viewer-slider-value" id="we-shadows-radius-value">7.9</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Map Size</div>
+                                        <input id="we-shadows-map-size" type="range" min="128" max="4096" step="128" value="512">
+                                        <div class="viewer-slider-value" id="we-shadows-map-size-value">512</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Bias and Normal Bias fight self-shadow seams (raise to fix) and peter-panning (lower to fix). PCF Radius softens edges. Map Size trades GPU memory for sharpness; each step doubles memory on point lights.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Parallax (POM)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-pom-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-pom-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Height Intensity</div>
+                                        <input id="we-pom-intensity" type="range" min="0" max="0.2" step="0.001" value="0.04">
+                                        <div class="viewer-slider-value" id="we-pom-intensity-value">0.040</div>
+                                    </div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-pom-quality-low">Low</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-pom-quality-medium">Medium</button>
+                                        <button class="btn viewer-toggle-btn" id="we-pom-quality-high">High</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Parallax Occlusion Mapping fakes 3D depth on flat surfaces. Requires a per-material heightMap. Quality cycles 8/16/32 ray-march steps; High is ~3× cost of Low. Disabled automatically by perf mode.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Baked Lighting</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Resolution</div>
+                                        <input id="we-bake-res" type="range" min="16" max="2048" step="16" value="16">
+                                        <div class="viewer-slider-value" id="we-bake-res-value">16</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Samples</div>
+                                        <input id="we-bake-samples" type="range" min="4" max="1000" step="4" value="4">
+                                        <div class="viewer-slider-value" id="we-bake-samples-value">4</div>
+                                    </div>
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn viewer-menu-btn" id="we-bake-run">Bake Lightmaps</button>
+                                        <button class="btn viewer-menu-btn" id="we-bake-clear">Clear</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="we-bake-status">CPU lightmap bake. Large scenes are guarded to avoid browser freezes.</div>
                                 </div>
                             </details>
 
