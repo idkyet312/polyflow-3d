@@ -9,6 +9,19 @@ export const OCT_TEXELS = OCT_RES_P * OCT_RES_P;
 export const MAX_LIGHTS = 4;
 export const DEPTH_RANGE = 50.0;
 
+// SafeRace / Tint bounds-check notes (audited 2026-05-14):
+//
+// 1. probeOct / probeOctPrev are swapped across passes by JS-side
+//    copyBufferToBuffer between dispatches — never read+written by the same
+//    dispatch. WebGPU's implicit pass-boundary barrier covers this.
+// 2. All dynamic array indices below are explicit clamp/min'd against the
+//    same compile-time const used as the array bound. Do NOT replace any
+//    clamp() with a logical "if" — the SafeRace failure mode is exactly
+//    "compiler proves the branch unreachable then races elide the clamp."
+// 3. The 64-entry traversal stack is bounded by `sp < 62` push guards.
+//    Both `64` and `62` are kept as WGSL consts (STACK_SIZE / STACK_MAX_SP)
+//    so Tint's range analysis can prove `sp < STACK_SIZE` at every access.
+
 const RT_WGSL = /* wgsl */`
 struct Light {
   posI:    vec4<f32>,
@@ -22,8 +35,10 @@ struct RTUniforms {
   probeMax:   vec4<f32>,
   probeDimsR: vec4<f32>,
   rtMeta:     vec4<f32>,
-  matAlbedo:  array<vec4<f32>, ${MAX_MATERIAL_SLOTS}>,
-  matEmissive:array<vec4<f32>, ${MAX_MATERIAL_SLOTS}>,
+  // matCount.x = number of valid material slots in matAlbedo/matEmissive.
+  // Replaces the old fixed 16-slot cap; the actual data lives in storage
+  // buffers below so the count is bounded by GPU memory, not by uniform size.
+  matCount:   vec4<f32>,
   lights:     array<Light, ${MAX_LIGHTS}>,
 };
 @group(0) @binding(0) var<uniform> U: RTUniforms;
@@ -34,8 +49,26 @@ struct RTUniforms {
 @group(0) @binding(5) var<storage, read> probePos:  array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> probeOctIn: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> rayHits: array<vec4<f32>>;
+// Bindless-style: one unbounded storage buffer holds both albedo and
+// emissive per material, interleaved as [albedo_0, emissive_0, albedo_1,
+// emissive_1, ...]. Packing into a single binding keeps the compute stage at
+// 7 storage buffers total — baseline WebGPU caps the per-stage count at 8,
+// and a separate per-channel binding would push us over on stock devices.
+// Indices are clamped against matCount before access so a corrupt triMatId
+// can't read past the buffer.
+@group(0) @binding(8) var<storage, read> matData: array<vec4<f32>>;
 
 const PI : f32 = 3.14159265358979;
+
+// BVH traversal stack bounds. Pushing requires sp < STACK_MAX_SP so a leaf
+// that pushes two children still fits. Keep both as compile-time consts so
+// Tint's range analysis can prove all stack[sp] accesses are in-bounds.
+const STACK_SIZE: u32 = 64u;
+const STACK_MAX_SP: i32 = 62;
+// Upper bound for the fixed-size lights array (still in the uniform struct).
+// Materials moved to unbounded storage and are clamped against U.matCount.x
+// at the access site instead.
+const MAX_LIGHTS_U: u32 = ${MAX_LIGHTS}u;
 
 fn nodeBoundsMin(nodeI: u32) -> vec3<f32> {
   let b = nodeI * 8u;
@@ -102,7 +135,7 @@ fn traceScene(roIn: vec3<f32>, rd: vec3<f32>, tMaxIn: f32) -> SceneHit {
   let safeRdY = select(rd.y, 1e-20, abs(rd.y) < 1e-20);
   let safeRdZ = select(rd.z, 1e-20, abs(rd.z) < 1e-20);
   let invRd = vec3<f32>(1.0 / safeRdX, 1.0 / safeRdY, 1.0 / safeRdZ);
-  var stack: array<u32, 64>;
+  var stack: array<u32, STACK_SIZE>;
   var sp: i32 = 0;
   stack[0] = 0u;
   sp = 1;
@@ -144,7 +177,7 @@ fn traceScene(roIn: vec3<f32>, rd: vec3<f32>, tMaxIn: f32) -> SceneHit {
       let rightAabb = rayAabb(roIn, invRd, nodeBoundsMin(rightI), nodeBoundsMax(rightI), result.t);
       let leftHit = leftAabb.x <= leftAabb.y && leftAabb.x <= result.t;
       let rightHit = rightAabb.x <= rightAabb.y && rightAabb.x <= result.t;
-      if (sp < 62) {
+      if (sp < STACK_MAX_SP) {
         if (leftHit && rightHit) {
           let visitLeftFirst = leftAabb.x <= rightAabb.x;
           stack[sp] = select(leftI, rightI, visitLeftFirst);
@@ -169,7 +202,7 @@ fn occluded(ro: vec3<f32>, rd: vec3<f32>, tMax: f32) -> bool {
   let safeRdY = select(rd.y, 1e-20, abs(rd.y) < 1e-20);
   let safeRdZ = select(rd.z, 1e-20, abs(rd.z) < 1e-20);
   let invRd = vec3<f32>(1.0 / safeRdX, 1.0 / safeRdY, 1.0 / safeRdZ);
-  var stack: array<u32, 64>;
+  var stack: array<u32, STACK_SIZE>;
   var sp: i32 = 0;
   stack[0] = 0u;
   sp = 1;
@@ -198,7 +231,7 @@ fn occluded(ro: vec3<f32>, rd: vec3<f32>, tMax: f32) -> bool {
       let rightAabb = rayAabb(ro, invRd, nodeBoundsMin(rightI), nodeBoundsMax(rightI), tMax);
       let leftHit = leftAabb.x <= leftAabb.y;
       let rightHit = rightAabb.x <= rightAabb.y;
-      if (sp < 62) {
+      if (sp < STACK_MAX_SP) {
         if (leftHit && rightHit) {
           let visitLeftFirst = leftAabb.x <= rightAabb.x;
           stack[sp] = select(leftI, rightI, visitLeftFirst); sp = sp + 1;
@@ -225,30 +258,33 @@ fn octEncode(n_in: vec3<f32>) -> vec2<f32> {
   return uv * 0.5 + 0.5;
 }
 
-const OCT_RES_F: f32 = 8.0;
+const OCT_RES_U:   u32 = ${OCT_RES}u;
+const OCT_RES_F:   f32 = ${OCT_RES}.0;
+const OCT_RES_M1:  u32 = ${OCT_RES - 1}u;   // OCT_RES - 1, kept as const for Tint range analysis
 const OCT_RES_P_U: u32 = ${OCT_RES_P}u;
-const OCT_PAD_U: u32 = ${OCT_PAD}u;
-const OCT_TEX:   u32 = ${OCT_TEXELS}u;
+const OCT_PAD_U:   u32 = ${OCT_PAD}u;
+const OCT_TEX:     u32 = ${OCT_TEXELS}u;
 
 fn sampleProbeOctInterior(probeIdx: u32, n: vec3<f32>) -> vec3<f32> {
+  // octEncode returns [0,1], so uv lives in [-0.5, OCT_RES - 0.5].
+  // Clamp pre-cast so the i32→u32 cast never sees a negative value.
   let uv = octEncode(n) * OCT_RES_F - 0.5;
+  let uvc = clamp(uv, vec2<f32>(0.0), vec2<f32>(f32(OCT_RES_M1)));
   let base = probeIdx * OCT_TEX;
-  let x0 = clamp(i32(floor(uv.x)), 0, 7);
-  let y0 = clamp(i32(floor(uv.y)), 0, 7);
-  let x1 = min(x0 + 1, 7);
-  let y1 = min(y0 + 1, 7);
-  let fx = clamp(uv.x - f32(x0), 0.0, 1.0);
-  let fy = clamp(uv.y - f32(y0), 0.0, 1.0);
-  let stride = i32(OCT_RES_P_U);
-  let pad = i32(OCT_PAD_U);
-  let i00 = i32(base) + (y0 + pad) * stride + (x0 + pad);
-  let i10 = i32(base) + (y0 + pad) * stride + (x1 + pad);
-  let i01 = i32(base) + (y1 + pad) * stride + (x0 + pad);
-  let i11 = i32(base) + (y1 + pad) * stride + (x1 + pad);
-  let c00 = probeOctIn[u32(i00)].xyz;
-  let c10 = probeOctIn[u32(i10)].xyz;
-  let c01 = probeOctIn[u32(i01)].xyz;
-  let c11 = probeOctIn[u32(i11)].xyz;
+  let x0u = u32(uvc.x);
+  let y0u = u32(uvc.y);
+  let x1u = min(x0u + 1u, OCT_RES_M1);
+  let y1u = min(y0u + 1u, OCT_RES_M1);
+  let fx = clamp(uv.x - f32(x0u), 0.0, 1.0);
+  let fy = clamp(uv.y - f32(y0u), 0.0, 1.0);
+  let i00 = base + (y0u + OCT_PAD_U) * OCT_RES_P_U + (x0u + OCT_PAD_U);
+  let i10 = base + (y0u + OCT_PAD_U) * OCT_RES_P_U + (x1u + OCT_PAD_U);
+  let i01 = base + (y1u + OCT_PAD_U) * OCT_RES_P_U + (x0u + OCT_PAD_U);
+  let i11 = base + (y1u + OCT_PAD_U) * OCT_RES_P_U + (x1u + OCT_PAD_U);
+  let c00 = probeOctIn[i00].xyz;
+  let c10 = probeOctIn[i10].xyz;
+  let c01 = probeOctIn[i01].xyz;
+  let c11 = probeOctIn[i11].xyz;
   let cx0 = mix(c00, c10, fx);
   let cx1 = mix(c01, c11, fx);
   return mix(cx0, cx1, fy);
@@ -312,13 +348,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (h.hit) {
     hitDist = h.t;
     backface = dot(rd, h.nrm) > 0.0;
-    let albedo = U.matAlbedo[h.matId].xyz;
-    let emissive = U.matEmissive[h.matId].xyz;
+    // Clamp against the actual uploaded material count (matCount.x). matData
+    // is sized in JS to hold at least 2 * matCount.x vec4s, so the strided
+    // reads below are in-bounds even if triMatId is corrupt or stale.
+    let matMaxIdx = max(u32(U.matCount.x), 1u) - 1u;
+    let matId = min(h.matId, matMaxIdx);
+    let albedo = matData[matId * 2u].xyz;
+    let emissive = matData[matId * 2u + 1u].xyz;
     // Let emissive materials inject directly into probe radiance and boost
     // their DDGI contribution so emissive bounce reads clearly in-scene.
     radiance = max(emissive * vec3<f32>(3.0), vec3<f32>(0.0));
 
-    let numLights = u32(U.numLightsF.x);
+    let numLights = min(u32(U.numLightsF.x), MAX_LIGHTS_U);
     for (var li: u32 = 0u; li < numLights; li = li + 1u) {
       let L = U.lights[li];
       let typeF = L.dirType.w;
@@ -600,9 +641,38 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
     let triMatBuf = null;
     let nodeCount = 0;
     let triCount = 0;
-    const matAlbedo = new Float32Array(MAX_MATERIAL_SLOTS * 4);
-    const matEmissive = new Float32Array(MAX_MATERIAL_SLOTS * 4);
+    // CPU mirror; sized to whatever the BVH built upstream produced. The GPU
+    // storage buffer grows in power-of-two steps to amortise reallocation.
+    // Interleaved layout: [albedo_0, emissive_0, albedo_1, emissive_1, ...]
+    // so a single storage binding holds both channels (per-stage storage
+    // buffer count is the limiting resource on baseline WebGPU).
     let materialSlotCount = 0;
+    let materialBufferCapacity = 0; // slots the GPU buffer can hold
+    let matDataBuf = null;
+
+    function ensureMaterialBuffers(slotsNeeded) {
+        // WebGPU storage buffers must be > 0 bytes. Always allocate room for
+        // at least one slot so the bind group is valid before any BVH upload.
+        const wanted = Math.max(1, slotsNeeded);
+        if (matDataBuf && wanted <= materialBufferCapacity) return false;
+        let cap = Math.max(MAX_MATERIAL_SLOTS, materialBufferCapacity || MAX_MATERIAL_SLOTS);
+        while (cap < wanted) cap *= 2;
+        if (matDataBuf) matDataBuf.destroy();
+        // 2 vec4s per slot (albedo + emissive), 4 floats each.
+        const byteSize = cap * 2 * 4 * 4;
+        matDataBuf = device.createBuffer({
+            label: 'ddgi-mat-data',
+            size: byteSize,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+        materialBufferCapacity = cap;
+        return true; // buffer changed -> caller must rebuild bind groups
+    }
+    ensureMaterialBuffers(MAX_MATERIAL_SLOTS);
+    // Zero-fill so the very first bake (before uploadBVH) reads valid data
+    // even though no real materials are in yet. Matches the existing probeOct
+    // zero-init below.
+    device.queue.writeBuffer(matDataBuf, 0, new Float32Array(materialBufferCapacity * 2 * 4));
 
     const probePosBuf32 = new Float32Array(PROBE_COUNT * 4);
     const probePosBuf = device.createBuffer({
@@ -650,9 +720,11 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
     });
 
     // RT uniforms layout (vec4 lanes):
-    //   numLightsF.x | panelEmit | probeMin | probeMax | probeDimsR | rtMeta
-    //   matAlbedo[16] | matEmissive[16] | lights[4]*3
-    const RT_UNIFORM_VEC4S = 6 + MAX_MATERIAL_SLOTS * 2 + MAX_LIGHTS * 3;
+    //   0: numLightsF | 1: panelEmit | 2: probeMin | 3: probeMax
+    //   4: probeDimsR | 5: rtMeta    | 6: matCount | 7..: lights[4]*3
+    // Materials are no longer packed in the uniform — they live in two
+    // storage buffers (bindings 8 and 9). matCount.x is the active slot count.
+    const RT_UNIFORM_VEC4S = 7 + MAX_LIGHTS * 3;
     const rtUniBuf32 = new Float32Array(RT_UNIFORM_VEC4S * 4);
     const rtUniBuf = device.createBuffer({
         label: 'ddgi-rt-uniforms',
@@ -734,6 +806,7 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
                 { binding: 5, resource: { buffer: probePosBuf } },
                 { binding: 6, resource: { buffer: probeOctBuf } },
                 { binding: 7, resource: { buffer: rayHitsBuf } },
+                { binding: 8, resource: { buffer: matDataBuf } },
             ],
         });
         intBindGroup = device.createBindGroup({
@@ -807,8 +880,28 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
         nodeCount = bvhData.nodeCount;
         triCount = bvhData.triCount;
         materialSlotCount = bvhData.materialSlotCount;
-        matAlbedo.set(bvhData.matAlbedo);
-        matEmissive.set(bvhData.matEmissive);
+
+        // The BVH builder hands back trimmed arrays whose length matches
+        // materialSlotCount; ensureMaterialBuffers grows the GPU storage to
+        // fit. No 16-slot cap applies on either side anymore.
+        const incomingSlots = (bvhData.matAlbedo.length / 4) | 0;
+        // Interleave on the fly into a single upload buffer:
+        // [albedo_0, emissive_0, albedo_1, emissive_1, ...]
+        const packed = new Float32Array(incomingSlots * 2 * 4);
+        for (let s = 0; s < incomingSlots; s++) {
+            const dstBase = s * 8;
+            const srcBase = s * 4;
+            packed[dstBase + 0] = bvhData.matAlbedo[srcBase + 0];
+            packed[dstBase + 1] = bvhData.matAlbedo[srcBase + 1];
+            packed[dstBase + 2] = bvhData.matAlbedo[srcBase + 2];
+            packed[dstBase + 3] = bvhData.matAlbedo[srcBase + 3];
+            packed[dstBase + 4] = bvhData.matEmissive[srcBase + 0];
+            packed[dstBase + 5] = bvhData.matEmissive[srcBase + 1];
+            packed[dstBase + 6] = bvhData.matEmissive[srcBase + 2];
+            packed[dstBase + 7] = bvhData.matEmissive[srcBase + 3];
+        }
+        ensureMaterialBuffers(incomingSlots);
+        device.queue.writeBuffer(matDataBuf, 0, packed);
 
         rebuildBindGroups();
     }
@@ -838,13 +931,11 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
         u[12] = pMax.x; u[13] = pMax.y; u[14] = pMax.z; u[15] = 0;
         u[16] = probeDims.x; u[17] = probeDims.y; u[18] = probeDims.z; u[19] = RAYS_PER_PROBE;
         u[20] = nodeCount; u[21] = triCount; u[22] = frameSeed; u[23] = indirectScale;
+        // matCount vec4: x = active material slot count (drives the in-shader
+        // clamp), y/z/w reserved.
+        u[24] = materialSlotCount; u[25] = 0; u[26] = 0; u[27] = 0;
 
-        const albedoBase = 24;
-        for (let i = 0; i < MAX_MATERIAL_SLOTS * 4; i++) u[albedoBase + i] = matAlbedo[i];
-        const emBase = albedoBase + MAX_MATERIAL_SLOTS * 4;
-        for (let i = 0; i < MAX_MATERIAL_SLOTS * 4; i++) u[emBase + i] = matEmissive[i];
-
-        const lightsBase = emBase + MAX_MATERIAL_SLOTS * 4;
+        const lightsBase = 28;
         for (let li = 0; li < MAX_LIGHTS; li++) {
             const off = lightsBase + li * 12;
             u[off + 0] = 0; u[off + 1] = 0; u[off + 2] = 0; u[off + 3] = 0;
@@ -889,14 +980,25 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
     function destroyBuffers() {
       if (_destroyed) return;
       _destroyed = true;
-      for (const b of [bvhNodeBuf, bvhIdxBuf, triBuf, triMatBuf, probePosBuf, rayHitsBuf, probeOctBuf, probeOctPrevBuf, probeDepthBuf, probeOctReadBuf, probeDepthReadBuf, rtUniBuf, seedUniBuf, intUniBuf, smoothUniBuf]) {
+      for (const b of [bvhNodeBuf, bvhIdxBuf, triBuf, triMatBuf, matDataBuf, probePosBuf, rayHitsBuf, probeOctBuf, probeOctPrevBuf, probeDepthBuf, probeOctReadBuf, probeDepthReadBuf, rtUniBuf, seedUniBuf, intUniBuf, smoothUniBuf]) {
         try { b?.unmap?.(); } catch (e) { /* */ }
         try { b?.destroy?.(); } catch (e) { /* */ }
       }
     }
 
+    // Rolling window of recent bake timings. Index 0 is the most recent.
+    const _bakeTimings = [];
+    const _BAKE_TIMING_CAP = 60;
+    function _recordBakeTiming(sample) {
+      _bakeTimings.unshift(sample);
+      if (_bakeTimings.length > _BAKE_TIMING_CAP) _bakeTimings.length = _BAKE_TIMING_CAP;
+    }
+
     async function bake({ lights, indirectScale = 1.0, hysteresis = 0.92, bounces = 1 }) {
       if (!rtBindGroup || _disposePending || _destroyed) return null;
+
+      const t0 = performance.now();
+      let tSubmit = 0;
 
       const runBake = (async () => {
         for (let b = 0; b < bounces; b++) {
@@ -956,6 +1058,7 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
           device.queue.submit([enc.finish()]);
         }
         _hasBaked = true;
+        tSubmit = performance.now();
 
         if (_readbackBusy || _disposePending || _destroyed) return null;
         _readbackBusy = true;
@@ -977,6 +1080,18 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
           return { oct, depth };
         } finally {
           _readbackBusy = false;
+          // tSubmit = "CPU work + command submit done". t_end = "GPU work + readback complete".
+          // gpu = t_end - tSubmit roughly tracks GPU-bound time; cpu = tSubmit - t0 is JS+encoder build.
+          const tEnd = performance.now();
+          _recordBakeTiming({
+            total: tEnd - t0,
+            cpu: tSubmit - t0,
+            gpu: tEnd - tSubmit,
+            matSlots: materialSlotCount,
+            triCount,
+            bounces,
+            at: tEnd,
+          });
         }
       })();
 
@@ -1006,6 +1121,33 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
         _hasBaked = false;
     }
 
+    function getBakeStats({ window = 30 } = {}) {
+        // Returns mean / median / p95 of the last `window` successful bakes.
+        // Used by the perf-comparison harness; cheap enough to call any time.
+        const n = Math.min(window, _bakeTimings.length);
+        if (n === 0) return { count: 0 };
+        const slice = _bakeTimings.slice(0, n);
+        const stats = (key) => {
+            const sorted = slice.map((s) => s[key]).sort((a, b) => a - b);
+            const sum = sorted.reduce((a, b) => a + b, 0);
+            return {
+                mean: sum / sorted.length,
+                median: sorted[sorted.length >> 1],
+                p95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
+                min: sorted[0],
+                max: sorted[sorted.length - 1],
+            };
+        };
+        return {
+            count: n,
+            total: stats('total'),
+            cpu: stats('cpu'),
+            gpu: stats('gpu'),
+            matSlots: _bakeTimings[0].matSlots,
+            triCount: _bakeTimings[0].triCount,
+        };
+    }
+
     return {
         uploadBVH,
         setProbeBounds,
@@ -1013,6 +1155,7 @@ export function createDDGIRTCompute({ renderer, probeDims, probeMin, probeMax })
         bake,
         reset,
         dispose,
+        getBakeStats,
         get probeCount() { return PROBE_COUNT; },
         get raysPerProbe() { return RAYS_PER_PROBE; },
         get materialSlotCount() { return materialSlotCount; },

@@ -11,7 +11,21 @@
       "Bash(node --check main.js)",
       "Bash(node --check src/world/sceneSerialization.js)",
       "Bash(npm install *)",
-      "Bash(npm search *)"
+      "Bash(npm search *)",
+      "Bash(node --check src/app/runtime.js)",
+      "Bash(node --check src/world/gi/ddgiRTCompute.js)",
+      "Bash(node -e \"import\\('./src/world/gi/ddgiRTCompute.js'\\).then\\(m => console.log\\('OK', Object.keys\\(m\\)\\)\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
+      "Bash(node -e \"import\\('./src/world/gi/ddgiRTCompute.js'\\).then\\(m => { const s = m.createDDGIRTCompute.toString\\(\\); /* won't expose WGSL - just check constants */ console.log\\('OCT_RES:', m.OCT_RES, 'OCT_RES_P:', m.OCT_RES_P, 'OCT_TEXELS:', m.OCT_TEXELS\\); }\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
+      "Bash(node --check src/world/gi/rayQuerySupport.js)",
+      "Bash(node --check src/world/gi/ddgiManager.js)",
+      "Bash(node -e \"import\\('./src/world/gi/rayQuerySupport.js'\\).then\\(m => { console.log\\('exports:', Object.keys\\(m\\)\\); const r = m.detectRayQuerySupport\\(null\\); console.log\\('null-device detect:', r\\); }\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
+      "Bash(node --check src/world/gi/ddgiBVH.js)",
+      "Bash(node -e \"import\\('./src/world/gi/ddgiRTCompute.js'\\).then\\(m => console.log\\('rt:', Object.keys\\(m\\)\\)\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
+      "Bash(node -e \"import\\('./src/world/gi/ddgiBVH.js'\\).then\\(m => console.log\\('bvh:', Object.keys\\(m\\)\\)\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
+      "Bash(node -e \"import\\('./src/world/gi/ddgiRTCompute.js'\\).then\\(m => console.log\\('OK'\\)\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
+      "Bash(node --check src/world/gi/ddgiProbeGrid.js)",
+      "Bash(node --check src/runtime/components/DDGIVolumeComponent.js)",
+      "Bash(node -e \"import\\('./src/world/gi/ddgiProbeGrid.js'\\).then\\(m => { const g = m.createProbeGrid\\({ dims: { x: 4, y: 2, z: 4 }, cellSize: 4 }\\); console.log\\('scalar legacy:', g.cellSize, 'vec:', g.cellSizeVec.x, g.cellSizeVec.y, g.cellSizeVec.z\\); g.setCellSize\\({ x: 2, y: 5, z: 3 }\\); console.log\\('after anisotropic:', g.cellSize, 'vec:', g.cellSizeVec.x, g.cellSizeVec.y, g.cellSizeVec.z, 'bounds:', g.bounds.x, g.bounds.y, g.bounds.z\\); }\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")"
     ]
   }
 }

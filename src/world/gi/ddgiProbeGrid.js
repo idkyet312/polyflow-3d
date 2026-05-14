@@ -3,22 +3,30 @@ import * as THREE from 'three';
 export const DEFAULT_GRID_DIMS = { x: 8, y: 4, z: 8 };
 export const DEFAULT_CELL_SIZE = 4.0;
 
+// Per-axis cell sizing: probe count stays fixed, spacing stretches so the
+// grid exactly spans whatever box the owning volume is scaled to. The
+// `cellSize` getter still returns a scalar (the max axis) for legacy callers;
+// `cellSizeVec` is the authoritative per-axis value.
 export function createProbeGrid({
     dims = DEFAULT_GRID_DIMS,
     cellSize = DEFAULT_CELL_SIZE,
 } = {}) {
+    const initialCellVec = typeof cellSize === 'number'
+        ? new THREE.Vector3(cellSize, cellSize, cellSize)
+        : new THREE.Vector3(cellSize.x, cellSize.y, cellSize.z);
+
     const state = {
         dims: { x: dims.x | 0, y: dims.y | 0, z: dims.z | 0 },
-        cellSize,
+        cellSizeVec: initialCellVec,
         anchor: new THREE.Vector3(),
         bounds: new THREE.Vector3(),
     };
 
     function recomputeBounds() {
         state.bounds.set(
-            state.dims.x * state.cellSize,
-            state.dims.y * state.cellSize,
-            state.dims.z * state.cellSize,
+            state.dims.x * state.cellSizeVec.x,
+            state.dims.y * state.cellSizeVec.y,
+            state.dims.z * state.cellSizeVec.z,
         );
     }
 
@@ -32,9 +40,9 @@ export function createProbeGrid({
 
     function probePosition(ix, iy, iz, out = new THREE.Vector3()) {
         return out.set(
-            state.anchor.x + (ix + 0.5) * state.cellSize - state.bounds.x * 0.5,
-            state.anchor.y + (iy + 0.5) * state.cellSize - state.bounds.y * 0.5,
-            state.anchor.z + (iz + 0.5) * state.cellSize - state.bounds.z * 0.5,
+            state.anchor.x + (ix + 0.5) * state.cellSizeVec.x - state.bounds.x * 0.5,
+            state.anchor.y + (iy + 0.5) * state.cellSizeVec.y - state.bounds.y * 0.5,
+            state.anchor.z + (iz + 0.5) * state.cellSizeVec.z - state.bounds.z * 0.5,
         );
     }
 
@@ -55,13 +63,16 @@ export function createProbeGrid({
     }
 
     /**
-     * Snap anchor to camera position floored to cellSize. Returns true if anchor moved.
+     * Snap anchor to camera position floored to cell size, per axis. Returns
+     * true if anchor moved.
      */
     function snapAnchorTo(target) {
-        const cs = state.cellSize;
-        const nx = Math.floor(target.x / cs) * cs;
-        const ny = Math.floor(target.y / cs) * cs;
-        const nz = Math.floor(target.z / cs) * cs;
+        const csx = state.cellSizeVec.x;
+        const csy = state.cellSizeVec.y;
+        const csz = state.cellSizeVec.z;
+        const nx = Math.floor(target.x / csx) * csx;
+        const ny = Math.floor(target.y / csy) * csy;
+        const nz = Math.floor(target.z / csz) * csz;
         if (nx !== state.anchor.x || ny !== state.anchor.y || nz !== state.anchor.z) {
             state.anchor.set(nx, ny, nz);
             return true;
@@ -81,13 +92,15 @@ export function createProbeGrid({
      */
     function lookup8(worldPoint, out) {
         out = out || { indices: new Int32Array(8), weights: new Float32Array(8) };
-        const cs = state.cellSize;
+        const csx = state.cellSizeVec.x;
+        const csy = state.cellSizeVec.y;
+        const csz = state.cellSizeVec.z;
         const halfX = state.bounds.x * 0.5;
         const halfY = state.bounds.y * 0.5;
         const halfZ = state.bounds.z * 0.5;
-        const lx = (worldPoint.x - state.anchor.x + halfX) / cs - 0.5;
-        const ly = (worldPoint.y - state.anchor.y + halfY) / cs - 0.5;
-        const lz = (worldPoint.z - state.anchor.z + halfZ) / cs - 0.5;
+        const lx = (worldPoint.x - state.anchor.x + halfX) / csx - 0.5;
+        const ly = (worldPoint.y - state.anchor.y + halfY) / csy - 0.5;
+        const lz = (worldPoint.z - state.anchor.z + halfZ) / csz - 0.5;
         const ix = Math.floor(lx);
         const iy = Math.floor(ly);
         const iz = Math.floor(lz);
@@ -123,15 +136,37 @@ export function createProbeGrid({
         recomputeBounds();
     }
 
+    // Accepts either a scalar (uniform cell size on all axes) or a Vector3 /
+     // {x,y,z} for anisotropic spacing. Existing callers that pass a number
+     // keep working unchanged.
     function setCellSize(cellSize) {
-        state.cellSize = Math.max(0.05, +cellSize);
+        if (typeof cellSize === 'number') {
+            const v = Math.max(0.05, +cellSize);
+            state.cellSizeVec.set(v, v, v);
+        } else {
+            state.cellSizeVec.set(
+                Math.max(0.05, +cellSize.x),
+                Math.max(0.05, +cellSize.y),
+                Math.max(0.05, +cellSize.z),
+            );
+        }
         recomputeBounds();
     }
 
     return {
         state,
         get dims() { return state.dims; },
-        get cellSize() { return state.cellSize; },
+        // Backwards-compat: scalar callers (logs, serialization) get the
+        // largest axis. Use `cellSizeVec` to read the authoritative per-axis
+        // value.
+        get cellSize() {
+            return Math.max(
+                state.cellSizeVec.x,
+                state.cellSizeVec.y,
+                state.cellSizeVec.z,
+            );
+        },
+        get cellSizeVec() { return state.cellSizeVec; },
         get anchor() { return state.anchor; },
         get bounds() { return state.bounds; },
         probeCount,

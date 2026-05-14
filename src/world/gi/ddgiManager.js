@@ -3,7 +3,7 @@ import { createProbeGrid, DEFAULT_GRID_DIMS, DEFAULT_CELL_SIZE } from './ddgiPro
 import { createDDGIDebug } from './ddgiDebug.js';
 import { createDDGIAtlasTexture } from './ddgiAtlasTexture.js';
 import { buildDDGIBVH } from './ddgiBVH.js';
-import { createDDGIRTCompute } from './ddgiRTCompute.js';
+import { createDDGIRayTracer, detectRayQuerySupport } from './rayQuerySupport.js';
 import { createDDGISampler, patchMaterials } from './ddgiShaderInjection.js';
 
 const DDGI_CAPTURE_LAYER = 30;
@@ -19,6 +19,7 @@ const _tmpBox = new THREE.Box3();
 const _tmpSphere = new THREE.Sphere();
 const _tmpFrustum = new THREE.Frustum();
 const _tmpProjScreen = new THREE.Matrix4();
+const _tmpVolumeScale = new THREE.Vector3();
 
 export function createDDGIManager() {
     const state = {
@@ -138,7 +139,7 @@ export function createDDGIManager() {
         const key = `${d.x}|${d.y}|${d.z}`;
         const { min, max } = probeBounds();
         try {
-            state.rtCompute = createDDGIRTCompute({
+            state.rtCompute = createDDGIRayTracer({
                 renderer: state.renderer,
                 probeDims: { x: d.x, y: d.y, z: d.z },
                 probeMin: min.clone(),
@@ -204,7 +205,8 @@ export function createDDGIManager() {
         if (!state.grid) return '';
         const a = state.grid.anchor;
         const d = state.grid.dims;
-        return `${a.x},${a.y},${a.z}|${d.x},${d.y},${d.z}|${state.grid.cellSize}`;
+        const c = state.grid.cellSizeVec;
+        return `${a.x},${a.y},${a.z}|${d.x},${d.y},${d.z}|${c.x},${c.y},${c.z}`;
     }
 
     function activeVolumeAnchor(out) {
@@ -414,7 +416,22 @@ export function createDDGIManager() {
         chooseActiveVolume();
 
         const previousKey = gridKey();
-        if (state.activeVolume && state.activeVolume !== state._implicitVolume) {
+
+        // If the active volume's world scale changed (TransformControls drag),
+        // re-derive per-axis cell sizes so probes stretch with the box. Cheap
+        // when the scale didn't move: a Vector3 equality check.
+        const vol = state.activeVolume;
+        if (vol && vol !== state._implicitVolume) {
+            const mesh = vol.owner?.mesh || vol.owner?.root;
+            if (mesh) {
+                mesh.updateWorldMatrix?.(true, false);
+                mesh.getWorldScale(_tmpVolumeScale);
+                if (!_tmpVolumeScale.equals(vol._lastSyncedScale)) {
+                    vol.syncCellSizeToOwnerBounds();
+                    vol._lastSyncedScale.copy(_tmpVolumeScale);
+                    state.grid.setCellSize(vol.cellSize);
+                }
+            }
             const anchor = activeVolumeAnchor(_tmpPos);
             if (anchor) state.grid.anchor.copy(anchor);
         }
@@ -608,6 +625,15 @@ export function createDDGIManager() {
         getDebugLayer: () => DDGI_CAPTURE_LAYER,
         getIrradianceAtlas,
         setInjectionEnabled,
+        // Surfaces the ray-query feature-detect result. Returns a fresh
+        // descriptor every call (driver may load extensions late). Until the
+        // ray-query kernel ships, `rtCompute.rayTracerKind` reports the
+        // selected backend.
+        getRayQuerySupport: () => detectRayQuerySupport(state.renderer),
+        getRayTracerKind: () => state.rtCompute?.rayTracerKind ?? null,
+        // Forwards to the active ray tracer's rolling-window bake-time stats.
+        // Returns { count: 0 } when no bakes have completed yet.
+        getBakeStats: (opts) => state.rtCompute?.getBakeStats?.(opts) ?? { count: 0 },
         get contributionViewEnabled() { return state.debugContributionView; },
         get injectionEnabled() { return state.injectionEnabled; },
     };

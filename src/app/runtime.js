@@ -530,7 +530,13 @@ const WORLD_ENV_DEFAULTS = Object.freeze({
     ssgi: { enabled: false, giIntensity: 2.0, aoIntensity: 1.0, radius: 8.0, thickness: 0.6, sliceCount: 1, stepCount: 8 },
     fog: { enabled: true, density: 0.012, opacity: 0.055 },
     ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
-    shadows: { enabled: true },
+    // Shadow tuning is global across point/spot/directional lights so the
+    // user has one knob to fight self-shadow seams scene-wide instead of
+    // hunting per-light. Defaults were tuned in-engine against the test scene
+    // — zero bias + zero normal-bias relies on PCF Radius alone to soften
+    // the seams, which produced the cleanest result for point-light room
+    // shadows without peter-panning.
+    shadows: { enabled: true, bias: 0.0, normalBias: 0.0, radius: 7.9, mapSize: 512 },
 });
 let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
 let worldEnvUiRefs = null;
@@ -833,6 +839,7 @@ const tempVectorB = new THREE.Vector3();
 const tempVectorC = new THREE.Vector3();
 const tempVectorD = new THREE.Vector3();
 const tempVectorE = new THREE.Vector3();
+const tempVectorF = new THREE.Vector3();
 const mainDirectionalLightOffset = new THREE.Vector3(5, 10, 5);
 const mainDirectionalLightShadowFocus = new THREE.Vector3();
 const MAIN_SHADOW_EXTENT = 72;
@@ -1182,7 +1189,11 @@ function setResolution(res) {
 }
 
 function scheduleGpuRenderTimingResolve() {
-    if (!debugConsoleState.panels.has('gpu')) return;
+    // Always drain the timestamp query pool when trackTimestamp is on.
+    // Previously this was gated on the GPU debug panel being open, which left
+    // queries to accumulate until three.js's pool overflowed and spammed
+    // "Maximum number of queries exceeded" every frame. The resolve is cheap
+    // (one async copy) and we just ignore the result when the panel is closed.
     if (!renderer?.backend?.trackTimestamp || gpuTimestampResolvePending) return;
 
     gpuTimestampResolvePending = renderer.resolveTimestampsAsync?.('render')
@@ -1258,6 +1269,8 @@ function updateMultiplayerUiState({ statusText, playerCount, connected }) {
     }
 }
 
+// Reused Euler for getLocalMultiplayerSnapshot to avoid per-frame allocation.
+const _snapshotEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 function getLocalMultiplayerSnapshot() {
     if (!camera) return null;
 
@@ -1265,23 +1278,29 @@ function getLocalMultiplayerSnapshot() {
     let yaw;
 
     if (gameplay.active && physics.character) {
-        localPosition = copyJoltVector(tempVectorA, physics.character.GetPosition()).clone();
+        localPosition = copyJoltVector(tempVectorA, physics.character.GetPosition());
         yaw = gameplay.yaw;
     } else {
-        localPosition = tempVectorA.copy(camera.position).clone();
+        localPosition = tempVectorA.copy(camera.position);
         localPosition.y -= 1.05;
         yaw = showcase.yaw;
     }
 
-    const localRotation = tempQuaternionB.setFromEuler(new THREE.Euler(0, yaw, 0, 'YXZ')).clone();
+    _snapshotEuler.set(0, yaw, 0, 'YXZ');
+    const localRotation = tempQuaternionB.setFromEuler(_snapshotEuler);
+    // Snapshot fields are read into plain {x,y,z[,w]} objects immediately, so
+    // we can overwrite tempVectorA / tempQuaternionA inside the vehicle branch
+    // without losing the player's serialized values.
+    const positionSerialized = serializeVector3(localPosition);
+    const quaternionSerialized = serializeQuaternion(localRotation);
     let vehicleStateSnapshot = { active: false };
 
     if (gameplay.active && isDrivingVehicle()) {
         const vehicle = getActiveVehicleProp();
         if (vehicle?.body && physics.bodyInterface) {
             const bodyId = vehicle.body.GetID();
-            const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(bodyId)).clone();
-            const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(bodyId)).clone();
+            const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(bodyId));
+            const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(bodyId));
             vehicleStateSnapshot = {
                 active: true,
                 id: vehicle.id || '',
@@ -1293,8 +1312,8 @@ function getLocalMultiplayerSnapshot() {
 
     return {
         mode: vehicleStateSnapshot.active ? 'vehicle' : gameplay.active ? 'player' : 'showcase',
-        position: serializeVector3(localPosition),
-        quaternion: serializeQuaternion(localRotation),
+        position: positionSerialized,
+        quaternion: quaternionSerialized,
         vehicle: vehicleStateSnapshot,
     };
 }
@@ -2604,6 +2623,19 @@ function attachDefaultPrefabScript(actor, source) {
     ensureScriptHandles(actor);
 }
 
+function ensureGameplayPrefabScript(actor, source) {
+    if (!actor || !source) return false;
+    ensureActorIdentity(actor);
+    const actorId = actor.id;
+    const hasDraft = Object.prototype.hasOwnProperty.call(objectScriptState.drafts, actorId);
+    if (hasDraft) return false;
+    const draft = objectScriptState.drafts[actorId];
+    const currentSource = draft?.tick ?? actor?.scripts?.tick?.source ?? '';
+    if (typeof currentSource === 'string' && currentSource.trim()) return false;
+    attachDefaultPrefabScript(actor, source);
+    return true;
+}
+
 function tagGameplayPrefabActor(actor, gameplayPrefab, options = {}) {
     if (!actor) return null;
     actor.userData = {
@@ -2665,13 +2697,23 @@ function applyPlayerSpawnFromActor(actor) {
     return true;
 }
 
-function getGameplayPrefabActors(type = '') {
-    if (!sceneSystem?.actors?.size) return [];
-    return Array.from(sceneSystem.actors).filter((actor) => {
+function getGameplayPrefabActors(type = '', out = null) {
+    const result = out || [];
+    if (out) result.length = 0;
+    if (!sceneSystem?.actors?.size) return result;
+    for (const actor of sceneSystem.actors) {
         const prefabType = actor?.userData?.gameplayPrefab || getActorRenderObject(actor)?.userData?.gameplayPrefab || '';
-        return prefabType && (!type || prefabType === type);
-    });
+        if (prefabType && (!type || prefabType === type)) result.push(actor);
+    }
+    return result;
 }
+
+// Scratch buffers for per-frame prefab queries; reused across hot callers to
+// avoid per-frame array allocation. Each caller MUST consume the buffer
+// synchronously before yielding to another caller that uses the same buffer.
+const _scratchPrefab1 = [];
+const _scratchPrefab2 = [];
+const _emptyArray = Object.freeze([]);
 if (typeof window !== 'undefined') {
     queueMicrotask(() => { window.getGameplayPrefabActors = getGameplayPrefabActors; });
 }
@@ -2841,21 +2883,26 @@ function getShooterTargetPosition(target = new THREE.Vector3()) {
     return subjectPosition;
 }
 
+// Persistent scratch points reused by getShooterHitPoints — callers must
+// consume the returned array synchronously before calling again.
+const _shooterHitPointBuf = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const _shooterHitPointsOut = [];
 function getShooterHitPoints() {
-    const points = [];
-    if (camera) points.push(camera.position);
+    const out = _shooterHitPointsOut;
+    out.length = 0;
+    if (camera) out.push(camera.position);
 
-    const subjectPosition = getGameplaySubjectPosition(new THREE.Vector3());
+    const subjectPosition = getGameplaySubjectPosition(_shooterHitPointBuf[0]);
     if (subjectPosition) {
         if (!isDrivingVehicle()) {
-            points.push(subjectPosition.clone().addScaledVector(upVector, PLAYER_SETTINGS.eyeHeight * 0.35));
-            points.push(subjectPosition.clone().addScaledVector(upVector, PLAYER_SETTINGS.eyeHeight * 0.85));
+            out.push(_shooterHitPointBuf[1].copy(subjectPosition).addScaledVector(upVector, PLAYER_SETTINGS.eyeHeight * 0.35));
+            out.push(_shooterHitPointBuf[2].copy(subjectPosition).addScaledVector(upVector, PLAYER_SETTINGS.eyeHeight * 0.85));
         } else {
-            points.push(subjectPosition.clone().addScaledVector(upVector, 0.9));
+            out.push(_shooterHitPointBuf[1].copy(subjectPosition).addScaledVector(upVector, 0.9));
         }
     }
 
-    return points;
+    return out;
 }
 
 function addCircularNavmeshVisual(navmeshActor) {
@@ -2896,10 +2943,11 @@ function addCircularNavmeshVisual(navmeshActor) {
 }
 
 function updateCircularNavmeshAis(delta = 0) {
-    const actors = getGameplayPrefabActors('navmeshCircleAi');
+    const actors = getGameplayPrefabActors('navmeshCircleAi', _scratchPrefab1);
     if (!actors.length) return;
 
-    for (const actor of actors) {
+    for (let i = 0; i < actors.length; i++) {
+        const actor = actors[i];
         const mesh = getActorRenderObject(actor);
         const patrol = actor?.userData?.aiPatrol;
         if (!mesh || !patrol) continue;
@@ -3285,7 +3333,11 @@ function spawnShooterProjectile(origin, target, options = {}) {
 
 function updateShooterProjectiles(delta = 0) {
     if (!gameplayPrefabState.shooterProjectiles.length) return;
-    const hitPoints = gameplay.active ? getShooterHitPoints() : [];
+    const hitPoints = gameplay.active ? getShooterHitPoints() : null;
+    const hitPointsLen = hitPoints ? hitPoints.length : 0;
+    // Cache shooter list once per call; only re-fetch when a projectile actually
+    // needs it (damagesShooters), since it's the common-case path for player shots.
+    let cachedShooters = null;
 
     for (let i = gameplayPrefabState.shooterProjectiles.length - 1; i >= 0; i--) {
         const projectile = gameplayPrefabState.shooterProjectiles[i];
@@ -3297,20 +3349,22 @@ function updateShooterProjectiles(delta = 0) {
         let hitPlayer = false;
         let hitShooter = false;
         const hitRadius = projectile.hitRadius ?? SHOOTER_AI_PREFAB.hitRadius;
-        if (projectile.hitsPlayer !== false) {
-            for (const point of hitPoints) {
-                if (getPointSegmentDistanceSq(point, previousPosition, projectile.mesh.position) <= hitRadius * hitRadius) {
+        const hitRadiusSq = hitRadius * hitRadius;
+        if (projectile.hitsPlayer !== false && hitPoints) {
+            for (let p = 0; p < hitPointsLen; p++) {
+                if (getPointSegmentDistanceSq(hitPoints[p], previousPosition, projectile.mesh.position) <= hitRadiusSq) {
                     hitPlayer = true;
                     break;
                 }
             }
         }
         if (!hitPlayer && projectile.damagesShooters) {
-            const shooters = getGameplayPrefabActors('shooterAi');
+            const shooters = cachedShooters || (cachedShooters = getGameplayPrefabActors('shooterAi', _scratchPrefab2));
             if (window.DEBUG_BULLET_HITS) {
                 console.log('[bullet]', projectile.mesh.name, 'pos', projectile.mesh.position.toArray(), 'shooters', shooters.length, 'hitRadius', hitRadius);
             }
-            for (const actor of shooters) {
+            for (let s = 0; s < shooters.length; s++) {
+                const actor = shooters[s];
                 const mesh = getActorRenderObject(actor);
                 const shooter = actor?.userData?.shooterAi;
                 if (!mesh?.visible || !shooter || shooter.defeated) {
@@ -3326,7 +3380,7 @@ function updateShooterProjectiles(delta = 0) {
                 if (window.DEBUG_BULLET_HITS) {
                     console.log('[bullet] shooter at', tempVectorB.toArray(), 'dBody', Math.sqrt(dBody), 'dHead', Math.sqrt(dHead), 'r', hitRadius);
                 }
-                if (dBody <= hitRadius * hitRadius || dHead <= hitRadius * hitRadius) {
+                if (dBody <= hitRadiusSq || dHead <= hitRadiusSq) {
                     damageShooterAi(actor, projectile.damage ?? SHOOTER_AI_PREFAB.hitDamage);
                     hitShooter = true;
                     break;
@@ -3348,7 +3402,9 @@ function updateShooterAiPhysicsHits() {
     if (!gameplay.active || !physics.ready || !physics.dynamicBodies?.length) return;
 
     const now = performance.now?.() || Date.now();
-    for (const actor of getGameplayPrefabActors('shooterAi')) {
+    const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab1);
+    for (let si = 0; si < shooters.length; si++) {
+        const actor = shooters[si];
         const mesh = getActorRenderObject(actor);
         const shooter = actor?.userData?.shooterAi;
         if (!mesh || !shooter || shooter.defeated || mesh.visible === false) continue;
@@ -3392,13 +3448,18 @@ function isShooterLineOfSightClear(origin, target) {
     return !result?.hit || (Number(result.distance) || distance) >= distance - 0.75;
 }
 
+// Scratch vectors for getShooterCoverPoint; writes the best candidate directly
+// into `target` instead of allocating a clone per better-score branch.
+const _coverAway = new THREE.Vector3();
 function getShooterCoverPoint(mesh, subjectPosition, target = tempVectorC) {
     if (!mesh || !subjectPosition || !physics.dynamicBodies?.length) return null;
     const shooterPosition = mesh.getWorldPosition(tempVectorA);
     let bestScore = Infinity;
-    let bestPoint = null;
+    let found = false;
 
-    for (const prop of physics.dynamicBodies) {
+    const bodies = physics.dynamicBodies;
+    for (let i = 0; i < bodies.length; i++) {
+        const prop = bodies[i];
         if (!prop || prop.userData?.gameplayPrefab) continue;
         const propMesh = getActorRenderObject(prop);
         if (!propMesh?.visible) continue;
@@ -3410,15 +3471,16 @@ function getShooterCoverPoint(mesh, subjectPosition, target = tempVectorC) {
         const score = shooterDist + playerDist * 0.25;
         if (score < bestScore) {
             bestScore = score;
-            const awayFromPlayer = coverPosition.clone().sub(subjectPosition);
-            awayFromPlayer.y = 0;
-            if (awayFromPlayer.lengthSq() < 1e-6) awayFromPlayer.set(1, 0, 0);
-            awayFromPlayer.normalize();
-            bestPoint = coverPosition.clone().addScaledVector(awayFromPlayer, 1.6);
+            _coverAway.copy(coverPosition).sub(subjectPosition);
+            _coverAway.y = 0;
+            if (_coverAway.lengthSq() < 1e-6) _coverAway.set(1, 0, 0);
+            _coverAway.normalize();
+            target.copy(coverPosition).addScaledVector(_coverAway, 1.6);
+            found = true;
         }
     }
 
-    return bestPoint ? target.copy(bestPoint) : null;
+    return found ? target : null;
 }
 
 function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight) {
@@ -3430,20 +3492,22 @@ function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, has
     if (distance < 0.001) return;
     toPlayer.normalize();
 
-    let move = tempVectorC.set(0, 0, 0);
+    const move = tempVectorC.set(0, 0, 0);
     const lowHealth = (shooter.health ?? SHOOTER_AI_PREFAB.health) <= SHOOTER_AI_PREFAB.coverHealthThreshold;
     const coverPoint = lowHealth && hasLineOfSight ? getShooterCoverPoint(mesh, subjectPosition, tempVectorE) : null;
     if (coverPoint) {
         move.subVectors(coverPoint, position);
         move.y = 0;
     } else {
-        const strafe = new THREE.Vector3(-toPlayer.z, 0, toPlayer.x);
+        // Perpendicular strafe direction (no Vector3 alloc).
+        const strafeX = -toPlayer.z;
+        const strafeZ = toPlayer.x;
         if (!Number.isFinite(shooter.strafeDir)) shooter.strafeDir = Math.random() < 0.5 ? -1 : 1;
         if (!Number.isFinite(shooter.nextStrafeFlipAt) || performance.now() > shooter.nextStrafeFlipAt) {
             shooter.strafeDir *= -1;
             shooter.nextStrafeFlipAt = performance.now() + 1400 + Math.random() * 1400;
         }
-        move.copy(strafe).multiplyScalar(shooter.strafeDir);
+        move.set(strafeX * shooter.strafeDir, 0, strafeZ * shooter.strafeDir);
         if (distance < 5.5) move.addScaledVector(toPlayer, -0.8);
         if (distance > 15 && hasLineOfSight) move.addScaledVector(toPlayer, 0.35);
     }
@@ -3458,60 +3522,74 @@ function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, has
     mesh.updateMatrixWorld(true);
 }
 
+// Per-call scratch vectors for updateShooterAiActor (called per shooter per frame).
+const _shooterActorSubject = new THREE.Vector3();
+const _shooterActorOrigin = new THREE.Vector3();
+const _shooterActorMuzzleDir = new THREE.Vector3();
+function updateShooterAiActor(actor, delta = 0) {
+    if (!gameplay.active || !actor) return;
+    const subjectPosition = getShooterTargetPosition(_shooterActorSubject);
+    if (!subjectPosition) return;
+
+    const now = performance.now?.() || Date.now();
+    const mesh = getActorRenderObject(actor);
+    const shooter = actor?.userData?.shooterAi;
+    if (!mesh || !shooter || shooter.defeated || mesh.visible === false) return;
+    if (!Number.isFinite(shooter.health)) setShooterHealth(actor, SHOOTER_AI_PREFAB.health);
+    ensureShooterHealthBar(actor);
+
+    const origin = mesh.getWorldPosition(_shooterActorOrigin);
+    origin.y += SHOOTER_AI_PREFAB.muzzleHeight;
+    const distanceSq = origin.distanceToSquared(subjectPosition);
+    const range = Number.isFinite(shooter.range) ? shooter.range : SHOOTER_AI_PREFAB.range;
+    if (distanceSq > range * range) {
+        hideShooterAimWarning(actor);
+        return;
+    }
+
+    const hasLineOfSight = isShooterLineOfSightClear(origin, subjectPosition);
+    updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight);
+    mesh.getWorldPosition(origin);
+    origin.y += SHOOTER_AI_PREFAB.muzzleHeight;
+
+    mesh.lookAt(subjectPosition.x, mesh.position.y + SHOOTER_AI_PREFAB.muzzleHeight, subjectPosition.z);
+    mesh.rotateY(Math.PI);
+    if (!hasLineOfSight) {
+        hideShooterAimWarning(actor);
+        shooter.windupUntil = 0;
+        return;
+    }
+
+    if ((shooter.nextShotAt || 0) > now) {
+        hideShooterAimWarning(actor);
+        return;
+    }
+
+    if (!shooter.windupUntil) {
+        shooter.windupUntil = now + SHOOTER_AI_PREFAB.aimWarningMs;
+    }
+    const charge = 1 - Math.max(0, shooter.windupUntil - now) / SHOOTER_AI_PREFAB.aimWarningMs;
+    updateShooterAimWarning(actor, origin, subjectPosition, charge, true);
+    if (now < shooter.windupUntil) return;
+
+    hideShooterAimWarning(actor);
+    shooter.windupUntil = 0;
+    _shooterActorMuzzleDir.copy(subjectPosition).sub(origin).normalize().multiplyScalar(0.55);
+    origin.add(_shooterActorMuzzleDir);
+    spawnShooterProjectile(origin, subjectPosition);
+    shooter.nextShotAt = now + (Number.isFinite(shooter.cooldownMs) ? shooter.cooldownMs : SHOOTER_AI_PREFAB.cooldownMs);
+}
+
 function updateShooterAis(delta = 0) {
     updateShooterProjectiles(delta);
     updateShooterAiPhysicsHits();
     if (!gameplay.active) return;
 
-    const subjectPosition = getShooterTargetPosition(new THREE.Vector3());
-    if (!subjectPosition) return;
-
-    const now = performance.now?.() || Date.now();
-    for (const actor of getGameplayPrefabActors('shooterAi')) {
-        const mesh = getActorRenderObject(actor);
-        const shooter = actor?.userData?.shooterAi;
-        if (!mesh || !shooter || shooter.defeated || mesh.visible === false) continue;
-        if (!Number.isFinite(shooter.health)) setShooterHealth(actor, SHOOTER_AI_PREFAB.health);
-        ensureShooterHealthBar(actor);
-
-        const origin = mesh.getWorldPosition(new THREE.Vector3());
-        origin.y += SHOOTER_AI_PREFAB.muzzleHeight;
-        const distanceSq = origin.distanceToSquared(subjectPosition);
-        const range = Number.isFinite(shooter.range) ? shooter.range : SHOOTER_AI_PREFAB.range;
-        if (distanceSq > range * range) {
-            hideShooterAimWarning(actor);
-            continue;
-        }
-
-        const hasLineOfSight = isShooterLineOfSightClear(origin, subjectPosition);
-        updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight);
-        origin.copy(mesh.getWorldPosition(tempVectorA));
-        origin.y += SHOOTER_AI_PREFAB.muzzleHeight;
-
-        mesh.lookAt(subjectPosition.x, mesh.position.y + SHOOTER_AI_PREFAB.muzzleHeight, subjectPosition.z);
-        mesh.rotateY(Math.PI);
-        if (!hasLineOfSight) {
-            hideShooterAimWarning(actor);
-            shooter.windupUntil = 0;
-            continue;
-        }
-
-        if ((shooter.nextShotAt || 0) > now) {
-            hideShooterAimWarning(actor);
-            continue;
-        }
-
-        if (!shooter.windupUntil) {
-            shooter.windupUntil = now + SHOOTER_AI_PREFAB.aimWarningMs;
-        }
-        const charge = 1 - Math.max(0, shooter.windupUntil - now) / SHOOTER_AI_PREFAB.aimWarningMs;
-        updateShooterAimWarning(actor, origin, subjectPosition, charge, true);
-        if (now < shooter.windupUntil) continue;
-
-        hideShooterAimWarning(actor);
-        shooter.windupUntil = 0;
-        spawnShooterProjectile(origin.add(subjectPosition.clone().sub(origin).normalize().multiplyScalar(0.55)), subjectPosition);
-        shooter.nextShotAt = now + (Number.isFinite(shooter.cooldownMs) ? shooter.cooldownMs : SHOOTER_AI_PREFAB.cooldownMs);
+    const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab1);
+    for (let i = 0; i < shooters.length; i++) {
+        const actor = shooters[i];
+        ensureGameplayPrefabScript(actor, SHOOTER_AI_USER_SCRIPT);
+        runObjectEventScript(actor, 'tick', { deltaTime: delta });
     }
 }
 
@@ -3545,45 +3623,66 @@ function spawnShooterAiAt(position, options = {}) {
     tagGameplayPrefabActor(actor, 'shooterAi', { triggerRadius: 0.8, groundOffset: 1.18, ignoreGroundActors: shooterGroundIgnoreActors });
     tintGameplayPrefabActor(actor, '#dc2626', '#7f1d1d', 0.9);
     addShooterAiVisual(actor);
+    attachDefaultPrefabScript(actor, SHOOTER_AI_USER_SCRIPT);
     return actor;
 }
 
-function updateShooterSpawners() {
+function updateShooterSpawnerActor(spawner) {
+    if (!gameplay.active || !spawner) return;
+    const mesh = getActorRenderObject(spawner);
+    if (!mesh?.visible) return;
+    const now = performance.now?.() || Date.now();
+    const state = spawner.userData.shooterSpawner || (spawner.userData.shooterSpawner = {});
+    if (!Number.isFinite(state.nextWaveAt)) state.nextWaveAt = now + SHOOTER_SPAWNER_PREFAB.firstWaveDelayMs;
+
+    const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab2);
+    let alive = 0;
+    for (let i = 0; i < shooters.length; i++) {
+        const actor = shooters[i];
+        const shooter = actor?.userData?.shooterAi;
+        if (shooter?.spawnedBy === spawner.id && !shooter.defeated && getActorRenderObject(actor)?.visible !== false) {
+            alive++;
+        }
+    }
+    if (alive >= SHOOTER_SPAWNER_PREFAB.maxAlive || now < state.nextWaveAt) return;
+
+    state.wave = (state.wave || 0) + 1;
+    const spawnCount = Math.min(SHOOTER_SPAWNER_PREFAB.maxAlive - alive, 1 + Math.floor(state.wave / 2));
+    mesh.getWorldPosition(tempVectorA);
+    for (let i = 0; i < spawnCount; i++) {
+        const angle = (i / Math.max(1, spawnCount)) * Math.PI * 2 + Math.random() * 0.7;
+        const radius = SHOOTER_SPAWNER_PREFAB.spawnRadius * (0.65 + Math.random() * 0.5);
+        spawnShooterAiAt(new THREE.Vector3(
+            tempVectorA.x + Math.cos(angle) * radius,
+            tempVectorA.y,
+            tempVectorA.z + Math.sin(angle) * radius
+        ), {
+            spawnedBy: spawner.id,
+            scoreValue: SHOOTER_AI_PREFAB.scoreValue + state.wave * 10,
+            ignoreGroundActor: spawner,
+        });
+    }
+    state.nextWaveAt = now + SHOOTER_SPAWNER_PREFAB.cooldownMs;
+}
+
+function updateShooterSpawners(delta = 0) {
     if (!gameplay.active) return;
-    const spawners = getGameplayPrefabActors('shooterSpawner');
+    const spawners = getGameplayPrefabActors('shooterSpawner', _scratchPrefab1);
     if (!spawners.length) return;
 
-    const now = performance.now?.() || Date.now();
-    for (const spawner of spawners) {
-        const mesh = getActorRenderObject(spawner);
-        if (!mesh?.visible) continue;
-        const state = spawner.userData.shooterSpawner || (spawner.userData.shooterSpawner = {});
-        if (!Number.isFinite(state.nextWaveAt)) state.nextWaveAt = now + SHOOTER_SPAWNER_PREFAB.firstWaveDelayMs;
-
-        const alive = getGameplayPrefabActors('shooterAi').filter((actor) => {
-            const shooter = actor?.userData?.shooterAi;
-            return shooter?.spawnedBy === spawner.id && !shooter.defeated && getActorRenderObject(actor)?.visible !== false;
-        }).length;
-        if (alive >= SHOOTER_SPAWNER_PREFAB.maxAlive || now < state.nextWaveAt) continue;
-
-        state.wave = (state.wave || 0) + 1;
-        const spawnCount = Math.min(SHOOTER_SPAWNER_PREFAB.maxAlive - alive, 1 + Math.floor(state.wave / 2));
-        mesh.getWorldPosition(tempVectorA);
-        for (let i = 0; i < spawnCount; i++) {
-            const angle = (i / Math.max(1, spawnCount)) * Math.PI * 2 + Math.random() * 0.7;
-            const radius = SHOOTER_SPAWNER_PREFAB.spawnRadius * (0.65 + Math.random() * 0.5);
-            spawnShooterAiAt(new THREE.Vector3(
-                tempVectorA.x + Math.cos(angle) * radius,
-                tempVectorA.y,
-                tempVectorA.z + Math.sin(angle) * radius
-            ), {
-                spawnedBy: spawner.id,
-                scoreValue: SHOOTER_AI_PREFAB.scoreValue + state.wave * 10,
-                ignoreGroundActor: spawner,
-            });
-        }
-        state.nextWaveAt = now + SHOOTER_SPAWNER_PREFAB.cooldownMs;
+    for (let i = 0; i < spawners.length; i++) {
+        const spawner = spawners[i];
+        ensureGameplayPrefabScript(spawner, SHOOTER_SPAWNER_USER_SCRIPT);
+        runObjectEventScript(spawner, 'tick', { deltaTime: delta });
     }
+}
+if (typeof window !== 'undefined') {
+    window.updateShooterAiActor = updateShooterAiActor;
+    window.updateShooterSpawnerActor = updateShooterSpawnerActor;
+    window.spawnShooterAiAt = spawnShooterAiAt;
+    window.spawnShooterProjectile = spawnShooterProjectile;
+    window.damageShooterAi = damageShooterAi;
+    window.setShooterHealth = setShooterHealth;
 }
 
 function addStraightGunVisual(actor) {
@@ -3962,6 +4061,7 @@ function spawnGameplayPrefab(type) {
         if (mesh) mesh.scale.set(1.45, 0.18, 1.45);
         tagGameplayPrefabActor(actor, type, { triggerRadius: 1.4, groundOffset: 0.25 });
         tintGameplayPrefabActor(actor, '#7c3aed', '#a855f7', 1.9);
+        attachDefaultPrefabScript(actor, SHOOTER_SPAWNER_USER_SCRIPT);
     } else if (type === 'smg') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -4314,13 +4414,20 @@ function hasScriptedTriggerHandler(prop) {
     return /\bfunction\s+OnTrigger(Exit)?\s*\(/.test(source);
 }
 
+// Reused per-frame subject descriptor for processGameplayPrefabs to avoid
+// allocating a fresh object + Vector3 every frame.
+const _gameplaySubjectScratch = { position: new THREE.Vector3(), health: 0 };
 function processGameplayPrefabs() {
     if (!gameplay.active) return;
     const subjectPosition = getGameplaySubjectPosition(tempVectorC);
     if (!subjectPosition) return;
-    const subject = { position: subjectPosition.clone(), health: gameplay.health };
+    _gameplaySubjectScratch.position.copy(subjectPosition);
+    _gameplaySubjectScratch.health = gameplay.health;
+    const subject = _gameplaySubjectScratch;
 
-    for (const coin of getGameplayPrefabActors('coin')) {
+    let actors = getGameplayPrefabActors('coin', _scratchPrefab1);
+    for (let i = 0; i < actors.length; i++) {
+        const coin = actors[i];
         if (hasScriptedTriggerHandler(coin)) {
             dispatchTriggerForActor(coin, subjectPosition, subject);
             continue;
@@ -4333,7 +4440,9 @@ function processGameplayPrefabs() {
     }
 
     const now = performance.now?.() || Date.now();
-    for (const pickup of getGameplayPrefabActors('healthPickup')) {
+    actors = getGameplayPrefabActors('healthPickup', _scratchPrefab1);
+    for (let i = 0; i < actors.length; i++) {
+        const pickup = actors[i];
         if (hasScriptedTriggerHandler(pickup)) {
             dispatchTriggerForActor(pickup, subjectPosition, subject);
             continue;
@@ -4352,7 +4461,9 @@ function processGameplayPrefabs() {
         setPlayerHealth((gameplay.health ?? 1) + (pickup.userData.healValue ?? HEALTH_PICKUP_PREFAB.healValue));
     }
 
-    for (const weapon of getGameplayPrefabActors('smg')) {
+    actors = getGameplayPrefabActors('smg', _scratchPrefab1);
+    for (let i = 0; i < actors.length; i++) {
+        const weapon = actors[i];
         const mesh = getActorRenderObject(weapon);
         if (!mesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
         weapon.userData.collected = true;
@@ -4360,7 +4471,9 @@ function processGameplayPrefabs() {
         equipStraightGun(weapon);
     }
 
-    for (const weapon of getGameplayPrefabActors('sniperRifle')) {
+    actors = getGameplayPrefabActors('sniperRifle', _scratchPrefab1);
+    for (let i = 0; i < actors.length; i++) {
+        const weapon = actors[i];
         const mesh = getActorRenderObject(weapon);
         if (!mesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
         weapon.userData.collected = true;
@@ -4368,7 +4481,9 @@ function processGameplayPrefabs() {
         equipSniperRifle(weapon);
     }
 
-    for (const target of getGameplayPrefabActors('target')) {
+    actors = getGameplayPrefabActors('target', _scratchPrefab1);
+    for (let i = 0; i < actors.length; i++) {
+        const target = actors[i];
         if (hasScriptedTriggerHandler(target)) {
             // Script-owned: dispatch OnTrigger when any non-prefab dynamic body enters.
             const targetMesh = getActorRenderObject(target);
@@ -4400,7 +4515,9 @@ function processGameplayPrefabs() {
         targetMesh.getWorldPosition(tempVectorA);
         const radius = Number(target.userData?.triggerRadius ?? 1.55);
 
-        for (const actor of Array.from(physics.dynamicBodies || [])) {
+        const bodies = physics.dynamicBodies || _emptyArray;
+        for (let bi = 0; bi < bodies.length; bi++) {
+            const actor = bodies[bi];
             if (!actor || actor.userData?.gameplayPrefab) continue;
             const body = getActorBody(actor);
             const mesh = getActorRenderObject(actor);
@@ -4420,7 +4537,9 @@ function processGameplayPrefabs() {
 
     // Teleporter (script-owned path): if any teleporter has scripted trigger, let it
     // handle via OnTrigger event. Engine still expects script to call teleportPlayer.
-    for (const tp of getGameplayPrefabActors('teleporter')) {
+    actors = getGameplayPrefabActors('teleporter', _scratchPrefab1);
+    for (let i = 0; i < actors.length; i++) {
+        const tp = actors[i];
         if (!hasScriptedTriggerHandler(tp)) continue;
         dispatchTriggerForActor(tp, subjectPosition, subject);
     }
@@ -5381,13 +5500,17 @@ function requestLightShadowRefresh(light) {
     }
 }
 
-function configurePointLightShadow(light, {
-    mapSize = 512,
-    bias = 0.0005,
-    normalBias = 0.02,
-    radius = 2.5,
-} = {}) {
+function configurePointLightShadow(light, opts = {}) {
     if (!light?.isPointLight || !light.shadow) return light;
+    // Inherit any unspecified value from the global shadow tuning in
+    // worldEnvState so newly-spawned lights match the World Options panel
+    // without an extra apply pass. Callers that pass an explicit value still
+    // win — useful for the cornell preset which sets its own defaults.
+    const g = worldEnvState?.shadows ?? {};
+    const mapSize = Number.isFinite(opts.mapSize) ? opts.mapSize : (g.mapSize ?? 512);
+    const bias = Number.isFinite(opts.bias) ? opts.bias : (g.bias ?? 0.0005);
+    const normalBias = Number.isFinite(opts.normalBias) ? opts.normalBias : (g.normalBias ?? 0.02);
+    const radius = Number.isFinite(opts.radius) ? opts.radius : (g.radius ?? 2.5);
     light.shadow.mapSize.set(mapSize, mapSize);
     light.shadow.bias = bias;
     light.shadow.radius = radius;
@@ -5402,6 +5525,52 @@ function requestScenePointLightShadowRefresh(root = scene) {
         if (!obj?.isPointLight || !obj.castShadow) return;
         requestLightShadowRefresh(obj);
     });
+}
+
+// Walks the scene and stamps the World Options shadow tuning onto every
+// shadow-casting light. Point + spot + directional all share the same set of
+// shadow params so a single panel covers all three. bias/normalBias/radius
+// apply immediately; mapSize changes are deferred to the next frame because
+// three.js's PointShadowNode dereferences shadow.map mid-frame and a
+// synchronous reallocation produces a null-deref crash.
+const _pendingShadowMapResizes = new Set();
+function applyShadowTuningToScene(tuning, root = scene) {
+    if (!tuning || !root?.traverse) return;
+    const bias = Number.isFinite(tuning.bias) ? tuning.bias : 0.0005;
+    const normalBias = Number.isFinite(tuning.normalBias) ? tuning.normalBias : 0.02;
+    const radius = Math.max(0, Number.isFinite(tuning.radius) ? tuning.radius : 2.5);
+    const mapSize = Math.max(64, Math.min(4096, Number.isFinite(tuning.mapSize) ? (tuning.mapSize | 0) : 512));
+
+    root.traverse((obj) => {
+        if (!obj?.castShadow || !obj.shadow) return;
+        if (!obj.isPointLight && !obj.isSpotLight && !obj.isDirectionalLight) return;
+        obj.shadow.bias = bias;
+        if ('normalBias' in obj.shadow) obj.shadow.normalBias = normalBias;
+        obj.shadow.radius = radius;
+        if (obj.shadow.mapSize.x !== mapSize || obj.shadow.mapSize.y !== mapSize) {
+            // Defer the map.dispose() + map = null to a microtask between
+            // frames so we don't yank the texture out from under a pending
+            // shadow-pass dereference.
+            _pendingShadowMapResizes.add(obj);
+            obj.shadow.mapSize.set(mapSize, mapSize);
+        }
+        obj.shadow.needsUpdate = true;
+    });
+    if (renderer?.shadowMap) renderer.shadowMap.needsUpdate = true;
+
+    if (_pendingShadowMapResizes.size > 0) {
+        const toResize = Array.from(_pendingShadowMapResizes);
+        _pendingShadowMapResizes.clear();
+        requestAnimationFrame(() => {
+            for (const light of toResize) {
+                if (!light?.shadow) continue;
+                light.shadow.map?.dispose?.();
+                light.shadow.map = null;
+                light.shadow.needsUpdate = true;
+            }
+            if (renderer?.shadowMap) renderer.shadowMap.needsUpdate = true;
+        });
+    }
 }
 
 function spawnLightActor(kind, { userData = null, position = null, scale = 8, includeScripts = true } = {}) {
@@ -6812,10 +6981,13 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     ddgi?.setSolidTestEnabled?.(runtimeDdgiEnabled && s.ddgi.solidTest);
     if (cornellPanelLight) cornellPanelLight.intensity = s.ddgi.lightIntensity;
 
-    // Shadows
+    // Shadows: global toggle + per-light bias/normalBias/PCF radius/map size.
+    // We walk every light with castShadow on and stamp the same values so the
+    // World Options panel acts as a single source of truth.
     if (renderer?.shadowMap) {
         renderer.shadowMap.enabled = s.shadows.enabled;
     }
+    applyShadowTuningToScene(s.shadows);
 
     if (persist) saveWorldEnvToStorage();
     updateWorldEnvUi();
@@ -6872,6 +7044,10 @@ function updateWorldEnvUi() {
     setToggle(worldEnvUiRefs.ddgiViewLit, worldEnvUiRefs.ddgiViewContribution, s.ddgi.contributionView);
 
     setToggle(worldEnvUiRefs.shadowsOff, worldEnvUiRefs.shadowsOn, s.shadows.enabled);
+    setSlider(worldEnvUiRefs.shadowsBias, worldEnvUiRefs.shadowsBiasValue, s.shadows.bias, 4);
+    setSlider(worldEnvUiRefs.shadowsNormalBias, worldEnvUiRefs.shadowsNormalBiasValue, s.shadows.normalBias, 2);
+    setSlider(worldEnvUiRefs.shadowsRadius, worldEnvUiRefs.shadowsRadiusValue, s.shadows.radius, 1);
+    setSlider(worldEnvUiRefs.shadowsMapSize, worldEnvUiRefs.shadowsMapSizeValue, s.shadows.mapSize, 0);
 
     // Summary chip + status text
     if (worldEnvUiRefs.summaryValue) {
@@ -7133,26 +7309,53 @@ function applyCoreVisualRulesToInstance(instanceActor, rules) {
     }
 }
 
+// Reused per-frame buckets for syncActorCoreInstances; module-scoped to avoid
+// per-frame allocation. Cleared at the top of each call.
+const _coreInstanceBuckets = new Map(); // coreId -> instance actor[]
 function syncActorCoreInstances() {
     if (!sceneSystem?.actors?.size) return;
-    const actors = Array.from(sceneSystem.actors);
-    const cores = actors.filter((actor) => !actorInheritsCore(actor));
-    const liveCoreIds = new Set(cores.map((actor) => actor.id));
 
-    actorCoreSyncState.forEach((_entry, coreId) => {
-        if (!liveCoreIds.has(coreId)) actorCoreSyncState.delete(coreId);
-    });
+    const buckets = _coreInstanceBuckets;
+    buckets.clear();
 
-    cores.forEach((coreActor) => {
-        const linked = actors.filter((actor) => actorInheritsCore(actor) && getActorCoreSource(actor)?.id === coreActor.id);
-        if (!linked.length) return;
+    // Single pass: partition into cores (bucket keys) and instances (bucket values).
+    // Core actors get an empty bucket so we can prune stale entries below.
+    for (const actor of sceneSystem.actors) {
+        if (actorInheritsCore(actor)) {
+            const sourceId = getActorCoreSource(actor)?.id;
+            if (!sourceId) continue;
+            let list = buckets.get(sourceId);
+            if (!list) {
+                list = [];
+                buckets.set(sourceId, list);
+            }
+            list.push(actor);
+        } else if (!buckets.has(actor.id)) {
+            buckets.set(actor.id, null);
+        }
+    }
+
+    // Prune sync state for cores that no longer exist.
+    for (const coreId of actorCoreSyncState.keys()) {
+        if (!buckets.has(coreId)) actorCoreSyncState.delete(coreId);
+    }
+
+    // Apply rules per core that actually has instances linked to it.
+    for (const [coreId, linked] of buckets) {
+        if (!linked || linked.length === 0) continue;
+        const coreActor = getDynamicPropById(coreId);
+        if (!coreActor) continue;
         const rules = serializeCoreVisualRules(coreActor);
-        if (!rules) return;
+        if (!rules) continue;
         const signature = JSON.stringify(rules);
-        if (actorCoreSyncState.get(coreActor.id)?.signature === signature) return;
-        actorCoreSyncState.set(coreActor.id, { signature });
-        linked.forEach((instanceActor) => applyCoreVisualRulesToInstance(instanceActor, rules));
-    });
+        const cached = actorCoreSyncState.get(coreId);
+        if (cached && cached.signature === signature) continue;
+        if (cached) cached.signature = signature;
+        else actorCoreSyncState.set(coreId, { signature });
+        for (let i = 0; i < linked.length; i++) {
+            applyCoreVisualRulesToInstance(linked[i], rules);
+        }
+    }
 }
 
 function focusSceneActor(actor) {
@@ -8181,6 +8384,14 @@ async function init() {
         ddgiViewContribution: document.getElementById('we-ddgi-view-contribution'),
         shadowsOff: document.getElementById('we-shadows-off'),
         shadowsOn: document.getElementById('we-shadows-on'),
+        shadowsBias: document.getElementById('we-shadows-bias'),
+        shadowsBiasValue: document.getElementById('we-shadows-bias-value'),
+        shadowsNormalBias: document.getElementById('we-shadows-normal-bias'),
+        shadowsNormalBiasValue: document.getElementById('we-shadows-normal-bias-value'),
+        shadowsRadius: document.getElementById('we-shadows-radius'),
+        shadowsRadiusValue: document.getElementById('we-shadows-radius-value'),
+        shadowsMapSize: document.getElementById('we-shadows-map-size'),
+        shadowsMapSizeValue: document.getElementById('we-shadows-map-size-value'),
         resetBtn: document.getElementById('we-reset-defaults'),
         bakeRes: document.getElementById('we-bake-res'),
         bakeResValue: document.getElementById('we-bake-res-value'),
@@ -8437,6 +8648,10 @@ async function init() {
     wireToggle(worldEnvUiRefs?.shadowsOff, worldEnvUiRefs?.shadowsOn,
         () => { worldEnvState.shadows.enabled = false; },
         () => { worldEnvState.shadows.enabled = true; });
+    wireSlider(worldEnvUiRefs?.shadowsBias, 'shadows.bias', (v) => { worldEnvState.shadows.bias = v; });
+    wireSlider(worldEnvUiRefs?.shadowsNormalBias, 'shadows.normalBias', (v) => { worldEnvState.shadows.normalBias = v; });
+    wireSlider(worldEnvUiRefs?.shadowsRadius, 'shadows.radius', (v) => { worldEnvState.shadows.radius = v; });
+    wireSlider(worldEnvUiRefs?.shadowsMapSize, 'shadows.mapSize', (v) => { worldEnvState.shadows.mapSize = v | 0; });
 
     // Apply once now that all controllers + UI are wired. This pushes the
     // (possibly-restored-from-localStorage) state through every subsystem and
@@ -8906,7 +9121,7 @@ async function init() {
 
         updateSoccerGoalies(delta);
         updateCircularNavmeshAis(delta);
-        updateShooterSpawners();
+        updateShooterSpawners(delta);
         updateStraightGuns();
         updateShooterAis(delta);
         updateGameplayEffects(delta);
@@ -10862,55 +11077,47 @@ function updateMainDirectionalLightShadowFocus() {
     mainDirectionalLight.target.updateMatrixWorld();
 }
 
+// Avoid clobbering DOM textContent every call: writing the same string still
+// triggers layout invalidation in some browsers and shows up as churn under
+// heavy frame loads.
+function setTextIfChanged(element, value) {
+    if (!element) return;
+    if (element.textContent !== value) element.textContent = value;
+}
+
 function updateGameplayUI() {
     const hasAsset = !!currentMesh;
     const mobileActive = mobileState.enabled;
     const drivingVehicle = isDrivingVehicle();
 
-    if (resetViewBtn) {
-        resetViewBtn.textContent = gameplay.active ? 'Respawn' : 'Reset View';
-    }
+    setTextIfChanged(resetViewBtn, gameplay.active ? 'Respawn' : 'Reset View');
 
     updateCameraModeButtons();
 
     if (gameplayStatus) {
-        if (mobileActive && drivingVehicle) {
-            gameplayStatus.textContent = 'Mobile driving active';
-        } else if (mobileActive && gameplay.active) {
-            gameplayStatus.textContent = 'Mobile play active';
-        } else if (mobileActive) {
-            gameplayStatus.textContent = 'Mobile showcase ready';
-        } else if (drivingVehicle) {
-            gameplayStatus.textContent = 'Driving summoned car';
-        } else if (!hasAsset && gameplay.active) {
-            gameplayStatus.textContent = gameplay.grounded ? 'Exploring terrain' : 'Airborne';
-        } else if (!hasAsset) {
-            gameplayStatus.textContent = `Showcase free-fly ready. Camera speed ${showcase.moveSpeed.toFixed(1)}x.`;
-        } else if (gameplay.active) {
-            gameplayStatus.textContent = gameplay.grounded ? 'Exploring scene' : 'Airborne';
-        } else {
-            gameplayStatus.textContent = `Scene ready. Showcase speed ${showcase.moveSpeed.toFixed(1)}x.`;
-        }
+        let statusText;
+        if (mobileActive && drivingVehicle) statusText = 'Mobile driving active';
+        else if (mobileActive && gameplay.active) statusText = 'Mobile play active';
+        else if (mobileActive) statusText = 'Mobile showcase ready';
+        else if (drivingVehicle) statusText = 'Driving summoned car';
+        else if (!hasAsset && gameplay.active) statusText = gameplay.grounded ? 'Exploring terrain' : 'Airborne';
+        else if (!hasAsset) statusText = `Showcase free-fly ready. Camera speed ${showcase.moveSpeed.toFixed(1)}x.`;
+        else if (gameplay.active) statusText = gameplay.grounded ? 'Exploring scene' : 'Airborne';
+        else statusText = `Scene ready. Showcase speed ${showcase.moveSpeed.toFixed(1)}x.`;
+        setTextIfChanged(gameplayStatus, statusText);
     }
 
     if (playHint) {
-        if (mobileActive && drivingVehicle) {
-            playHint.textContent = 'Touch left pad to drive, right pad to look, hold Brake to slow down, tap the scene for play scripts, and tap E on keyboard to hop out.';
-        } else if (mobileActive && gameplay.active) {
-            playHint.textContent = 'Touch left pad to move, right pad to look, tap the scene to run play scripts, and use Jump to hop.';
-        } else if (mobileActive) {
-            playHint.textContent = 'Touch left pad to move, right pad to look, double-tap a prop to open its script menu, and use Menu for assets.';
-        } else if (drivingVehicle) {
-            playHint.textContent = 'W/S drive, A/D steer, Shift boost, Space brake, E exit car, R respawn, Esc exit play mode.';
-        } else if (!hasAsset && gameplay.active) {
-            playHint.textContent = 'WASD move, mouse look, Space jump, Shift sprint, E enter nearby car, V summon car, R respawn, Esc exit.';
-        } else if (!hasAsset) {
-            playHint.textContent = 'Showcase: hold right mouse to look, use WASD to move, Q/E for down/up, Shift to boost, and mouse wheel to change camera speed.';
-        } else if (gameplay.active) {
-            playHint.textContent = 'WASD move, mouse look, Space jump, Shift sprint, E enter nearby car, V summon car, R respawn, Esc exit.';
-        } else {
-            playHint.textContent = 'Showcase: hold right mouse to look, use WASD to move, Q/E for down/up, Shift to boost, and mouse wheel to change camera speed. Play mode still uses pointer lock.';
-        }
+        let hintText;
+        if (mobileActive && drivingVehicle) hintText = 'Touch left pad to drive, right pad to look, hold Brake to slow down, tap the scene for play scripts, and tap E on keyboard to hop out.';
+        else if (mobileActive && gameplay.active) hintText = 'Touch left pad to move, right pad to look, tap the scene to run play scripts, and use Jump to hop.';
+        else if (mobileActive) hintText = 'Touch left pad to move, right pad to look, double-tap a prop to open its script menu, and use Menu for assets.';
+        else if (drivingVehicle) hintText = 'W/S drive, A/D steer, Shift boost, Space brake, E exit car, R respawn, Esc exit play mode.';
+        else if (!hasAsset && gameplay.active) hintText = 'WASD move, mouse look, Space jump, Shift sprint, E enter nearby car, V summon car, R respawn, Esc exit.';
+        else if (!hasAsset) hintText = 'Showcase: hold right mouse to look, use WASD to move, Q/E for down/up, Shift to boost, and mouse wheel to change camera speed.';
+        else if (gameplay.active) hintText = 'WASD move, mouse look, Space jump, Shift sprint, E enter nearby car, V summon car, R respawn, Esc exit.';
+        else hintText = 'Showcase: hold right mouse to look, use WASD to move, Q/E for down/up, Shift to boost, and mouse wheel to change camera speed. Play mode still uses pointer lock.';
+        setTextIfChanged(playHint, hintText);
     }
 
     updateMobileButtons();
@@ -11259,6 +11466,26 @@ const TELEPORTER_USER_SCRIPT = `function OnTrigger(subject) {
     if (destinationActor) destinationActor.userData._tpCooldownUntil = now + 900;
 }`;
 
+const SHOOTER_AI_USER_SCRIPT = `function Tick(DeltaTime) {
+    window.updateShooterAiActor?.(Self, DeltaTime);
+}`;
+
+const SHOOTER_SPAWNER_USER_SCRIPT = `function Tick(DeltaTime) {
+    window.updateShooterSpawnerActor?.(Self, DeltaTime);
+}`;
+
+// Dedicated scratch for updateHelicopterGameplay; same rationale as the car
+// scratch above (global tempVectors get overwritten mid-function).
+const _hPos = new THREE.Vector3();
+const _hRot = new THREE.Quaternion();
+const _hForward = new THREE.Vector3();
+const _hRight = new THREE.Vector3();
+const _hUp = new THREE.Vector3();
+const _hFlatForward = new THREE.Vector3();
+const _hFlatRight = new THREE.Vector3();
+const _hLinVel = new THREE.Vector3();
+const _hAngVel = new THREE.Vector3();
+const _hEuler = new THREE.Euler();
 function updateHelicopterGameplay(vehicle, delta) {
     const { Jolt, bodyInterface } = physics;
     const bodyId = vehicle.body.GetID();
@@ -11267,8 +11494,8 @@ function updateHelicopterGameplay(vehicle, delta) {
     // Runtime only handles camera follow + visual mirror.
     const scriptHandles = vehicle.scripts?.tick?.handles;
     if (typeof scriptHandles?.OnInput === 'function') {
-        const position = copyJoltVector(tempVectorA, bodyInterface.GetPosition(bodyId)).clone();
-        const rotation = copyJoltQuaternion(tempQuaternionA, bodyInterface.GetRotation(bodyId)).clone();
+        const position = copyJoltVector(_hPos, bodyInterface.GetPosition(bodyId));
+        const rotation = copyJoltQuaternion(_hRot, bodyInterface.GetRotation(bodyId));
         vehicle.mesh.position.copy(position);
         vehicle.mesh.quaternion.copy(rotation);
         positionVehicleCamera(position, rotation, delta);
@@ -11281,18 +11508,18 @@ function updateHelicopterGameplay(vehicle, delta) {
     const liftUp = gameplay.input.lift ? 1 : 0;
     const liftDown = gameplay.input.descend ? 1 : 0;
 
-    const position = copyJoltVector(tempVectorA, bodyInterface.GetPosition(bodyId)).clone();
-    const rotation = copyJoltQuaternion(tempQuaternionA, bodyInterface.GetRotation(bodyId)).clone();
-    const forward = tempVectorB.set(0, 0, -1).applyQuaternion(rotation).normalize().clone();
-    const right = tempVectorC.set(1, 0, 0).applyQuaternion(rotation).normalize().clone();
-    const up = tempVectorD.set(0, 1, 0).applyQuaternion(rotation).normalize().clone();
-    const flatForward = tempVectorE.copy(forward); flatForward.y = 0;
+    const position = copyJoltVector(_hPos, bodyInterface.GetPosition(bodyId));
+    const rotation = copyJoltQuaternion(_hRot, bodyInterface.GetRotation(bodyId));
+    const forward = _hForward.set(0, 0, -1).applyQuaternion(rotation).normalize();
+    const right = _hRight.set(1, 0, 0).applyQuaternion(rotation).normalize();
+    const up = _hUp.set(0, 1, 0).applyQuaternion(rotation).normalize();
+    const flatForward = _hFlatForward.copy(forward); flatForward.y = 0;
     if (flatForward.lengthSq() < 1e-4) flatForward.copy(forward);
     flatForward.normalize();
-    const flatRight = new THREE.Vector3().crossVectors(flatForward, upVector).normalize();
+    const flatRight = _hFlatRight.crossVectors(flatForward, upVector).normalize();
 
-    const linVel = copyJoltVector(tempVectorA, bodyInterface.GetLinearVelocity(bodyId)).clone();
-    const angVel = copyJoltVector(tempVectorB, bodyInterface.GetAngularVelocity(bodyId)).clone();
+    const linVel = copyJoltVector(_hLinVel, bodyInterface.GetLinearVelocity(bodyId));
+    const angVel = copyJoltVector(_hAngVel, bodyInterface.GetAngularVelocity(bodyId));
 
     // Lift: counter gravity + active up/down. Tilt reduces vertical thrust.
     const gravityAssist = 9.81;
@@ -11308,14 +11535,15 @@ function updateHelicopterGameplay(vehicle, delta) {
     // Horizontal: forward thrust along flat-forward when pitched.
     const targetFwdSpeed = throttleFwd * HELI_SETTINGS.maxForwardSpeed;
     const targetStrafeSpeed = 0;
-    const horizVel = new THREE.Vector3(linVel.x, 0, linVel.z);
-    const fwdSpeed = horizVel.dot(flatForward);
-    const sideSpeed = horizVel.dot(flatRight);
+    // dot(horizVel, flatForward) where horizVel = (linVel.x, 0, linVel.z).
+    const fwdSpeed = linVel.x * flatForward.x + linVel.z * flatForward.z;
+    const sideSpeed = linVel.x * flatRight.x + linVel.z * flatRight.z;
     const nextFwd = THREE.MathUtils.damp(fwdSpeed, targetFwdSpeed, HELI_SETTINGS.horizontalDrag * 4, delta);
     const nextSide = THREE.MathUtils.damp(sideSpeed, targetStrafeSpeed, HELI_SETTINGS.horizontalDrag * 6, delta);
-    const nextHoriz = flatForward.clone().multiplyScalar(nextFwd).addScaledVector(flatRight, nextSide);
+    const nextHorizX = flatForward.x * nextFwd + flatRight.x * nextSide;
+    const nextHorizZ = flatForward.z * nextFwd + flatRight.z * nextSide;
 
-    const nextVel = new Jolt.Vec3(nextHoriz.x, newVy, nextHoriz.z);
+    const nextVel = new Jolt.Vec3(nextHorizX, newVy, nextHorizZ);
     bodyInterface.SetLinearVelocity(bodyId, nextVel);
     Jolt.destroy(nextVel);
 
@@ -11324,7 +11552,7 @@ function updateHelicopterGameplay(vehicle, delta) {
     const nextYaw = THREE.MathUtils.damp(angVel.y, targetYaw, HELI_SETTINGS.yawAccel, delta);
 
     // Pitch & roll auto-level toward tilt angles based on input
-    const euler = new THREE.Euler().setFromQuaternion(rotation, 'YXZ');
+    const euler = _hEuler.setFromQuaternion(rotation, 'YXZ');
     const targetPitch = -throttleFwd * HELI_SETTINGS.tiltAngle;
     const targetRoll = 0;
     const pitchError = targetPitch - euler.x;
@@ -11352,6 +11580,29 @@ function updateHelicopterGameplay(vehicle, delta) {
     positionVehicleCamera(position, rotation, delta);
 }
 
+// Dedicated per-frame scratch vectors for updateVehicleGameplay. The original
+// code allocated 7+ clones every frame because the global tempVector pool was
+// being overwritten mid-function.
+const _vPos = new THREE.Vector3();
+const _vRot = new THREE.Quaternion();
+const _vFlatForward = new THREE.Vector3();
+const _vUp = new THREE.Vector3();
+const _vForward = new THREE.Vector3();
+const _vRight = new THREE.Vector3();
+const _vLinVel = new THREE.Vector3();
+const _vAngVel = new THREE.Vector3();
+const _vFlatRight = new THREE.Vector3();
+const _vHorizVel = new THREE.Vector3();
+// Pre-allocated corner sample objects; fields are overwritten each frame so
+// the downstream consumer reads fresh values without allocating new objects.
+const _cornerSamplesScratch = [
+    { forward: 0, sideways: 0, rideHeight: null, compression: 0 },
+    { forward: 0, sideways: 0, rideHeight: null, compression: 0 },
+    { forward: 0, sideways: 0, rideHeight: null, compression: 0 },
+    { forward: 0, sideways: 0, rideHeight: null, compression: 0 },
+];
+const _rearWheelScratch = [new THREE.Vector3(), new THREE.Vector3()];
+const _rearWheelScratchOut = [];
 function updateVehicleGameplay(delta) {
     const vehicle = getActiveVehicleProp();
     if (!vehicle?.body) {
@@ -11369,16 +11620,16 @@ function updateVehicleGameplay(delta) {
     const throttle = (gameplay.input.forward ? 1 : 0) - (gameplay.input.back ? 1 : 0);
     const steer = (gameplay.input.left ? 1 : 0) - (gameplay.input.right ? 1 : 0);
     const boostMultiplier = gameplay.input.sprint ? 1.35 : 1;
-    const vehiclePosition = copyJoltVector(tempVectorA, bodyInterface.GetPosition(bodyId)).clone();
-    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, bodyInterface.GetRotation(bodyId)).clone();
-    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true).clone();
-    const vehicleUp = tempVectorC.set(0, 1, 0).applyQuaternion(vehicleRotation).normalize().clone();
-    const vehicleForward = tempVectorA.set(0, 0, -1).applyQuaternion(vehicleRotation).normalize().clone();
-    const vehicleRight = tempVectorB.set(1, 0, 0).applyQuaternion(vehicleRotation).normalize().clone();
-    const linearVelocity = copyJoltVector(tempVectorD, bodyInterface.GetLinearVelocity(bodyId)).clone();
-    const angularVelocity = copyJoltVector(tempVectorE, bodyInterface.GetAngularVelocity(bodyId)).clone();
-    const flatRight = tempVectorC.crossVectors(flatForward, upVector).normalize().clone();
-    const horizontalVelocity = tempVectorD.copy(linearVelocity).setY(0);
+    const vehiclePosition = copyJoltVector(_vPos, bodyInterface.GetPosition(bodyId));
+    const vehicleRotation = copyJoltQuaternion(_vRot, bodyInterface.GetRotation(bodyId));
+    const flatForward = getVehicleForward(_vFlatForward, vehicleRotation, true);
+    const vehicleUp = _vUp.set(0, 1, 0).applyQuaternion(vehicleRotation).normalize();
+    const vehicleForward = _vForward.set(0, 0, -1).applyQuaternion(vehicleRotation).normalize();
+    const vehicleRight = _vRight.set(1, 0, 0).applyQuaternion(vehicleRotation).normalize();
+    const linearVelocity = copyJoltVector(_vLinVel, bodyInterface.GetLinearVelocity(bodyId));
+    const angularVelocity = copyJoltVector(_vAngVel, bodyInterface.GetAngularVelocity(bodyId));
+    const flatRight = _vFlatRight.crossVectors(flatForward, upVector).normalize();
+    const horizontalVelocity = _vHorizVel.copy(linearVelocity).setY(0);
     const forwardSpeed = horizontalVelocity.dot(flatForward);
     const lateralSpeed = horizontalVelocity.dot(flatRight);
     const throttleInput = throttle;
@@ -11398,17 +11649,26 @@ function updateVehicleGameplay(delta) {
         filteredGroundHeight: null,
     };
     vehicle.mesh.userData.vehicleRideState = rideState;
-    const cornerSamples = [
-        { forward: halfWheelBase, sideways: -halfTrackWidth },
-        { forward: halfWheelBase, sideways: halfTrackWidth },
-        { forward: -halfWheelBase, sideways: -halfTrackWidth },
-        { forward: -halfWheelBase, sideways: halfTrackWidth },
-    ].map((corner, index) => {
-        const sampleX = vehiclePosition.x + flatForward.x * corner.forward + flatRight.x * corner.sideways;
-        const sampleZ = vehiclePosition.z + flatForward.z * corner.forward + flatRight.z * corner.sideways;
-        const sampleAnchorY = vehiclePosition.y
-            + vehicleForward.y * corner.forward
-            + vehicleRight.y * corner.sideways;
+    // Sample the four wheel corners. Updates _cornerSamplesScratch[] in place
+    // instead of allocating fresh objects + .map/.filter chains every frame.
+    // Layout: [FL, FR, RL, RR] matches the original code.
+    const cornerSamples = _cornerSamplesScratch;
+    cornerSamples[0].forward = halfWheelBase;  cornerSamples[0].sideways = -halfTrackWidth;
+    cornerSamples[1].forward = halfWheelBase;  cornerSamples[1].sideways =  halfTrackWidth;
+    cornerSamples[2].forward = -halfWheelBase; cornerSamples[2].sideways = -halfTrackWidth;
+    cornerSamples[3].forward = -halfWheelBase; cornerSamples[3].sideways =  halfTrackWidth;
+    let _contactCount = 0;
+    let _maxContactCompression = 0;
+    let _maxContactGroundHeight = Number.NEGATIVE_INFINITY;
+    let _anyContact = false;
+    const contactMaxRide = VEHICLE_SETTINGS.suspensionRideHeight + VEHICLE_SETTINGS.suspensionTravel;
+    for (let ci = 0; ci < 4; ci++) {
+        const corner = cornerSamples[ci];
+        const cf = corner.forward;
+        const cs = corner.sideways;
+        const sampleX = vehiclePosition.x + flatForward.x * cf + flatRight.x * cs;
+        const sampleZ = vehiclePosition.z + flatForward.z * cf + flatRight.z * cs;
+        const sampleAnchorY = vehiclePosition.y + vehicleForward.y * cf + vehicleRight.y * cs;
         const groundHeight = getGroundHeightAt(sampleX, sampleZ, true, {
             ignoreActor: vehicle,
             minSurfaceUpDot: 0.35,
@@ -11417,26 +11677,24 @@ function updateVehicleGameplay(delta) {
             maxHitY: sampleAnchorY + 0.05,
         });
         const rideHeight = groundHeight === null ? null : vehiclePosition.y - groundHeight;
-        rideState.sampleRideHeights[index] = rideHeight;
+        rideState.sampleRideHeights[ci] = rideHeight;
+        corner.rideHeight = rideHeight;
         const compression = rideHeight === null
             ? 0
             : THREE.MathUtils.clamp(VEHICLE_SETTINGS.suspensionRideHeight - rideHeight, 0, VEHICLE_SETTINGS.suspensionTravel);
-
-        return {
-            ...corner,
-            rideHeight,
-            compression,
-        };
-    });
-    const contactSamples = cornerSamples.filter((corner) => corner.rideHeight !== null && corner.rideHeight <= VEHICLE_SETTINGS.suspensionRideHeight + VEHICLE_SETTINGS.suspensionTravel);
-    const grounded = contactSamples.length > 0;
-    const contactRatio = contactSamples.length / cornerSamples.length;
-    const averageCompression = contactSamples.length
-        ? Math.max(...contactSamples.map((corner) => corner.compression))
-        : 0;
-    const averageGroundHeight = contactSamples.length
-        ? Math.max(...contactSamples.map((corner) => vehiclePosition.y - corner.rideHeight))
-        : null;
+        corner.compression = compression;
+        if (rideHeight !== null && rideHeight <= contactMaxRide) {
+            _contactCount++;
+            _anyContact = true;
+            if (compression > _maxContactCompression) _maxContactCompression = compression;
+            const gh = vehiclePosition.y - rideHeight;
+            if (gh > _maxContactGroundHeight) _maxContactGroundHeight = gh;
+        }
+    }
+    const grounded = _contactCount > 0;
+    const contactRatio = _contactCount / 4;
+    const averageCompression = _contactCount ? _maxContactCompression : 0;
+    const averageGroundHeight = _anyContact ? _maxContactGroundHeight : null;
     const frontCompression = Math.max(cornerSamples[0].compression, cornerSamples[1].compression);
     const rearCompression = Math.max(cornerSamples[2].compression, cornerSamples[3].compression);
     const leftCompression = Math.max(cornerSamples[0].compression, cornerSamples[2].compression);
@@ -11535,13 +11793,14 @@ function updateVehicleGameplay(delta) {
 
     const vehicleRenderObject = getActorRenderObject(vehicle);
     const vehicleVisualState = vehicleRenderObject ? ensureVehicleVisualState(vehicleRenderObject) : null;
-    const rearWheelWorldPositions = [];
+    const rearWheelWorldPositions = _rearWheelScratchOut;
+    rearWheelWorldPositions.length = 0;
     if (vehicleVisualState?.steeringPivots?.length >= 4) {
         const forwardOffset = VEHICLE_SETTINGS.wheelBase * 0.18;
         for (let i = 2; i < 4; i++) {
             const pivot = vehicleVisualState.steeringPivots[i];
             if (!pivot?.isObject3D) { rearWheelWorldPositions.push(null); continue; }
-            const wheelPos = new THREE.Vector3();
+            const wheelPos = _rearWheelScratch[i - 2];
             pivot.getWorldPosition(wheelPos);
             wheelPos.y -= vehicleVisualState.wheelRadius || 0;
             wheelPos.addScaledVector(flatForward, forwardOffset);
@@ -11609,6 +11868,10 @@ function updateVehicleGameplay(delta) {
     processGameplayPrefabs();
 }
 
+// Reused per-call hits buffer for getGroundHitAt; cleared on entry. Caller
+// must consume the result synchronously.
+const _groundHits = [];
+const _groundHitNormal = new THREE.Vector3();
 function getGroundHitAt(x, z, includeFloor = true, options = {}) {
     const {
         ignoreActor = null,
@@ -11621,17 +11884,18 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
     } = options;
     const ignoredActors = Array.isArray(ignoreActors) ? new Set(ignoreActors.filter(Boolean)) : null;
     const originY = Math.max(PLAYER_SETTINGS.probeHeight, gameplayBounds.max.y + PLAYER_SETTINGS.probeHeight);
-    const hits = [];
+    const hits = _groundHits;
+    hits.length = 0;
 
     raycaster.set(tempVectorA.set(x, originY, z), downVector);
 
     if (Array.isArray(targetObjects)) {
         if (targetObjects.length > 0) {
-            hits.push(...raycaster.intersectObjects(targetObjects, true));
+            raycaster.intersectObjects(targetObjects, true, hits);
         }
     } else {
         if (currentMesh) {
-            hits.push(...raycaster.intersectObject(currentMesh, true));
+            raycaster.intersectObject(currentMesh, true, hits);
         }
 
         if (sceneSystem?.actors?.size) {
@@ -11641,10 +11905,7 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
                 const actorMesh = getActorRenderObject(actor);
                 if (!actorMesh) continue;
 
-                const actorHits = raycaster.intersectObject(actorMesh, true);
-                if (actorHits.length > 0) {
-                    hits.push(...actorHits);
-                }
+                raycaster.intersectObject(actorMesh, true, hits);
             }
         }
     }
@@ -11654,7 +11915,7 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
         if (terrainHeight !== null && originY >= terrainHeight) {
             hits.push({
                 distance: originY - terrainHeight,
-                point: tempVectorB.set(x, terrainHeight, z).clone(),
+                point: new THREE.Vector3(x, terrainHeight, z),
                 object: worldFloor,
             });
         }
@@ -11670,8 +11931,8 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
             if (!hit?.face || !hit.object?.matrixWorld) {
                 return true;
             }
-            const hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
-            return hitNormal.y > 1e-4;
+            _groundHitNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+            return _groundHitNormal.y > 1e-4;
         })
         : hits;
 
@@ -11685,8 +11946,8 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
                 return true;
             }
 
-            const hitNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
-            return hitNormal.y >= minSurfaceUpDot;
+            _groundHitNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+            return _groundHitNormal.y >= minSurfaceUpDot;
         })
         : heightFilteredHits;
 
@@ -11725,6 +11986,9 @@ function getGroundHeightAt(x, z, includeFloor = true, options = {}) {
     return hit ? hit.point.y : null;
 }
 
+const _resolveHorizontalProbeHeights = [0.35, 0.75]; // multipliers of eyeHeight
+const _resolveHorizontalHits = [];
+const _wallNormalScratch = new THREE.Vector3();
 function resolveHorizontalMovement(origin, movementDelta) {
     if (!currentMesh || movementDelta.lengthSq() === 0) {
         return movementDelta;
@@ -11732,33 +11996,39 @@ function resolveHorizontalMovement(origin, movementDelta) {
 
     const adjustedMovement = movementDelta.clone();
     const direction = tempVectorA.copy(movementDelta).normalize();
-    const probeHeights = [PLAYER_SETTINGS.eyeHeight * 0.35, PLAYER_SETTINGS.eyeHeight * 0.75];
+    const eyeHeight = PLAYER_SETTINGS.eyeHeight;
+    const maxDistance = movementDelta.length() + PLAYER_SETTINGS.collisionRadius;
 
-    for (const probeHeight of probeHeights) {
+    for (let i = 0; i < _resolveHorizontalProbeHeights.length; i++) {
         const rayOrigin = tempVectorB.copy(origin);
-        rayOrigin.y += probeHeight - PLAYER_SETTINGS.eyeHeight;
+        rayOrigin.y += _resolveHorizontalProbeHeights[i] * eyeHeight - eyeHeight;
 
         raycaster.set(rayOrigin, direction);
+        raycaster.far = maxDistance;
 
-        const hit = raycaster.intersectObject(currentMesh, true).find(entry => (
-            entry.distance <= movementDelta.length() + PLAYER_SETTINGS.collisionRadius
-        ));
+        const hits = _resolveHorizontalHits;
+        hits.length = 0;
+        raycaster.intersectObject(currentMesh, true, hits);
+        // raycaster.far filters distance already; first hit is the nearest in-range one.
+        const hit = hits.length > 0 ? hits[0] : null;
         updateRaycasterDebugLine(
             raycaster.ray,
-            movementDelta.length() + PLAYER_SETTINGS.collisionRadius,
+            maxDistance,
             hit?.point ?? null,
             !!hit,
         );
+        hits.length = 0;
 
         if (!hit || !hit.face) continue;
 
-        const wallNormal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+        const wallNormal = _wallNormalScratch.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
         if (wallNormal.y > 0.6) continue;
 
         adjustedMovement.projectOnPlane(wallNormal);
         adjustedMovement.addScaledVector(wallNormal, PLAYER_SETTINGS.wallClearance);
     }
 
+    raycaster.far = Infinity;
     return adjustedMovement;
 }
 
@@ -11813,14 +12083,14 @@ function updateGameplay(delta) {
     const movingTowardsGround = currentVerticalVelocity.y - groundVelocity.y <= 0.1;
     physics.allowSliding = desiredMovement.lengthSq() > 1e-8;
 
-    let nextVelocity;
+    const nextVelocity = tempVectorF;
     if (onGround && movingTowardsGround) {
-        nextVelocity = groundVelocity.clone();
+        nextVelocity.copy(groundVelocity);
         if (physics.jumpQueued) {
             nextVelocity.y += PLAYER_SETTINGS.jumpSpeed;
         }
     } else {
-        nextVelocity = currentVerticalVelocity.clone();
+        nextVelocity.copy(currentVerticalVelocity);
     }
 
     nextVelocity.addScaledVector(copyJoltVector(tempVectorC, physics.gravity), delta);

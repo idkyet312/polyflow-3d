@@ -863,7 +863,27 @@
                                         <button class="btn viewer-toggle-btn" id="we-shadows-off">Off</button>
                                         <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-shadows-on">On</button>
                                     </div>
-                                    <div class="viewer-inline-note">Toggles the renderer shadow pass globally. Per-light cast-shadow stays under each light section.</div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bias</div>
+                                        <input id="we-shadows-bias" type="range" min="-0.05" max="0.05" step="0.0001" value="0">
+                                        <div class="viewer-slider-value" id="we-shadows-bias-value">0.0000</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Normal Bias</div>
+                                        <input id="we-shadows-normal-bias" type="range" min="-2" max="2" step="0.01" value="0">
+                                        <div class="viewer-slider-value" id="we-shadows-normal-bias-value">0.00</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">PCF Radius</div>
+                                        <input id="we-shadows-radius" type="range" min="0" max="16" step="0.1" value="7.9">
+                                        <div class="viewer-slider-value" id="we-shadows-radius-value">7.9</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Map Size</div>
+                                        <input id="we-shadows-map-size" type="range" min="128" max="4096" step="128" value="512">
+                                        <div class="viewer-slider-value" id="we-shadows-map-size-value">512</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Bias and Normal Bias fight self-shadow seams (raise to fix) and peter-panning (lower to fix). PCF Radius softens edges. Map Size trades GPU memory for sharpness; each step doubles memory on point lights.</div>
                                 </div>
                             </details>
 

@@ -214,17 +214,32 @@ export function buildDDGIBVH(scene) {
     const triBoundsMax = new Float32Array(totalTriangles * 3);
     const triCenters = new Float32Array(totalTriangles * 3);
 
+    // Materials are no longer capped at MAX_MATERIAL_SLOTS. The GPU side
+    // (createDDGIRTCompute) keeps a growable storage buffer; here we only
+    // need the CPU mirror to grow in step. MAX_MATERIAL_SLOTS is the initial
+    // capacity to amortise reallocation for the common <=16-material case.
     const slotByKey = new Map();
-    const matAlbedo = new Float32Array(MAX_MATERIAL_SLOTS * 4);
-    const matEmissive = new Float32Array(MAX_MATERIAL_SLOTS * 4);
+    let matCapacity = MAX_MATERIAL_SLOTS;
+    let matAlbedo = new Float32Array(matCapacity * 4);
+    let matEmissive = new Float32Array(matCapacity * 4);
     let nextSlot = 0;
+    const growMaterials = (wanted) => {
+        if (wanted <= matCapacity) return;
+        while (matCapacity < wanted) matCapacity *= 2;
+        const nextA = new Float32Array(matCapacity * 4);
+        const nextE = new Float32Array(matCapacity * 4);
+        nextA.set(matAlbedo);
+        nextE.set(matEmissive);
+        matAlbedo = nextA;
+        matEmissive = nextE;
+    };
     const allocSlot = (mat) => {
         const key = materialKey(mat);
         let slot = slotByKey.get(key);
         if (slot !== undefined) return slot;
-        if (nextSlot >= MAX_MATERIAL_SLOTS) return 0;
         slot = nextSlot++;
         slotByKey.set(key, slot);
+        growMaterials(nextSlot);
         const c = mat.color || { r: 1, g: 1, b: 1 };
         const e = mat.emissive || { r: 0, g: 0, b: 0 };
         const ei = mat.emissiveIntensity ?? 1;
@@ -362,6 +377,12 @@ export function buildDDGIBVH(scene) {
     const nodeCount = subdivideBVH(nodeFloat, nodeUint, triIndices, triBoundsMin, triBoundsMax, triCenters, TRI_COUNT);
     const rootBuffer = new Uint32Array(nodeBuffer.slice(0, nodeCount * NODE_STRIDE_U32 * 4));
 
+    // Trim the material arrays down to the actual slot count so the GPU
+    // upload writes only valid data. matCapacity may have doubled past
+    // nextSlot during allocation; the unused tail bytes are not interesting.
+    const trimmedAlbedo = matAlbedo.subarray(0, nextSlot * 4);
+    const trimmedEmissive = matEmissive.subarray(0, nextSlot * 4);
+
     return {
         rootBuffer,
         idxBuffer: triIndices,
@@ -369,8 +390,8 @@ export function buildDDGIBVH(scene) {
         triMatIds: mergedMatIds,
         triCount: TRI_COUNT,
         nodeCount,
-        matAlbedo,
-        matEmissive,
+        matAlbedo: trimmedAlbedo,
+        matEmissive: trimmedEmissive,
         materialSlotCount: nextSlot,
         meshCount: meshes.length,
     };

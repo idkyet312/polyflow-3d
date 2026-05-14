@@ -20,12 +20,22 @@ export class DDGIVolumeComponent extends ActorComponent {
     } = {}) {
         super();
         this.gridDims = { x: gridDims.x | 0, y: gridDims.y | 0, z: gridDims.z | 0 };
-        this.cellSize = +cellSize;
+        // cellSize is per-axis so probes can stretch/squash with the volume's
+        // scale. Accepts a scalar from older serialized data; gets re-derived
+        // from the owning mesh's world scale via syncCellSizeToOwnerBounds().
+        if (typeof cellSize === 'number') {
+            this.cellSize = new THREE.Vector3(+cellSize, +cellSize, +cellSize);
+        } else {
+            this.cellSize = new THREE.Vector3(+cellSize.x, +cellSize.y, +cellSize.z);
+        }
         this.intensity = +intensity;
         this.hysteresis = +hysteresis;
         this.normalBias = +normalBias;
         this.probesPerFrame = probesPerFrame | 0;
         this._registered = false;
+        // Cache last-applied scale so we only resync when the volume actually
+        // moved. Updated by tick path in ddgiManager.
+        this._lastSyncedScale = new THREE.Vector3(NaN, NaN, NaN);
     }
 
     beginPlay() {
@@ -71,11 +81,12 @@ export class DDGIVolumeComponent extends ActorComponent {
 
     syncCellSizeToOwnerBounds() {
         const size = this.getOwnerVolumeSize(_tmpSize);
-        this.cellSize = Math.max(
-            size.x / Math.max(2, this.gridDims.x),
-            size.y / Math.max(2, this.gridDims.y),
-            size.z / Math.max(2, this.gridDims.z),
-            0.05,
+        // Per-axis cell size = box extent / probe count on that axis, so the
+        // grid exactly spans the scaled volume regardless of aspect ratio.
+        this.cellSize.set(
+            Math.max(size.x / Math.max(2, this.gridDims.x), 0.05),
+            Math.max(size.y / Math.max(2, this.gridDims.y), 0.05),
+            Math.max(size.z / Math.max(2, this.gridDims.z), 0.05),
         );
         return this.cellSize;
     }
@@ -93,14 +104,23 @@ export class DDGIVolumeComponent extends ActorComponent {
     }
 
     setCellSize(v) {
-        this.cellSize = Math.max(0.05, +v);
+        if (typeof v === 'number') {
+            const n = Math.max(0.05, +v);
+            this.cellSize.set(n, n, n);
+        } else {
+            this.cellSize.set(
+                Math.max(0.05, +v.x),
+                Math.max(0.05, +v.y),
+                Math.max(0.05, +v.z),
+            );
+        }
         return this.cellSize;
     }
 
     serialize() {
         return {
             gridDims: { ...this.gridDims },
-            cellSize: this.cellSize,
+            cellSize: { x: this.cellSize.x, y: this.cellSize.y, z: this.cellSize.z },
             intensity: this.intensity,
             hysteresis: this.hysteresis,
             normalBias: this.normalBias,
