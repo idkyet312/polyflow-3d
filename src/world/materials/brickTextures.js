@@ -71,14 +71,21 @@ function makeAlbedo(opts) {
 }
 
 function makeHeight(opts) {
-    // Build a height field where bricks = bright (high) and mortar = dark
-    // (low). Same brick layout as the albedo so a single UV samples both.
+    // Height field: mortar = bright, brick face = dark. POM (pomNode) flips
+    // this via 1-r and only carves *inward*, so the bright mortar lines get
+    // pushed back while the dark brick faces stay proud at the polygon
+    // surface. Same brick layout as the albedo so one UV samples both.
     const size = opts.size || 512;
     const canvas = document.createElement('canvas');
     canvas.width = size;
     canvas.height = size;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#000000'; // mortar = 0
+    // Mortar = HIGH (white), brick = LOW (black). POM only carves *inward*
+    // from the polygon face: whatever is the deepest valley (high depth
+    // after the 1-r flip in pomNode) gets pushed back. We want the mortar
+    // LINES pushed back and the brick faces left proud, so mortar must be
+    // the bright value here. (Drawing brick=white made bricks read recessed.)
+    ctx.fillStyle = '#ffffff'; // mortar = high
     ctx.fillRect(0, 0, size, size);
 
     const rows = opts.rows || 6;
@@ -90,6 +97,12 @@ function makeHeight(opts) {
     const padX = cellW * mortar * 0.5;
     const padY = cellH * mortar * 0.5;
 
+    // Bevel width: how far the chamfer reaches in from the brick edge toward
+    // the flat top. Small → mostly-flat brick face with a sharp lip at the
+    // mortar (correct masonry look). A full-cell radial gradient instead
+    // turns every brick into a dome ("scales/bubbles" artifact under POM).
+    const bevelPx = Math.max(2, Math.min(cellW, cellH) * 0.12);
+
     for (let r = 0; r < rows; r++) {
         const xOffset = (r % 2 === 0) ? 0 : cellW * rowOffset;
         for (let c = -1; c <= cols; c++) {
@@ -98,17 +111,42 @@ function makeHeight(opts) {
             const w = cellW - padX * 2;
             const h = cellH - padY * 2;
             if (x + w < 0 || x > size) continue;
-            // Soft bevel: bricks aren't square steps — they curve toward the
-            // mortar. Gradient from bright center to mid-grey edge so POM
-            // produces a believable bulge.
-            const grad = ctx.createRadialGradient(
-                x + w * 0.5, y + h * 0.5, Math.min(w, h) * 0.08,
-                x + w * 0.5, y + h * 0.5, Math.max(w, h) * 0.7,
-            );
-            grad.addColorStop(0, '#ffffff');
-            grad.addColorStop(1, '#404040');
-            ctx.fillStyle = grad;
+
+            const b = Math.min(bevelPx, w * 0.45, h * 0.45);
+
+            // Polarity: mortar = WHITE (high), brick face = BLACK (low).
+            // 1. Flat brick top — black (the proud surface; POM leaves the
+            //    low-depth region at the polygon face).
+            ctx.fillStyle = '#000000';
             ctx.fillRect(x, y, w, h);
+
+            // 2. Chamfered border: ramp from the mortar floor (white, outer
+            //    edge) down to the brick top (black, inner edge) over `b`
+            //    pixels. Four linear gradients = a picture-frame bevel.
+            ctx.fillStyle = (() => {
+                const g = ctx.createLinearGradient(x, 0, x + b, 0);
+                g.addColorStop(0, '#cfcfcf'); g.addColorStop(1, '#000000');
+                return g;
+            })();
+            ctx.fillRect(x, y, b, h); // left
+            ctx.fillStyle = (() => {
+                const g = ctx.createLinearGradient(x + w, 0, x + w - b, 0);
+                g.addColorStop(0, '#cfcfcf'); g.addColorStop(1, '#000000');
+                return g;
+            })();
+            ctx.fillRect(x + w - b, y, b, h); // right
+            ctx.fillStyle = (() => {
+                const g = ctx.createLinearGradient(0, y, 0, y + b);
+                g.addColorStop(0, '#cfcfcf'); g.addColorStop(1, '#000000');
+                return g;
+            })();
+            ctx.fillRect(x, y, w, b); // top
+            ctx.fillStyle = (() => {
+                const g = ctx.createLinearGradient(0, y + h, 0, y + h - b);
+                g.addColorStop(0, '#cfcfcf'); g.addColorStop(1, '#000000');
+                return g;
+            })();
+            ctx.fillRect(x, y + h - b, w, b); // bottom
         }
     }
 
@@ -147,7 +185,11 @@ function makeNormal(heightTexture) {
     for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
             const dx = (at(x + 1, y) - at(x - 1, y)) * strength;
-            const dy = (at(x, y + 1) - at(x, y - 1)) * strength;
+            // Canvas +Y points DOWN; tangent-space normal-map green (+Y)
+            // points UP. Flip dy so the green channel matches the OpenGL
+            // convention three.js expects — otherwise bricks light as if
+            // recessed (the "inverted/flipped" look).
+            const dy = (at(x, y - 1) - at(x, y + 1)) * strength;
             // Convert gradient to a unit normal in tangent space.
             const len = Math.sqrt(dx * dx + dy * dy + 1);
             const nx = -dx / len;
