@@ -138,6 +138,20 @@ export function serializeSingleMaterialState(material) {
     if ('side' in material) {
         state.side = serializeMaterialSide(material.side);
     }
+    // POM state lives only on DDGIMeshStandardNodeMaterial. Persist whenever
+    // present so a round-trip through save/load preserves it. Quality is a
+    // string ('low'|'medium'|'high') from the POM_QUALITY presets.
+    if ('pomEnabled' in material) {
+        state.pomEnabled = !!material.pomEnabled;
+    }
+    if ('pomIntensity' in material) {
+        state.pomIntensity = material.pomIntensity ?? 0.04;
+    }
+    if (material.pomQuality) {
+        state.pomQuality = typeof material.pomQuality === 'string'
+            ? material.pomQuality
+            : (material.pomQuality?.name ?? 'medium');
+    }
 
     return Object.keys(state).length ? state : null;
 }
@@ -279,6 +293,24 @@ export function applyObjectMaterialState(object3D, materialState) {
             material.side = side;
             changed = true;
         }
+        // POM apply. Intensity is a uniform update (no recompile);
+        // pomEnabled / pomQuality are graph changes that the material's own
+        // syncPomGraphIfStale() / rebuildPomGraph() handle. We just write the
+        // properties and let the material reconcile on its next tick.
+        if ('pomIntensity' in material && nextState.pomIntensity !== undefined) {
+            material.setPomIntensity?.(nextState.pomIntensity);
+            material.pomIntensity = nextState.pomIntensity;
+            changed = true;
+        }
+        if ('pomEnabled' in material && nextState.pomEnabled !== undefined) {
+            material.pomEnabled = !!nextState.pomEnabled;
+            changed = true;
+        }
+        if ('pomQuality' in material && nextState.pomQuality !== undefined) {
+            material.pomQuality = nextState.pomQuality;
+            changed = true;
+        }
+        material.syncPomGraphIfStale?.();
         // Intentionally not setting material.needsUpdate. The fields touched
         // above (color, roughness, metalness, opacity, emissive, etc.) are
         // uniform updates — none of them require a shader recompile. Marking

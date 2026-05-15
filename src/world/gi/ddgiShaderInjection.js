@@ -220,10 +220,20 @@ function convertToDDGIMaterial(mat) {
     const textureSlots = [
         'map', 'lightMap', 'aoMap', 'emissiveMap', 'bumpMap', 'normalMap',
         'displacementMap', 'roughnessMap', 'metalnessMap', 'alphaMap', 'envMap',
+        // heightMap drives Parallax Occlusion Mapping. Carried through here
+        // so a user-assigned heightMap survives the DDGI conversion.
+        'heightMap',
     ];
     for (const key of textureSlots) {
         if (mat[key]) converted[key] = mat[key];
     }
+
+    // POM state lives outside the standard PBR slot list; copy explicitly so
+    // a serialized material round-trips through the converter intact.
+    if (mat.pomEnabled !== undefined) converted.pomEnabled = !!mat.pomEnabled;
+    if (mat.pomIntensity !== undefined) converted.setPomIntensity?.(mat.pomIntensity);
+    if (mat.pomQuality !== undefined) converted.pomQuality = mat.pomQuality;
+    converted.rebuildPomGraph?.();
 
     if (mat.emissive) converted.emissive.copy(mat.emissive);
     converted.emissiveIntensity = mat.emissiveIntensity ?? 1;

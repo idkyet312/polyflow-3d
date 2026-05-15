@@ -46,6 +46,7 @@ import { createPostProcessVolumeManager } from '../world/postProcessVolume.js';
 import { getDDGIManager } from '../world/gi/ddgiManager.js';
 import { createDDGIRayDebug } from '../world/gi/ddgiRayDebug.js';
 import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
+import { getBrickTextureSet } from '../world/materials/brickTextures.js';
 import {
     createActor,
     createSceneSystem,
@@ -537,6 +538,10 @@ const WORLD_ENV_DEFAULTS = Object.freeze({
     // the seams, which produced the cleanest result for point-light room
     // shadows without peter-panning.
     shadows: { enabled: true, bias: 0.0, normalBias: 0.0, radius: 7.9, mapSize: 512 },
+    // Parallax Occlusion Mapping defaults. enabled=false globally means no
+    // material runs the POM march even if heightMap is assigned. Quality
+    // strings map to POM_QUALITY presets in src/world/materials/pomNode.js.
+    pom: { enabled: false, intensity: 0.04, quality: 'medium' },
 });
 let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
 let worldEnvUiRefs = null;
@@ -5527,6 +5532,36 @@ function requestScenePointLightShadowRefresh(root = scene) {
     });
 }
 
+// Walks the scene and stamps the World Options POM tuning onto every
+// DDGI-converted material. Materials without a heightMap stay inert; ones
+// with a heightMap get the global enabled flag plus live intensity update.
+// Quality changes trigger a TSL recompile via material.syncPomGraphIfStale().
+// Perf mode forces enabled=false regardless of user setting.
+function applyPomTuningToScene(tuning, root = scene) {
+    if (!tuning || !root?.traverse) return;
+    const wantEnabled = !!tuning.enabled && !perfModeEnabled;
+    const intensity = Math.max(0, Number.isFinite(tuning.intensity) ? tuning.intensity : 0.04);
+    const quality = tuning.quality || 'medium';
+
+    root.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+            if (!m?.isDDGIMeshStandardNodeMaterial) continue;
+            // Don't force pomEnabled=true on materials that don't have a
+            // heightMap — the material's own rebuild path treats missing
+            // heightMap as "disabled" automatically, but flipping the flag
+            // anyway wastes a needsUpdate cycle.
+            const hasHeight = !!m.heightMap;
+            m.pomEnabled = wantEnabled && hasHeight;
+            m.pomQuality = quality;
+            m.setPomIntensity?.(intensity);
+            m.pomIntensity = intensity;
+            m.syncPomGraphIfStale?.();
+        }
+    });
+}
+
 // Walks the scene and stamps the World Options shadow tuning onto every
 // shadow-casting light. Point + spot + directional all share the same set of
 // shadow params so a single panel covers all three. bias/normalBias/radius
@@ -6988,6 +7023,7 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
         renderer.shadowMap.enabled = s.shadows.enabled;
     }
     applyShadowTuningToScene(s.shadows);
+    applyPomTuningToScene(s.pom);
 
     if (persist) saveWorldEnvToStorage();
     updateWorldEnvUi();
@@ -7048,6 +7084,14 @@ function updateWorldEnvUi() {
     setSlider(worldEnvUiRefs.shadowsNormalBias, worldEnvUiRefs.shadowsNormalBiasValue, s.shadows.normalBias, 2);
     setSlider(worldEnvUiRefs.shadowsRadius, worldEnvUiRefs.shadowsRadiusValue, s.shadows.radius, 1);
     setSlider(worldEnvUiRefs.shadowsMapSize, worldEnvUiRefs.shadowsMapSizeValue, s.shadows.mapSize, 0);
+
+    setToggle(worldEnvUiRefs.pomOff, worldEnvUiRefs.pomOn, s.pom.enabled);
+    setSlider(worldEnvUiRefs.pomIntensity, worldEnvUiRefs.pomIntensityValue, s.pom.intensity, 3);
+    // 3-state quality toggle: highlight the active preset only.
+    const pomQ = (s.pom.quality || 'medium').toLowerCase();
+    worldEnvUiRefs.pomQualityLow?.classList.toggle('viewer-toggle-btn-active', pomQ === 'low');
+    worldEnvUiRefs.pomQualityMedium?.classList.toggle('viewer-toggle-btn-active', pomQ === 'medium');
+    worldEnvUiRefs.pomQualityHigh?.classList.toggle('viewer-toggle-btn-active', pomQ === 'high');
 
     // Summary chip + status text
     if (worldEnvUiRefs.summaryValue) {
@@ -8392,6 +8436,13 @@ async function init() {
         shadowsRadiusValue: document.getElementById('we-shadows-radius-value'),
         shadowsMapSize: document.getElementById('we-shadows-map-size'),
         shadowsMapSizeValue: document.getElementById('we-shadows-map-size-value'),
+        pomOff: document.getElementById('we-pom-off'),
+        pomOn: document.getElementById('we-pom-on'),
+        pomIntensity: document.getElementById('we-pom-intensity'),
+        pomIntensityValue: document.getElementById('we-pom-intensity-value'),
+        pomQualityLow: document.getElementById('we-pom-quality-low'),
+        pomQualityMedium: document.getElementById('we-pom-quality-medium'),
+        pomQualityHigh: document.getElementById('we-pom-quality-high'),
         resetBtn: document.getElementById('we-reset-defaults'),
         bakeRes: document.getElementById('we-bake-res'),
         bakeResValue: document.getElementById('we-bake-res-value'),
@@ -8652,6 +8703,21 @@ async function init() {
     wireSlider(worldEnvUiRefs?.shadowsNormalBias, 'shadows.normalBias', (v) => { worldEnvState.shadows.normalBias = v; });
     wireSlider(worldEnvUiRefs?.shadowsRadius, 'shadows.radius', (v) => { worldEnvState.shadows.radius = v; });
     wireSlider(worldEnvUiRefs?.shadowsMapSize, 'shadows.mapSize', (v) => { worldEnvState.shadows.mapSize = v | 0; });
+
+    wireToggle(worldEnvUiRefs?.pomOff, worldEnvUiRefs?.pomOn,
+        () => { worldEnvState.pom.enabled = false; },
+        () => { worldEnvState.pom.enabled = true; });
+    wireSlider(worldEnvUiRefs?.pomIntensity, 'pom.intensity', (v) => { worldEnvState.pom.intensity = v; });
+    // Quality is a 3-button mutually-exclusive group; clicking any one sets
+    // the matching string and re-applies. Wired manually because wireToggle
+    // only handles 2-state pairs.
+    const setPomQuality = (q) => {
+        worldEnvState.pom.quality = q;
+        applyWorldEnvState();
+    };
+    worldEnvUiRefs?.pomQualityLow?.addEventListener('click', () => setPomQuality('low'));
+    worldEnvUiRefs?.pomQualityMedium?.addEventListener('click', () => setPomQuality('medium'));
+    worldEnvUiRefs?.pomQualityHigh?.addEventListener('click', () => setPomQuality('high'));
 
     // Apply once now that all controllers + UI are wired. This pushes the
     // (possibly-restored-from-localStorage) state through every subsystem and
@@ -9870,6 +9936,579 @@ function createFlatTerrainLevelDefinition({
     };
 }
 
+// Stage 5 feed: point every SilPOM material's self-shadow uniform from a
+// world-space light position toward the mesh it's on. Levels here use
+// static lights, so a one-shot call at build time is sufficient.
+function applySilPomLighting(root, lightWorldPos) {
+    const dir = new THREE.Vector3();
+    root.updateWorldMatrix(true, true);
+    root.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of mats) {
+            if (!m?.userData?.silPom || typeof m.setSilPomLightDirection !== 'function') continue;
+            obj.getWorldPosition(dir);
+            dir.subVectors(lightWorldPos, dir).normalize();
+            m.setSilPomLightDirection(dir, obj);
+        }
+    });
+}
+
+function createBrickRoomLevel() {
+    // Sample level that showcases Parallax Occlusion Mapping — every wall
+    // and the floor get a procedurally-generated brick set (albedo + normal
+    // + heightmap). Materials are spawned as DDGIMeshStandardNodeMaterial
+    // up-front so the World Options "Parallax (POM)" toggle drives the
+    // surfaces without needing a manual rebuild. The room is sealed, lit by
+    // one warm point light, with a couple of free-standing partitions so the
+    // user can walk past edges and see the parallax warp at grazing angles.
+    const root = new THREE.Group();
+    root.name = 'PolyFlow_Brick_Room';
+    root.userData.sampleType = 'brickRoom';
+    root.userData.hideTerrainPresentation = true;
+    root.userData.skipNormalization = true;
+
+    const ROOM_W = 14;
+    const ROOM_D = 14;
+    const ROOM_H = 5;
+    const WALL_THICKNESS = 0.4;
+
+    root.userData.preferredSpawn = {
+        position: [0, 0.3, ROOM_D * 0.5 - 1.5],
+        yaw: Math.PI,
+        pitch: -0.05,
+    };
+    root.userData.preferredShowcase = {
+        position: [ROOM_W * 0.55, ROOM_H * 0.6, ROOM_D * 0.55],
+        target: [0, 1.2, 0],
+    };
+
+    const wallSet = getBrickTextureSet('wall');
+    const floorSet = getBrickTextureSet('floor');
+    const accentSet = getBrickTextureSet('accent');
+
+    const makeBrickMaterial = (set, { repeatU = 2, repeatV = 2, color = '#ffffff' } = {}) => {
+        // Clone the shared textures so per-material UV repeats don't fight
+        // each other — three.js's repeat lives on the texture, not the
+        // material. Cloning is cheap; the underlying canvas/image is shared.
+        const albedo = set.albedo.clone();
+        const normal = set.normal.clone();
+        const height = set.height.clone();
+        for (const t of [albedo, normal, height]) {
+            t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            t.repeat.set(repeatU, repeatV);
+            t.needsUpdate = true;
+        }
+        const mat = new DDGIMeshStandardNodeMaterial({
+            color: new THREE.Color(color),
+            roughness: 0.85,
+            metalness: 0.0,
+        });
+        mat.map = albedo;
+        mat.normalMap = normal;
+        mat.normalScale = new THREE.Vector2(1.2, 1.2);
+        mat.heightMap = height;
+        // POM is opt-in via the global toggle; the material is fully equipped
+        // here so flipping World Options → Parallax → On lights it up
+        // immediately. Default-off so the level still looks correct without
+        // the effect.
+        mat.pomEnabled = false;
+        mat.pomIntensity = 0.05;
+        mat.pomQuality = 'medium';
+        mat.pomDepthWrite = true;
+        mat.userData.ownedMaps = [albedo, normal, height];
+        mat.userData.silPom = true;
+        return mat;
+    };
+
+    const addBox = (name, size, position, material, { rotationY = 0 } = {}) => {
+        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+        // Real per-vertex tangents so silhouette POM uses a stable TBN
+        // instead of the screen-derivative fallback.
+        geometry.computeTangents();
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.name = name;
+        mesh.position.set(position[0], position[1], position[2]);
+        mesh.rotation.y = rotationY;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        root.add(mesh);
+        return mesh;
+    };
+
+    // Floor
+    addBox(
+        'brick-floor',
+        [ROOM_W, WALL_THICKNESS, ROOM_D],
+        [0, -WALL_THICKNESS * 0.5, 0],
+        makeBrickMaterial(floorSet, { repeatU: 4, repeatV: 4 }),
+    );
+
+    // Ceiling — keep DDGI surface; no parallax (it's overhead, not great
+    // viewing angle for POM and saves shader cost).
+    const ceilingMat = new DDGIMeshStandardNodeMaterial({
+        color: new THREE.Color('#d4cec8'),
+        roughness: 0.95,
+        metalness: 0.02,
+    });
+    addBox(
+        'brick-ceiling',
+        [ROOM_W, WALL_THICKNESS, ROOM_D],
+        [0, ROOM_H + WALL_THICKNESS * 0.5, 0],
+        ceilingMat,
+    );
+
+    // Four perimeter walls
+    const wallMaterial = () => makeBrickMaterial(wallSet, { repeatU: 4, repeatV: 1.5 });
+    addBox('brick-wall-north', [ROOM_W, ROOM_H, WALL_THICKNESS], [0, ROOM_H * 0.5, -ROOM_D * 0.5], wallMaterial());
+    addBox('brick-wall-south', [ROOM_W, ROOM_H, WALL_THICKNESS], [0, ROOM_H * 0.5,  ROOM_D * 0.5], wallMaterial());
+    addBox('brick-wall-east',  [WALL_THICKNESS, ROOM_H, ROOM_D], [ ROOM_W * 0.5, ROOM_H * 0.5, 0], wallMaterial());
+    addBox('brick-wall-west',  [WALL_THICKNESS, ROOM_H, ROOM_D], [-ROOM_W * 0.5, ROOM_H * 0.5, 0], wallMaterial());
+
+    // Two free-standing partitions with accent bricks — POM shows clearest
+    // when you can walk past an edge at a grazing angle.
+    const accentMaterial = () => makeBrickMaterial(accentSet, { repeatU: 2, repeatV: 1 });
+    addBox('brick-pillar-a', [WALL_THICKNESS * 1.8, ROOM_H * 0.95, 2.8], [-2.5, ROOM_H * 0.475, -2], accentMaterial());
+    addBox('brick-pillar-b', [WALL_THICKNESS * 1.8, ROOM_H * 0.95, 2.8], [ 2.5, ROOM_H * 0.475,  2], accentMaterial(), { rotationY: Math.PI * 0.1 });
+
+    // Single warm point light to graze the brick. Positioned slightly off
+    // center so the parallax bumps cast asymmetric highlights.
+    const light = new THREE.PointLight(0xffd2a0, 8, 28, 1.4);
+    light.position.set(2.5, ROOM_H - 1.2, 0);
+    light.castShadow = true;
+    configurePointLightShadow(light);
+    light.name = 'brick-room-key-light';
+    root.add(light);
+
+    applySilPomLighting(root, light.position.clone());
+
+    return root;
+}
+
+function makeDoomImpSpriteTexture() {
+    // 32x40 pixel-art imp: brown body, horns, glowing yellow eyes, claws.
+    // Drawn via per-pixel rect fills on a small canvas, then upsampled by
+    // NearestFilter so the chunky pixels survive in 3D.
+    const W = 32, H = 40;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+
+    const px = (x, y, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, 1, 1); };
+    const rect = (x, y, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); };
+
+    const SKIN = '#8a3a1a';
+    const SKIN_D = '#5a2410';
+    const SKIN_L = '#b8552a';
+    const HORN = '#1a1208';
+    const EYE = '#ffdd33';
+    const EYE_HI = '#ffffaa';
+    const MOUTH = '#2a0a04';
+    const CLAW = '#e8d8b8';
+
+    // Horns
+    rect(8, 2, 2, 4, HORN);
+    rect(22, 2, 2, 4, HORN);
+    px(9, 6, HORN); px(22, 6, HORN);
+
+    // Head
+    rect(8, 6, 16, 10, SKIN);
+    rect(8, 6, 16, 2, SKIN_D); // brow shadow
+    rect(10, 14, 12, 2, SKIN_D); // jaw shadow
+    // Cheek highlights
+    rect(9, 9, 2, 3, SKIN_L);
+    rect(21, 9, 2, 3, SKIN_L);
+
+    // Eyes (angry glowing)
+    rect(11, 9, 3, 2, EYE);
+    rect(18, 9, 3, 2, EYE);
+    px(12, 9, EYE_HI); px(19, 9, EYE_HI);
+    // Eyebrow slash
+    px(10, 8, HORN); px(13, 8, HORN);
+    px(18, 8, HORN); px(21, 8, HORN);
+
+    // Mouth + fangs
+    rect(12, 13, 8, 2, MOUTH);
+    px(13, 13, CLAW); px(15, 13, CLAW); px(17, 13, CLAW); px(19, 13, CLAW);
+
+    // Torso
+    rect(7, 16, 18, 12, SKIN);
+    rect(7, 16, 18, 2, SKIN_D);
+    // Spikes on shoulders
+    px(7, 16, HORN); px(24, 16, HORN);
+    px(6, 17, HORN); px(25, 17, HORN);
+    // Chest highlight
+    rect(13, 19, 6, 5, SKIN_L);
+    rect(14, 20, 4, 3, SKIN);
+
+    // Arms
+    rect(4, 18, 3, 9, SKIN);
+    rect(25, 18, 3, 9, SKIN);
+    // Claws
+    rect(3, 27, 5, 2, CLAW);
+    rect(24, 27, 5, 2, CLAW);
+    px(3, 28, HORN); px(7, 28, HORN);
+    px(24, 28, HORN); px(28, 28, HORN);
+
+    // Legs
+    rect(9, 28, 5, 10, SKIN);
+    rect(18, 28, 5, 10, SKIN);
+    rect(9, 28, 5, 2, SKIN_D);
+    rect(18, 28, 5, 2, SKIN_D);
+    // Hooves
+    rect(8, 37, 7, 2, HORN);
+    rect(17, 37, 7, 2, HORN);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+function makeDoomShotgunSpriteTexture() {
+    // 48x24 pixel-art shotgun (super-shotgun silhouette): wood stock, double
+    // barrel, metallic receiver, brass shell sticking out.
+    const W = 48, H = 24;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+
+    const rect = (x, y, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); };
+    const px = (x, y, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, 1, 1); };
+
+    const WOOD = '#6a3a1a';
+    const WOOD_D = '#3a1f0a';
+    const WOOD_L = '#9a5828';
+    const STEEL = '#7a7a82';
+    const STEEL_D = '#3a3a42';
+    const STEEL_L = '#b8b8c0';
+    const BLACK = '#0a0a0a';
+    const BRASS = '#d8a838';
+    const BRASS_L = '#ffd86a';
+    const BRASS_D = '#8a6a18';
+
+    // Stock (wood) — left side
+    rect(2, 9, 14, 9, WOOD);
+    rect(2, 9, 14, 1, WOOD_L);     // top highlight
+    rect(2, 17, 14, 1, WOOD_D);    // bottom shadow
+    rect(3, 11, 1, 5, WOOD_L);     // grain
+    rect(8, 12, 1, 4, WOOD_D);
+    // Butt curve
+    px(1, 10, WOOD_D); px(1, 16, WOOD_D);
+    px(2, 9, WOOD_D); px(2, 17, WOOD_D);
+
+    // Receiver (metallic block) middle
+    rect(15, 8, 9, 10, STEEL);
+    rect(15, 8, 9, 1, STEEL_L);
+    rect(15, 17, 9, 1, STEEL_D);
+    // Trigger guard
+    rect(17, 18, 4, 3, BLACK);
+    rect(18, 19, 2, 2, STEEL_D);
+    // Trigger
+    px(19, 18, BLACK);
+    // Shell ejector / port
+    rect(20, 10, 3, 2, BLACK);
+
+    // Pump action handle under barrel
+    rect(22, 13, 7, 3, WOOD);
+    rect(22, 13, 7, 1, WOOD_L);
+    rect(22, 15, 7, 1, WOOD_D);
+
+    // Double barrels (over/under)
+    rect(23, 9, 23, 2, STEEL);
+    rect(23, 11, 23, 2, STEEL_D);
+    rect(23, 9, 23, 1, STEEL_L);
+    // Muzzle
+    rect(45, 9, 1, 4, BLACK);
+    px(44, 9, STEEL_L); px(44, 12, STEEL_D);
+
+    // Brass shell on top of receiver
+    rect(16, 5, 3, 3, BRASS);
+    rect(16, 5, 3, 1, BRASS_L);
+    rect(15, 6, 1, 2, BRASS);
+    rect(19, 6, 1, 2, BRASS_D);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+function createDoomTestLevel() {
+    // Doom-ish test arena: cramped tech corridor opens into a hex-ish combat
+    // room with raised walkways, monster-closet alcoves, a key-colored door
+    // recess and a slime pit. Pure BoxGeometry + brick texture set so it
+    // costs nothing beyond what the Brick Room already pays for.
+    const root = new THREE.Group();
+    root.name = 'PolyFlow_Doom_Test';
+    root.userData.sampleType = 'doomTest';
+    root.userData.hideTerrainPresentation = true;
+    root.userData.skipNormalization = true;
+
+    const T = 0.4;                // wall thickness
+    const CORR_W = 4;
+    const CORR_H = 3.2;
+    const CORR_LEN = 14;
+    const ROOM_W = 22;
+    const ROOM_D = 22;
+    const ROOM_H = 5.2;
+    const LEDGE_H = 1.6;
+    const LEDGE_W = 3;
+
+    root.userData.preferredSpawn = {
+        position: [0, 0.3, CORR_LEN + ROOM_D * 0.5 - 1.5],
+        yaw: Math.PI,
+        pitch: -0.05,
+    };
+    root.userData.preferredShowcase = {
+        // Camera sits inside the corridor mouth so when the user presses Play,
+        // syncGameplaySpawnToCamera drops them into a valid interior spot
+        // (player_eye = camera_y, feet = camera_y - eyeHeight → ~0 above floor).
+        position: [0, PLAYER_SETTINGS.eyeHeight + 0.3, CORR_LEN + ROOM_D * 0.5 - 2.5],
+        target: [0, 1.4, 0],
+    };
+
+    const wallSet = getBrickTextureSet('wall');
+    const floorSet = getBrickTextureSet('floor');
+    const accentSet = getBrickTextureSet('accent');
+
+    const brickMat = (set, { repeatU = 2, repeatV = 2, color = '#ffffff', rough = 0.9, metal = 0.05 } = {}) => {
+        const albedo = set.albedo.clone();
+        const normal = set.normal.clone();
+        const height = set.height.clone();
+        for (const t of [albedo, normal, height]) {
+            t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            t.repeat.set(repeatU, repeatV);
+            t.needsUpdate = true;
+        }
+        const mat = new DDGIMeshStandardNodeMaterial({
+            color: new THREE.Color(color),
+            roughness: rough,
+            metalness: metal,
+        });
+        mat.map = albedo;
+        mat.normalMap = normal;
+        mat.normalScale = new THREE.Vector2(1.1, 1.1);
+        mat.heightMap = height;
+        mat.pomEnabled = true;
+        mat.pomIntensity = 0.08;
+        mat.pomQuality = 'high';
+        mat.pomDepthWrite = true;
+        mat.rebuildPomGraph?.();
+        mat.userData.ownedMaps = [albedo, normal, height];
+        mat.userData.silPom = true;
+        return mat;
+    };
+
+    const flatMat = (color, { rough = 0.85, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
+        const mat = new DDGIMeshStandardNodeMaterial({
+            color: new THREE.Color(color),
+            roughness: rough,
+            metalness: metal,
+        });
+        if (emissive) {
+            mat.emissive = new THREE.Color(emissive);
+            mat.emissiveIntensity = emissiveIntensity;
+        }
+        return mat;
+    };
+
+    const addBox = (name, size, position, material, { rotationY = 0, cast = true, receive = true } = {}) => {
+        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+        // Real per-vertex tangents so silhouette POM uses a stable TBN
+        // instead of the screen-derivative fallback.
+        geometry.computeTangents();
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.name = name;
+        mesh.position.set(position[0], position[1], position[2]);
+        mesh.rotation.y = rotationY;
+        mesh.castShadow = cast;
+        mesh.receiveShadow = receive;
+        root.add(mesh);
+        return mesh;
+    };
+
+    // ---- Combat room ----
+    const roomCenterZ = 0;
+    const corridorCenterZ = ROOM_D * 0.5 + CORR_LEN * 0.5;
+
+    // Floor (slightly darker brick)
+    addBox(
+        'doom-room-floor',
+        [ROOM_W, T, ROOM_D],
+        [0, -T * 0.5, roomCenterZ],
+        brickMat(floorSet, { repeatU: 6, repeatV: 6, color: '#6c6258' }),
+    );
+    // Ceiling
+    addBox(
+        'doom-room-ceiling',
+        [ROOM_W, T, ROOM_D],
+        [0, ROOM_H + T * 0.5, roomCenterZ],
+        flatMat('#2a2724', { rough: 0.95 }),
+    );
+
+    // Perimeter walls — leave a doorway gap on south wall for corridor
+    const southGap = CORR_W;
+    const southSegW = (ROOM_W - southGap) * 0.5;
+    addBox('doom-wall-south-l', [southSegW, ROOM_H, T],
+        [-(southGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5 }));
+    addBox('doom-wall-south-r', [southSegW, ROOM_H, T],
+        [(southGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5 }));
+    addBox('doom-wall-north', [ROOM_W, ROOM_H, T], [0, ROOM_H * 0.5, -ROOM_D * 0.5],
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5 }));
+    addBox('doom-wall-east',  [T, ROOM_H, ROOM_D], [ ROOM_W * 0.5, ROOM_H * 0.5, 0],
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5 }));
+    addBox('doom-wall-west',  [T, ROOM_H, ROOM_D], [-ROOM_W * 0.5, ROOM_H * 0.5, 0],
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5 }));
+
+    // Raised L-shaped ledge with stairs — classic Doom verticality
+    addBox('doom-ledge-north', [ROOM_W - 2, LEDGE_H, LEDGE_W],
+        [0, LEDGE_H * 0.5, -ROOM_D * 0.5 + LEDGE_W * 0.5 + 0.4],
+        brickMat(accentSet, { repeatU: 6, repeatV: 1, color: '#7a6a55' }));
+    addBox('doom-ledge-west', [LEDGE_W, LEDGE_H, ROOM_D - 2 * LEDGE_W - 1],
+        [-ROOM_W * 0.5 + LEDGE_W * 0.5 + 0.4, LEDGE_H * 0.5, -1],
+        brickMat(accentSet, { repeatU: 1, repeatV: 4, color: '#7a6a55' }));
+
+    // Stair stepping up to ledge
+    for (let i = 0; i < 4; i++) {
+        const h = (LEDGE_H / 4) * (i + 1);
+        addBox(`doom-stair-${i}`, [3, h, 0.7],
+            [3.5, h * 0.5, -ROOM_D * 0.5 + LEDGE_W + 0.4 + 0.7 * i + 0.35],
+            brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#88796a' }));
+    }
+
+    // Slime pit (recessed area with glowing green floor)
+    const PIT_W = 4, PIT_D = 4, PIT_DEPTH = 0.9;
+    addBox('doom-slime-floor', [PIT_W, T, PIT_D],
+        [4.5, -PIT_DEPTH - T * 0.5, 4.5],
+        flatMat('#1e3a12', { rough: 0.4, metal: 0.0, emissive: '#39ff14', emissiveIntensity: 0.85 }));
+    // pit walls (4 thin slabs framing the dip — floor cutout faked with surround)
+    addBox('doom-pit-rim-n', [PIT_W + 0.4, PIT_DEPTH, 0.2],
+        [4.5, -PIT_DEPTH * 0.5, 4.5 - PIT_D * 0.5 - 0.1],
+        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
+    addBox('doom-pit-rim-s', [PIT_W + 0.4, PIT_DEPTH, 0.2],
+        [4.5, -PIT_DEPTH * 0.5, 4.5 + PIT_D * 0.5 + 0.1],
+        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
+    addBox('doom-pit-rim-e', [0.2, PIT_DEPTH, PIT_D + 0.4],
+        [4.5 + PIT_W * 0.5 + 0.1, -PIT_DEPTH * 0.5, 4.5],
+        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
+    addBox('doom-pit-rim-w', [0.2, PIT_DEPTH, PIT_D + 0.4],
+        [4.5 - PIT_W * 0.5 - 0.1, -PIT_DEPTH * 0.5, 4.5],
+        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
+
+    // Two monster-closet alcoves carved into north wall (recessed boxes)
+    const CLOSET_W = 2.2, CLOSET_D = 1.4, CLOSET_H = 2.6;
+    const closet = (x) => {
+        addBox(`doom-closet-floor-${x}`, [CLOSET_W, T, CLOSET_D],
+            [x, LEDGE_H + T * 0.5, -ROOM_D * 0.5 + CLOSET_D * 0.5 + 0.05],
+            brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#5a4a3a' }));
+        addBox(`doom-closet-back-${x}`, [CLOSET_W, CLOSET_H, T * 0.6],
+            [x, LEDGE_H + CLOSET_H * 0.5, -ROOM_D * 0.5 + 0.05],
+            flatMat('#2a1a1a', { rough: 0.5, emissive: '#ff1a1a', emissiveIntensity: 0.6 }));
+    };
+    closet(-5.5);
+    closet(5.5);
+
+    // Key-colored door recess on east wall (locked door look)
+    addBox('doom-keydoor-frame', [T * 1.4, 3.2, 1.8],
+        [ROOM_W * 0.5 - T * 0.4, 1.6, -ROOM_D * 0.5 + 5.5],
+        flatMat('#1a1a1a', { rough: 0.4, metal: 0.6 }));
+    addBox('doom-keydoor-panel', [T * 0.5, 2.6, 1.4],
+        [ROOM_W * 0.5 - T * 0.9, 1.4, -ROOM_D * 0.5 + 5.5],
+        flatMat('#1a4a8a', { rough: 0.35, metal: 0.7, emissive: '#3060ff', emissiveIntensity: 0.55 }));
+
+    // Center cover crates (boxy stacks)
+    addBox('doom-crate-a', [1.4, 1.4, 1.4], [-2, 0.7, 1.5],
+        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
+    addBox('doom-crate-b', [1.4, 1.4, 1.4], [-2, 0.7, 3.0],
+        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
+    addBox('doom-crate-c', [1.4, 1.4, 1.4], [-2, 2.1, 1.5],
+        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
+    addBox('doom-pillar-mid', [1.2, ROOM_H, 1.2], [2.5, ROOM_H * 0.5, -3],
+        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: '#6a5a4a' }));
+
+    // ---- Corridor connecting south door to spawn ----
+    addBox('doom-corr-floor', [CORR_W, T, CORR_LEN],
+        [0, -T * 0.5, corridorCenterZ],
+        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }));
+    addBox('doom-corr-ceiling', [CORR_W, T, CORR_LEN],
+        [0, CORR_H + T * 0.5, corridorCenterZ],
+        flatMat('#1a1816', { rough: 0.95 }));
+    addBox('doom-corr-wall-e', [T, CORR_H, CORR_LEN],
+        [CORR_W * 0.5, CORR_H * 0.5, corridorCenterZ],
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: '#6a5a4a' }));
+    addBox('doom-corr-wall-w', [T, CORR_H, CORR_LEN],
+        [-CORR_W * 0.5, CORR_H * 0.5, corridorCenterZ],
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: '#6a5a4a' }));
+    addBox('doom-corr-end', [CORR_W, CORR_H, T],
+        [0, CORR_H * 0.5, corridorCenterZ + CORR_LEN * 0.5],
+        brickMat(accentSet, { repeatU: 2, repeatV: 1, color: '#5a4030' }));
+
+    // Wall sconces (emissive bars) flanking the corridor
+    addBox('doom-corr-light-l', [0.2, 0.6, 0.4],
+        [-CORR_W * 0.5 + 0.15, CORR_H - 1.0, corridorCenterZ - CORR_LEN * 0.25],
+        flatMat('#3a1408', { emissive: '#ff7a2a', emissiveIntensity: 1.6 }));
+    addBox('doom-corr-light-r', [0.2, 0.6, 0.4],
+        [ CORR_W * 0.5 - 0.15, CORR_H - 1.0, corridorCenterZ + CORR_LEN * 0.25],
+        flatMat('#3a1408', { emissive: '#ff7a2a', emissiveIntensity: 1.6 }));
+
+    // Imp enemies spawned in afterLoad via spawnShooterAiAt — see level definition.
+    // ---- Gun pickup pedestal (actual SMG actor spawned in afterLoad) ----
+    addBox('doom-gun-pedestal', [1.0, 0.3, 1.0], [0, 0.15, -2],
+        flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#222222', emissiveIntensity: 0.2 }));
+
+    // Glow under gun
+    const gunGlow = new THREE.PointLight(0xffdd66, 1.6, 4.5, 2.0);
+    gunGlow.position.set(0, 0.6, -2);
+    gunGlow.castShadow = false;
+    gunGlow.name = 'doom-gun-glow';
+    root.add(gunGlow);
+
+    // ---- Lights ----
+    // Main room: low red key light + cooler fill from above
+    const keyLight = new THREE.PointLight(0xff5a2a, 9, 26, 1.6);
+    keyLight.position.set(-4, ROOM_H - 1.2, -2);
+    keyLight.castShadow = true;
+    configurePointLightShadow(keyLight);
+    keyLight.name = 'doom-room-key';
+    root.add(keyLight);
+
+    const fillLight = new THREE.PointLight(0x80a8ff, 3.5, 22, 2.0);
+    fillLight.position.set(5, ROOM_H - 0.6, 5);
+    fillLight.castShadow = false;
+    fillLight.name = 'doom-room-fill';
+    root.add(fillLight);
+
+    // Slime glow
+    const slimeGlow = new THREE.PointLight(0x39ff14, 2.4, 9, 1.8);
+    slimeGlow.position.set(4.5, 0.2, 4.5);
+    slimeGlow.castShadow = false;
+    slimeGlow.name = 'doom-slime-glow';
+    root.add(slimeGlow);
+
+    // Corridor torch
+    const corrLight = new THREE.PointLight(0xff8a3a, 4, 12, 1.8);
+    corrLight.position.set(0, CORR_H - 0.6, corridorCenterZ);
+    corrLight.castShadow = true;
+    configurePointLightShadow(corrLight);
+    corrLight.name = 'doom-corr-torch';
+    root.add(corrLight);
+
+    applySilPomLighting(root, keyLight.position.clone());
+
+    return root;
+}
+
 function getBuiltinLevelDefinition(levelId = 'soccerField') {
     if (levelId === 'fpsStarter') {
         return {
@@ -9877,6 +10516,101 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
             assetName: 'Sample Level',
             fileSize: 420000,
             create: createFpsStarterLevel,
+        };
+    }
+
+    if (levelId === 'brickRoom') {
+        return {
+            id: 'brickRoom',
+            assetName: 'Brick Room (POM Demo)',
+            fileSize: 120000,
+            create: createBrickRoomLevel,
+        };
+    }
+
+    if (levelId === 'doomTest') {
+        return {
+            id: 'doomTest',
+            assetName: 'Doom Test Arena',
+            fileSize: 260000,
+            create: createDoomTestLevel,
+            afterLoad: () => {
+                // SMG pickup on pedestal
+                const gunActor = spawnGameplayPrefab('smg');
+                if (gunActor) {
+                    const mesh = getActorRenderObject(gunActor);
+                    if (mesh) {
+                        mesh.position.set(0, 0.75, -2);
+                        mesh.rotation.set(0, Math.PI * 0.5, 0);
+                        mesh.updateMatrixWorld(true);
+                    }
+                    rebuildActorPhysics?.(gunActor);
+                }
+
+                // Imp enemies: spawn real shooterAi actors so they share the
+                // existing AI/damage/score pipeline, then re-skin them with
+                // our pixel-art sprite. Hide the default capsule body and
+                // barrel by zero-scaling so only the sprite shows.
+                const impSpots = [
+                    new THREE.Vector3(-5, 0, -8),
+                    new THREE.Vector3( 6, 0, -6),
+                ];
+                for (const spot of impSpots) {
+                    // Use the spot's own Y as ground; default raycast from
+                    // probeHeight down hits the ceiling first in a sealed
+                    // room and stamps the imp onto the roof.
+                    const imp = spawnShooterAiAt(spot, { label: 'Doom Imp', groundY: spot.y });
+                    if (!imp) continue;
+                    const impMesh = getActorRenderObject(imp);
+                    if (!impMesh) continue;
+
+                    // Hide the procedural capsule + barrel; keep the mesh
+                    // node itself so AI keeps tracking it.
+                    impMesh.traverse((child) => {
+                        if (child === impMesh) return;
+                        if (child.name === 'Shooter Barrel'
+                            || child.isMesh && child.geometry?.type === 'CapsuleGeometry') {
+                            child.visible = false;
+                        }
+                    });
+                    // Capsule itself (the actor root mesh) — hide its material
+                    // by making it transparent. We keep the mesh so health-bar
+                    // and aim-warning children stay correctly positioned.
+                    if (impMesh.isMesh && impMesh.material) {
+                        const mats = Array.isArray(impMesh.material) ? impMesh.material : [impMesh.material];
+                        for (const m of mats) {
+                            if (!m) continue;
+                            m.transparent = true;
+                            m.opacity = 0.0;
+                            m.depthWrite = false;
+                            m.needsUpdate = true;
+                        }
+                    }
+
+                    // Pixel-art sprite skin
+                    const impTex = makeDoomImpSpriteTexture();
+                    const impMat = new THREE.SpriteMaterial({
+                        map: impTex,
+                        transparent: true,
+                        alphaTest: 0.5,
+                        depthWrite: true,
+                        sizeAttenuation: true,
+                    });
+                    impMat.toneMapped = false;
+                    const impSprite = new THREE.Sprite(impMat);
+                    impSprite.name = 'doom-imp-sprite';
+                    impSprite.scale.set(1.6, 2.0, 1);
+                    // Actor mesh origin sits at capsule center (~1.18 above
+                    // ground from spawnShooterAiAt). Lift sprite slightly so
+                    // pixel feet line up with the floor.
+                    impSprite.position.set(0, -0.2, 0);
+                    impSprite.userData.ownedTextures = [impTex];
+                    impSprite.raycast = () => {};
+                    impMesh.add(impSprite);
+                }
+
+                return null;
+            },
         };
     }
 

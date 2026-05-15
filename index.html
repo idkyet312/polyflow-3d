@@ -165,6 +165,8 @@
                             <span class="viewer-input-label">Level</span>
                             <select class="viewer-text-input" id="level-select">
                                 <option value="fpsStarter">Sample Level</option>
+                                <option value="brickRoom">Brick Room (POM Demo)</option>
+                                <option value="doomTest">Doom Test Arena</option>
                                 <option value="soccerField" selected>Soccer Field</option>
                                 <option value="soccerFieldTerrain">Terrain</option>
                             </select>
@@ -884,6 +886,27 @@
                                         <div class="viewer-slider-value" id="we-shadows-map-size-value">512</div>
                                     </div>
                                     <div class="viewer-inline-note">Bias and Normal Bias fight self-shadow seams (raise to fix) and peter-panning (lower to fix). PCF Radius softens edges. Map Size trades GPU memory for sharpness; each step doubles memory on point lights.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Parallax (POM)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-pom-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-pom-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Height Intensity</div>
+                                        <input id="we-pom-intensity" type="range" min="0" max="0.2" step="0.001" value="0.04">
+                                        <div class="viewer-slider-value" id="we-pom-intensity-value">0.040</div>
+                                    </div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-pom-quality-low">Low</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-pom-quality-medium">Medium</button>
+                                        <button class="btn viewer-toggle-btn" id="we-pom-quality-high">High</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Parallax Occlusion Mapping fakes 3D depth on flat surfaces. Requires a per-material heightMap. Quality cycles 8/16/32 ray-march steps; High is ~3× cost of Low. Disabled automatically by perf mode.</div>
                                 </div>
                             </details>
 

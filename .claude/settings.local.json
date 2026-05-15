@@ -25,7 +25,31 @@
       "Bash(node -e \"import\\('./src/world/gi/ddgiRTCompute.js'\\).then\\(m => console.log\\('OK'\\)\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
       "Bash(node --check src/world/gi/ddgiProbeGrid.js)",
       "Bash(node --check src/runtime/components/DDGIVolumeComponent.js)",
-      "Bash(node -e \"import\\('./src/world/gi/ddgiProbeGrid.js'\\).then\\(m => { const g = m.createProbeGrid\\({ dims: { x: 4, y: 2, z: 4 }, cellSize: 4 }\\); console.log\\('scalar legacy:', g.cellSize, 'vec:', g.cellSizeVec.x, g.cellSizeVec.y, g.cellSizeVec.z\\); g.setCellSize\\({ x: 2, y: 5, z: 3 }\\); console.log\\('after anisotropic:', g.cellSize, 'vec:', g.cellSizeVec.x, g.cellSizeVec.y, g.cellSizeVec.z, 'bounds:', g.bounds.x, g.bounds.y, g.bounds.z\\); }\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")"
+      "Bash(node -e \"import\\('./src/world/gi/ddgiProbeGrid.js'\\).then\\(m => { const g = m.createProbeGrid\\({ dims: { x: 4, y: 2, z: 4 }, cellSize: 4 }\\); console.log\\('scalar legacy:', g.cellSize, 'vec:', g.cellSizeVec.x, g.cellSizeVec.y, g.cellSizeVec.z\\); g.setCellSize\\({ x: 2, y: 5, z: 3 }\\); console.log\\('after anisotropic:', g.cellSize, 'vec:', g.cellSizeVec.x, g.cellSizeVec.y, g.cellSizeVec.z, 'bounds:', g.bounds.x, g.bounds.y, g.bounds.z\\); }\\).catch\\(e => console.error\\('FAIL', e.message\\)\\)\")",
+      "Bash(node --check src/world/materials/pomNode.js)",
+      "Bash(node --check src/world/gi/DDGIMeshStandardNodeMaterial.js)",
+      "Bash(node --check src/world/gi/ddgiShaderInjection.js)",
+      "Bash(node --check src/io/objectLoader.js)",
+      "Bash(node --check src/world/objectMaterial.js)",
+      "Bash(node -e \"import\\('./src/world/materials/pomNode.js'\\).then\\(m => console.log\\('exports:', Object.keys\\(m\\)\\)\\).catch\\(e => console.error\\('FAIL:', e.message\\)\\)\")",
+      "Bash(node -e \"import\\('./src/world/gi/DDGIMeshStandardNodeMaterial.js'\\).then\\(m => console.log\\('exports:', Object.keys\\(m\\)\\)\\).catch\\(e => console.error\\('FAIL:', e.message\\)\\)\")",
+      "Bash(node --check src/world/materials/brickTextures.js)",
+      "Bash(node -e \"import\\('./src/world/materials/brickTextures.js'\\).then\\(m => console.log\\('exports:', Object.keys\\(m\\)\\)\\).catch\\(e => console.error\\('FAIL:', e.message\\)\\)\")",
+      "Bash(node -e \"import\\('./src/world/gi/DDGIMeshStandardNodeMaterial.js'\\).then\\(m => console.log\\('OK'\\)\\).catch\\(e => console.error\\('FAIL:', e.message\\)\\)\")",
+      "Bash(grep -E \"texture\\\\\\(|^--$\")",
+      "Bash(find \"e:\\\\JOBS\\\\polyflow-3d\\\\node_modules\\\\three\\\\src\\\\nodes\\\\utils\\\\\" -name \"*.js\" | head -20)",
+      "Bash(grep -r \"tangent\\\\|TBN\\\\|computeTangents\" \"e:\\\\JOBS\\\\polyflow-3d\\\\src\" --include=\"*.js\" 2>nul | head -20)",
+      "Bash(grep -r \"shadowNode\\\\|castShadow\\\\|customDepthMaterial\\\\|shadowMap\" \"e:\\\\JOBS\\\\polyflow-3d\\\\src\\\\world\" --include=\"*.js\" 2>nul | head -20)",
+      "Bash(grep -r \"rebuildPomGraph\\\\|syncPomGraphIfStale\\\\|setPomIntensity\\\\|setPomQuality\" \"e:\\\\JOBS\\\\polyflow-3d\\\\src\" --include=\"*.js\" 2>nul)",
+      "Bash(find \"e:\\\\JOBS\\\\polyflow-3d\\\\node_modules\\\\three\\\\src\\\\nodes\" -name \"*.js\" | xargs grep -l \"perspectiveDepth\\\\|viewZ\\\\|logarithmic\" 2>nul)",
+      "Bash(node -e \"require\\('playwright'\\); console.log\\('playwright module OK'\\)\")",
+      "Bash(timeout 90 node __ssdm_probe.mjs)",
+      "Bash(netstat -ano)",
+      "Bash(node -e \"const{chromium}=require\\('playwright'\\);chromium.launch\\({channel:'chrome'}\\).then\\(b=>{console.log\\('system chrome OK'\\);return b.close\\(\\)}\\).catch\\(e=>console.log\\('no system chrome:',e.message.split\\('\\\\n'\\)[0]\\)\\)\")",
+      "Bash(timeout 100 node __ssdm_probe.mjs)"
+    ],
+    "additionalDirectories": [
+      "e:\\JOBS\\polyflow-3d"
     ]
   }
 }

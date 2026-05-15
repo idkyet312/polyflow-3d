@@ -183,7 +183,13 @@ export function convertLoadedObjectMaterials(root) {
                 standardMaterial.emissiveMap.needsUpdate = true;
             }
 
-            ['normalMap', 'alphaMap', 'roughnessMap', 'aoMap'].forEach((mapName) => {
+            // heightMap drives POM; carry it through if the loader exposes one
+            // (GLB extension, OBJ disp_map, or attached by importer plugins).
+            if (material.heightMap || material.displacementMap) {
+                standardMaterial.heightMap = material.heightMap || material.displacementMap;
+            }
+
+            ['normalMap', 'alphaMap', 'roughnessMap', 'aoMap', 'heightMap'].forEach((mapName) => {
                 if (standardMaterial[mapName]) {
                     standardMaterial[mapName].colorSpace = THREE.NoColorSpace || '';
                     standardMaterial[mapName].needsUpdate = true;
