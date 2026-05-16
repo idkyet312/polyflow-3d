@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { assetRegistry } from '../../runtime/assets/AssetRegistry.js';
 
 // Procedural brick texture set generated on a canvas. Returns three textures
 // — albedo (sRGB), normal (linear), height (linear) — all sharing the same
@@ -21,7 +22,7 @@ const cache = new Map();
 // CC0 (public domain) — https://polyhaven.com/license
 
 const PH = (slug, map, ext, res = '2k') =>
-    `https://dl.polyhaven.org/file/ph-assets/Textures/${ext}/${res}/${slug}/${slug}_${map}_${res}.${ext}`;
+    assetRegistry.resolvePolyHaven(slug, map, ext, res);
 
 // slug per variant. _diff sRGB, _nor_gl/_disp/_rough linear.
 const PH_SLUG = { wall: 'brick_wall_006', floor: 'cobblestone_floor_08', accent: 'red_brick' };

@@ -4,6 +4,7 @@
 // All module-scope dependencies are injected once by setupSceneHistory().
 
 import * as THREE from 'three';
+import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 
 // Cross-module imports — these functions live in sceneSerialization.js.
 import {
@@ -467,12 +468,16 @@ export const editorHistory = {
 // ─── lines 11413–11444 ───────────────────────────────────────────────────────────────────
 
 export function exportWorldToJSON({ preferAssetPath = false } = {}) {
-    const umap = { version: 3, actors: [], importedTemplates: [] };
+    const umap = { version: 3, actors: [], importedTemplates: [], assets: [] };
     const usedTemplateIds = new Set();
+    const assetIds = new Set();
     for (const actor of (sceneSystem?.actors || [])) {
         const serializedActor = serializeActorData(actor);
         if (!serializedActor) continue;
         umap.actors.push(serializedActor);
+        if (serializedActor.assetId) {
+            assetIds.add(serializedActor.assetId);
+        }
         if (serializedActor.kind === 'imported' && serializedActor.templateId) {
             usedTemplateIds.add(serializedActor.templateId);
         }
@@ -485,15 +490,22 @@ export function exportWorldToJSON({ preferAssetPath = false } = {}) {
     }
 
     usedTemplateIds.forEach((templateId) => {
-        const template = importedPropState.templates.find((entry) => entry.id === templateId);
+        const template = assetRegistry.getImportedTemplate(templateId);
         const serializedTemplate = serializeImportedPropTemplate(template, { preferAssetPath });
         if (serializedTemplate) {
             umap.importedTemplates.push(serializedTemplate);
+            if (serializedTemplate.assetId) assetIds.add(serializedTemplate.assetId);
         }
     });
 
     if (umap.importedTemplates.length === 0) {
         delete umap.importedTemplates;
+    }
+    if (assetIds.size > 0) {
+        umap.assets = Array.from(assetIds)
+            .map((id) => assetRegistry.get(id) || { id, kind: 'other' });
+    } else {
+        delete umap.assets;
     }
 
     const worldTerrain = serializeWorldTerrainState?.();

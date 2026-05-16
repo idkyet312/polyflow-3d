@@ -3,6 +3,7 @@ import { ActorComponent } from './components/ActorComponent.js';
 import { AudioComponent } from './components/AudioComponent.js';
 import { PhysicsComponent } from './components/PhysicsComponent.js';
 import { TransformComponent } from './components/TransformComponent.js';
+import { MeshRendererComponent } from './components/MeshRendererComponent.js';
 
 export const RUNTIME_COMPONENT_KEYS = {
     render: 'render',
@@ -166,6 +167,8 @@ export class Actor {
         scripts = null,
         templateId = '',
         userData = null,
+        assetId = '',
+        materialId = '',
     } = {}) {
         applyActorShadowFlags(mesh);
 
@@ -181,6 +184,7 @@ export class Actor {
         this._components = new Map();
 
         this.entity.setComponent(RUNTIME_COMPONENT_KEYS.render, createRenderComponent(mesh));
+        this.addComponent(new MeshRendererComponent({ mesh, assetId, materialId }));
         this.entity.setComponent(RUNTIME_COMPONENT_KEYS.physicsBody, createPhysicsBodyComponent(body));
         this.entity.setComponent(RUNTIME_COMPONENT_KEYS.scripts, createScriptComponent(scripts));
 
@@ -472,10 +476,37 @@ export class SceneSystem {
         this.scene = scene;
         this.actors = new Set();
         this.onActorsChanged = null;
+
+        // ── Entity bridge (Phase 1) ──────────────────────────────────────
+        // O(1) id → Actor registry. Every actor that flows through addActor()
+        // (which is the single creation funnel) is registered and its root
+        // object3D is stamped with userData.entityId, so the reverse lookup
+        // (object3D → Actor) is also O(1) instead of the old linear scan over
+        // `actors`. Old code paths are unaffected; this is purely additive.
+        this._byId = new Map();
+        this._idCounter = 0;
+    }
+
+    /**
+     * Guarantee the actor has a unique, stable id. Actors may arrive with an
+     * empty id (default) or — across load/clone — a colliding one. We only
+     * mint a new id when missing or colliding, so serialization round-trips
+     * that intentionally preserve ids keep working.
+     */
+    _ensureUniqueId(actor) {
+        let id = actor.id;
+        if (!id || (this._byId.has(id) && this._byId.get(id) !== actor)) {
+            do { id = `ng-${++this._idCounter}`; } while (this._byId.has(id));
+            actor.id = id;
+        }
+        return id;
     }
 
     addActor(actor) {
         if (!actor || this.actors.has(actor)) return actor;
+
+        const id = this._ensureUniqueId(actor);
+        this._byId.set(id, actor);
 
         this.actors.add(actor);
         actor.sceneSystem = this;
@@ -491,6 +522,13 @@ export class SceneSystem {
         if (mesh?.parent === this.scene) {
             this.scene.remove(mesh);
         }
+        if (mesh?.userData && mesh.userData.entityId === actor.id) {
+            delete mesh.userData.entityId;
+        }
+
+        if (actor.id && this._byId.get(actor.id) === actor) {
+            this._byId.delete(actor.id);
+        }
 
         actor.sceneSystem = null;
         this.actors.delete(actor);
@@ -501,6 +539,11 @@ export class SceneSystem {
     attachActorRoot(actor) {
         const mesh = actor?.mesh;
         if (!mesh) return;
+
+        // Stamp the entity id on the root render object. attachActorRoot is
+        // called by both addActor and notifyActorMeshChanged, so a mesh swap
+        // re-tags the new root automatically.
+        if (actor.id) mesh.userData.entityId = actor.id;
 
         if (mesh.parent && mesh.parent !== this.scene) {
             mesh.parent.remove(mesh);
@@ -515,9 +558,61 @@ export class SceneSystem {
         if (previousMesh?.parent === this.scene) {
             this.scene.remove(previousMesh);
         }
+        if (previousMesh?.userData && previousMesh.userData.entityId === actor.id) {
+            delete previousMesh.userData.entityId;
+        }
 
         if (this.actors.has(actor)) {
             this.attachActorRoot(actor);
+        }
+    }
+
+    // ── Entity bridge API ────────────────────────────────────────────────
+
+    /** O(1) id → Actor. */
+    getEntity(id) {
+        return this._byId.get(id) ?? null;
+    }
+
+    /**
+     * Resolve the owning Actor from any THREE.Object3D in its subtree by
+     * walking parents until one carries userData.entityId, then a map
+     * lookup. Replaces the old O(n) scan over `actors`. Returns null for
+     * objects not owned by a registered actor.
+     */
+    entityFromObject3D(object3D) {
+        let cur = object3D;
+        while (cur) {
+            const id = cur.userData?.entityId;
+            if (id) {
+                const actor = this._byId.get(id);
+                if (actor) return actor;
+            }
+            cur = cur.parent;
+        }
+        return null;
+    }
+
+    /**
+     * Entity-first creation: make the Actor (entity) BEFORE any render
+     * object exists, register it, and return it so the caller can build and
+     * assign its mesh after. The mesh gets tagged on the subsequent
+     * `actor.mesh = ...` → notifyActorMeshChanged → attachActorRoot path.
+     */
+    createEntity(name = 'Entity', options = {}) {
+        const { register = true, ...actorOptions } = options;
+        const actor = new Actor({ name, ...actorOptions });
+        return register ? this.addActor(actor) : actor;
+    }
+
+    /**
+     * Tick all actor components once per frame. Central System pass — purely
+     * additive; existing ad-hoc subsystem ticks remain until individually
+     * retired. Iterates a snapshot so a component may spawn/destroy actors.
+     */
+    tickComponents(deltaTime) {
+        for (const actor of Array.from(this.actors)) {
+            actor.tickComponents?.(deltaTime);
         }
     }
 }
@@ -536,6 +631,7 @@ export { AudioComponent } from './components/AudioComponent.js';
 export { PhysicsComponent } from './components/PhysicsComponent.js';
 export { TransformComponent } from './components/TransformComponent.js';
 export { DDGIVolumeComponent } from './components/DDGIVolumeComponent.js';
+export { MeshRendererComponent } from './components/MeshRendererComponent.js';
 
 /**
  * Convenience factory: create an Actor with a PhysicsComponent already attached.

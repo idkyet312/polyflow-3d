@@ -4,6 +4,8 @@
 
 import * as THREE from 'three';
 import { DDGIVolumeComponent, createActor } from '../runtime/sceneRuntime.js';
+import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
+import { prefabRegistry } from '../runtime/assets/PrefabRegistry.js';
 import { createTerrainMesh, applySerializedTerrainState, setTerrainModeGrid, serializeTerrainState } from './terrain.js';
 
 // Module-scope deps — populated by setupSceneSerialization, assigned once.
@@ -294,9 +296,15 @@ export function serializeActorData(actor) {
     const terrainState = isFlatTerrainActor
         ? serializeTerrainState(mesh)
         : null;
+    const prefabId = userDataForSerialization?.prefabId || userDataForSerialization?.gameplayPrefab || '';
+    const prefabAssetId = userDataForSerialization?.prefabAssetId
+        || mesh.userData?.prefabAssetId
+        || (prefabId ? prefabRegistry.getPrefabAssetId(prefabId) : '');
 
     return {
         id: actor.id,
+        assetId: prefabAssetId || null,
+        prefabId: prefabId || null,
         kind: actor.kind,
         name: actor.rootNode?.name || 'Actor',
         templateId: actor.templateId,
@@ -342,14 +350,22 @@ function spawnSerializedFlatTerrainActor(actorData) {
     setTerrainModeGrid(mesh);
     applySerializedTerrainState(mesh, actorData.terrainState);
 
-    const actor = createActor({
-        name: actorData.name || 'Actor',
-        kind: actorData.kind,
-        mesh,
-        body: null,
-        templateId: actorData.templateId || '',
-        userData: actorData.userData,
-    });
+    const actor = sceneSystem?.createEntity
+        ? sceneSystem.createEntity(actorData.name || 'Actor', {
+            register: false,
+            kind: actorData.kind,
+            body: null,
+            templateId: actorData.templateId || '',
+            userData: actorData.userData,
+        })
+        : createActor({
+            name: actorData.name || 'Actor',
+            kind: actorData.kind,
+            body: null,
+            templateId: actorData.templateId || '',
+            userData: actorData.userData,
+        });
+    actor.mesh = mesh;
     sceneSystem?.addActor?.(actor);
     return actor;
 }
@@ -379,11 +395,11 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
     let actor = null;
     if (actorData.kind === 'vehicle') {
         const savedBodyTemplateId = actorData.vehicleBodyTemplateId
-            && importedPropState.templates.some((template) => template.id === actorData.vehicleBodyTemplateId)
+            && assetRegistry.hasImportedTemplate(actorData.vehicleBodyTemplateId)
             ? actorData.vehicleBodyTemplateId
             : '';
         const savedWheelTemplateId = actorData.vehicleWheelTemplateId
-            && importedPropState.templates.some((template) => template.id === actorData.vehicleWheelTemplateId)
+            && assetRegistry.hasImportedTemplate(actorData.vehicleWheelTemplateId)
             ? actorData.vehicleWheelTemplateId
             : '';
         actor = spawnDrivableCar({
@@ -397,16 +413,24 @@ export function spawnActorFromSerializedData(actorData, { preserveId = false, sp
             actor = spawnSerializedFlatTerrainActor(actorData);
         } else if (hasEmbeddedRoot) {
             const mesh = new THREE.ObjectLoader().parse(sanitizeEmbeddedRootJson(actorData.rootJson));
-            actor = createActor({
-                name: actorData.name || 'Actor',
-                kind: actorData.kind,
-                mesh,
-                body: null,
-                templateId: actorData.templateId || '',
-                userData: actorData.userData,
-            });
+            actor = sceneSystem?.createEntity
+                ? sceneSystem.createEntity(actorData.name || 'Actor', {
+                    register: false,
+                    kind: actorData.kind,
+                    body: null,
+                    templateId: actorData.templateId || '',
+                    userData: actorData.userData,
+                })
+                : createActor({
+                    name: actorData.name || 'Actor',
+                    kind: actorData.kind,
+                    body: null,
+                    templateId: actorData.templateId || '',
+                    userData: actorData.userData,
+                });
+            actor.mesh = mesh;
             sceneSystem?.addActor?.(actor);
-        } else if (!actorData.templateId || !importedPropState.templates.some((template) => template.id === actorData.templateId)) {
+        } else if (!actorData.templateId || !assetRegistry.hasImportedTemplate(actorData.templateId)) {
             if (tempScriptId) {
                 delete objectScriptState.drafts[tempScriptId];
             }
@@ -561,11 +585,16 @@ export function exportActorToFile(actor) {
     }
 
     const importedTemplates = [];
+    const assetIds = new Set();
+    if (serializedActor.assetId) {
+        assetIds.add(serializedActor.assetId);
+    }
     usedTemplateIds.forEach((templateId) => {
-        const template = importedPropState.templates.find((entry) => entry.id === templateId);
+        const template = assetRegistry.getImportedTemplate(templateId);
         const serializedTemplate = serializeImportedPropTemplate(template, { preferAssetPath: false });
         if (serializedTemplate) {
             importedTemplates.push(serializedTemplate);
+            if (serializedTemplate.assetId) assetIds.add(serializedTemplate.assetId);
         }
     });
 
@@ -577,6 +606,10 @@ export function exportActorToFile(actor) {
 
     if (importedTemplates.length > 0) {
         actorData.importedTemplates = importedTemplates;
+    }
+    if (assetIds.size > 0) {
+        actorData.assets = Array.from(assetIds)
+            .map((id) => assetRegistry.get(id) || { id, kind: 'other' });
     }
 
     const displayName = getDynamicPropDisplayName(actor)
@@ -642,6 +675,7 @@ export async function loadActorFromFile(file, options = {}) {
     const {
         askSpawnLocation = true,
         spawnInFrontOfPlayer = false,
+        prefab = null,
     } = options;
 
     const fileSizeMb = (file.size / (1024 * 1024)).toFixed(1);
@@ -696,6 +730,19 @@ export async function loadActorFromFile(file, options = {}) {
             alert('Failed to spawn the loaded actor. Physics may not be ready yet.');
             return;
         }
+        if (prefab?.id) {
+            const prefabAssetId = prefab.assetId || prefabRegistry.getPrefabAssetId(prefab.id);
+            actor.userData = {
+                ...(actor.userData || {}),
+                prefabId: actor.userData?.prefabId || prefab.id,
+                prefabAssetId,
+            };
+            const mesh = getActorRenderObject(actor);
+            if (mesh?.userData) {
+                mesh.userData.prefabId = mesh.userData.prefabId || prefab.id;
+                mesh.userData.prefabAssetId = prefabAssetId;
+            }
+        }
 
         progressOverlay.update(92, 'Restoring scripts...');
         await yieldToPaint();
@@ -707,6 +754,7 @@ export async function loadActorFromFile(file, options = {}) {
         selectShowcaseActor(actor.id);
 
         progressOverlay.update(100, 'Done.');
+        return actor;
     } catch (err) {
         console.error('Error loading actor file', err);
         alert('Failed to load actor file. It may be corrupt or in an unsupported format.');

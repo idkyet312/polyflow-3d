@@ -15,6 +15,7 @@ import {
     PhysicsComponent,
     TransformComponent,
 } from '../runtime/sceneRuntime.js';
+import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 import { detectsUeLifecycle, buildUeContext } from '../scripting/ueApi.js';
 
 // ─── Module-scope deps populated by setupObjectEvents ─────────────────────
@@ -233,14 +234,11 @@ export function createDynamicPropActor({
     userData = null,
     includeScripts = true,
 }) {
-    const actor = createActor({
-        body,
-        mesh,
-        kind,
-        templateId,
-        userData,
-        name: userData?.label || `${kind || 'actor'}-actor`,
-    });
+    const name = userData?.label || `${kind || 'actor'}-actor`;
+    const actor = sceneSystem?.createEntity
+        ? sceneSystem.createEntity(name, { register: false, body, kind, templateId, userData })
+        : createActor({ body, kind, templateId, userData, name });
+    actor.mesh = mesh;
     // Auto-attach UE-style components so GetComponent() works on every actor.
     if (!actor.hasComponent(TransformComponent)) {
         actor.addComponent(new TransformComponent());
@@ -257,7 +255,9 @@ export function createDynamicPropActor({
         actor.addComponent(audio);
     }
 
-    sceneSystem?.addActor(actor);
+    if (!sceneSystem?.actors?.has?.(actor)) {
+        sceneSystem?.addActor(actor);
+    }
     ensureActorIdentity(actor);
     return includeScripts ? syncPropScriptState(actor) : actor;
 }
@@ -272,15 +272,14 @@ export function removeObjectScriptDraft(propId) {
 export function findDynamicPropByMesh(target) {
     if (!target) return null;
 
-    if (sceneSystem) {
-        for (const actor of sceneSystem.actors) {
-            const mesh = getActorRenderObject(actor);
-            let current = target;
-            while (current) {
-                if (current === mesh) return actor;
-                current = current.parent;
-            }
-        }
+    // Entity bridge (Phase 1): O(1) object3D → Actor via the SceneSystem
+    // registry (walks parents to the entityId-tagged root, then a map
+    // lookup) instead of the old O(actors × depth) nested scan. Falls
+    // through to the physics.dynamicBodies sweep below for any object not
+    // owned by a registered actor, preserving exact prior behavior.
+    if (sceneSystem?.entityFromObject3D) {
+        const actor = sceneSystem.entityFromObject3D(target);
+        if (actor) return actor;
     }
 
     return physics.dynamicBodies.find((prop) => {
@@ -312,7 +311,7 @@ export function getDynamicPropDisplayName(prop) {
     }
 
     if (prop.kind === 'imported') {
-        const template = importedPropState.templates.find((entry) => entry.id === prop.templateId);
+        const template = assetRegistry.getImportedTemplate(prop.templateId);
         return template?.displayName || 'Imported Prop';
     }
 
@@ -324,10 +323,12 @@ export function getDynamicPropDisplayName(prop) {
 }
 
 export function getDynamicPropById(propId) {
-    if (sceneSystem) {
-        for (const actor of sceneSystem.actors) {
-            if (actor.id === propId) return actor;
-        }
+    // Entity bridge (Phase 1): O(1) id → Actor via the SceneSystem registry
+    // instead of the old linear scan over every actor. Physics fallback
+    // unchanged for ids not in the registry.
+    if (sceneSystem?.getEntity) {
+        const actor = sceneSystem.getEntity(propId);
+        if (actor) return actor;
     }
     return physics.dynamicBodies.find((prop) => prop.id === propId) || null;
 }

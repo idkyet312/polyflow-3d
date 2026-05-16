@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
+import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 
 const ENVIRONMENTS = {
     'sunny-sky': {
@@ -45,11 +46,7 @@ const ENVIRONMENTS = {
 };
 
 function getHdriUrl(slug, resolution) {
-    if (slug === 'kloofendal_48d_partly_cloudy_puresky' && resolution === '4k') {
-        return (import.meta.env.BASE_URL || '/') + 'kloofendal_48d_partly_cloudy_puresky_4k.hdr';
-    }
-
-    return `https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/${resolution}/${slug}_${resolution}.hdr`;
+    return assetRegistry.resolveHdri(slug, resolution);
 }
 
 export function createEnvironmentController({ scene, getAmbientLight, getHemiLight }) {

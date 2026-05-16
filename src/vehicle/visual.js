@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 
 const VEHICLE_LIGHT_NAME_RE = /(head|tail|brake|reverse|signal|indicator|turn|lamp|light|emiss)/i;
 
@@ -135,10 +136,10 @@ export function createDrivableCarVisual({ bodyTemplateId = '', wheelTemplateId =
     });
 
     const bodyTemplate = bodyTemplateId
-        ? importedPropState.templates.find((entry) => entry.id === bodyTemplateId)
+        ? assetRegistry.getImportedTemplate(bodyTemplateId)
         : null;
     const wheelTemplate = wheelTemplateId
-        ? importedPropState.templates.find((entry) => entry.id === wheelTemplateId)
+        ? assetRegistry.getImportedTemplate(wheelTemplateId)
         : null;
 
     const usingCustomBody = !!bodyTemplate?.root;

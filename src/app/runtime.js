@@ -60,6 +60,9 @@ import {
     TransformComponent,
     DDGIVolumeComponent,
 } from '../runtime/sceneRuntime.js';
+import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
+import { prefabRegistry } from '../runtime/assets/PrefabRegistry.js';
+import { registerCoreAssets } from '../runtime/assets/assetManifest.js';
 import { createDynamicBodySpatialIndex } from '../physics/dynamicBodySpatial.js';
 import {
     createDynamicCollisionEventRunner,
@@ -88,6 +91,7 @@ import { createWater } from '../world/water.js';
 import { createLightmapBaker } from '../world/lightmapBaker.js';
 import { createPostProcessUiController } from '../world/postProcessUiController.js';
 import { createLitePhysicsPool } from '../physics/litePool.js';
+import { createProjectileInstancer } from '../gameplay/projectileInstancer.js';
 import {
     AHUD,
     installUePrototypeMethods,
@@ -709,6 +713,12 @@ const importedPropState = {
     // slow). Keyed by template.id.
     sourceFiles: Object.create(null),
 };
+function listImportedTemplates() {
+    return assetRegistry.listImportedTemplates();
+}
+function getImportedTemplate(templateId) {
+    return assetRegistry.getImportedTemplate(templateId);
+}
 const actorEditorState = {
     open: false,
 };
@@ -921,7 +931,6 @@ const gameplay = {
 const gameplayPrefabState = {
     teleporterCooldownUntil: 0,
     shooterProjectiles: [],
-    projectilePools: new Map(),
     effects: [],
 };
 const BASIC_NAVMESH_AI_PREFAB = {
@@ -1569,10 +1578,11 @@ function createImportedCollisionShape(root, mode) {
 function renderImportedPropButtons() {
     if (!importedPropList || !importedPropLibrary) return;
 
+    const templates = listImportedTemplates();
     importedPropList.innerHTML = '';
-    importedPropLibrary.hidden = importedPropState.templates.length === 0;
+    importedPropLibrary.hidden = templates.length === 0;
 
-    importedPropState.templates.forEach((template) => {
+    templates.forEach((template) => {
         const button = document.createElement('button');
         button.className = 'btn viewer-menu-btn';
         button.textContent = `${template.displayName} · ${template.collisionMode === 'simple' ? 'Simple' : 'Complex'}`;
@@ -1597,6 +1607,7 @@ function registerImportedPropTemplate(fileName, root, collisionMode, shape, tria
     };
 
     importedPropState.templates.push(template);
+    assetRegistry.registerImportedTemplate(template);
     renderImportedPropButtons();
     updatePropImportStatus();
     return template;
@@ -1605,8 +1616,10 @@ function registerImportedPropTemplate(fileName, root, collisionMode, shape, tria
 async function registerImportedPropTemplateFromSerializedData(templateData, { fileMap = null } = {}) {
     if (!templateData) return null;
 
-    const existingTemplate = importedPropState.templates.find((entry) => entry.id === templateData.id);
+    const templateId = templateData.id || assetRegistry.importedTemplateIdFromAssetId(templateData.assetId);
+    const existingTemplate = getImportedTemplate(templateId);
     if (existingTemplate) {
+        assetRegistry.registerImportedTemplate(existingTemplate);
         return existingTemplate;
     }
 
@@ -1646,7 +1659,7 @@ async function registerImportedPropTemplateFromSerializedData(templateData, { fi
         : Math.round(countTrianglesForObject(root));
     const collision = createImportedCollisionShape(root, templateData.collisionMode || 'simple');
     const template = {
-        id: templateData.id || `imported-prop-${importedPropState.nextId++}`,
+        id: templateId || `imported-prop-${importedPropState.nextId++}`,
         fileName: templateData.fileName || 'Imported Prop',
         displayName: templateData.displayName || formatImportedPropName(templateData.fileName || 'Imported Prop'),
         root,
@@ -1656,6 +1669,7 @@ async function registerImportedPropTemplateFromSerializedData(templateData, { fi
     };
 
     importedPropState.templates.push(template);
+    assetRegistry.registerImportedTemplate(template);
 
     // If we loaded from a folder bundle, retain the original File so the user
     // can re-save the scene as a folder without re-inlining the geometry.
@@ -1691,6 +1705,7 @@ function serializeImportedPropTemplate(template, { preferAssetPath = false } = {
 
     const base = {
         id: template.id,
+        assetId: assetRegistry.getImportedTemplateAssetId(template.id),
         fileName: template.fileName,
         displayName: template.displayName,
         normalized: true,
@@ -1717,7 +1732,7 @@ function spawnImportedProp(templateId, options = {}) {
         return null;
     }
 
-    const template = importedPropState.templates.find((entry) => entry.id === templateId);
+    const template = getImportedTemplate(templateId);
     if (!template?.root) return null;
 
     const spawnPosition = tempVectorD;
@@ -3233,69 +3248,34 @@ function clearShooterProjectiles() {
     gameplayPrefabState.shooterProjectiles.length = 0;
 }
 
-function disposeProjectileMesh(mesh) {
-    mesh?.parent?.remove(mesh);
-    mesh?.traverse?.((node) => {
-        node.geometry?.dispose?.();
-        if (Array.isArray(node.material)) {
-            node.material.forEach((material) => material?.dispose?.());
-        } else {
-            node.material?.dispose?.();
-        }
-    });
-}
+// (disposeProjectileMesh removed — projectiles no longer own per-instance
+// geometry/material; the instancer owns shared geo/mat per visual key.)
 
-function createProjectileMesh({ radius, color, emissiveIntensity, light, lightIntensity, lightDistance, name }) {
-    const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(radius, 16, 10),
-        new THREE.MeshStandardMaterial({
-            color,
-            emissive: color,
-            emissiveIntensity,
-            roughness: 0.18,
-            metalness: 0.15,
-        })
-    );
-    mesh.name = name;
-    if (light === true) {
-        mesh.add(new THREE.PointLight(color, lightIntensity, lightDistance));
+// Phase A: bullets render through one InstancedMesh per visual key instead of
+// a Mesh-per-bullet (see src/gameplay/projectileInstancer.js). The instancer
+// hands back a lightweight handle that quacks like the old `mesh` for the
+// fields the gameplay/hit code touches (.position/.name/.visible), so
+// spawnShooterProjectile + updateShooterProjectiles below are unchanged. The
+// instancer owns its own slot pooling, so the old projectilePools Map and the
+// createProjectileMesh/disposeProjectileMesh allocation path are retired.
+let _projectileInstancer = null;
+function getProjectileInstancer() {
+    if (!_projectileInstancer && scene) {
+        _projectileInstancer = createProjectileInstancer(scene);
     }
-    return mesh;
+    return _projectileInstancer;
 }
 
 function acquireProjectileMesh(options) {
-    const poolKey = options.poolKey || '';
-    if (poolKey) {
-        const pool = gameplayPrefabState.projectilePools.get(poolKey);
-        const pooledMesh = pool?.pop();
-        if (pooledMesh) {
-            pooledMesh.visible = true;
-            scene.add(pooledMesh);
-            return pooledMesh;
-        }
-    }
-    return createProjectileMesh(options);
+    // Returns a handle, or null if that batch is at capacity (caller drops
+    // the shot — same observable effect as the old pool being exhausted).
+    return getProjectileInstancer()?.acquire(options) ?? null;
 }
 
 function releaseProjectile(projectile) {
-    const mesh = projectile?.mesh;
-    if (!mesh) return;
-    const poolKey = projectile.poolKey || '';
-    if (poolKey) {
-        let pool = gameplayPrefabState.projectilePools.get(poolKey);
-        if (!pool) {
-            pool = [];
-            gameplayPrefabState.projectilePools.set(poolKey, pool);
-        }
-        const maxPoolSize = projectile.maxPoolSize ?? SHOOTER_AI_PREFAB.projectilePoolSize;
-        if (pool.length < maxPoolSize) {
-            mesh.visible = false;
-            mesh.parent?.remove(mesh);
-            pool.push(mesh);
-            return;
-        }
-    }
-    disposeProjectileMesh(mesh);
+    const handle = projectile?.mesh;
+    if (!handle) return;
+    _projectileInstancer?.release(handle);
 }
 
 function spawnShooterProjectile(origin, target, options = {}) {
@@ -3319,9 +3299,13 @@ function spawnShooterProjectile(origin, target, options = {}) {
         lightDistance: options.lightDistance ?? 2.2,
         name: options.name || 'Shooter AI Projectile',
     });
+    // Batch at capacity → drop the shot (same observable effect the old
+    // fixed-size pool had when exhausted). `mesh` is an instancer handle,
+    // not an Object3D: it carries .position/.name/.visible and is added to
+    // the shared InstancedMesh by the instancer, so no scene.add() here.
+    if (!mesh) return;
     mesh.name = options.name || 'Shooter AI Projectile';
     mesh.position.copy(origin);
-    scene.add(mesh);
 
     gameplayPrefabState.shooterProjectiles.push({
         mesh,
@@ -5039,7 +5023,7 @@ function rebuildActorPhysics(prop) {
     }
     
     const importedTemplate = prop.kind === 'imported'
-        ? importedPropState.templates.find((entry) => entry.id === prop.templateId)
+        ? getImportedTemplate(prop.templateId)
         : null;
     const useExactMeshCollision = importedTemplate?.collisionMode === 'complex';
 
@@ -5284,26 +5268,27 @@ function buildPrimitiveActorMesh(kind) {
 }
 
 function syncActorEditorTemplateOptions(selectedTemplateId = '', selectedVehicleBodyTemplateId = '', selectedVehicleWheelTemplateId = '') {
+    const templates = listImportedTemplates();
     if (actorImportedTemplateSelect) {
         actorImportedTemplateSelect.innerHTML = '';
 
-        if (!importedPropState.templates.length) {
+        if (!templates.length) {
             const option = document.createElement('option');
             option.value = '';
             option.textContent = 'No imported source available';
             actorImportedTemplateSelect.appendChild(option);
             actorImportedTemplateSelect.value = '';
         } else {
-            importedPropState.templates.forEach((template) => {
+            templates.forEach((template) => {
                 const option = document.createElement('option');
                 option.value = template.id;
                 option.textContent = `${template.displayName} (${template.collisionMode})`;
                 actorImportedTemplateSelect.appendChild(option);
             });
 
-            actorImportedTemplateSelect.value = selectedTemplateId && importedPropState.templates.some((template) => template.id === selectedTemplateId)
+            actorImportedTemplateSelect.value = selectedTemplateId && templates.some((template) => template.id === selectedTemplateId)
                 ? selectedTemplateId
-                : importedPropState.templates[0].id;
+                : templates[0].id;
         }
     }
 
@@ -5314,7 +5299,7 @@ function syncActorEditorTemplateOptions(selectedTemplateId = '', selectedVehicle
         defaultOption.value = '';
         defaultOption.textContent = defaultLabel;
         select.appendChild(defaultOption);
-        importedPropState.templates.forEach((template) => {
+        templates.forEach((template) => {
             const option = document.createElement('option');
             option.value = template.id;
             option.textContent = template.displayName;
@@ -5324,7 +5309,7 @@ function syncActorEditorTemplateOptions(selectedTemplateId = '', selectedVehicle
         customOption.value = VEHICLE_CUSTOM_IMPORT_VALUE;
         customOption.textContent = 'Custom… (import file)';
         select.appendChild(customOption);
-        select.value = selectedId && importedPropState.templates.some((template) => template.id === selectedId)
+        select.value = selectedId && templates.some((template) => template.id === selectedId)
             ? selectedId
             : '';
     };
@@ -5387,7 +5372,7 @@ function syncActorEditorUi() {
 
     actorEditorSummary.textContent = `Type: ${typeLabel}`;
 
-    if (isImported && !importedPropState.templates.length) {
+    if (isImported && !listImportedTemplates().length) {
         actorEditorStatus.textContent = 'Import a prop source first, then create an imported actor instance from it.';
         return;
     }
@@ -5470,12 +5455,18 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     mesh.castShadow = false;
     mesh.receiveShadow = false;
 
-    const actor = createActor({
-        mesh,
-        kind: 'ddgiVolume',
-        userData,
-        name: userData?.label || 'ddgi-volume',
-    });
+    const actor = sceneSystem?.createEntity
+        ? sceneSystem.createEntity(userData?.label || 'ddgi-volume', {
+            register: false,
+            kind: 'ddgiVolume',
+            userData,
+        })
+        : createActor({
+            kind: 'ddgiVolume',
+            userData,
+            name: userData?.label || 'ddgi-volume',
+        });
+    actor.mesh = mesh;
     if (!actor.hasComponent(TransformComponent)) {
         actor.addComponent(new TransformComponent());
     }
@@ -5971,12 +5962,18 @@ function ensureDDGITestVolume(rig) {
     mesh.castShadow = false;
     mesh.receiveShadow = false;
 
-    const actor = createActor({
-        mesh,
-        kind: 'ddgiVolume',
-        userData: { internalSample: true, label: 'DDGI Test Volume' },
-        name: 'DDGI Test Volume',
-    });
+    const actor = sceneSystem?.createEntity
+        ? sceneSystem.createEntity('DDGI Test Volume', {
+            register: false,
+            kind: 'ddgiVolume',
+            userData: { internalSample: true, label: 'DDGI Test Volume' },
+        })
+        : createActor({
+            kind: 'ddgiVolume',
+            userData: { internalSample: true, label: 'DDGI Test Volume' },
+            name: 'DDGI Test Volume',
+        });
+    actor.mesh = mesh;
     if (!actor.hasComponent(TransformComponent)) {
         actor.addComponent(new TransformComponent());
     }
@@ -6038,12 +6035,18 @@ function ensureDDGITestRigActor(rig) {
     const existingActor = findDDGITestRigActor(rig);
     if (existingActor) return existingActor;
 
-    const actor = createActor({
-        mesh: rig,
-        kind: 'cornellBox',
-        userData: { internalSample: true, label: 'Cornell Box', ddgiSampleRig: true },
-        name: 'Cornell Box',
-    });
+    const actor = sceneSystem?.createEntity
+        ? sceneSystem.createEntity('Cornell Box', {
+            register: false,
+            kind: 'cornellBox',
+            userData: { internalSample: true, label: 'Cornell Box', ddgiSampleRig: true },
+        })
+        : createActor({
+            kind: 'cornellBox',
+            userData: { internalSample: true, label: 'Cornell Box', ddgiSampleRig: true },
+            name: 'Cornell Box',
+        });
+    actor.mesh = rig;
     if (!actor.hasComponent(TransformComponent)) {
         actor.addComponent(new TransformComponent());
     }
@@ -6575,7 +6578,7 @@ function buildActorCollisionOverlay(actor) {
     }
 
     if (actor.kind === 'imported') {
-        const template = importedPropState.templates.find((entry) => entry.id === actor.templateId);
+        const template = getImportedTemplate(actor.templateId);
         if (template?.collisionMode === 'simple') {
             return createImportedSimpleCollisionOverlay(template, color);
         }
@@ -8188,6 +8191,25 @@ function refreshSceneUI() {
 
 // --- Initialization ---
 async function init() {
+    const assets = registerCoreAssets();
+    assets.setImportedTemplatesProvider(() => importedPropState.templates);
+    registerBuiltinPrefabs();
+    await loadPrefabManifest();
+    if (typeof window !== 'undefined') {
+        window.__assets = assets;
+        window.__prefabs = prefabRegistry;
+    }
+
+    // Phase 0 dev gate: `?bench=cull` runs the throwaway cull benchmark in
+    // full isolation (its own renderer/scene/camera) and skips the entire
+    // game boot. See plan the-nullgraph-engine-data-oriented-*.md. Removed
+    // when Phase 0 concludes.
+    if (new URLSearchParams(location.search).get('bench') === 'cull') {
+        const { runCullBench } = await import('../dev/cullBench.js');
+        await runCullBench();
+        return;
+    }
+
     // Mobile Detection (full applyMobileModeState runs after wireExtractedModules
     // because it depends on injected refs in src/debug/console.js)
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || window.matchMedia('(pointer: coarse)').matches;
@@ -8957,6 +8979,9 @@ async function init() {
     if (typeof window !== 'undefined') {
         window.__ddgi = getDDGIManager();
         window.__lightmapBaker = lightmapBaker;
+        // Entity bridge debug handle (verification: __scene.getEntity(id),
+        // __scene.entityFromObject3D(obj)).
+        window.__scene = sceneSystem;
     }
 
     // Initialize TransformControls for gizmo manipulation
@@ -9192,6 +9217,16 @@ async function init() {
         updateShooterAis(delta);
         updateGameplayEffects(delta);
         updatePlayerHitFeedback(delta);
+        // Phase A: pack all live bullet positions into their InstancedMesh
+        // once per frame, after every system that moves/spawns/releases a
+        // projectile this frame has run (updateShooterAis →
+        // updateShooterProjectiles advances positions; spawners add/remove).
+        _projectileInstancer?.flush();
+
+        // Entity bridge (Phase 1): central component System pass. Purely
+        // additive — ticks actor ActorComponents once per frame; existing
+        // ad-hoc subsystem ticks are untouched and retire individually later.
+        sceneSystem?.tickComponents?.(delta);
 
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
         if (gameplay.active) {
@@ -13360,7 +13395,7 @@ async function exportWorldToSceneFolder() {
     const rawFiles = new Map();  // templateId -> File (fallback only)
 
     for (const t of umap.importedTemplates || []) {
-        const template = importedPropState.templates.find((entry) => entry.id === t.id);
+        const template = getImportedTemplate(t.id);
         if (!template?.root) continue;
         const sourceFile = importedPropState.sourceFiles[t.id];
 
@@ -13516,7 +13551,7 @@ document.getElementById('scene-folder-input')?.addEventListener('change', (e) =>
     }
 });
 
-const PREFAB_MANIFEST_URL = './prefabs/manifest.json';
+const PREFAB_MANIFEST_URL = assetRegistry.resolvePrefabManifest();
 const PREFAB_CATEGORY_ORDER = ['Vehicles', 'Lights', 'Shapes', 'Gameplay', 'AI'];
 const BUILTIN_PREFAB_ITEMS = [
     { id: 'helicopter', name: 'Helicopter', category: 'Vehicles', modelPrefab: 'helicopter', image: 'helicopter.svg' },
@@ -13538,6 +13573,13 @@ const BUILTIN_PREFAB_ITEMS = [
     { id: 'sniper-rifle', name: 'Bolt Action Sniper Rifle', category: 'AI', gameplayPrefab: 'sniperRifle', image: 'ai-shooter.svg' },
 ];
 let prefabManifestCache = null;
+let builtinPrefabsRegistered = false;
+
+function registerBuiltinPrefabs() {
+    if (builtinPrefabsRegistered) return;
+    builtinPrefabsRegistered = true;
+    prefabRegistry.registerMany(BUILTIN_PREFAB_ITEMS);
+}
 
 async function loadPrefabManifest() {
     if (prefabManifestCache) return prefabManifestCache;
@@ -13547,6 +13589,7 @@ async function loadPrefabManifest() {
             throw new Error(`Prefab manifest failed: ${manifestResponse.status}`);
         }
         prefabManifestCache = await manifestResponse.json();
+        prefabRegistry.registerMany(prefabManifestCache.prefabs || [], { category: 'Vehicles' });
     } catch (err) {
         console.warn('Prefab manifest unavailable. Using built-in prefabs only.', err);
         prefabManifestCache = { prefabs: [] };
@@ -13570,15 +13613,21 @@ async function loadPrefab(prefab) {
         }
 
         const prefabUrl = new URL(prefab.file, new URL(PREFAB_MANIFEST_URL, window.location.href));
-        const prefabResponse = await fetch(prefabUrl);
-        if (!prefabResponse.ok) {
-            throw new Error(`Prefab failed: ${prefabResponse.status}`);
+        const prefabCacheKey = prefabUrl.href;
+        let file = prefabRegistry.getCachedActorFile(prefabCacheKey);
+        if (!file) {
+            const prefabResponse = await fetch(prefabUrl);
+            if (!prefabResponse.ok) {
+                throw new Error(`Prefab failed: ${prefabResponse.status}`);
+            }
+            const blob = await prefabResponse.blob();
+            file = new File([blob], prefab.file, { type: 'application/json' });
+            prefabRegistry.cacheActorFile(prefabCacheKey, file);
         }
-        const blob = await prefabResponse.blob();
-        const file = new File([blob], prefab.file, { type: 'application/json' });
         await loadActorFromFile(file, {
             askSpawnLocation: false,
             spawnInFrontOfPlayer: true,
+            prefab,
         });
         closePrefabBrowser();
     } catch (err) {
@@ -13809,7 +13858,10 @@ function spawnHelicopterPrefab() {
 
 function spawnBuiltinPrefab(prefab) {
     if (prefab?.gameplayPrefab) {
-        spawnGameplayPrefab(prefab.gameplayPrefab);
+        const actor = spawnGameplayPrefab(prefab.gameplayPrefab);
+        if (actor) {
+            tagPrefabInstance(actor, prefab);
+        }
         closePrefabBrowser();
         return;
     }
@@ -13823,6 +13875,7 @@ function spawnBuiltinPrefab(prefab) {
         }
 
         refreshSceneUI();
+        tagPrefabInstance(actor, prefab);
         selectShowcaseActor(actor.id);
         closePrefabBrowser();
         return;
@@ -13856,8 +13909,25 @@ function spawnBuiltinPrefab(prefab) {
     }
 
     refreshSceneUI();
+    tagPrefabInstance(actor, prefab);
     selectShowcaseActor(actor.id);
     closePrefabBrowser();
+}
+
+function tagPrefabInstance(actor, prefab) {
+    if (!actor || !prefab?.id) return actor;
+    const assetId = prefab.assetId || prefabRegistry.getPrefabAssetId(prefab.id);
+    actor.userData = {
+        ...(actor.userData || {}),
+        prefabId: actor.userData?.prefabId || prefab.id,
+        prefabAssetId: assetId,
+    };
+    const mesh = getActorRenderObject(actor);
+    if (mesh?.userData) {
+        mesh.userData.prefabId = mesh.userData.prefabId || prefab.id;
+        mesh.userData.prefabAssetId = assetId;
+    }
+    return actor;
 }
 
 function closePrefabBrowser() {
@@ -13901,34 +13971,15 @@ async function openPrefabBrowser() {
     if (status) status.textContent = 'Loading prefabs...';
 
     try {
-        const manifest = await loadPrefabManifest();
-        const manifestPrefabs = Array.isArray(manifest.prefabs) ? manifest.prefabs : [];
-        const prefabs = [
-            ...manifestPrefabs.map((prefab) => ({
-                category: 'Vehicles',
-                ...prefab,
-            })),
-            ...BUILTIN_PREFAB_ITEMS,
-        ];
+        await loadPrefabManifest();
+        registerBuiltinPrefabs();
+        const prefabs = prefabRegistry.list();
         if (!prefabs.length) {
             if (status) status.textContent = 'No prefabs found.';
             return;
         }
 
-        const grouped = new Map();
-        prefabs.forEach((prefab) => {
-            const category = prefab.category || 'Other';
-            if (!grouped.has(category)) grouped.set(category, []);
-            grouped.get(category).push(prefab);
-        });
-
-        const categories = [
-            ...PREFAB_CATEGORY_ORDER.filter((category) => grouped.has(category)),
-            ...Array.from(grouped.keys()).filter((category) => !PREFAB_CATEGORY_ORDER.includes(category)).sort(),
-        ];
-
-        categories.forEach((category) => {
-            const items = grouped.get(category) || [];
+        prefabRegistry.grouped(PREFAB_CATEGORY_ORDER).forEach(({ category, items }) => {
             const heading = document.createElement('div');
             heading.className = 'prefab-category-heading';
 
@@ -14414,4 +14465,3 @@ function wireExtractedModules() {
         forceExitGameplayForWorldLoad, updateGameplayUI, updateWorldPresentation,
     });
 }
-
