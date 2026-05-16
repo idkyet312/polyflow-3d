@@ -1,10 +1,12 @@
 import { MeshStandardNodeMaterial, IrradianceNode } from 'three/webgpu';
 import {
     texture, uniform, normalMap, vec2, vec4,
+    uv as uvNode,
     cameraProjectionMatrix, modelViewMatrix, positionLocal, normalLocal,
 } from 'three/tsl';
 import { Vector3, Matrix3, Color } from 'three';
 import { createPomUVNode, resolvePomQuality, POM_QUALITY } from '../materials/pomNode.js';
+import { untileTextureSample } from '../materials/untileUVNode.js';
 
 /**
  * MeshStandardNodeMaterial subclass that
@@ -33,6 +35,10 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
         // others are plain bag-of-state. rebuildPomGraph() reads them to
         // decide whether to install override nodes.
         this.heightMap = null;
+        // Optional AO map sampled at the parallax-offset UV (so joints stay
+        // occluded under POM). When POM is off, three's built-in aoMap +
+        // uv2 path handles it instead — set both to the same texture.
+        this.pomAOMap = null;
         this.pomEnabled = false;
         this.pomIntensity = 0.04;
         this.pomQuality = POM_QUALITY.MEDIUM;
@@ -78,42 +84,41 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
         const wantPom = !!(this.pomEnabled && this.heightMap);
         const quality = resolvePomQuality(this.pomQuality);
 
-        if (!wantPom) {
-            // Tear down: clear the override nodes so three.js falls back to
-            // its built-in sampling via material maps.
-            this.colorNode = null;
-            this.normalNode = null;
-            this.roughnessNode = null;
-            this.metalnessNode = null;
-            this.maskNode = null;
-            this.maskShadowNode = null;
-            this.depthNode = null;
-            this.aoNode = null;
-            this._pomCompiled = { enabled: false, quality: null, heightMap: null, depthWrite: false };
-            this.needsUpdate = true;
-            return;
+        // Sampling UV: parallax-marched when POM is on, the plain mesh UV
+        // when off. EITHER way every surface map is routed through the IQ
+        // untiler so brick/cobble repetition is hidden (the visible grid
+        // was there with POM off too). Opt out per material via
+        // `untileMaps = false` (set on non-tiling finite props).
+        let sampleUV;
+        let silhouette = null;
+        let hitDepth = null;
+        let shadow = null;
+        let coverage = null;
+        if (wantPom) {
+            const heightTextureNode = texture(this.heightMap);
+            ({ uv: sampleUV, silhouette, hitDepth, shadow, coverage } = createPomUVNode({
+                heightTextureNode,
+                intensityUniform: this._pomIntensityUniform,
+                quality,
+                lightDirTSUniform: this._silPomLightTSUniform,
+            }));
+        } else {
+            sampleUV = uvNode();
         }
 
-        // Build the parallax-offset UV (+ silhouette mask) from the heightmap
-        // march, then route every surface sampler through the offset UV so
-        // the textures fake depth.
-        const heightTextureNode = texture(this.heightMap);
-        const { uv: pomUV, silhouette, hitDepth, shadow } = createPomUVNode({
-            heightTextureNode,
-            intensityUniform: this._pomIntensityUniform,
-            quality,
-            lightDirTSUniform: this._silPomLightTSUniform,
-        });
-
+        const untileOn = this.untileMaps !== false;
+        const opts = { blendScale: 0.22, strength: untileOn ? 1.0 : 0.0 };
         // Dynamic/computed UV must go through .sample() — the constructor-arg
         // form (texture(map, uv)) mis-binds a derived UV node in this build
-        // and renders black. Use color-uniform × map@pomUV (NOT
+        // and renders black. Use color-uniform × map@sampleUV (NOT
         // materialColor, which already bakes in map@defaultUV → double map).
         if (this.map) {
             if (this.color && this._silPomColorUniform?.value?.copy) {
                 this._silPomColorUniform.value.copy(this.color);
             }
-            this.colorNode = this._silPomColorUniform.mul(texture(this.map).sample(pomUV));
+            this.colorNode = this._silPomColorUniform.mul(
+                untileTextureSample(texture(this.map), sampleUV, opts),
+            );
         } else {
             this.colorNode = null;
         }
@@ -122,57 +127,74 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
             const scale = this.normalScale
                 ? vec2(this.normalScale.x, this.normalScale.y)
                 : vec2(1, 1);
-            this.normalNode = normalMap(texture(this.normalMap).sample(pomUV), scale);
+            this.normalNode = normalMap(
+                untileTextureSample(texture(this.normalMap), sampleUV, opts),
+                scale,
+            );
         } else {
             this.normalNode = null;
         }
 
         this.roughnessNode = this.roughnessMap
-            ? texture(this.roughnessMap).sample(pomUV).g
+            ? untileTextureSample(texture(this.roughnessMap), sampleUV, opts).g
             : null;
         this.metalnessNode = this.metalnessMap
-            ? texture(this.metalnessMap).sample(pomUV).b
+            ? untileTextureSample(texture(this.metalnessMap), sampleUV, opts).b
             : null;
 
-        // Silhouette discard: maskNode keeps the fragment where the node is
-        // true (three discards on `mask.not()`). silhouette is true past the
-        // displaced contour, so keep = NOT silhouette. Same node for the
-        // shadow pass so cast shadows clip to the same contour.
-        const keepMask = silhouette.not();
-        this.maskNode = keepMask;
-        this.maskShadowNode = keepMask;
+        if (wantPom) {
+            // Silhouette discard: maskNode keeps the fragment where the
+            // node is true (three discards on `mask.not()`). silhouette is
+            // true past the displaced contour, so keep = NOT silhouette.
+            // Same node for the shadow pass so cast shadows clip alike.
+            const keepMask = silhouette.not();
+            this.maskNode = keepMask;
+            this.maskShadowNode = keepMask;
 
-        // Stage 5: internal self-shadow → ambient occlusion term.
-        this.aoNode = shadow;
+            // Stage 5: self-shadow → AO term, combined with the baked AO
+            // map (untiled at the parallax UV so mortar joints stay
+            // occluded as the surface displaces). coverage feathers the
+            // silhouette so the eroded contour reads as a soft contact
+            // line, not a 1-bit stair-step.
+            const edgeShade = shadow.mul(coverage);
+            this.aoNode = this.pomAOMap
+                ? edgeShade.mul(
+                    untileTextureSample(texture(this.pomAOMap), sampleUV, opts).r,
+                )
+                : edgeShade;
 
-        // Stage 4: rewrite fragment depth from the marched hit so the
-        // displaced surface z-fights/clips correctly against real
-        // geometry. localHit = surface pushed inward along the geometric
-        // normal by the tangent-space hit depth × height scale, then
-        // local→view→clip→NDC→[0,1]. Gated: Early-Z loss is opt-in.
-        if (this.pomDepthWrite) {
-            const localHit = positionLocal.sub(
-                normalLocal.mul(hitDepth.mul(this._pomIntensityUniform)),
-            );
-            const clip = cameraProjectionMatrix.mul(
-                modelViewMatrix.mul(vec4(localHit, 1.0)),
-            );
-            // WebGPU clip-space z is already in [0,1] after the perspective
-            // divide (unlike GL's [-1,1]). The classic *0.5+0.5 remap from
-            // GLSL POM tutorials pushes every fragment to [0.5,1] here and
-            // makes the surface fail the depth test → invisible. Use z/w
-            // directly, clamped to the valid range.
-            this.depthNode = clip.z.div(clip.w).clamp(0.0, 1.0);
+            // Stage 4: rewrite fragment depth from the marched hit so the
+            // displaced surface z-fights/clips correctly against real
+            // geometry. Gated: Early-Z loss is opt-in.
+            if (this.pomDepthWrite) {
+                const localHit = positionLocal.sub(
+                    normalLocal.mul(hitDepth.mul(this._pomIntensityUniform)),
+                );
+                const clip = cameraProjectionMatrix.mul(
+                    modelViewMatrix.mul(vec4(localHit, 1.0)),
+                );
+                // WebGPU clip-space z is already [0,1] post perspective
+                // divide; use z/w directly, clamped.
+                this.depthNode = clip.z.div(clip.w).clamp(0.0, 1.0);
+            } else {
+                this.depthNode = null;
+            }
         } else {
+            // POM off: no silhouette/depth rewrite. Maps above are still
+            // untiled — that's the whole point of this branch existing.
+            this.maskNode = null;
+            this.maskShadowNode = null;
             this.depthNode = null;
+            this.aoNode = null;
         }
 
         this._pomCompiled = {
-            enabled: true,
-            quality: quality.name,
-            heightMap: this.heightMap,
-            depthWrite: !!this.pomDepthWrite,
+            enabled: wantPom,
+            quality: wantPom ? quality.name : null,
+            heightMap: wantPom ? this.heightMap : null,
+            depthWrite: wantPom ? !!this.pomDepthWrite : false,
         };
+        this._graphBuilt = true;
         this.needsUpdate = true;
     }
 
@@ -198,7 +220,13 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
         const wantEnabled = !!(this.pomEnabled && this.heightMap);
         const wantQuality = resolvePomQuality(this.pomQuality).name;
         if (
-            snap.enabled !== wantEnabled
+            // Build at least once IF this material opts into untiling:
+            // even with POM off the graph then does the IQ map untiling,
+            // so the default (null nodes) is wrong and must be replaced.
+            // Non-untiling materials keep three.js's built-in sampling
+            // (no override, no behaviour change for props/ceiling).
+            (this.untileMaps === true && !this._graphBuilt)
+            || snap.enabled !== wantEnabled
             || snap.quality !== (wantEnabled ? wantQuality : null)
             || snap.heightMap !== (wantEnabled ? this.heightMap : null)
             || snap.depthWrite !== (wantEnabled ? !!this.pomDepthWrite : false)

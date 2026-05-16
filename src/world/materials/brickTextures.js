@@ -10,6 +10,112 @@ import * as THREE from 'three';
 
 const cache = new Map();
 
+// ── PolyHaven PBR streaming ────────────────────────────────────────────────
+// getBrickTextureSet stays SYNCHRONOUS (callers clone the result the same
+// frame). It returns the procedural set immediately, then asynchronously
+// fetches real photo-scanned PBR maps from PolyHaven's CORS-enabled CDN and
+// hot-swaps the decoded image into the cached texture AND every clone made
+// from it. Clones register via registerBrickClone(); on upgrade we copy the
+// new image onto each and flag needsUpdate so the GPU re-uploads.
+//
+// CC0 (public domain) — https://polyhaven.com/license
+
+const PH = (slug, map, ext, res = '2k') =>
+    `https://dl.polyhaven.org/file/ph-assets/Textures/${ext}/${res}/${slug}/${slug}_${map}_${res}.${ext}`;
+
+// slug per variant. _diff sRGB, _nor_gl/_disp/_rough linear.
+const PH_SLUG = { wall: 'brick_wall_006', floor: 'cobblestone_floor_08', accent: 'red_brick' };
+
+// srcTexture → Set<cloneTexture>. WeakRefs not needed: level teardown drops
+// the whole module-level cache lifetime is the page.
+const cloneRegistry = new Map();
+
+// 16 is the universal hardware cap for texture anisotropy; every WebGL2/
+// WebGPU GPU clamps to its own max ≤16, so this is safe without a
+// renderer handle. Kills the crisp tile-seam shimmer at grazing angles.
+const MAX_ANISOTROPY = 16;
+
+// Re-assert the sampler state a tiling clone needs. .clone() copies it,
+// but a later .image swap (async PolyHaven upgrade) can land with the
+// clone still on three.js defaults (ClampToEdge, no mips, aniso 1) →
+// a hard line at every tile boundary + crisp seams at grazing angles.
+// Idempotent; safe to call on every image change.
+function enforceTilingSampler(tex) {
+    if (!tex) return;
+    // Plain Repeat. (MirroredRepeat removes the seam but introduces an
+    // obvious kaleidoscope/butterfly symmetry every other tile, which
+    // reads worse than the seam — the repetition is broken up in-shader
+    // via UV-domain variation instead, see DDGIMeshStandardNodeMaterial.)
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.anisotropy = MAX_ANISOTROPY;
+    tex.needsUpdate = true;
+}
+
+export function registerBrickClone(srcTex, cloneTex) {
+    let s = cloneRegistry.get(srcTex);
+    if (!s) { s = new Set(); cloneRegistry.set(srcTex, s); }
+    s.add(cloneTex);
+    // If the upgrade already landed before this clone registered, copy now.
+    if (srcTex.userData?.phUpgraded && srcTex.image) {
+        cloneTex.image = srcTex.image;
+        enforceTilingSampler(cloneTex);
+    }
+}
+
+function loadImage(url) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`brick PBR load failed: ${url}`));
+        img.src = url;
+    });
+}
+
+function upgradeTexture(srcTex, img, { srgb }) {
+    srcTex.image = img;
+    srcTex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    enforceTilingSampler(srcTex);
+    srcTex.userData = srcTex.userData || {};
+    srcTex.userData.phUpgraded = true;
+    const clones = cloneRegistry.get(srcTex);
+    if (clones) {
+        for (const c of clones) {
+            c.image = img;
+            c.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+            // Re-assert AFTER the image swap: the clone's repeat (set by
+            // applyBrickWorldScale at addBox time) is preserved by .set();
+            // this only restores wrap/mips/aniso the swap may have reset.
+            enforceTilingSampler(c);
+        }
+    }
+}
+
+async function streamPolyHavenInto(variant, set) {
+    const slug = PH_SLUG[variant] || PH_SLUG.wall;
+    try {
+        const [diff, nor, disp, rough, ao] = await Promise.all([
+            loadImage(PH(slug, 'diff', 'jpg')),
+            loadImage(PH(slug, 'nor_gl', 'jpg')),
+            loadImage(PH(slug, 'disp', 'png')),
+            loadImage(PH(slug, 'rough', 'jpg')),
+            loadImage(PH(slug, 'ao', 'jpg')),
+        ]);
+        upgradeTexture(set.albedo, diff, { srgb: true });
+        upgradeTexture(set.normal, nor, { srgb: false });
+        upgradeTexture(set.height, disp, { srgb: false });
+        upgradeTexture(set.roughness, rough, { srgb: false });
+        upgradeTexture(set.ao, ao, { srgb: false });
+    } catch (e) {
+        // Network/CORS failure → keep procedural set. Non-fatal.
+        console.warn('[brickTextures] PolyHaven stream failed, using procedural fallback:', e.message);
+    }
+}
+
 function drawBricks({
     size = 512,
     rows = 6,
@@ -36,8 +142,14 @@ function drawBricks({
 
     const base = new THREE.Color(baseColor);
     // Hash → deterministic per-brick jitter so the level reloads identical.
+    // Two decorrelated streams (different salt) drive lightness vs hue so
+    // bricks don't shift hue and value in lock-step.
     const jitter = (r, c) => {
         const h = ((r * 73856093) ^ (c * 19349663)) >>> 0;
+        return (h / 0xffffffff) * 2 - 1; // -1..1
+    };
+    const jitter2 = (r, c) => {
+        const h = ((r * 83492791) ^ (c * 49979687) ^ 0x9e3779b9) >>> 0;
         return (h / 0xffffffff) * 2 - 1; // -1..1
     };
 
@@ -50,8 +162,14 @@ function drawBricks({
             const w = cellW - padX * 2;
             const h = cellH - padY * 2;
             if (x + w < 0 || x > size) continue;
-            const j = jitter(r, c) * colorJitter;
-            const col = base.clone().offsetHSL(0, 0, j);
+            // Lightness jitter (broad), plus a smaller decorrelated hue +
+            // saturation shift so the wall reads as many fired clay bricks
+            // rather than one tinted tile. Hue swing kept tight (±0.02) so
+            // it stays the same material, just kiln-varied.
+            const jL = jitter(r, c) * colorJitter;
+            const jH = jitter2(r, c) * 0.02;
+            const jS = jitter2(c, r) * 0.10;
+            const col = base.clone().offsetHSL(jH, jS, jL);
             ctx.fillStyle = `#${col.getHexString()}`;
             ctx.fillRect(x, y, w, h);
         }
@@ -212,10 +330,124 @@ function makeNormal(heightTexture) {
     return tex;
 }
 
+function makeRoughness(opts) {
+    // Roughness field: mortar is matte/very rough, fired-clay brick faces
+    // are a touch glossier, with per-brick jitter so specular highlights
+    // don't sweep across the wall as one uniform sheet. White = rough,
+    // black = smooth (three.js samples green; greyscale is fine).
+    const size = opts.size || 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    const rows = opts.rows || 6;
+    const cols = opts.cols || 4;
+    const mortar = opts.mortar ?? 0.06;
+    const rowOffset = opts.rowOffset ?? 0.5;
+    const cellH = size / rows;
+    const cellW = size / cols;
+    const padX = cellW * mortar * 0.5;
+    const padY = cellH * mortar * 0.5;
+
+    // Mortar background — rough.
+    ctx.fillStyle = '#e6e6e6';
+    ctx.fillRect(0, 0, size, size);
+
+    const jit = (r, c) => {
+        const h = ((r * 374761393) ^ (c * 668265263) ^ 0x85ebca6b) >>> 0;
+        return (h / 0xffffffff) * 2 - 1; // -1..1
+    };
+
+    for (let r = 0; r < rows; r++) {
+        const xOffset = (r % 2 === 0) ? 0 : cellW * rowOffset;
+        for (let c = -1; c <= cols; c++) {
+            const x = c * cellW + xOffset + padX;
+            const y = r * cellH + padY;
+            const w = cellW - padX * 2;
+            const h = cellH - padY * 2;
+            if (x + w < 0 || x > size) continue;
+            // Brick face roughness ~0.55 ± 0.12 → values 0.43..0.67.
+            const v = Math.round((0.55 + jit(r, c) * 0.12) * 255);
+            ctx.fillStyle = `rgb(${v},${v},${v})`;
+            ctx.fillRect(x, y, w, h);
+        }
+    }
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.anisotropy = 8;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+function makeAO(opts) {
+    // Ambient-occlusion field: brick faces ~unoccluded (white), mortar
+    // joints darkened with a soft falloff into the recess so the joint
+    // reads as a shadowed crevice even before any light hits it. White =
+    // fully lit, dark = occluded (multiplied into the diffuse/ambient).
+    const size = opts.size || 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    const rows = opts.rows || 6;
+    const cols = opts.cols || 4;
+    const mortar = opts.mortar ?? 0.06;
+    const rowOffset = opts.rowOffset ?? 0.5;
+    const cellH = size / rows;
+    const cellW = size / cols;
+    const padX = cellW * mortar * 0.5;
+    const padY = cellH * mortar * 0.5;
+
+    // Mortar background — occluded.
+    ctx.fillStyle = '#4a4a4a';
+    ctx.fillRect(0, 0, size, size);
+
+    // Soft AO gradient ring inside each brick: edges slightly darkened
+    // (light can't fully reach the joint corner), flat bright center.
+    const aoEdge = Math.max(2, Math.min(cellW, cellH) * 0.16);
+
+    for (let r = 0; r < rows; r++) {
+        const xOffset = (r % 2 === 0) ? 0 : cellW * rowOffset;
+        for (let c = -1; c <= cols; c++) {
+            const x = c * cellW + xOffset + padX;
+            const y = r * cellH + padY;
+            const w = cellW - padX * 2;
+            const h = cellH - padY * 2;
+            if (x + w < 0 || x > size) continue;
+            const b = Math.min(aoEdge, w * 0.45, h * 0.45);
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(x, y, w, h);
+
+            // Darken just the brick perimeter toward the joint.
+            const ramp = (g0, g1) => { const g = g0; g.addColorStop(0, '#9a9a9a'); g.addColorStop(1, '#ffffff'); return g; };
+            ctx.fillStyle = ramp(ctx.createLinearGradient(x, 0, x + b, 0));
+            ctx.fillRect(x, y, b, h);
+            ctx.fillStyle = ramp(ctx.createLinearGradient(x + w, 0, x + w - b, 0));
+            ctx.fillRect(x + w - b, y, b, h);
+            ctx.fillStyle = ramp(ctx.createLinearGradient(0, y, 0, y + b));
+            ctx.fillRect(x, y, w, b);
+            ctx.fillStyle = ramp(ctx.createLinearGradient(0, y + h, 0, y + h - b));
+            ctx.fillRect(x, y + h - b, w, b);
+        }
+    }
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.NoColorSpace;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.anisotropy = 8;
+    tex.needsUpdate = true;
+    return tex;
+}
+
 /**
- * Returns { albedo, normal, height } — three.js textures suitable for a
- * MeshStandardMaterial / DDGIMeshStandardNodeMaterial. The set is cached
- * per-`variant` key so repeated calls share GPU memory.
+ * Returns { albedo, normal, height, roughness, ao } — three.js textures
+ * suitable for a MeshStandardMaterial / DDGIMeshStandardNodeMaterial. The
+ * set is cached per-`variant` key so repeated calls share GPU memory.
  *
  * Variants tune the brick layout for floor vs wall vs accent stripe usage.
  */
@@ -245,7 +477,15 @@ export function getBrickTextureSet(variant = 'wall') {
     const albedo = makeAlbedo(opts);
     const height = makeHeight(opts);
     const normal = makeNormal(height);
-    const set = { albedo, normal, height };
+    const roughness = makeRoughness(opts);
+    const ao = makeAO(opts);
+    const set = { albedo, normal, height, roughness, ao };
     cache.set(variant, set);
+
+    // Fire-and-forget: replace the procedural maps with photo-scanned
+    // PolyHaven PBR as soon as they decode. Until then the level renders
+    // with the procedural set (no pop-in stall, graceful offline fallback).
+    streamPolyHavenInto(variant, set);
+
     return set;
 }

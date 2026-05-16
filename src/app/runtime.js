@@ -46,7 +46,7 @@ import { createPostProcessVolumeManager } from '../world/postProcessVolume.js';
 import { getDDGIManager } from '../world/gi/ddgiManager.js';
 import { createDDGIRayDebug } from '../world/gi/ddgiRayDebug.js';
 import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
-import { getBrickTextureSet } from '../world/materials/brickTextures.js';
+import { getBrickTextureSet, registerBrickClone } from '../world/materials/brickTextures.js';
 import {
     createActor,
     createSceneSystem,
@@ -9987,42 +9987,107 @@ function createBrickRoomLevel() {
     const floorSet = getBrickTextureSet('floor');
     const accentSet = getBrickTextureSet('accent');
 
-    const makeBrickMaterial = (set, { repeatU = 2, repeatV = 2, color = '#ffffff' } = {}) => {
+    const makeBrickMaterial = (set, {
+        repeatU = 2, repeatV = 2, color = '#ffffff',
+        normalScale = 1.2, pomIntensity = 0.03, tileM = null,
+    } = {}) => {
         // Clone the shared textures so per-material UV repeats don't fight
         // each other — three.js's repeat lives on the texture, not the
         // material. Cloning is cheap; the underlying canvas/image is shared.
         const albedo = set.albedo.clone();
         const normal = set.normal.clone();
         const height = set.height.clone();
-        for (const t of [albedo, normal, height]) {
+        const roughness = set.roughness.clone();
+        const ao = set.ao.clone();
+        // Subscribe clones to the async PolyHaven PBR upgrade.
+        registerBrickClone(set.albedo, albedo);
+        registerBrickClone(set.normal, normal);
+        registerBrickClone(set.height, height);
+        registerBrickClone(set.roughness, roughness);
+        registerBrickClone(set.ao, ao);
+        for (const t of [albedo, normal, height, roughness, ao]) {
             t.wrapS = t.wrapT = THREE.RepeatWrapping;
             t.repeat.set(repeatU, repeatV);
             t.needsUpdate = true;
         }
         const mat = new DDGIMeshStandardNodeMaterial({
             color: new THREE.Color(color),
-            roughness: 0.85,
+            roughness: 1.0, // roughnessMap is multiplicative — keep scalar at 1
             metalness: 0.0,
         });
         mat.map = albedo;
         mat.normalMap = normal;
-        mat.normalScale = new THREE.Vector2(1.2, 1.2);
+        mat.normalScale = new THREE.Vector2(normalScale, normalScale);
+        mat.roughnessMap = roughness;
         mat.heightMap = height;
+        // pomAOMap → sampled at the parallax UV when POM is on. aoMap → the
+        // built-in uv2 path used when POM is off (addBox copies uv→uv2).
+        mat.pomAOMap = ao;
+        mat.aoMap = ao;
+        mat.aoMapIntensity = 1.0;
         // POM is opt-in via the global toggle; the material is fully equipped
         // here so flipping World Options → Parallax → On lights it up
         // immediately. Default-off so the level still looks correct without
         // the effect.
         mat.pomEnabled = false;
-        mat.pomIntensity = 0.05;
-        mat.pomQuality = 'medium';
+        // Real PolyHaven disp maps use the full 0..1 range, so a smaller
+        // scale than the procedural heightfield needed. ~0.03 reads as
+        // deep mortar joints without grazing-angle smearing.
+        mat.pomIntensity = pomIntensity;
+        mat.pomQuality = 'high';
         mat.pomDepthWrite = true;
-        mat.userData.ownedMaps = [albedo, normal, height];
+        mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
         mat.userData.silPom = true;
+        // IQ untiling: these are heavily-tiled brick/cobble; opt in so the
+        // visible repeat grid is broken up (works POM on AND off).
+        mat.untileMaps = true;
+        // Opt into world-scale UVs: addBox() derives texture.repeat from the
+        // box dimensions so a brick is the same physical size on every
+        // surface regardless of wall/floor extent. tileM overrides the
+        // default BRICK_TILE_M per-material (cobble floor needs bigger
+        // tiles than wall brick or it reads as noisy fish-scales).
+        mat.userData.brickWorldScale = true;
+        if (tileM) mat.userData.brickTileM = tileM;
         return mat;
+    };
+
+    // Meters of surface covered by one full brick-texture tile. Single knob
+    // → constant brick size across the whole level. Larger ⇒ bigger, fewer
+    // bricks. PolyHaven brick_wall_006 is ~6 courses/tile; 2.6 m ≈ 12 cm
+    // courses (chunkier, requested).
+    const BRICK_TILE_M = 2.6;
+
+    const applyBrickWorldScale = (material, size) => {
+        if (!material?.userData?.brickWorldScale) return;
+        const [sx, sy, sz] = size;
+        // BoxGeometry shares one UV set across all faces, so pick the two
+        // dominant extents. Floor-like (thin in Y) tiles over X×Z; wall-like
+        // tiles over its longest horizontal span × height.
+        const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
+        const tileM = material.userData.brickTileM || BRICK_TILE_M;
+        // Round to a WHOLE number of tiles per face. Fractional repeats cut
+        // a tile mid-pattern at the box edge → visible seam where surfaces
+        // meet; an integer count makes the RepeatWrapping wrap land exactly
+        // on the edge, so adjacent faces line up seamlessly.
+        const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
+        const repV = Math.max(
+            Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1,
+        );
+        for (const t of material.userData.ownedMaps || []) {
+            t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            t.repeat.set(repU, repV);
+            t.needsUpdate = true;
+        }
     };
 
     const addBox = (name, size, position, material, { rotationY = 0 } = {}) => {
         const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+        applyBrickWorldScale(material, size);
+        // aoMap (POM-off path) samples uv2; BoxGeometry only ships uv, so
+        // mirror it. POM-on path uses pomAOMap at the parallax UV instead.
+        if (geometry.attributes.uv && !geometry.attributes.uv2) {
+            geometry.setAttribute('uv2', geometry.attributes.uv);
+        }
         // Real per-vertex tangents so silhouette POM uses a stable TBN
         // instead of the screen-derivative fallback.
         geometry.computeTangents();
@@ -10041,7 +10106,16 @@ function createBrickRoomLevel() {
         'brick-floor',
         [ROOM_W, WALL_THICKNESS, ROOM_D],
         [0, -WALL_THICKNESS * 0.5, 0],
-        makeBrickMaterial(floorSet, { repeatU: 4, repeatV: 4 }),
+        // Cobblestone: bigger tile (4 m vs 1.6 m brick) so stones read at
+        // human scale instead of a dense fish-scale shimmer; softer normal
+        // and shallower parallax so grazing angles don't smear the relief.
+        makeBrickMaterial(floorSet, {
+            repeatU: 4, repeatV: 4,
+            // Smaller tile ⇒ more cobble repeats across the floor (denser,
+            // requested). Rounded to whole tiles by applyBrickWorldScale so
+            // the X and Z edges stay seamless.
+            tileM: 2.2, normalScale: 0.6, pomIntensity: 0.015,
+        }),
     );
 
     // Ceiling — keep DDGI surface; no parallax (it's overhead, not great
@@ -10284,28 +10358,68 @@ function createDoomTestLevel() {
         const albedo = set.albedo.clone();
         const normal = set.normal.clone();
         const height = set.height.clone();
-        for (const t of [albedo, normal, height]) {
+        const roughness = set.roughness.clone();
+        const ao = set.ao.clone();
+        registerBrickClone(set.albedo, albedo);
+        registerBrickClone(set.normal, normal);
+        registerBrickClone(set.height, height);
+        registerBrickClone(set.roughness, roughness);
+        registerBrickClone(set.ao, ao);
+        for (const t of [albedo, normal, height, roughness, ao]) {
             t.wrapS = t.wrapT = THREE.RepeatWrapping;
             t.repeat.set(repeatU, repeatV);
             t.needsUpdate = true;
         }
         const mat = new DDGIMeshStandardNodeMaterial({
             color: new THREE.Color(color),
-            roughness: rough,
+            roughness: 1.0, // roughnessMap is multiplicative — keep scalar at 1
             metalness: metal,
         });
         mat.map = albedo;
         mat.normalMap = normal;
         mat.normalScale = new THREE.Vector2(1.1, 1.1);
+        mat.roughnessMap = roughness;
         mat.heightMap = height;
+        // AO must be assigned BEFORE rebuildPomGraph() — aoNode reads
+        // pomAOMap at graph-build time.
+        mat.pomAOMap = ao;
+        mat.aoMap = ao;
+        mat.aoMapIntensity = 1.0;
         mat.pomEnabled = true;
-        mat.pomIntensity = 0.08;
+        // Real PolyHaven disp = full 0..1 range; smaller scale than the
+        // procedural field. 0.035 = deep joints, minimal smear.
+        mat.pomIntensity = 0.035;
         mat.pomQuality = 'high';
         mat.pomDepthWrite = true;
+        // IQ untiling on before the build so the graph bakes it in.
+        mat.untileMaps = true;
         mat.rebuildPomGraph?.();
-        mat.userData.ownedMaps = [albedo, normal, height];
+        mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
         mat.userData.silPom = true;
+        mat.userData.brickWorldScale = true;
         return mat;
+    };
+
+    const BRICK_TILE_M = 1.6;
+
+    const applyBrickWorldScale = (material, size) => {
+        if (!material?.userData?.brickWorldScale) return;
+        const [sx, sy, sz] = size;
+        const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
+        const tileM = material.userData.brickTileM || BRICK_TILE_M;
+        // Round to a WHOLE number of tiles per face. Fractional repeats cut
+        // a tile mid-pattern at the box edge → visible seam where surfaces
+        // meet; an integer count makes the RepeatWrapping wrap land exactly
+        // on the edge, so adjacent faces line up seamlessly.
+        const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
+        const repV = Math.max(
+            Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1,
+        );
+        for (const t of material.userData.ownedMaps || []) {
+            t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            t.repeat.set(repU, repV);
+            t.needsUpdate = true;
+        }
     };
 
     const flatMat = (color, { rough = 0.85, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
@@ -10323,6 +10437,10 @@ function createDoomTestLevel() {
 
     const addBox = (name, size, position, material, { rotationY = 0, cast = true, receive = true } = {}) => {
         const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+        applyBrickWorldScale(material, size);
+        if (geometry.attributes.uv && !geometry.attributes.uv2) {
+            geometry.setAttribute('uv2', geometry.attributes.uv);
+        }
         // Real per-vertex tangents so silhouette POM uses a stable TBN
         // instead of the screen-derivative fallback.
         geometry.computeTangents();

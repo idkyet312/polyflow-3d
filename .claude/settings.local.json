@@ -46,7 +46,8 @@
       "Bash(timeout 90 node __ssdm_probe.mjs)",
       "Bash(netstat -ano)",
       "Bash(node -e \"const{chromium}=require\\('playwright'\\);chromium.launch\\({channel:'chrome'}\\).then\\(b=>{console.log\\('system chrome OK'\\);return b.close\\(\\)}\\).catch\\(e=>console.log\\('no system chrome:',e.message.split\\('\\\\n'\\)[0]\\)\\)\")",
-      "Bash(timeout 100 node __ssdm_probe.mjs)"
+      "Bash(timeout 100 node __ssdm_probe.mjs)",
+      "Bash(node -e \"const t=require\\('three/tsl'\\); console.log\\('clamp',typeof t.clamp,'smoothstep',typeof t.smoothstep,'min',typeof t.min\\);\")"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"
