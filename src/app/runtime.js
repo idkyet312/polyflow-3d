@@ -4202,10 +4202,105 @@ function equipDoomShotgun(sourceActor = null) {
     gameplay.weapon.nextShotAt = 0;
     gameplay.weapon.sourceActorId = sourceActor?.id || '';
 }
+if (typeof window !== 'undefined') {
+    window.equipDoomShotgun = equipDoomShotgun;
+}
 
 function updateDoomShotgunHud(now = performance.now?.() || Date.now()) {
     const flash = gameplay.weapon.mesh?.userData?.flash;
     if (flash) flash.visible = now < (gameplay.weapon.mesh.userData.flashUntil || 0);
+}
+
+// Low-level primitive: spawn ONE pellet from the camera, aimed forward with
+// an optional spread offset (in the camera's right/up plane). Every numeric
+// is overridable so the prefab user script owns ALL weapon behavior (pellet
+// count, spread pattern, burst, cooldown, damage). Engine keeps no weapon
+// logic — just camera math + projectile pooling. spreadX/spreadY are the
+// per-pellet aim offsets; pass them from whatever pattern the script wants.
+function spawnDoomPellet(opts = {}) {
+    if (!camera) return false;
+    const d = DOOM_SHOTGUN_PREFAB;
+    const spreadX = Number(opts.spreadX) || 0;
+    const spreadY = Number(opts.spreadY) || 0;
+    camera.getWorldDirection(tempVectorC).normalize();
+    tempVectorD.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+    tempVectorE.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
+    const origin = camera.localToWorld(tempVectorA.set(0, -0.08, -0.85));
+    const velocity = tempVectorF.copy(tempVectorC)
+        .addScaledVector(tempVectorD, spreadX)
+        .addScaledVector(tempVectorE, spreadY)
+        .normalize();
+    spawnShooterProjectile(origin, null, {
+        velocity,
+        name: 'Doom Shotgun Pellet',
+        poolKey: 'doomShotgunPellets',
+        maxPoolSize: opts.poolSize ?? d.bulletPoolSize,
+        radius: opts.radius ?? 0.065,
+        color: opts.color ?? 0xfff1a8,
+        speed: opts.speed ?? d.projectileSpeed,
+        life: opts.life ?? d.projectileLife,
+        damage: opts.damage ?? d.damage,
+        hitRadius: opts.hitRadius ?? d.hitRadius,
+        hitsPlayer: opts.hitsPlayer ?? false,
+        damagesShooters: opts.damagesShooters ?? true,
+        emissiveIntensity: opts.emissiveIntensity ?? 4.8,
+        light: opts.light ?? false,
+    });
+    return true;
+}
+// Show the held-weapon muzzle flash for `ms` from now (purely cosmetic).
+function flashDoomShotgun(ms = DOOM_SHOTGUN_PREFAB.flashMs, now = performance.now?.() || Date.now()) {
+    if (gameplay.weapon.mesh?.userData) {
+        gameplay.weapon.mesh.userData.flashUntil = now + ms;
+    }
+    updateDoomShotgunHud(now);
+}
+// Procedural shotgun blast: a short filtered noise burst + a low thump.
+// `volume` 0..1 scales loudness. Synthesized so there's no asset to ship.
+function playDoomShotgunSound(volume = 1) {
+    const context = runtimeAudio.listener?.context;
+    if (!context || context.state !== 'running') return;
+    const t = context.currentTime;
+    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+
+    // Noise burst (the "crack").
+    const dur = 0.22;
+    const buffer = context.createBuffer(1, Math.ceil(context.sampleRate * dur), context.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    }
+    const noise = context.createBufferSource();
+    noise.buffer = buffer;
+    const noiseFilter = context.createBiquadFilter();
+    noiseFilter.type = 'lowpass';
+    noiseFilter.frequency.setValueAtTime(2600, t);
+    noiseFilter.frequency.exponentialRampToValueAtTime(420, t + dur);
+    const noiseGain = context.createGain();
+    noiseGain.gain.setValueAtTime(0.55 * vol, t);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    noise.connect(noiseFilter).connect(noiseGain).connect(context.destination);
+    noise.start(t);
+    noise.stop(t + dur);
+
+    // Low thump (the "boom" body).
+    const osc = context.createOscillator();
+    const oscGain = context.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(140, t);
+    osc.frequency.exponentialRampToValueAtTime(48, t + 0.16);
+    oscGain.gain.setValueAtTime(0.5 * vol, t);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    osc.connect(oscGain).connect(context.destination);
+    osc.start(t);
+    osc.stop(t + 0.19);
+}
+if (typeof window !== 'undefined') {
+    window.spawnDoomPellet = spawnDoomPellet;
+    window.flashDoomShotgun = flashDoomShotgun;
+    window.playDoomShotgunSound = playDoomShotgunSound;
+    // Defaults the script can read instead of hardcoding numbers.
+    window.DOOM_SHOTGUN_DEFAULTS = Object.freeze({ ...DOOM_SHOTGUN_PREFAB });
 }
 
 function updateStraightGuns() {
@@ -4215,43 +4310,33 @@ function updateStraightGuns() {
     const now = performance.now?.() || Date.now();
     if (gameplay.weapon.type === 'doomShotgun') {
         updateDoomShotgunHud(now);
-        if (!gameplay.input.firePressed) return;
-        gameplay.input.firePressed = false;
-        if ((gameplay.weapon.nextShotAt || 0) > now) return;
-
-        const config = DOOM_SHOTGUN_PREFAB;
-        camera.getWorldDirection(tempVectorC).normalize();
-        tempVectorD.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
-        tempVectorE.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
-        const origin = camera.localToWorld(tempVectorA.set(0, -0.08, -0.85));
-        for (let i = 0; i < config.pellets; i++) {
-            const [sx, sy] = DOOM_SHOTGUN_PELLET_PATTERN[i % DOOM_SHOTGUN_PELLET_PATTERN.length];
-            const velocity = tempVectorF.copy(tempVectorC)
-                .addScaledVector(tempVectorD, sx * config.spread)
-                .addScaledVector(tempVectorE, sy * config.spread)
-                .normalize();
-            spawnShooterProjectile(origin, null, {
-                velocity,
-                name: 'Doom Shotgun Pellet',
-                poolKey: 'doomShotgunPellets',
-                maxPoolSize: config.bulletPoolSize,
-                radius: 0.065,
-                color: 0xfff1a8,
-                speed: config.projectileSpeed,
-                life: config.projectileLife,
-                damage: config.damage,
-                hitRadius: config.hitRadius,
-                hitsPlayer: false,
-                damagesShooters: true,
-                emissiveIntensity: 4.8,
-                light: false,
-            });
+        // ALL weapon behavior (pellet count, spread, burst, cooldown) lives in
+        // the pickup prefab's user script. Drive that actor's Tick every frame
+        // while equipped. Only if the user cleared the script do we run a
+        // minimal built-in blast so the gun still works.
+        const srcId = gameplay.weapon.sourceActorId;
+        let srcActor = null;
+        if (srcId) {
+            const guns = getGameplayPrefabActors('doomShotgunSprite', _scratchPrefab1);
+            for (let i = 0; i < guns.length; i++) {
+                if (guns[i]?.id === srcId) { srcActor = guns[i]; break; }
+            }
         }
-        gameplay.weapon.nextShotAt = now + config.cooldownMs;
-        if (gameplay.weapon.mesh?.userData) {
-            gameplay.weapon.mesh.userData.flashUntil = now + config.flashMs;
+        if (srcActor && hasScriptedTickHandler(srcActor)) {
+            runObjectEventScript(srcActor, 'tick', { deltaTime: 0 });
+        } else if (gameplay.input.firePressed && (gameplay.weapon.nextShotAt || 0) <= now) {
+            gameplay.input.firePressed = false;
+            const d = DOOM_SHOTGUN_PREFAB;
+            for (let i = 0; i < d.pellets; i++) {
+                const [sx, sy] = DOOM_SHOTGUN_PELLET_PATTERN[i % DOOM_SHOTGUN_PELLET_PATTERN.length];
+                spawnDoomPellet({ spreadX: sx * d.spread, spreadY: sy * d.spread });
+            }
+            gameplay.weapon.nextShotAt = now + d.cooldownMs;
+            flashDoomShotgun(d.flashMs, now);
+            playDoomShotgunSound(1);
+        } else if (gameplay.input.firePressed) {
+            gameplay.input.firePressed = false;
         }
-        updateDoomShotgunHud(now);
         return;
     }
 
@@ -4539,6 +4624,7 @@ function spawnGameplayPrefab(type) {
         ensureActorIdentity(actor);
         setActorComponentFlags(actor, { collision: false, physics: false, scripts: false });
         tagGameplayPrefabActor(actor, type, { triggerRadius: 0.7, groundOffset: 0.7 });
+        attachDefaultPrefabScript(actor, DOOM_SHOTGUN_USER_SCRIPT);
     } else if (type === 'doomEnemy') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -4948,6 +5034,15 @@ function hasScriptedTriggerHandler(prop) {
     return /\bfunction\s+OnTrigger(Exit)?\s*\(/.test(source);
 }
 
+function hasScriptedTickHandler(prop) {
+    const tick = prop?.scripts?.tick;
+    if (!tick?.enabled) return false;
+    if (typeof tick.handles?.Tick === 'function') return true;
+    // Handles populate asynchronously — fall back to a source check so the
+    // engine doesn't run its default fire before the script is ready.
+    return /\bfunction\s+Tick\s*\(/.test(tick.source || '');
+}
+
 // Reused per-frame subject descriptor for processGameplayPrefabs to avoid
 // allocating a fresh object + Vector3 every frame.
 const _gameplaySubjectScratch = { position: new THREE.Vector3(), health: 0 };
@@ -5018,6 +5113,12 @@ function processGameplayPrefabs() {
     actors = getGameplayPrefabActors('doomShotgunSprite', _scratchPrefab1);
     for (let i = 0; i < actors.length; i++) {
         const weapon = actors[i];
+        // User script (OnTrigger) owns pickup when present; engine default
+        // only runs as fallback if the script was cleared.
+        if (hasScriptedTriggerHandler(weapon)) {
+            dispatchTriggerForActor(weapon, subjectPosition, subject);
+            continue;
+        }
         const mesh = getActorRenderObject(weapon);
         if (!mesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
         weapon.userData.collected = true;
@@ -13145,6 +13246,70 @@ const TELEPORTER_USER_SCRIPT = `function OnTrigger(subject) {
 
     Self.userData._tpCooldownUntil = now + 900;
     if (destinationActor) destinationActor.userData._tpCooldownUntil = now + 900;
+}`;
+
+const DOOM_SHOTGUN_USER_SCRIPT = `// ===== DOOM SHOTGUN — all weapon logic lives here. Edit freely. =====
+// OnTrigger: walk over the pickup -> equip.
+// Tick: runs every frame while equipped -> all firing behavior.
+// Engine only provides primitives:
+//   window.spawnDoomPellet({ spreadX, spreadY, speed, damage, ... }) -> 1 pellet
+//   window.flashDoomShotgun(ms)                                      -> muzzle flash
+//   window.playDoomShotgunSound(volume)                              -> blast sfx
+//   window.equipDoomShotgun(Self)                                    -> equip
+//   window.DOOM_SHOTGUN_DEFAULTS                                     -> stock numbers
+
+// ---- TUNABLES: change anything here ----
+const SHOTS_PER_BURST = 1;     // bullets per fire press (1 = no burst)
+const BURST_GAP_MS    = 90;    // delay between burst shots
+const COOLDOWN_MS     = 760;   // lockout after a burst finishes
+const PELLETS         = 7;     // pellets per shot (1 = single bullet)
+const SPREAD          = 0.075; // pellet cone size
+const VOLUME          = 1.0;   // blast sound loudness, 0..1 (0 = mute)
+const PELLET_PATTERN  = [      // per-pellet [x, y] offsets, scaled by SPREAD
+    [0, 0], [-0.65, -0.2], [0.65, -0.18], [-0.35, 0.42],
+    [0.38, 0.38], [-0.95, 0.16], [0.92, 0.12],
+];
+
+function OnTrigger(subject) {
+    if (Self?.userData?.collected) return;
+    const mesh = object || Self?.mesh;
+    if (!mesh?.visible) return;
+    Self.userData.collected = true;
+    mesh.visible = false;
+    window.equipDoomShotgun?.(Self);
+}
+
+function fireOneShot() {
+    for (let i = 0; i < PELLETS; i++) {
+        const p = PELLET_PATTERN[i % PELLET_PATTERN.length];
+        window.spawnDoomPellet?.({ spreadX: p[0] * SPREAD, spreadY: p[1] * SPREAD });
+    }
+    window.flashDoomShotgun?.(85);
+    window.playDoomShotgunSound?.(VOLUME);
+}
+
+function Tick(DeltaTime) {
+    if (gameplay?.weapon?.type !== 'doomShotgun') return;
+
+    const now = performance.now();
+    const ud = Self.userData;
+
+    // Queue a burst on fire press, unless still cooling down.
+    if (gameplay.input.firePressed) {
+        gameplay.input.firePressed = false;
+        if ((ud._cooldownUntil || 0) <= now && (ud._burstLeft || 0) <= 0) {
+            ud._burstLeft = SHOTS_PER_BURST;
+            ud._nextShotAt = now;
+        }
+    }
+
+    // Drive the queued burst.
+    if ((ud._burstLeft || 0) > 0 && now >= (ud._nextShotAt || 0)) {
+        fireOneShot();
+        ud._burstLeft -= 1;
+        ud._nextShotAt = now + BURST_GAP_MS;
+        if (ud._burstLeft <= 0) ud._cooldownUntil = now + COOLDOWN_MS;
+    }
 }`;
 
 const SHOOTER_AI_USER_SCRIPT = `function Tick(DeltaTime) {
