@@ -108,15 +108,27 @@ export function snapshotSceneState() {
         activeActorId: objectScriptState.targetPropId || '',
         scene: exportWorldToJSON(),
     };
+    const acts = pieSceneSnapshot.scene?.actors || [];
+    console.log('[SNAP] captured actors =', acts.length,
+        '| gameplayPrefabs =',
+        acts.filter((a) => a?.userData?.gameplayPrefab)
+            .map((a) => a.userData.gameplayPrefab));
 }
 
+// Returns a Promise that resolves once the world reload + actor respawn is
+// complete. Callers that run actor-dependent cleanup (collision repair,
+// per-level state resets) MUST await/chain this — loadWorldFromJSON is
+// async, so work queued synchronously after a bare restoreSceneState() call
+// runs against the OLD actors that are about to be wiped/replaced.
+// Resolves (not rejects) on the no-snapshot early-out so callers can always
+// .then() unconditionally.
 export function restoreSceneState() {
-    if (!pieSceneSnapshot || !sceneSystem) return;
+    if (!pieSceneSnapshot || !sceneSystem) return Promise.resolve(false);
 
     const snapshot = pieSceneSnapshot;
     pieSceneSnapshot = null;
 
-    Promise.resolve(loadWorldFromJSON(snapshot.scene))
+    return Promise.resolve(loadWorldFromJSON(snapshot.scene))
         .then(() => {
             restoreMissingPieTerrainActors(snapshot.scene);
 
@@ -125,9 +137,11 @@ export function restoreSceneState() {
             } else {
                 selectShowcaseActor(null);
             }
+            return true;
         })
         .catch((error) => {
             console.error('Failed to restore PIE snapshot.', error);
+            return false;
         });
 }
 

@@ -3530,8 +3530,14 @@ function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, has
     if (move.lengthSq() < 1e-6) return false;
     move.normalize().multiplyScalar(SHOOTER_AI_PREFAB.strafeSpeed * delta);
     mesh.position.add(move);
-    const groundY = getGroundHeightAt(mesh.position.x, mesh.position.z, true, {
+    const groundOptions = {
         ignoreActors: getShooterGroundIgnoreActors(actor, shooter),
+    };
+    if (currentMesh?.userData?.sampleType === 'doomTest') {
+        groundOptions.hitFilter = (hit) => !isDoomRoofSurfaceHit(hit);
+    }
+    const groundY = getGroundHeightAt(mesh.position.x, mesh.position.z, true, {
+        ...groundOptions,
     });
     if (groundY !== null) mesh.position.y = groundY + 1.18;
     mesh.updateMatrixWorld(true);
@@ -3675,6 +3681,129 @@ function spawnDoomEnemyAt(position, options = {}) {
     if (!actor) return null;
     applyDoomEnemySpriteSkin(actor);
     return actor;
+}
+
+function isDoomRoofSurfaceHit(hit) {
+    let object = hit?.object || null;
+    while (object) {
+        if (object.userData?.doomMapSurface) {
+            return object.userData.doomMapSurface === 'roof';
+        }
+        object = object.parent || null;
+    }
+    return false;
+}
+
+function setActorWorldPositionExact(actor, position, { visible } = {}) {
+    const mesh = getActorRenderObject(actor);
+    if (!mesh || !position) return false;
+    if (Array.isArray(position)) {
+        mesh.position.set(position[0] ?? 0, position[1] ?? 0, position[2] ?? 0);
+    } else {
+        mesh.position.copy(position);
+    }
+    if (typeof visible === 'boolean') mesh.visible = visible;
+    mesh.updateMatrixWorld(true);
+    syncActorBodyToRenderTransform(actor, physics?.Jolt?.EActivation_DontActivate ?? null);
+    return true;
+}
+
+function isDoomMiniWaveCleared(actors = []) {
+    if (!Array.isArray(actors) || actors.length === 0) return false;
+    return actors.every((actor) => {
+        const shooter = actor?.userData?.shooterAi;
+        const mesh = getActorRenderObject(actor);
+        return !actor || shooter?.defeated || mesh?.visible === false;
+    });
+}
+
+function spawnDoomMiniWave(spots = [], label = 'Doom Enemy') {
+    const actors = [];
+    for (const spot of spots) {
+        if (!Array.isArray(spot) || spot.length < 3) continue;
+        const actor = spawnDoomEnemyAt(new THREE.Vector3(spot[0], spot[1], spot[2]), {
+            label,
+            groundY: spot[1],
+            health: DOOM_ENEMY_PREFAB.health,
+            maxHealth: DOOM_ENEMY_PREFAB.health,
+        });
+        if (actor) actors.push(actor);
+    }
+    return actors;
+}
+
+function createDoomMiniBarrierEntries(anchor = null) {
+    if (!Array.isArray(anchor) || anchor.length < 3) return [];
+    const entries = [];
+    const spacing = 1.6;
+    const cubeScale = 0.8;
+    const startX = anchor[0] - spacing;
+    for (let row = 0; row < 3; row += 1) {
+        for (let col = 0; col < 3; col += 1) {
+            const activePosition = [startX + col * spacing, anchor[1] + row * spacing, anchor[2]];
+            const inactivePosition = [activePosition[0], -48 - row * 4, activePosition[2]];
+            const actor = spawnDynamicPrimitive('cube', new THREE.Vector3(...activePosition), cubeScale, {
+                local: false,
+                simulatePhysics: false,
+                skipImpulse: true,
+                includeScripts: false,
+                castShadow: false,
+                receiveShadow: true,
+                userData: { label: 'Arena Gate' },
+                returnActor: true,
+            });
+            if (!actor) continue;
+            tintGameplayPrefabActor(actor, '#5b0f0f', '#ff3030', 1.6);
+            setActorWorldPositionExact(actor, inactivePosition, { visible: false });
+            entries.push({ actor, activePosition, inactivePosition });
+        }
+    }
+    return entries;
+}
+
+function setDoomMiniBarrierActive(entries = [], active = false) {
+    for (const entry of entries) {
+        if (!entry?.actor) continue;
+        setActorWorldPositionExact(
+            entry.actor,
+            active ? entry.activePosition : entry.inactivePosition,
+            { visible: active },
+        );
+    }
+}
+
+function updateDoomMiniLevelState(subjectPosition = null) {
+    const layout = currentMesh?.userData?.doomMiniLevel;
+    const state = currentMesh?.userData?.doomMiniLevelState;
+    if (!layout || !state || !subjectPosition) return;
+
+    if (!state.hallTriggered && subjectPosition.z <= layout.hallTriggerZ) {
+        state.hallTriggered = true;
+        state.hallWaveActors = spawnDoomMiniWave(layout.hallWave, 'Doom Ambush');
+    }
+
+    if (!state.arenaTriggered && subjectPosition.z <= layout.arenaTriggerZ) {
+        state.arenaTriggered = true;
+        setDoomMiniBarrierActive(state.arenaBarrier, true);
+        state.arenaWaveActors = spawnDoomMiniWave(layout.arenaWave, 'Doom Arena Enemy');
+    }
+
+    if (
+        state.hallTriggered
+        && state.arenaTriggered
+        && !state.finalTriggered
+        && isDoomMiniWaveCleared(state.hallWaveActors)
+        && isDoomMiniWaveCleared(state.arenaWaveActors)
+    ) {
+        state.finalTriggered = true;
+        setDoomMiniBarrierActive(state.arenaBarrier, false);
+        state.finalWaveActors = spawnDoomMiniWave(layout.finalWave, 'Doom Exit Guard');
+    }
+
+    if (state.finalTriggered && !state.exitUnlocked && isDoomMiniWaveCleared(state.finalWaveActors)) {
+        state.exitUnlocked = true;
+        setActorWorldPositionExact(state.exitActor, layout.exitTeleporter, { visible: true });
+    }
 }
 
 function updateShooterSpawnerActor(spawner) {
@@ -4549,6 +4678,104 @@ function resetActorToStoredTransform(actor) {
             dynamicBodySpatial.updateEntry(actor);
         }
     }
+    return true;
+}
+
+// Rebuild the Doom mini-level's wave state machine to its pre-Play state.
+// restoreSceneState() reloads serialized actors (the gun/exit/spawn prefabs
+// and pre-placed geometry) but it does NOT touch currentMesh.userData, so
+// doomMiniLevelState keeps its play-time progress (hall/arena/finalTriggered,
+// stale *WaveActors, an exitActor pointing at a destroyed actor) — the level
+// reads as "already beaten": enemies don't respawn, barriers/exit stay wrong.
+// Mirrors resetSoccerLevelState(); called from both Stop paths.
+function resetDoomMiniLevelState() {
+    if (currentMesh?.userData?.sampleType !== 'doomTest') return false;
+
+    const layout = currentMesh.userData.doomMiniLevel || {};
+    const prevState = currentMesh.userData.doomMiniLevelState || null;
+
+    // Destroy everything spawned DURING play: wave enemies (tracked in the
+    // old state arrays + any other live shooterAi) and the old barrier
+    // actors (createDoomMiniBarrierEntries makes fresh ones below).
+    const toDestroy = new Set();
+    if (prevState) {
+        for (const key of ['hallWaveActors', 'arenaWaveActors', 'finalWaveActors']) {
+            for (const actor of prevState[key] || []) toDestroy.add(actor);
+        }
+        for (const entry of prevState.arenaBarrier || []) {
+            if (entry?.actor) toDestroy.add(entry.actor);
+        }
+    }
+    for (const actor of getGameplayPrefabActors('shooterAi')) toDestroy.add(actor);
+    for (const actor of toDestroy) {
+        if (!actor) continue;
+        hideShooterAimWarning?.(actor);
+        destroyDynamicPhysicsProp(actor);
+        sceneSystem?.removeActor?.(actor);
+    }
+
+    // Restore the surviving (restored-from-snapshot) prefabs: gun pickup
+    // visible/uncollected at its layout spot, exit teleporter hidden,
+    // player-spawn re-applied. resetGameplayPrefabs() handles the generic
+    // collected/visibility/cooldown flags for all gameplay prefabs.
+    resetGameplayPrefabs();
+
+    const _allPrefabs = getGameplayPrefabActors();
+    console.log('[DOOM] reset: prefab actors =', _allPrefabs.length,
+        _allPrefabs.map((a) => a?.userData?.gameplayPrefab),
+        '| prevState triggers =', prevState
+            ? [prevState.hallTriggered, prevState.arenaTriggered, prevState.finalTriggered]
+            : 'none',
+        '| layout keys =', Object.keys(layout));
+    let exitActor = null;
+    let gunActor = null;
+    for (const actor of getGameplayPrefabActors()) {
+        const type = actor?.userData?.gameplayPrefab;
+        const mesh = getActorRenderObject(actor);
+        if (type === 'doomShotgunSprite' && mesh && Array.isArray(layout.shotgunPickup)) {
+            gunActor = actor;
+            actor.userData.collected = false;
+            setActorWorldPositionExact(actor, layout.shotgunPickup, { visible: true });
+        } else if (type === 'teleporter') {
+            exitActor = actor;
+            setActorWorldPositionExact(
+                actor,
+                Array.isArray(layout.exitTeleporterHidden)
+                    ? layout.exitTeleporterHidden : layout.exitTeleporter,
+                { visible: false },
+            );
+        } else if (type === 'playerSpawn' && mesh && Array.isArray(layout.playerSpawn)) {
+            mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
+            mesh.updateMatrixWorld(true);
+            applyPlayerSpawnFromActor(actor);
+        }
+    }
+
+    // The shotgun pickup is a THREE.Sprite (kind 'sprite'); serializeActorData
+    // serializes it but loadWorldFromJSON has no 'sprite' spawn case, so the
+    // snapshot restore on Stop drops it entirely. Re-spawn like afterLoad does.
+    if (!gunActor && Array.isArray(layout.shotgunPickup)) {
+        gunActor = spawnGameplayPrefab('doomShotgunSprite');
+        if (gunActor) {
+            gunActor.userData.collected = false;
+            setActorWorldPositionExact(gunActor, layout.shotgunPickup, { visible: true });
+        }
+    }
+
+    // Fresh state machine — identical shape to the doomTest afterLoad init.
+    currentMesh.userData.doomMiniLevelState = {
+        exitActor,
+        arenaBarrier: createDoomMiniBarrierEntries(layout.arenaBarrier),
+        hallWaveActors: [],
+        arenaWaveActors: [],
+        finalWaveActors: [],
+        hallTriggered: false,
+        arenaTriggered: false,
+        finalTriggered: false,
+        exitUnlocked: false,
+    };
+
+    syncGameplaySpawnFromPlayerSpawnActor();
     return true;
 }
 
@@ -10874,10 +11101,7 @@ function makeDoomShotgunSpriteTexture() {
 }
 
 function createDoomTestLevel() {
-    // Doom-ish test arena: cramped tech corridor opens into a hex-ish combat
-    // room with raised walkways, monster-closet alcoves, a key-colored door
-    // recess and a slime pit. Pure BoxGeometry + brick texture set so it
-    // costs nothing beyond what the Brick Room already pays for.
+    // Compact Doom-style mini level: start room, combat arena, and a clear end room.
     const root = new THREE.Group();
     root.name = 'PolyFlow_Doom_Test';
     root.userData.sampleType = 'doomTest';
@@ -10885,28 +11109,31 @@ function createDoomTestLevel() {
     root.userData.skipNormalization = true;
 
     const T = 0.4;                // wall thickness
-    const CORR_W = 4;
-    const CORR_H = 3.2;
-    const CORR_LEN = 14;
-    const ROOM_W = 22;
-    const ROOM_D = 22;
-    const ROOM_H = 5.2;
-    const LEDGE_H = 1.6;
-    const LEDGE_W = 3;
+    const CORR_W = 5;
+    const CORR_H = 3.4;
+    const CORR_LEN = 16;
+    const ROOM_W = 28;
+    const ROOM_D = 28;
+    const ROOM_H = 5.6;
+    const START_W = 14;
+    const START_D = 14;
+    const START_H = 4.4;
+    const END_W = 14;
+    const END_D = 14;
+    const END_H = 4.4;
+    const START_CENTER_Z = ROOM_D * 0.5 + CORR_LEN + START_D * 0.5;
+    const END_CENTER_Z = -(ROOM_D * 0.5 + CORR_LEN + END_D * 0.5);
     const DOOM_WALL_COLOR = '#2b1514';
     const DOOM_RED_LIGHT = 0xff3030;
     const DOOM_RED_EMISSIVE = '#ff3030';
 
     root.userData.preferredSpawn = {
-        position: [0, 0.3, CORR_LEN + ROOM_D * 0.5 - 1.5],
+        position: [0, 0.3, START_CENTER_Z + START_D * 0.5 - 3.0],
         yaw: Math.PI,
         pitch: -0.05,
     };
     root.userData.preferredShowcase = {
-        // Camera sits inside the corridor mouth so when the user presses Play,
-        // syncGameplaySpawnToCamera drops them into a valid interior spot
-        // (player_eye = camera_y, feet = camera_y - eyeHeight → ~0 above floor).
-        position: [0, PLAYER_SETTINGS.eyeHeight + 0.3, CORR_LEN + ROOM_D * 0.5 - 2.5],
+        position: [0, PLAYER_SETTINGS.eyeHeight + 0.35, START_CENTER_Z + START_D * 0.5 - 4.5],
         target: [0, 1.4, 0],
     };
 
@@ -10932,7 +11159,7 @@ function createDoomTestLevel() {
         }
         const mat = new DDGIMeshStandardNodeMaterial({
             color: new THREE.Color(color),
-            roughness: 1.0, // roughnessMap is multiplicative — keep scalar at 1
+            roughness: 1.0,
             metalness: metal,
         });
         mat.map = albedo;
@@ -10940,14 +11167,10 @@ function createDoomTestLevel() {
         mat.normalScale = new THREE.Vector2(1.1, 1.1);
         mat.roughnessMap = roughness;
         mat.heightMap = height;
-        // AO must be assigned BEFORE rebuildPomGraph() — aoNode reads
-        // pomAOMap at graph-build time.
         mat.pomAOMap = ao;
         mat.aoMap = ao;
         mat.aoMapIntensity = 1.0;
         mat.pomEnabled = true;
-        // Real PolyHaven disp = full 0..1 range; smaller scale than the
-        // procedural field. 0.035 = deep joints, minimal smear.
         mat.pomIntensity = 0.035;
         mat.pomQuality = 'high';
         mat.pomClipMode = 'solid';
@@ -10967,10 +11190,6 @@ function createDoomTestLevel() {
         const [sx, sy, sz] = size;
         const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
         const tileM = material.userData.brickTileM || BRICK_TILE_M;
-        // Round to a WHOLE number of tiles per face. Fractional repeats cut
-        // a tile mid-pattern at the box edge → visible seam where surfaces
-        // meet; an integer count makes the RepeatWrapping wrap land exactly
-        // on the edge, so adjacent faces line up seamlessly.
         const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
         const repV = Math.max(
             Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1,
@@ -11003,8 +11222,6 @@ function createDoomTestLevel() {
         if (geometry.attributes.uv && !geometry.attributes.uv2) {
             geometry.setAttribute('uv2', geometry.attributes.uv);
         }
-        // Real per-vertex tangents so silhouette POM uses a stable TBN
-        // instead of the screen-derivative fallback.
         geometry.computeTangents();
         const mesh = new THREE.Mesh(geometry, material);
         mesh.name = name;
@@ -11012,6 +11229,7 @@ function createDoomTestLevel() {
         mesh.rotation.y = rotationY;
         mesh.castShadow = cast;
         mesh.receiveShadow = receive;
+        if (actorSurface) mesh.userData.doomMapSurface = actorSurface;
         root.add(mesh);
         if (actorSurface) {
             const actor = makeSampleLevelMeshActor(name, mesh, {
@@ -11030,164 +11248,215 @@ function createDoomTestLevel() {
         return mesh;
     };
 
-    // ---- Combat room ----
     const roomCenterZ = 0;
-    const corridorCenterZ = ROOM_D * 0.5 + CORR_LEN * 0.5;
+    const southHallCenterZ = ROOM_D * 0.5 + CORR_LEN * 0.5;
+    const northHallCenterZ = -(ROOM_D * 0.5 + CORR_LEN * 0.5);
+    const startCenterZ = START_CENTER_Z;
+    const endCenterZ = END_CENTER_Z;
+    const portalGap = CORR_W;
+    const southSegW = (ROOM_W - portalGap) * 0.5;
+    const northSegW = (ROOM_W - portalGap) * 0.5;
+    const startSegW = (START_W - portalGap) * 0.5;
+    const endSegW = (END_W - portalGap) * 0.5;
 
-    // Floor (slightly darker brick)
-    addBox(
-        'doom-room-floor',
-        [ROOM_W, T, ROOM_D],
-        [0, -T * 0.5, roomCenterZ],
-        brickMat(floorSet, { repeatU: 6, repeatV: 6, color: '#6c6258' }),
-        { actorSurface: 'floor' },
-    );
-    // Ceiling
-    addBox(
-        'doom-room-ceiling',
-        [ROOM_W, T, ROOM_D],
-        [0, ROOM_H + T * 0.5, roomCenterZ],
-        flatMat('#2a2724', { rough: 0.95 }),
-        { actorSurface: 'roof' },
-    );
-
-    // Perimeter walls — leave a doorway gap on south wall for corridor
-    const southGap = CORR_W;
-    const southSegW = (ROOM_W - southGap) * 0.5;
-    addBox('doom-wall-south-l', [southSegW, ROOM_H, T],
-        [-(southGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-south-r', [southSegW, ROOM_H, T],
-        [(southGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-north', [ROOM_W, ROOM_H, T], [0, ROOM_H * 0.5, -ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-east',  [T, ROOM_H, ROOM_D], [ ROOM_W * 0.5, ROOM_H * 0.5, 0],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-west',  [T, ROOM_H, ROOM_D], [-ROOM_W * 0.5, ROOM_H * 0.5, 0],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-
-    // Raised L-shaped ledge with stairs — classic Doom verticality
-    addBox('doom-ledge-north', [ROOM_W - 2, LEDGE_H, LEDGE_W],
-        [0, LEDGE_H * 0.5, -ROOM_D * 0.5 + LEDGE_W * 0.5 + 0.4],
-        brickMat(accentSet, { repeatU: 6, repeatV: 1, color: DOOM_WALL_COLOR }));
-    addBox('doom-ledge-west', [LEDGE_W, LEDGE_H, ROOM_D - 2 * LEDGE_W - 1],
-        [-ROOM_W * 0.5 + LEDGE_W * 0.5 + 0.4, LEDGE_H * 0.5, -1],
-        brickMat(accentSet, { repeatU: 1, repeatV: 4, color: DOOM_WALL_COLOR }));
-
-    // Stair stepping up to ledge
-    for (let i = 0; i < 4; i++) {
-        const h = (LEDGE_H / 4) * (i + 1);
-        addBox(`doom-stair-${i}`, [3, h, 0.7],
-            [3.5, h * 0.5, -ROOM_D * 0.5 + LEDGE_W + 0.4 + 0.7 * i + 0.35],
-            brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#88796a' }));
-    }
-
-    // Slime pit (recessed area with glowing green floor)
-    const PIT_W = 4, PIT_D = 4, PIT_DEPTH = 0.9;
-    addBox('doom-slime-floor', [PIT_W, T, PIT_D],
-        [4.5, -PIT_DEPTH - T * 0.5, 4.5],
-        flatMat('#1e3a12', { rough: 0.4, metal: 0.0, emissive: '#39ff14', emissiveIntensity: 0.85 }));
-
-    // Two monster-closet alcoves carved into north wall (recessed boxes)
-    const CLOSET_W = 2.2, CLOSET_D = 1.4, CLOSET_H = 2.6;
-    const closet = (x) => {
-        addBox(`doom-closet-floor-${x}`, [CLOSET_W, T, CLOSET_D],
-            [x, LEDGE_H + T * 0.5, -ROOM_D * 0.5 + CLOSET_D * 0.5 + 0.05],
-            brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#5a4a3a' }));
-        addBox(`doom-closet-back-${x}`, [CLOSET_W, CLOSET_H, T * 0.6],
-            [x, LEDGE_H + CLOSET_H * 0.5, -ROOM_D * 0.5 + 0.05],
-            flatMat(DOOM_WALL_COLOR, { rough: 0.5, emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 0.6 }));
+    const addHallSconce = (name, x, y, z) => {
+        addBox(name, [0.2, 0.6, 0.4], [x, y, z],
+            flatMat('#2a0f0f', { emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 1.6 }));
     };
-    closet(-5.5);
-    closet(5.5);
 
-    // Key-colored door recess on east wall (locked door look)
-    addBox('doom-keydoor-frame', [T * 1.4, 3.2, 1.8],
-        [ROOM_W * 0.5 - T * 0.4, 1.6, -ROOM_D * 0.5 + 5.5],
-        flatMat(DOOM_WALL_COLOR, { rough: 0.4, metal: 0.6 }));
-    addBox('doom-keydoor-panel', [T * 0.5, 2.6, 1.4],
-        [ROOM_W * 0.5 - T * 0.9, 1.4, -ROOM_D * 0.5 + 5.5],
-        flatMat('#1a4a8a', { rough: 0.35, metal: 0.7, emissive: '#3060ff', emissiveIntensity: 0.55 }));
-
-    // Center cover crates (boxy stacks)
-    addBox('doom-crate-a', [1.4, 1.4, 1.4], [-2, 0.7, 1.5],
-        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
-    addBox('doom-crate-b', [1.4, 1.4, 1.4], [-2, 0.7, 3.0],
-        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
-    addBox('doom-crate-c', [1.4, 1.4, 1.4], [-2, 2.1, 1.5],
-        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
-    addBox('doom-pillar-mid', [1.2, ROOM_H, 1.2], [2.5, ROOM_H * 0.5, -3],
-        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: DOOM_WALL_COLOR }));
-
-    // ---- Corridor connecting south door to spawn ----
-    addBox('doom-corr-floor', [CORR_W, T, CORR_LEN],
-        [0, -T * 0.5, corridorCenterZ],
-        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }),
+    addBox('doom-start-floor', [START_W, T, START_D],
+        [0, -T * 0.5, startCenterZ],
+        brickMat(floorSet, { repeatU: 4, repeatV: 4, color: '#5a5048' }),
         { actorSurface: 'floor' });
-    addBox('doom-corr-ceiling', [CORR_W, T, CORR_LEN],
-        [0, CORR_H + T * 0.5, corridorCenterZ],
+    addBox('doom-start-ceiling', [START_W, T, START_D],
+        [0, START_H + T * 0.5, startCenterZ],
         flatMat('#1a1816', { rough: 0.95 }),
         { actorSurface: 'roof' });
-    addBox('doom-corr-wall-e', [T, CORR_H, CORR_LEN],
-        [CORR_W * 0.5, CORR_H * 0.5, corridorCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
-    addBox('doom-corr-wall-w', [T, CORR_H, CORR_LEN],
-        [-CORR_W * 0.5, CORR_H * 0.5, corridorCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
-    addBox('doom-corr-end', [CORR_W, CORR_H, T],
-        [0, CORR_H * 0.5, corridorCenterZ + CORR_LEN * 0.5],
-        brickMat(accentSet, { repeatU: 2, repeatV: 1, color: DOOM_WALL_COLOR }));
+    addBox('doom-start-wall-south', [START_W, START_H, T],
+        [0, START_H * 0.5, startCenterZ + START_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-start-wall-north-l', [startSegW, START_H, T],
+        [-(portalGap * 0.5 + startSegW * 0.5), START_H * 0.5, startCenterZ - START_D * 0.5],
+        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-start-wall-north-r', [startSegW, START_H, T],
+        [(portalGap * 0.5 + startSegW * 0.5), START_H * 0.5, startCenterZ - START_D * 0.5],
+        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-start-wall-east', [T, START_H, START_D],
+        [START_W * 0.5, START_H * 0.5, startCenterZ],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-start-wall-west', [T, START_H, START_D],
+        [-START_W * 0.5, START_H * 0.5, startCenterZ],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-start-pad', [3.2, 0.24, 3.2],
+        [0, 0.12, startCenterZ + 2.6],
+        flatMat('#241414', { rough: 0.35, emissive: '#6b1818', emissiveIntensity: 0.35 }));
 
-    // Wall sconces (emissive bars) flanking the corridor
-    addBox('doom-corr-light-l', [0.2, 0.6, 0.4],
-        [-CORR_W * 0.5 + 0.15, CORR_H - 1.0, corridorCenterZ - CORR_LEN * 0.25],
-        flatMat('#2a0f0f', { emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 1.6 }));
-    addBox('doom-corr-light-r', [0.2, 0.6, 0.4],
-        [ CORR_W * 0.5 - 0.15, CORR_H - 1.0, corridorCenterZ + CORR_LEN * 0.25],
-        flatMat('#2a0f0f', { emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 1.6 }));
+    addBox('doom-south-hall-floor', [CORR_W, T, CORR_LEN],
+        [0, -T * 0.5, southHallCenterZ],
+        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }),
+        { actorSurface: 'floor' });
+    addBox('doom-south-hall-ceiling', [CORR_W, T, CORR_LEN],
+        [0, CORR_H + T * 0.5, southHallCenterZ],
+        flatMat('#1a1816', { rough: 0.95 }),
+        { actorSurface: 'roof' });
+    addBox('doom-south-hall-wall-e', [T, CORR_H, CORR_LEN],
+        [CORR_W * 0.5, CORR_H * 0.5, southHallCenterZ],
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
+    addBox('doom-south-hall-wall-w', [T, CORR_H, CORR_LEN],
+        [-CORR_W * 0.5, CORR_H * 0.5, southHallCenterZ],
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
+    addHallSconce('doom-south-hall-light-l', -CORR_W * 0.5 + 0.15, CORR_H - 1.0, southHallCenterZ - CORR_LEN * 0.25);
+    addHallSconce('doom-south-hall-light-r', CORR_W * 0.5 - 0.15, CORR_H - 1.0, southHallCenterZ + CORR_LEN * 0.25);
 
-    // Imp enemies spawned in afterLoad via spawnShooterAiAt — see level definition.
-    // ---- Gun pickup pedestal (actual SMG actor spawned in afterLoad) ----
-    addBox('doom-gun-pedestal', [1.0, 0.3, 1.0], [0, 0.15, -2],
+    addBox('doom-room-floor', [ROOM_W, T, ROOM_D],
+        [0, -T * 0.5, roomCenterZ],
+        brickMat(floorSet, { repeatU: 7, repeatV: 7, color: '#6c6258' }),
+        { actorSurface: 'floor' });
+    addBox('doom-room-ceiling', [ROOM_W, T, ROOM_D],
+        [0, ROOM_H + T * 0.5, roomCenterZ],
+        flatMat('#2a2724', { rough: 0.95 }),
+        { actorSurface: 'roof' });
+    addBox('doom-wall-south-l', [southSegW, ROOM_H, T],
+        [-(portalGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
+    addBox('doom-wall-south-r', [southSegW, ROOM_H, T],
+        [(portalGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
+    addBox('doom-wall-north-l', [northSegW, ROOM_H, T],
+        [-(portalGap * 0.5 + northSegW * 0.5), ROOM_H * 0.5, -ROOM_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
+    addBox('doom-wall-north-r', [northSegW, ROOM_H, T],
+        [(portalGap * 0.5 + northSegW * 0.5), ROOM_H * 0.5, -ROOM_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
+    addBox('doom-wall-east', [T, ROOM_H, ROOM_D],
+        [ROOM_W * 0.5, ROOM_H * 0.5, roomCenterZ],
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
+    addBox('doom-wall-west', [T, ROOM_H, ROOM_D],
+        [-ROOM_W * 0.5, ROOM_H * 0.5, roomCenterZ],
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
+    addBox('doom-cover-a', [2.2, 1.6, 1.2], [-5.5, 0.8, 2.5],
+        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
+    addBox('doom-cover-b', [2.2, 1.6, 1.2], [5.5, 0.8, -1.5],
+        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
+    addBox('doom-cover-c', [1.2, 3.0, 1.2], [0, 1.5, 6.5],
+        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: DOOM_WALL_COLOR }));
+    addBox('doom-cover-d', [1.2, 3.0, 1.2], [0, 1.5, -6.5],
+        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: DOOM_WALL_COLOR }));
+
+    addBox('doom-north-hall-floor', [CORR_W, T, CORR_LEN],
+        [0, -T * 0.5, northHallCenterZ],
+        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }),
+        { actorSurface: 'floor' });
+    addBox('doom-north-hall-ceiling', [CORR_W, T, CORR_LEN],
+        [0, CORR_H + T * 0.5, northHallCenterZ],
+        flatMat('#1a1816', { rough: 0.95 }),
+        { actorSurface: 'roof' });
+    addBox('doom-north-hall-wall-e', [T, CORR_H, CORR_LEN],
+        [CORR_W * 0.5, CORR_H * 0.5, northHallCenterZ],
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
+    addBox('doom-north-hall-wall-w', [T, CORR_H, CORR_LEN],
+        [-CORR_W * 0.5, CORR_H * 0.5, northHallCenterZ],
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
+    addHallSconce('doom-north-hall-light-l', -CORR_W * 0.5 + 0.15, CORR_H - 1.0, northHallCenterZ - CORR_LEN * 0.25);
+    addHallSconce('doom-north-hall-light-r', CORR_W * 0.5 - 0.15, CORR_H - 1.0, northHallCenterZ + CORR_LEN * 0.25);
+
+    addBox('doom-end-floor', [END_W, T, END_D],
+        [0, -T * 0.5, endCenterZ],
+        brickMat(floorSet, { repeatU: 4, repeatV: 4, color: '#5a5048' }),
+        { actorSurface: 'floor' });
+    addBox('doom-end-ceiling', [END_W, T, END_D],
+        [0, END_H + T * 0.5, endCenterZ],
+        flatMat('#1a1816', { rough: 0.95 }),
+        { actorSurface: 'roof' });
+    addBox('doom-end-wall-north', [END_W, END_H, T],
+        [0, END_H * 0.5, endCenterZ - END_D * 0.5],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-end-wall-south-l', [endSegW, END_H, T],
+        [-(portalGap * 0.5 + endSegW * 0.5), END_H * 0.5, endCenterZ + END_D * 0.5],
+        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-end-wall-south-r', [endSegW, END_H, T],
+        [(portalGap * 0.5 + endSegW * 0.5), END_H * 0.5, endCenterZ + END_D * 0.5],
+        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-end-wall-east', [T, END_H, END_D],
+        [END_W * 0.5, END_H * 0.5, endCenterZ],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-end-wall-west', [T, END_H, END_D],
+        [-END_W * 0.5, END_H * 0.5, endCenterZ],
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
+    addBox('doom-end-dais', [4.2, 0.4, 4.2],
+        [0, 0.2, endCenterZ - 1.8],
+        flatMat('#221212', { rough: 0.3, emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 0.45 }));
+
+    root.userData.doomMiniLevel = {
+        playerSpawn: [0, 0.85, startCenterZ + START_D * 0.5 - 3.2],
+        shotgunPickup: [0, 0.75, startCenterZ - 1.6],
+        exitTeleporter: [0, 0.42, endCenterZ - 1.8],
+        exitTeleporterHidden: [0, -48, endCenterZ - 1.8],
+        hallTriggerZ: startCenterZ - START_D * 0.5 + 1.0,
+        arenaTriggerZ: ROOM_D * 0.5 - 1.5,
+        hallWave: [
+            [-1.25, 0, southHallCenterZ + 2.6],
+            [1.25, 0, southHallCenterZ - 2.2],
+        ],
+        arenaWave: [
+            [-6.0, 0, 4.0],
+            [6.0, 0, -4.5],
+            [0, 0, -6.0],
+        ],
+        finalWave: [
+            [-1.2, 0, northHallCenterZ - 1.2],
+            [1.2, 0, endCenterZ + 1.2],
+        ],
+        arenaBarrier: [0, 0.8, ROOM_D * 0.5 - 0.6],
+    };
+
+    addBox('doom-gun-pedestal', [1.0, 0.3, 1.0],
+        [0, 0.15, startCenterZ - 1.6],
         flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#222222', emissiveIntensity: 0.2 }));
 
-    // Glow under gun
     const gunGlow = new THREE.PointLight(DOOM_RED_LIGHT, 1.6, 4.5, 2.0);
-    gunGlow.position.set(0, 0.6, -2);
+    gunGlow.position.set(0, 0.75, startCenterZ - 1.6);
     gunGlow.castShadow = false;
     gunGlow.name = 'doom-gun-glow';
     root.add(gunGlow);
 
-    // ---- Lights ----
-    // Main room: low red key light + softer red fill from above
-    const keyLight = new THREE.PointLight(DOOM_RED_LIGHT, 9, 26, 1.6);
-    keyLight.position.set(-4, ROOM_H - 1.2, -2);
+    const startLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.6, 18, 1.8);
+    startLight.position.set(0, START_H - 0.8, startCenterZ + 0.5);
+    startLight.castShadow = false;
+    startLight.name = 'doom-start-light';
+    root.add(startLight);
+
+    const keyLight = new THREE.PointLight(DOOM_RED_LIGHT, 9, 28, 1.6);
+    keyLight.position.set(-5, ROOM_H - 1.2, -2);
     keyLight.castShadow = true;
     configurePointLightShadow(keyLight);
     keyLight.name = 'doom-room-key';
     root.add(keyLight);
 
-    const fillLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.5, 22, 2.0);
-    fillLight.position.set(5, ROOM_H - 0.6, 5);
+    const fillLight = new THREE.PointLight(DOOM_RED_LIGHT, 4.2, 24, 2.0);
+    fillLight.position.set(6, ROOM_H - 0.8, 6);
     fillLight.castShadow = false;
     fillLight.name = 'doom-room-fill';
     root.add(fillLight);
 
-    // Slime glow
-    const slimeGlow = new THREE.PointLight(DOOM_RED_LIGHT, 2.4, 9, 1.8);
-    slimeGlow.position.set(4.5, 0.2, 4.5);
-    slimeGlow.castShadow = false;
-    slimeGlow.name = 'doom-slime-glow';
-    root.add(slimeGlow);
+    const southHallLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.2, 16, 1.8);
+    southHallLight.position.set(0, CORR_H - 0.7, southHallCenterZ);
+    southHallLight.castShadow = false;
+    southHallLight.name = 'doom-south-hall-light';
+    root.add(southHallLight);
 
-    // Corridor torch
-    const corrLight = new THREE.PointLight(DOOM_RED_LIGHT, 4, 12, 1.8);
-    corrLight.position.set(0, CORR_H - 0.6, corridorCenterZ);
-    corrLight.castShadow = true;
-    configurePointLightShadow(corrLight);
-    corrLight.name = 'doom-corr-torch';
-    root.add(corrLight);
+    const northHallLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.2, 16, 1.8);
+    northHallLight.position.set(0, CORR_H - 0.7, northHallCenterZ);
+    northHallLight.castShadow = false;
+    northHallLight.name = 'doom-north-hall-light';
+    root.add(northHallLight);
+
+    const endLight = new THREE.PointLight(DOOM_RED_LIGHT, 4.8, 18, 1.8);
+    endLight.position.set(0, END_H - 0.8, endCenterZ - 1.2);
+    endLight.castShadow = true;
+    configurePointLightShadow(endLight);
+    endLight.name = 'doom-end-light';
+    root.add(endLight);
 
     applySilPomLighting(root, keyLight.position.clone());
 
@@ -11216,27 +11485,54 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
     if (levelId === 'doomTest') {
         return {
             id: 'doomTest',
-            assetName: 'Doom Test Arena',
-            fileSize: 260000,
+            assetName: 'Doom Mini Level',
+            fileSize: 340000,
             create: createDoomTestLevel,
             afterLoad: () => {
+                const layout = currentMesh?.userData?.doomMiniLevel || {};
+
+                const startActor = spawnGameplayPrefab('playerSpawn');
+                if (startActor) {
+                    startActor.userData.label = 'Start';
+                    const mesh = getActorRenderObject(startActor);
+                    if (mesh && Array.isArray(layout.playerSpawn)) {
+                        mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
+                        mesh.updateMatrixWorld(true);
+                    }
+                    applyPlayerSpawnFromActor(startActor);
+                }
+
                 const gunActor = spawnGameplayPrefab('doomShotgunSprite');
                 if (gunActor) {
                     const mesh = getActorRenderObject(gunActor);
-                    if (mesh) {
-                        mesh.position.set(0, 0.75, -2);
+                    if (mesh && Array.isArray(layout.shotgunPickup)) {
+                        mesh.position.set(layout.shotgunPickup[0], layout.shotgunPickup[1], layout.shotgunPickup[2]);
                         mesh.updateMatrixWorld(true);
                     }
-                    rebuildActorPhysics?.(gunActor);
                 }
 
-                const doomEnemy = spawnDoomEnemyAt(new THREE.Vector3(-5, 0, -8), {
-                    label: 'Doom Enemy',
-                    groundY: 0,
-                    health: DOOM_ENEMY_PREFAB.health,
-                    maxHealth: DOOM_ENEMY_PREFAB.health,
-                });
-                doomEnemy?.mesh?.updateMatrixWorld?.(true);
+                const endActor = spawnGameplayPrefab('teleporter');
+                if (endActor) {
+                    endActor.userData.label = 'Level End';
+                    tintGameplayPrefabActor(endActor, '#ef4444', '#ef4444', 2.8);
+                    setActorWorldPositionExact(
+                        endActor,
+                        Array.isArray(layout.exitTeleporterHidden) ? layout.exitTeleporterHidden : layout.exitTeleporter,
+                        { visible: false },
+                    );
+                }
+
+                currentMesh.userData.doomMiniLevelState = {
+                    exitActor: endActor || null,
+                    arenaBarrier: createDoomMiniBarrierEntries(layout.arenaBarrier),
+                    hallWaveActors: [],
+                    arenaWaveActors: [],
+                    finalWaveActors: [],
+                    hallTriggered: false,
+                    arenaTriggered: false,
+                    finalTriggered: false,
+                    exitUnlocked: false,
+                };
 
                 return null;
             },
@@ -12287,9 +12583,19 @@ function handlePointerLockChange() {
     clearShooterAimWarnings();
     clearGameplayEffects();
     clearHeldWeapon();
-    restoreSceneState();
-    repairSampleCollisionHierarchyAfterRestore();
-    syncTransformControlState();
+    // restoreSceneState() reloads the world ASYNchronously; actor-dependent
+    // cleanup must run AFTER it resolves or it operates on the old actors
+    // that the reload then wipes (→ doom waves never re-arm on Stop).
+    console.log('[STOP] handlePointerLockChange → restore; sampleType=',
+        currentMesh?.userData?.sampleType);
+    Promise.resolve(restoreSceneState()).then((restored) => {
+        console.log('[STOP] restore resolved =', restored,
+            'actors=', sceneSystem?.actors?.size);
+        repairSampleCollisionHierarchyAfterRestore();
+        const did = resetDoomMiniLevelState();
+        console.log('[STOP] resetDoomMiniLevelState ran =', did);
+        syncTransformControlState();
+    });
 
     updateWorldPresentation();
     resetShowcaseCamera(false);
@@ -12362,9 +12668,18 @@ function exitGameplay() {
     clearShooterAimWarnings();
     clearGameplayEffects();
     clearHeldWeapon();
-    restoreSceneState();
-    repairSampleCollisionHierarchyAfterRestore();
-    resetSoccerLevelState();
+    // Async restore: run actor-dependent cleanup AFTER the world reload
+    // resolves (see handlePointerLockChange for the same fix).
+    console.log('[STOP] exitGameplay → restore; sampleType=',
+        currentMesh?.userData?.sampleType);
+    Promise.resolve(restoreSceneState()).then((restored) => {
+        console.log('[STOP] exitGameplay restore resolved =', restored,
+            'actors=', sceneSystem?.actors?.size);
+        repairSampleCollisionHierarchyAfterRestore();
+        resetSoccerLevelState();
+        const did = resetDoomMiniLevelState();
+        console.log('[STOP] exitGameplay resetDoomMiniLevelState ran =', did);
+    });
     gameplay.velocity.set(0, 0, 0);
     physics.jumpQueued = false;
     physics.desiredVelocity.set(0, 0, 0);
@@ -12596,6 +12911,9 @@ function respawnPlayer(useStoredView = false) {
     gameplay.dead = false;
     gameplay.lastDamageAt = 0;
     resetGameplayPrefabs();
+    // Re-arm the Doom wave state machine so killed enemies return on
+    // respawn (no-op on every non-doomTest level via its own guard).
+    resetDoomMiniLevelState();
 
     if (isDrivingVehicle()) {
         clearActiveVehicle();
@@ -13244,13 +13562,16 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
         surfaceStepTolerance = 0,
         cullBackFaces = false,
         maxHitY = Number.POSITIVE_INFINITY,
+        hitFilter = null,
     } = options;
     const ignoredActors = Array.isArray(ignoreActors) ? new Set(ignoreActors.filter(Boolean)) : null;
     const originY = Math.max(PLAYER_SETTINGS.probeHeight, gameplayBounds.max.y + PLAYER_SETTINGS.probeHeight);
     const hits = _groundHits;
     hits.length = 0;
+    const previousRaycasterCamera = raycaster.camera;
 
     raycaster.set(tempVectorA.set(x, originY, z), downVector);
+    if (camera) raycaster.camera = camera;
 
     if (Array.isArray(targetObjects)) {
         if (targetObjects.length > 0) {
@@ -13284,20 +13605,22 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
         }
     }
 
+    const solidHits = hits.filter((hit) => !hit?.object?.isSprite);
+
     // Optional strict back-face cull: drop hits whose triangle faces away
     // from the ray direction (i.e. faces below the trace look down). Used by
     // car-related ground tracing so a slight overlap between two stitched
     // road segments can't surface a back-face hit and put the car at the
     // wrong Y.
     const backFaceCulledHits = cullBackFaces
-        ? hits.filter((hit) => {
+        ? solidHits.filter((hit) => {
             if (!hit?.face || !hit.object?.matrixWorld) {
                 return true;
             }
             _groundHitNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
             return _groundHitNormal.y > 1e-4;
         })
-        : hits;
+        : solidHits;
 
     const heightFilteredHits = Number.isFinite(maxHitY)
         ? backFaceCulledHits.filter((hit) => (hit?.point?.y ?? Number.NEGATIVE_INFINITY) <= maxHitY)
@@ -13316,13 +13639,17 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
 
     const resolvedHits = filteredHits.length > 0
         ? filteredHits
-        : (cullBackFaces ? heightFilteredHits : hits);
+        : (cullBackFaces ? heightFilteredHits : solidHits);
 
-    resolvedHits.sort((a, b) => a.distance - b.distance);
-    let resolvedHit = resolvedHits[0] || null;
+    const candidateHits = typeof hitFilter === 'function'
+        ? resolvedHits.filter((hit) => hitFilter(hit))
+        : resolvedHits;
+
+    candidateHits.sort((a, b) => a.distance - b.distance);
+    let resolvedHit = candidateHits[0] || null;
     if (resolvedHit && surfaceStepTolerance > 0) {
-        for (let index = 1; index < resolvedHits.length; index += 1) {
-            const candidateHit = resolvedHits[index];
+        for (let index = 1; index < candidateHits.length; index += 1) {
+            const candidateHit = candidateHits[index];
             if (!candidateHit?.point || !resolvedHit?.point) continue;
 
             const verticalGap = resolvedHit.point.y - candidateHit.point.y;
@@ -13341,6 +13668,7 @@ function getGroundHitAt(x, z, includeFloor = true, options = {}) {
         resolvedHit?.point ?? null,
         !!resolvedHit,
     );
+    raycaster.camera = previousRaycasterCamera;
     return resolvedHit;
 }
 
@@ -13492,6 +13820,7 @@ function updateGameplay(delta) {
         respawnPlayer();
     }
 
+    updateDoomMiniLevelState(characterPosition);
     processGameplayPrefabs();
 
     if (wasGrounded !== gameplay.grounded) {
