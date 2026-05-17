@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Doom Enemy">
+  <rect width="640" height="480" fill="#120b08"/>
+  <circle cx="320" cy="250" r="164" fill="#3b140c"/>
+  <circle cx="320" cy="250" r="164" fill="none" stroke="#7f1d1d" stroke-width="18"/>
+  <path d="M226 116l48 70h-74zM414 116l-48 70h74z" fill="#160d08"/>
+  <rect x="238" y="150" width="164" height="98" rx="24" fill="#7c2d12"/>
+  <rect x="254" y="170" width="132" height="22" fill="#4a1d0d"/>
+  <rect x="272" y="198" width="34" height="20" fill="#ffd43b"/>
+  <rect x="334" y="198" width="34" height="20" fill="#ffd43b"/>
+  <rect x="282" y="204" width="14" height="8" fill="#fff7b2"/>
+  <rect x="344" y="204" width="14" height="8" fill="#fff7b2"/>
+  <rect x="278" y="226" width="84" height="18" fill="#210704"/>
+  <rect x="290" y="226" width="12" height="18" fill="#f8e7c2"/>
+  <rect x="318" y="226" width="12" height="18" fill="#f8e7c2"/>
+  <rect x="346" y="226" width="12" height="18" fill="#f8e7c2"/>
+  <path d="M214 280c20-74 66-106 106-106s86 32 106 106v104H214z" fill="#8a3a1a"/>
+  <rect x="264" y="278" width="112" height="74" fill="#b8552a"/>
+  <rect x="190" y="284" width="52" height="96" rx="20" fill="#6b240f"/>
+  <rect x="398" y="284" width="52" height="96" rx="20" fill="#6b240f"/>
+  <rect x="176" y="366" width="78" height="24" fill="#e8d8b8"/>
+  <rect x="386" y="366" width="78" height="24" fill="#e8d8b8"/>
+  <rect x="252" y="384" width="48" height="54" fill="#5a2410"/>
+  <rect x="340" y="384" width="48" height="54" fill="#5a2410"/>
+  <rect x="238" y="428" width="74" height="22" fill="#120b08"/>
+  <rect x="328" y="428" width="74" height="22" fill="#120b08"/>
+</svg>
