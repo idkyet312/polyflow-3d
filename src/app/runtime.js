@@ -895,6 +895,8 @@ const gameplay = {
     grounded: false,
     yaw: 0,
     pitch: -0.1,
+    recoilPitch: 0,
+    recoilYaw: 0,
     health: 1,
     spawnYaw: 0,
     spawnPitch: -0.1,
@@ -922,6 +924,7 @@ const gameplay = {
         sprint: false,
         fire: false,
         firePressed: false,
+        reloadPressed: false,
         lift: false,
         descend: false,
     },
@@ -2882,6 +2885,14 @@ function updatePlayerHitFeedback(delta = 0) {
         camera.position.x += (Math.random() - 0.5) * strength;
         camera.position.y += (Math.random() - 0.5) * strength;
     }
+    // Exponential recoil recovery (~12/s) toward zero, frame-rate independent.
+    if (gameplay.recoilPitch || gameplay.recoilYaw) {
+        const k = Math.exp(-12 * delta);
+        gameplay.recoilPitch *= k;
+        gameplay.recoilYaw *= k;
+        if (Math.abs(gameplay.recoilPitch) < 1e-4) gameplay.recoilPitch = 0;
+        if (Math.abs(gameplay.recoilYaw) < 1e-4) gameplay.recoilYaw = 0;
+    }
 }
 
 function queuePlayerDeathRespawn() {
@@ -3164,6 +3175,7 @@ function setShooterHealth(actor, value = SHOOTER_AI_PREFAB.health) {
         const mesh = getActorRenderObject(actor);
         if (!wasDefeated) {
             emitShooterDeathEffect(actor);
+            playEnemyDeathSound(1);
             addGameScore(shooter.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue);
             if (mesh) {
                 mesh.traverse?.((node) => {
@@ -3363,9 +3375,26 @@ function updateShooterProjectiles(delta = 0) {
 
         let hitPlayer = false;
         let hitShooter = false;
+        let hitWall = false;
         const hitRadius = projectile.hitRadius ?? SHOOTER_AI_PREFAB.hitRadius;
         const hitRadiusSq = hitRadius * hitRadius;
-        if (projectile.hitsPlayer !== false && hitPoints) {
+
+        // Raycast the segment travelled this frame against world geometry so
+        // bullets stop on walls/floors instead of passing through. Only the
+        // short per-frame span is cast (cheap). Shooter actors are skipped —
+        // the proximity test below owns enemy hits (more forgiving radius);
+        // anything else (level static, props) blocks the bullet.
+        const segVec = tempVectorB.copy(projectile.mesh.position).sub(previousPosition);
+        const segLen = segVec.length();
+        if (segLen > 1e-5 && physicsCore?.castRay) {
+            const dir = tempVectorC.copy(segVec).multiplyScalar(1 / segLen);
+            const ray = raycastWorld(previousPosition, dir, segLen + (projectile.hitRadius ?? 0.1));
+            if (ray?.hit && !ray.actor?.userData?.shooterAi) {
+                hitWall = true;
+                if (ray.point) projectile.mesh.position.copy(ray.point);
+            }
+        }
+        if (!hitWall && projectile.hitsPlayer !== false && hitPoints) {
             for (let p = 0; p < hitPointsLen; p++) {
                 if (getPointSegmentDistanceSq(hitPoints[p], previousPosition, projectile.mesh.position) <= hitRadiusSq) {
                     hitPlayer = true;
@@ -3373,7 +3402,7 @@ function updateShooterProjectiles(delta = 0) {
                 }
             }
         }
-        if (!hitPlayer && projectile.damagesShooters) {
+        if (!hitWall && !hitPlayer && projectile.damagesShooters) {
             const shooters = cachedShooters || (cachedShooters = getGameplayPrefabActors('shooterAi', _scratchPrefab2));
             if (window.DEBUG_BULLET_HITS) {
                 console.log('[bullet]', projectile.mesh.name, 'pos', projectile.mesh.position.toArray(), 'shooters', shooters.length, 'hitRadius', hitRadius);
@@ -3402,7 +3431,7 @@ function updateShooterProjectiles(delta = 0) {
                 }
             }
         }
-        if (projectile.ttl <= 0 || hitPlayer || hitShooter) {
+        if (projectile.ttl <= 0 || hitPlayer || hitShooter || hitWall) {
             releaseProjectile(projectile);
             gameplayPrefabState.shooterProjectiles.splice(i, 1);
             if (hitPlayer) {
@@ -4168,6 +4197,8 @@ function clearHeldWeapon() {
     gameplay.weapon.sourceActorId = '';
     gameplay.input.fire = false;
     gameplay.input.firePressed = false;
+    gameplay.input.reloadPressed = false;
+    if (weaponHudEl) weaponHudEl.style.opacity = '0';
 }
 
 function equipStraightGun(sourceActor = null) {
@@ -4295,10 +4326,106 @@ function playDoomShotgunSound(volume = 1) {
     osc.start(t);
     osc.stop(t + 0.19);
 }
+// Bright two-note pickup chime.
+function playDoomPickupSound(volume = 1) {
+    const context = runtimeAudio.listener?.context;
+    if (!context || context.state !== 'running') return;
+    const t = context.currentTime;
+    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+    [[660, 0], [990, 0.07]].forEach(([freq, dt]) => {
+        const o = context.createOscillator();
+        const g = context.createGain();
+        o.type = 'triangle';
+        o.frequency.setValueAtTime(freq, t + dt);
+        g.gain.setValueAtTime(0.0001, t + dt);
+        g.gain.exponentialRampToValueAtTime(0.28 * vol, t + dt + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dt + 0.16);
+        o.connect(g).connect(context.destination);
+        o.start(t + dt);
+        o.stop(t + dt + 0.18);
+    });
+}
+// Enemy death: a descending sawtooth growl + a short noisy splat.
+function playEnemyDeathSound(volume = 1) {
+    const context = runtimeAudio.listener?.context;
+    if (!context || context.state !== 'running') return;
+    const t = context.currentTime;
+    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+
+    // Descending growl.
+    const osc = context.createOscillator();
+    const oscGain = context.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(320, t);
+    osc.frequency.exponentialRampToValueAtTime(55, t + 0.34);
+    oscGain.gain.setValueAtTime(0.32 * vol, t);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.36);
+    osc.connect(oscGain).connect(context.destination);
+    osc.start(t);
+    osc.stop(t + 0.37);
+
+    // Noisy splat.
+    const dur = 0.18;
+    const buffer = context.createBuffer(1, Math.ceil(context.sampleRate * dur), context.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    }
+    const noise = context.createBufferSource();
+    noise.buffer = buffer;
+    const nf = context.createBiquadFilter();
+    nf.type = 'bandpass';
+    nf.frequency.setValueAtTime(900, t);
+    nf.frequency.exponentialRampToValueAtTime(220, t + dur);
+    const ng = context.createGain();
+    ng.gain.setValueAtTime(0.4 * vol, t);
+    ng.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    noise.connect(nf).connect(ng).connect(context.destination);
+    noise.start(t);
+    noise.stop(t + dur);
+}
+if (typeof window !== 'undefined') {
+    window.playEnemyDeathSound = playEnemyDeathSound;
+}
+// Bottom-right weapon HUD (ammo / reload text). One reused DOM element.
+let weaponHudEl = null;
+function ensureWeaponHud() {
+    if (weaponHudEl?.parentNode) return weaponHudEl;
+    const el = document.createElement('div');
+    el.style.cssText = `
+        position:absolute;
+        right:28px;
+        bottom:22px;
+        pointer-events:none;
+        font:700 30px/1 "Trebuchet MS",system-ui,sans-serif;
+        color:#ffe27a;
+        text-shadow:0 2px 6px rgba(0,0,0,0.85);
+        letter-spacing:1px;
+        opacity:0;
+        transition:opacity 0.12s linear;
+        z-index:998;
+    `;
+    (document.getElementById('canvas-container') || document.body)?.appendChild(el);
+    weaponHudEl = el;
+    return el;
+}
+// Show HUD text (e.g. "7 / 21" or "RELOADING"). Empty/null hides it.
+function setWeaponHud(text) {
+    const el = ensureWeaponHud();
+    if (!el) return;
+    if (text == null || text === '') {
+        el.style.opacity = '0';
+        return;
+    }
+    el.textContent = String(text);
+    el.style.opacity = '1';
+}
 if (typeof window !== 'undefined') {
     window.spawnDoomPellet = spawnDoomPellet;
     window.flashDoomShotgun = flashDoomShotgun;
     window.playDoomShotgunSound = playDoomShotgunSound;
+    window.playDoomPickupSound = playDoomPickupSound;
+    window.setWeaponHud = setWeaponHud;
     // Defaults the script can read instead of hardcoding numbers.
     window.DOOM_SHOTGUN_DEFAULTS = Object.freeze({ ...DOOM_SHOTGUN_PREFAB });
 }
@@ -4334,6 +4461,7 @@ function updateStraightGuns() {
             gameplay.weapon.nextShotAt = now + d.cooldownMs;
             flashDoomShotgun(d.flashMs, now);
             playDoomShotgunSound(1);
+            applyCameraRecoil(0.045, (Math.random() - 0.5) * 0.012);
         } else if (gameplay.input.firePressed) {
             gameplay.input.firePressed = false;
         }
@@ -4821,6 +4949,11 @@ function resetDoomMiniLevelState() {
         if (type === 'doomShotgunSprite' && mesh && Array.isArray(layout.shotgunPickup)) {
             gunActor = actor;
             actor.userData.collected = false;
+            actor.userData._bobBaseY = null;
+            actor.userData._mag = null; // forces ammo() to re-init on next pickup
+            actor.userData._reloadUntil = 0;
+            actor.userData._burstLeft = 0;
+            actor.userData._cooldownUntil = 0;
             setActorWorldPositionExact(actor, layout.shotgunPickup, { visible: true });
         } else if (type === 'teleporter') {
             exitActor = actor;
@@ -5113,16 +5246,25 @@ function processGameplayPrefabs() {
     actors = getGameplayPrefabActors('doomShotgunSprite', _scratchPrefab1);
     for (let i = 0; i < actors.length; i++) {
         const weapon = actors[i];
+        const wmesh = getActorRenderObject(weapon);
+        // Idle bob + spin while sitting un-collected (pickup polish). Sprites
+        // don't rotate visually, so bob the Y around the layout/base height.
+        if (wmesh?.visible && !weapon.userData.collected) {
+            if (weapon.userData._bobBaseY == null) weapon.userData._bobBaseY = wmesh.position.y;
+            const tphase = (performance.now?.() || Date.now()) * 0.004;
+            wmesh.position.y = weapon.userData._bobBaseY + Math.sin(tphase) * 0.12;
+            wmesh.material && (wmesh.material.rotation = Math.sin(tphase * 0.5) * 0.18);
+        }
         // User script (OnTrigger) owns pickup when present; engine default
         // only runs as fallback if the script was cleared.
         if (hasScriptedTriggerHandler(weapon)) {
             dispatchTriggerForActor(weapon, subjectPosition, subject);
             continue;
         }
-        const mesh = getActorRenderObject(weapon);
-        if (!mesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
+        if (!wmesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
         weapon.userData.collected = true;
-        mesh.visible = false;
+        wmesh.visible = false;
+        playDoomPickupSound();
         equipDoomShotgun(weapon);
     }
 
@@ -12461,6 +12603,10 @@ function handleGameplayKeyEvent(event) {
         case 'ArrowRight':
             gameplay.input.right = isDown;
             break;
+        case 'KeyR':
+            // Reload press, consumed by weapon scripts (one-shot per keydown).
+            if (isDown && !event.repeat) gameplay.input.reloadPressed = true;
+            break;
         case 'ShiftLeft':
         case 'ShiftRight':
             gameplay.input.sprint = isDown;
@@ -13063,9 +13209,21 @@ function respawnPlayer(useStoredView = false) {
 
 function applyGameplayCameraRotation() {
     camera.rotation.order = 'YXZ';
-    camera.rotation.x = gameplay.pitch;
-    camera.rotation.y = gameplay.yaw;
+    // recoilPitch/recoilYaw are transient kick offsets (set by weapon scripts
+    // via window.applyCameraRecoil, decayed each frame in updatePlayerHitFeedback).
+    camera.rotation.x = gameplay.pitch + (gameplay.recoilPitch || 0);
+    camera.rotation.y = gameplay.yaw + (gameplay.recoilYaw || 0);
     camera.rotation.z = 0;
+}
+
+// Kick the camera by `pitch`/`yaw` radians (recoil). Additive, decays back to
+// zero. Exposed for weapon user scripts. Positive pitch = muzzle climbs up.
+function applyCameraRecoil(pitch = 0, yaw = 0) {
+    gameplay.recoilPitch += Number(pitch) || 0;
+    gameplay.recoilYaw += Number(yaw) || 0;
+}
+if (typeof window !== 'undefined') {
+    window.applyCameraRecoil = applyCameraRecoil;
 }
 
 const HELI_SETTINGS = {
@@ -13249,26 +13407,39 @@ const TELEPORTER_USER_SCRIPT = `function OnTrigger(subject) {
 }`;
 
 const DOOM_SHOTGUN_USER_SCRIPT = `// ===== DOOM SHOTGUN — all weapon logic lives here. Edit freely. =====
-// OnTrigger: walk over the pickup -> equip.
-// Tick: runs every frame while equipped -> all firing behavior.
-// Engine only provides primitives:
+// OnTrigger: walk over the pickup -> equip (+ pickup chime).
+// Tick: runs every frame while equipped -> firing, ammo, reload, HUD, recoil.
+// Engine primitives:
 //   window.spawnDoomPellet({ spreadX, spreadY, speed, damage, ... }) -> 1 pellet
-//   window.flashDoomShotgun(ms)                                      -> muzzle flash
-//   window.playDoomShotgunSound(volume)                              -> blast sfx
-//   window.equipDoomShotgun(Self)                                    -> equip
-//   window.DOOM_SHOTGUN_DEFAULTS                                     -> stock numbers
+//   window.flashDoomShotgun(ms)            -> muzzle flash
+//   window.playDoomShotgunSound(volume)    -> blast sfx
+//   window.playDoomPickupSound(volume)     -> pickup chime
+//   window.applyCameraRecoil(pitch, yaw)   -> camera kick (radians)
+//   window.setWeaponHud(text)              -> bottom-right text ('' hides)
+//   window.equipDoomShotgun(Self)          -> equip
+// Input: gameplay.input.firePressed / .reloadPressed (press 'R').
 
 // ---- TUNABLES: change anything here ----
+const MAG_SIZE        = 8;     // shells per magazine
+const RESERVE_AMMO    = 24;    // spare shells carried
+const RELOAD_MS       = 1300;  // reload duration
 const SHOTS_PER_BURST = 1;     // bullets per fire press (1 = no burst)
 const BURST_GAP_MS    = 90;    // delay between burst shots
 const COOLDOWN_MS     = 760;   // lockout after a burst finishes
-const PELLETS         = 7;     // pellets per shot (1 = single bullet)
+const PELLETS         = 7;     // pellets per shot
 const SPREAD          = 0.075; // pellet cone size
-const VOLUME          = 1.0;   // blast sound loudness, 0..1 (0 = mute)
+const VOLUME          = 1.0;   // blast sound loudness, 0..1
+const RECOIL_PITCH    = 0.05;  // upward camera kick per shot (radians)
+const RECOIL_YAW      = 0.014; // random sideways kick per shot
 const PELLET_PATTERN  = [      // per-pellet [x, y] offsets, scaled by SPREAD
     [0, 0], [-0.65, -0.2], [0.65, -0.18], [-0.35, 0.42],
     [0.38, 0.38], [-0.95, 0.16], [0.92, 0.12],
 ];
+
+function ammo(ud) {
+    if (ud._mag == null) { ud._mag = MAG_SIZE; ud._reserve = RESERVE_AMMO; }
+    return ud;
+}
 
 function OnTrigger(subject) {
     if (Self?.userData?.collected) return;
@@ -13276,7 +13447,9 @@ function OnTrigger(subject) {
     if (!mesh?.visible) return;
     Self.userData.collected = true;
     mesh.visible = false;
+    ammo(Self.userData);
     window.equipDoomShotgun?.(Self);
+    window.playDoomPickupSound?.(1);
 }
 
 function fireOneShot() {
@@ -13286,30 +13459,64 @@ function fireOneShot() {
     }
     window.flashDoomShotgun?.(85);
     window.playDoomShotgunSound?.(VOLUME);
+    window.applyCameraRecoil?.(RECOIL_PITCH, (Math.random() - 0.5) * 2 * RECOIL_YAW);
+}
+
+function startReload(ud, now) {
+    if (ud._reloadUntil) return;
+    if (ud._reserve <= 0 || ud._mag >= MAG_SIZE) return;
+    ud._reloadUntil = now + RELOAD_MS;
+    ud._burstLeft = 0;
 }
 
 function Tick(DeltaTime) {
     if (gameplay?.weapon?.type !== 'doomShotgun') return;
 
     const now = performance.now();
-    const ud = Self.userData;
+    const ud = ammo(Self.userData);
 
-    // Queue a burst on fire press, unless still cooling down.
+    // Reload: by key, or auto when the mag runs dry.
+    if (gameplay.input.reloadPressed) {
+        gameplay.input.reloadPressed = false;
+        startReload(ud, now);
+    }
+    if (ud._reloadUntil) {
+        if (now >= ud._reloadUntil) {
+            const need = MAG_SIZE - ud._mag;
+            const take = Math.min(need, ud._reserve);
+            ud._mag += take;
+            ud._reserve -= take;
+            ud._reloadUntil = 0;
+        } else {
+            window.setWeaponHud?.('RELOADING');
+            return; // can't fire mid-reload
+        }
+    }
+
+    // Queue a burst on fire press (needs ammo + off cooldown).
     if (gameplay.input.firePressed) {
         gameplay.input.firePressed = false;
         if ((ud._cooldownUntil || 0) <= now && (ud._burstLeft || 0) <= 0) {
-            ud._burstLeft = SHOTS_PER_BURST;
-            ud._nextShotAt = now;
+            if (ud._mag > 0) {
+                ud._burstLeft = Math.min(SHOTS_PER_BURST, ud._mag);
+                ud._nextShotAt = now;
+            } else {
+                startReload(ud, now); // dry-fire -> auto reload
+            }
         }
     }
 
     // Drive the queued burst.
-    if ((ud._burstLeft || 0) > 0 && now >= (ud._nextShotAt || 0)) {
+    if ((ud._burstLeft || 0) > 0 && now >= (ud._nextShotAt || 0) && ud._mag > 0) {
         fireOneShot();
+        ud._mag -= 1;
         ud._burstLeft -= 1;
         ud._nextShotAt = now + BURST_GAP_MS;
-        if (ud._burstLeft <= 0) ud._cooldownUntil = now + COOLDOWN_MS;
+        if (ud._burstLeft <= 0 || ud._mag <= 0) ud._cooldownUntil = now + COOLDOWN_MS;
+        if (ud._mag <= 0) startReload(ud, now);
     }
+
+    window.setWeaponHud?.(ud._mag + ' / ' + ud._reserve);
 }`;
 
 const SHOOTER_AI_USER_SCRIPT = `function Tick(DeltaTime) {
