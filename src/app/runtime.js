@@ -3499,12 +3499,12 @@ function getShooterCoverPoint(mesh, subjectPosition, target = tempVectorC) {
 }
 
 function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight) {
-    if (!mesh || !shooter || !subjectPosition || delta <= 0) return;
+    if (!mesh || !shooter || !subjectPosition || delta <= 0) return false;
     const position = mesh.getWorldPosition(tempVectorA);
     const toPlayer = tempVectorB.subVectors(subjectPosition, position);
     toPlayer.y = 0;
     const distance = toPlayer.length();
-    if (distance < 0.001) return;
+    if (distance < 0.001) return false;
     toPlayer.normalize();
 
     const move = tempVectorC.set(0, 0, 0);
@@ -3527,7 +3527,7 @@ function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, has
         if (distance > 15 && hasLineOfSight) move.addScaledVector(toPlayer, 0.35);
     }
 
-    if (move.lengthSq() < 1e-6) return;
+    if (move.lengthSq() < 1e-6) return false;
     move.normalize().multiplyScalar(SHOOTER_AI_PREFAB.strafeSpeed * delta);
     mesh.position.add(move);
     const groundY = getGroundHeightAt(mesh.position.x, mesh.position.z, true, {
@@ -3535,6 +3535,7 @@ function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, has
     });
     if (groundY !== null) mesh.position.y = groundY + 1.18;
     mesh.updateMatrixWorld(true);
+    return true;
 }
 
 // Per-call scratch vectors for updateShooterAiActor (called per shooter per frame).
@@ -3561,11 +3562,12 @@ function updateShooterAiActor(actor, delta = 0) {
     const range = Number.isFinite(shooter.range) ? shooter.range : SHOOTER_AI_PREFAB.range;
     if (distanceSq > range * range) {
         hideShooterAimWarning(actor);
+        updateDoomEnemySpriteAnimation(actor, delta, false);
         return;
     }
 
     const hasLineOfSight = isShooterLineOfSightClear(origin, subjectPosition);
-    updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight);
+    const moved = updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight);
     mesh.getWorldPosition(origin);
     origin.y += SHOOTER_AI_PREFAB.muzzleHeight;
 
@@ -3574,11 +3576,13 @@ function updateShooterAiActor(actor, delta = 0) {
     if (!hasLineOfSight) {
         hideShooterAimWarning(actor);
         shooter.windupUntil = 0;
+        updateDoomEnemySpriteAnimation(actor, delta, moved);
         return;
     }
 
     if ((shooter.nextShotAt || 0) > now) {
         hideShooterAimWarning(actor);
+        updateDoomEnemySpriteAnimation(actor, delta, moved);
         return;
     }
 
@@ -3587,7 +3591,10 @@ function updateShooterAiActor(actor, delta = 0) {
     }
     const charge = 1 - Math.max(0, shooter.windupUntil - now) / SHOOTER_AI_PREFAB.aimWarningMs;
     updateShooterAimWarning(actor, origin, subjectPosition, charge, true);
-    if (now < shooter.windupUntil) return;
+    if (now < shooter.windupUntil) {
+        updateDoomEnemySpriteAnimation(actor, delta, moved);
+        return;
+    }
 
     hideShooterAimWarning(actor);
     shooter.windupUntil = 0;
@@ -3595,6 +3602,7 @@ function updateShooterAiActor(actor, delta = 0) {
     origin.add(_shooterActorMuzzleDir);
     spawnShooterProjectile(origin, subjectPosition);
     shooter.nextShotAt = now + (Number.isFinite(shooter.cooldownMs) ? shooter.cooldownMs : SHOOTER_AI_PREFAB.cooldownMs);
+    updateDoomEnemySpriteAnimation(actor, delta, moved);
 }
 
 function updateShooterAis(delta = 0) {
@@ -3648,6 +3656,24 @@ function spawnShooterAiAt(position, options = {}) {
     tintGameplayPrefabActor(actor, '#dc2626', '#7f1d1d', 0.9);
     addShooterAiVisual(actor);
     attachDefaultPrefabScript(actor, SHOOTER_AI_USER_SCRIPT);
+    return actor;
+}
+
+function spawnDoomEnemyAt(position, options = {}) {
+    if (!position) return null;
+    const maxHealth = Number.isFinite(options.maxHealth)
+        ? options.maxHealth
+        : Number.isFinite(options.health)
+            ? options.health
+            : DOOM_ENEMY_PREFAB.health;
+    const actor = spawnShooterAiAt(position, {
+        ...options,
+        label: options.label || 'Doom Enemy',
+        health: Number.isFinite(options.health) ? options.health : maxHealth,
+        maxHealth,
+    });
+    if (!actor) return null;
+    applyDoomEnemySpriteSkin(actor);
     return actor;
 }
 
@@ -4394,12 +4420,11 @@ function spawnGameplayPrefab(type) {
             spawnDirection.normalize();
         }
         const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 9);
-        actor = spawnShooterAiAt(spawnPosition, {
+        actor = spawnDoomEnemyAt(spawnPosition, {
             label: 'Doom Enemy',
             health: DOOM_ENEMY_PREFAB.health,
             maxHealth: DOOM_ENEMY_PREFAB.health,
         });
-        applyDoomEnemySpriteSkin(actor);
     } else if (type === 'shooterAi') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -10549,102 +10574,190 @@ function createBrickRoomLevel() {
     return root;
 }
 
-function makeDoomImpSpriteTexture() {
-    // 32x40 pixel-art imp: brown body, horns, glowing yellow eyes, claws.
-    // Drawn via per-pixel rect fills on a small canvas, then upsampled by
-    // NearestFilter so the chunky pixels survive in 3D.
-    const W = 32, H = 40;
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, W, H);
+const DOOM_ENEMY_SPRITE_FRAME_W = 32;
+const DOOM_ENEMY_SPRITE_FRAME_H = 40;
+const DOOM_ENEMY_SPRITE_COLS = 3;
+const DOOM_ENEMY_SPRITE_ROWS = 2;
+const DOOM_ENEMY_IDLE_FRAME = 1;
+const DOOM_ENEMY_WALK_FRAMES = [0, 1, 2, 5, 4, 3];
+const DOOM_ENEMY_WALK_FPS = 9;
 
-    const px = (x, y, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, 1, 1); };
-    const rect = (x, y, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); };
+function setDoomEnemySpriteFrame(sprite, frameIndex = DOOM_ENEMY_IDLE_FRAME) {
+    const texture = sprite?.material?.map;
+    if (!texture) return;
+    const clampedFrame = Math.max(0, Math.min(DOOM_ENEMY_SPRITE_COLS * DOOM_ENEMY_SPRITE_ROWS - 1, frameIndex | 0));
+    const col = clampedFrame % DOOM_ENEMY_SPRITE_COLS;
+    const row = Math.floor(clampedFrame / DOOM_ENEMY_SPRITE_COLS);
+    texture.repeat.set(1 / DOOM_ENEMY_SPRITE_COLS, 1 / DOOM_ENEMY_SPRITE_ROWS);
+    texture.offset.set(col / DOOM_ENEMY_SPRITE_COLS, 1 - ((row + 1) / DOOM_ENEMY_SPRITE_ROWS));
+    texture.needsUpdate = true;
+    sprite.userData.frameIndex = clampedFrame;
+}
 
-    const SKIN = '#8a3a1a';
-    const SKIN_D = '#5a2410';
-    const SKIN_L = '#b8552a';
-    const HORN = '#1a1208';
-    const EYE = '#ffdd33';
-    const EYE_HI = '#ffffaa';
-    const MOUTH = '#2a0a04';
-    const CLAW = '#e8d8b8';
+function drawDoomEnemySpriteFrame(ctx, ox, oy, pose = {}) {
+    const rect = (x, y, w, h, color) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(ox + x, oy + y, w, h);
+    };
+    const px = (x, y, color) => rect(x, y, 1, 1, color);
 
-    // Horns
-    rect(8, 2, 2, 4, HORN);
-    rect(22, 2, 2, 4, HORN);
-    px(9, 6, HORN); px(22, 6, HORN);
+    const lean = pose.lean || 0;
+    const headShift = pose.headShift || 0;
+    const gunShift = pose.gunShift || 0;
+    const gunLift = pose.gunLift || 0;
+    const leftArmShift = pose.leftArmShift || 0;
+    const rightArmShift = pose.rightArmShift || 0;
+    const leftLegLift = pose.leftLegLift || 0;
+    const rightLegLift = pose.rightLegLift || 0;
+
+    const FACE = '#0b0b0b';
+    const FACE_D = '#000000';
+    const FACE_L = '#2a2a2a';
+    const SKIN = '#d5a07a';
+    const SKIN_D = '#8e5b43';
+    const SKIN_L = '#efc6aa';
+    const ARMOR = '#27242c';
+    const ARMOR_D = '#131118';
+    const ARMOR_L = '#4a4650';
+    const RED = '#8a1e1c';
+    const RED_L = '#bb4036';
+    const RED_D = '#4c0d0f';
+    const PANTS = '#5f624c';
+    const PANTS_D = '#3e4034';
+    const GUN = '#6f737a';
+    const GUN_L = '#a2a7af';
+    const GUN_D = '#34383d';
+    const BLACK = '#090909';
 
     // Head
-    rect(8, 6, 16, 10, SKIN);
-    rect(8, 6, 16, 2, SKIN_D); // brow shadow
-    rect(10, 14, 12, 2, SKIN_D); // jaw shadow
-    // Cheek highlights
-    rect(9, 9, 2, 3, SKIN_L);
-    rect(21, 9, 2, 3, SKIN_L);
+    rect(11 + lean + headShift, 3, 9, 8, FACE);
+    rect(11 + lean + headShift, 3, 9, 2, FACE_L);
+    rect(11 + lean + headShift, 10, 9, 1, FACE_D);
+    rect(13 + lean + headShift, 0, 5, 3, FACE_L);
+    px(14 + lean + headShift, 5, BLACK);
+    px(17 + lean + headShift, 5, BLACK);
+    rect(14 + lean + headShift, 7, 3, 1, FACE_D);
 
-    // Eyes (angry glowing)
-    rect(11, 9, 3, 2, EYE);
-    rect(18, 9, 3, 2, EYE);
-    px(12, 9, EYE_HI); px(19, 9, EYE_HI);
-    // Eyebrow slash
-    px(10, 8, HORN); px(13, 8, HORN);
-    px(18, 8, HORN); px(21, 8, HORN);
+    // Torso and shoulders
+    rect(9 + lean, 11, 14, 13, ARMOR);
+    rect(9 + lean, 11, 14, 2, ARMOR_L);
+    rect(9 + lean, 22, 14, 2, ARMOR_D);
+    rect(8 + lean, 12, 4, 4, RED);
+    rect(20 + lean, 12, 4, 4, RED);
+    rect(12 + lean, 15, 8, 5, ARMOR_L);
+    rect(13 + lean, 16, 6, 3, '#1b191f');
 
-    // Mouth + fangs
-    rect(12, 13, 8, 2, MOUTH);
-    px(13, 13, CLAW); px(15, 13, CLAW); px(17, 13, CLAW); px(19, 13, CLAW);
+    // Arms and gloves
+    rect(5 + lean, 14 + leftArmShift, 4, 9, ARMOR);
+    rect(23 + lean, 14 + rightArmShift, 4, 9, ARMOR);
+    rect(5 + lean, 21 + leftArmShift, 4, 3, RED);
+    rect(23 + lean, 21 + rightArmShift, 4, 3, RED);
+    rect(6 + lean, 23 + leftArmShift, 3, 2, SKIN);
+    rect(23 + lean, 23 + rightArmShift, 3, 2, SKIN);
 
-    // Torso
-    rect(7, 16, 18, 12, SKIN);
-    rect(7, 16, 18, 2, SKIN_D);
-    // Spikes on shoulders
-    px(7, 16, HORN); px(24, 16, HORN);
-    px(6, 17, HORN); px(25, 17, HORN);
-    // Chest highlight
-    rect(13, 19, 6, 5, SKIN_L);
-    rect(14, 20, 4, 3, SKIN);
+    // Shotgun
+    rect(8 + lean + gunShift, 19 + gunLift, 5, 2, '#65442a');
+    rect(12 + lean + gunShift, 18 + gunLift, 8, 3, GUN_D);
+    rect(19 + lean + gunShift, 17 + gunLift, 8, 3, GUN);
+    rect(26 + lean + gunShift, 16 + gunLift, 3, 2, GUN_L);
+    px(27 + lean + gunShift, 18 + gunLift, BLACK);
 
-    // Arms
-    rect(4, 18, 3, 9, SKIN);
-    rect(25, 18, 3, 9, SKIN);
-    // Claws
-    rect(3, 27, 5, 2, CLAW);
-    rect(24, 27, 5, 2, CLAW);
-    px(3, 28, HORN); px(7, 28, HORN);
-    px(24, 28, HORN); px(28, 28, HORN);
+    // Waist and legs
+    rect(10 + lean, 24, 12, 3, RED_D);
+    rect(10 + lean, 25 - leftLegLift, 4, 9 + leftLegLift, PANTS);
+    rect(18 + lean, 25 - rightLegLift, 4, 9 + rightLegLift, PANTS);
+    rect(10 + lean, 25 - leftLegLift, 4, 2, PANTS_D);
+    rect(18 + lean, 25 - rightLegLift, 4, 2, PANTS_D);
+    rect(10 + lean, 30 - leftLegLift, 4, 2, RED);
+    rect(18 + lean, 30 - rightLegLift, 4, 2, RED);
+    rect(9 + lean, 34, 6, 4, RED_D);
+    rect(17 + lean, 34, 6, 4, RED_D);
+    rect(9 + lean, 34, 6, 1, RED_L);
+    rect(17 + lean, 34, 6, 1, RED_L);
+}
 
-    // Legs
-    rect(9, 28, 5, 10, SKIN);
-    rect(18, 28, 5, 10, SKIN);
-    rect(9, 28, 5, 2, SKIN_D);
-    rect(18, 28, 5, 2, SKIN_D);
-    // Hooves
-    rect(8, 37, 7, 2, HORN);
-    rect(17, 37, 7, 2, HORN);
+function makeDoomEnemySpriteSheet() {
+    const canvas = document.createElement('canvas');
+    canvas.width = DOOM_ENEMY_SPRITE_FRAME_W * DOOM_ENEMY_SPRITE_COLS;
+    canvas.height = DOOM_ENEMY_SPRITE_FRAME_H * DOOM_ENEMY_SPRITE_ROWS;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.magFilter = THREE.NearestFilter;
-    tex.minFilter = THREE.NearestFilter;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.generateMipmaps = false;
-    tex.needsUpdate = true;
-    return tex;
+    const poses = [
+        { lean: -1, headShift: -1, gunShift: -1, gunLift: -1, leftArmShift: -1, rightArmShift: 1, leftLegLift: 2, rightLegLift: 0 },
+        { lean: -1, headShift: 0, gunShift: 0, gunLift: 0, leftArmShift: 0, rightArmShift: 0, leftLegLift: 1, rightLegLift: 1 },
+        { lean: 0, headShift: 1, gunShift: 1, gunLift: 0, leftArmShift: 1, rightArmShift: -1, leftLegLift: 0, rightLegLift: 2 },
+        { lean: 1, headShift: 1, gunShift: 1, gunLift: 1, leftArmShift: 1, rightArmShift: 0, leftLegLift: 0, rightLegLift: 2 },
+        { lean: 1, headShift: 0, gunShift: 0, gunLift: 0, leftArmShift: 0, rightArmShift: 0, leftLegLift: 1, rightLegLift: 1 },
+        { lean: 0, headShift: -1, gunShift: -1, gunLift: -1, leftArmShift: -1, rightArmShift: 1, leftLegLift: 2, rightLegLift: 0 },
+    ];
+    poses.forEach((pose, index) => {
+        const ox = (index % DOOM_ENEMY_SPRITE_COLS) * DOOM_ENEMY_SPRITE_FRAME_W;
+        const oy = Math.floor(index / DOOM_ENEMY_SPRITE_COLS) * DOOM_ENEMY_SPRITE_FRAME_H;
+        drawDoomEnemySpriteFrame(ctx, ox, oy, pose);
+    });
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.generateMipmaps = false;
+    texture.needsUpdate = true;
+
+    return {
+        texture,
+        idleFrame: DOOM_ENEMY_IDLE_FRAME,
+        walkFrames: DOOM_ENEMY_WALK_FRAMES.slice(),
+        fps: DOOM_ENEMY_WALK_FPS,
+    };
+}
+
+function updateDoomEnemySpriteAnimation(actor, delta = 0, moving = false) {
+    const state = actor?.userData?.doomEnemy;
+    const sprite = state?.sprite;
+    if (!state || !sprite) return;
+
+    if (!moving) {
+        state.elapsed = 0;
+        if (state.frameIndex !== state.idleFrame) {
+            state.frameIndex = state.idleFrame;
+            setDoomEnemySpriteFrame(sprite, state.idleFrame);
+        }
+        return;
+    }
+
+    state.elapsed = (state.elapsed || 0) + Math.max(0, delta);
+    const walkFrames = Array.isArray(state.walkFrames) && state.walkFrames.length
+        ? state.walkFrames
+        : DOOM_ENEMY_WALK_FRAMES;
+    const frameIndex = walkFrames[Math.floor(state.elapsed * (state.fps || DOOM_ENEMY_WALK_FPS)) % walkFrames.length];
+    if (state.frameIndex !== frameIndex) {
+        state.frameIndex = frameIndex;
+        setDoomEnemySpriteFrame(sprite, frameIndex);
+    }
 }
 
 function applyDoomEnemySpriteSkin(actor) {
     const mesh = getActorRenderObject(actor);
     if (!mesh) return actor;
 
+    const staleSprites = [];
     mesh.traverse((child) => {
         if (child === mesh) return;
+        if (child.name === 'doom-enemy-sprite' || child.name === 'doom-imp-sprite') {
+            staleSprites.push(child);
+        }
         if (child.name === 'Shooter Barrel'
-            || child.name === 'doom-imp-sprite'
             || child.isMesh && child.geometry?.type === 'CapsuleGeometry') {
             child.visible = false;
         }
     });
+
+    for (const sprite of staleSprites) {
+        sprite.parent?.remove(sprite);
+        for (const tex of sprite.userData?.ownedTextures || []) tex?.dispose?.();
+        sprite.material?.dispose?.();
+    }
 
     if (mesh.isMesh && mesh.material) {
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
@@ -10657,9 +10770,9 @@ function applyDoomEnemySpriteSkin(actor) {
         }
     }
 
-    const impTex = makeDoomImpSpriteTexture();
+    const spriteSheet = makeDoomEnemySpriteSheet();
     const impMat = new THREE.SpriteMaterial({
-        map: impTex,
+        map: spriteSheet.texture,
         transparent: true,
         alphaTest: 0.5,
         depthWrite: true,
@@ -10667,15 +10780,23 @@ function applyDoomEnemySpriteSkin(actor) {
     });
     impMat.toneMapped = false;
     const impSprite = new THREE.Sprite(impMat);
-    impSprite.name = 'doom-imp-sprite';
+    impSprite.name = 'doom-enemy-sprite';
     impSprite.scale.set(3.2, 4.0, 1);
     impSprite.position.set(0, -0.2, 0);
-    impSprite.userData.ownedTextures = [impTex];
+    impSprite.userData.ownedTextures = [spriteSheet.texture];
     impSprite.raycast = () => {};
     mesh.add(impSprite);
+    setDoomEnemySpriteFrame(impSprite, spriteSheet.idleFrame);
 
     actor.userData.label = actor.userData.label || 'Doom Enemy';
-    actor.userData.doomEnemy = true;
+    actor.userData.doomEnemy = {
+        sprite: impSprite,
+        frameIndex: spriteSheet.idleFrame,
+        idleFrame: spriteSheet.idleFrame,
+        walkFrames: spriteSheet.walkFrames,
+        fps: spriteSheet.fps,
+        elapsed: 0,
+    };
     return actor;
 }
 
@@ -10772,6 +10893,9 @@ function createDoomTestLevel() {
     const ROOM_H = 5.2;
     const LEDGE_H = 1.6;
     const LEDGE_W = 3;
+    const DOOM_WALL_COLOR = '#2b1514';
+    const DOOM_RED_LIGHT = 0xff3030;
+    const DOOM_RED_EMISSIVE = '#ff3030';
 
     root.userData.preferredSpawn = {
         position: [0, 0.3, CORR_LEN + ROOM_D * 0.5 - 1.5],
@@ -10932,24 +11056,24 @@ function createDoomTestLevel() {
     const southSegW = (ROOM_W - southGap) * 0.5;
     addBox('doom-wall-south-l', [southSegW, ROOM_H, T],
         [-(southGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5 }));
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
     addBox('doom-wall-south-r', [southSegW, ROOM_H, T],
         [(southGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5 }));
+        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
     addBox('doom-wall-north', [ROOM_W, ROOM_H, T], [0, ROOM_H * 0.5, -ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5 }));
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
     addBox('doom-wall-east',  [T, ROOM_H, ROOM_D], [ ROOM_W * 0.5, ROOM_H * 0.5, 0],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5 }));
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
     addBox('doom-wall-west',  [T, ROOM_H, ROOM_D], [-ROOM_W * 0.5, ROOM_H * 0.5, 0],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5 }));
+        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
 
     // Raised L-shaped ledge with stairs — classic Doom verticality
     addBox('doom-ledge-north', [ROOM_W - 2, LEDGE_H, LEDGE_W],
         [0, LEDGE_H * 0.5, -ROOM_D * 0.5 + LEDGE_W * 0.5 + 0.4],
-        brickMat(accentSet, { repeatU: 6, repeatV: 1, color: '#7a6a55' }));
+        brickMat(accentSet, { repeatU: 6, repeatV: 1, color: DOOM_WALL_COLOR }));
     addBox('doom-ledge-west', [LEDGE_W, LEDGE_H, ROOM_D - 2 * LEDGE_W - 1],
         [-ROOM_W * 0.5 + LEDGE_W * 0.5 + 0.4, LEDGE_H * 0.5, -1],
-        brickMat(accentSet, { repeatU: 1, repeatV: 4, color: '#7a6a55' }));
+        brickMat(accentSet, { repeatU: 1, repeatV: 4, color: DOOM_WALL_COLOR }));
 
     // Stair stepping up to ledge
     for (let i = 0; i < 4; i++) {
@@ -10973,7 +11097,7 @@ function createDoomTestLevel() {
             brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#5a4a3a' }));
         addBox(`doom-closet-back-${x}`, [CLOSET_W, CLOSET_H, T * 0.6],
             [x, LEDGE_H + CLOSET_H * 0.5, -ROOM_D * 0.5 + 0.05],
-            flatMat('#2a1a1a', { rough: 0.5, emissive: '#ff1a1a', emissiveIntensity: 0.6 }));
+            flatMat(DOOM_WALL_COLOR, { rough: 0.5, emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 0.6 }));
     };
     closet(-5.5);
     closet(5.5);
@@ -10981,7 +11105,7 @@ function createDoomTestLevel() {
     // Key-colored door recess on east wall (locked door look)
     addBox('doom-keydoor-frame', [T * 1.4, 3.2, 1.8],
         [ROOM_W * 0.5 - T * 0.4, 1.6, -ROOM_D * 0.5 + 5.5],
-        flatMat('#1a1a1a', { rough: 0.4, metal: 0.6 }));
+        flatMat(DOOM_WALL_COLOR, { rough: 0.4, metal: 0.6 }));
     addBox('doom-keydoor-panel', [T * 0.5, 2.6, 1.4],
         [ROOM_W * 0.5 - T * 0.9, 1.4, -ROOM_D * 0.5 + 5.5],
         flatMat('#1a4a8a', { rough: 0.35, metal: 0.7, emissive: '#3060ff', emissiveIntensity: 0.55 }));
@@ -10994,7 +11118,7 @@ function createDoomTestLevel() {
     addBox('doom-crate-c', [1.4, 1.4, 1.4], [-2, 2.1, 1.5],
         brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
     addBox('doom-pillar-mid', [1.2, ROOM_H, 1.2], [2.5, ROOM_H * 0.5, -3],
-        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: '#6a5a4a' }));
+        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: DOOM_WALL_COLOR }));
 
     // ---- Corridor connecting south door to spawn ----
     addBox('doom-corr-floor', [CORR_W, T, CORR_LEN],
@@ -11007,21 +11131,21 @@ function createDoomTestLevel() {
         { actorSurface: 'roof' });
     addBox('doom-corr-wall-e', [T, CORR_H, CORR_LEN],
         [CORR_W * 0.5, CORR_H * 0.5, corridorCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: '#6a5a4a' }));
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
     addBox('doom-corr-wall-w', [T, CORR_H, CORR_LEN],
         [-CORR_W * 0.5, CORR_H * 0.5, corridorCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: '#6a5a4a' }));
+        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
     addBox('doom-corr-end', [CORR_W, CORR_H, T],
         [0, CORR_H * 0.5, corridorCenterZ + CORR_LEN * 0.5],
-        brickMat(accentSet, { repeatU: 2, repeatV: 1, color: '#5a4030' }));
+        brickMat(accentSet, { repeatU: 2, repeatV: 1, color: DOOM_WALL_COLOR }));
 
     // Wall sconces (emissive bars) flanking the corridor
     addBox('doom-corr-light-l', [0.2, 0.6, 0.4],
         [-CORR_W * 0.5 + 0.15, CORR_H - 1.0, corridorCenterZ - CORR_LEN * 0.25],
-        flatMat('#3a1408', { emissive: '#ff7a2a', emissiveIntensity: 1.6 }));
+        flatMat('#2a0f0f', { emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 1.6 }));
     addBox('doom-corr-light-r', [0.2, 0.6, 0.4],
         [ CORR_W * 0.5 - 0.15, CORR_H - 1.0, corridorCenterZ + CORR_LEN * 0.25],
-        flatMat('#3a1408', { emissive: '#ff7a2a', emissiveIntensity: 1.6 }));
+        flatMat('#2a0f0f', { emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 1.6 }));
 
     // Imp enemies spawned in afterLoad via spawnShooterAiAt — see level definition.
     // ---- Gun pickup pedestal (actual SMG actor spawned in afterLoad) ----
@@ -11029,36 +11153,36 @@ function createDoomTestLevel() {
         flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#222222', emissiveIntensity: 0.2 }));
 
     // Glow under gun
-    const gunGlow = new THREE.PointLight(0xffdd66, 1.6, 4.5, 2.0);
+    const gunGlow = new THREE.PointLight(DOOM_RED_LIGHT, 1.6, 4.5, 2.0);
     gunGlow.position.set(0, 0.6, -2);
     gunGlow.castShadow = false;
     gunGlow.name = 'doom-gun-glow';
     root.add(gunGlow);
 
     // ---- Lights ----
-    // Main room: low red key light + cooler fill from above
-    const keyLight = new THREE.PointLight(0xff5a2a, 9, 26, 1.6);
+    // Main room: low red key light + softer red fill from above
+    const keyLight = new THREE.PointLight(DOOM_RED_LIGHT, 9, 26, 1.6);
     keyLight.position.set(-4, ROOM_H - 1.2, -2);
     keyLight.castShadow = true;
     configurePointLightShadow(keyLight);
     keyLight.name = 'doom-room-key';
     root.add(keyLight);
 
-    const fillLight = new THREE.PointLight(0x80a8ff, 3.5, 22, 2.0);
+    const fillLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.5, 22, 2.0);
     fillLight.position.set(5, ROOM_H - 0.6, 5);
     fillLight.castShadow = false;
     fillLight.name = 'doom-room-fill';
     root.add(fillLight);
 
     // Slime glow
-    const slimeGlow = new THREE.PointLight(0x39ff14, 2.4, 9, 1.8);
+    const slimeGlow = new THREE.PointLight(DOOM_RED_LIGHT, 2.4, 9, 1.8);
     slimeGlow.position.set(4.5, 0.2, 4.5);
     slimeGlow.castShadow = false;
     slimeGlow.name = 'doom-slime-glow';
     root.add(slimeGlow);
 
     // Corridor torch
-    const corrLight = new THREE.PointLight(0xff8a3a, 4, 12, 1.8);
+    const corrLight = new THREE.PointLight(DOOM_RED_LIGHT, 4, 12, 1.8);
     corrLight.position.set(0, CORR_H - 0.6, corridorCenterZ);
     corrLight.castShadow = true;
     configurePointLightShadow(corrLight);
@@ -11106,72 +11230,13 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
                     rebuildActorPhysics?.(gunActor);
                 }
 
-                // Imp enemies: spawn real shooterAi actors so they share the
-                // existing AI/damage/score pipeline, then re-skin them with
-                // our pixel-art sprite. Hide the default capsule body and
-                // barrel by zero-scaling so only the sprite shows.
-                const impSpots = [
-                    new THREE.Vector3(-5, 0, -8),
-                    new THREE.Vector3( 6, 0, -6),
-                ];
-                for (const spot of impSpots) {
-                    // Use the spot's own Y as ground; default raycast from
-                    // probeHeight down hits the ceiling first in a sealed
-                    // room and stamps the imp onto the roof.
-                    const imp = spawnShooterAiAt(spot, {
-                        label: 'Doom Imp',
-                        groundY: spot.y,
-                        health: DOOM_ENEMY_PREFAB.health,
-                        maxHealth: DOOM_ENEMY_PREFAB.health,
-                    });
-                    if (!imp) continue;
-                    const impMesh = getActorRenderObject(imp);
-                    if (!impMesh) continue;
-
-                    // Hide the procedural capsule + barrel; keep the mesh
-                    // node itself so AI keeps tracking it.
-                    impMesh.traverse((child) => {
-                        if (child === impMesh) return;
-                        if (child.name === 'Shooter Barrel'
-                            || child.isMesh && child.geometry?.type === 'CapsuleGeometry') {
-                            child.visible = false;
-                        }
-                    });
-                    // Capsule itself (the actor root mesh) — hide its material
-                    // by making it transparent. We keep the mesh so health-bar
-                    // and aim-warning children stay correctly positioned.
-                    if (impMesh.isMesh && impMesh.material) {
-                        const mats = Array.isArray(impMesh.material) ? impMesh.material : [impMesh.material];
-                        for (const m of mats) {
-                            if (!m) continue;
-                            m.transparent = true;
-                            m.opacity = 0.0;
-                            m.depthWrite = false;
-                            m.needsUpdate = true;
-                        }
-                    }
-
-                    // Pixel-art sprite skin
-                    const impTex = makeDoomImpSpriteTexture();
-                    const impMat = new THREE.SpriteMaterial({
-                        map: impTex,
-                        transparent: true,
-                        alphaTest: 0.5,
-                        depthWrite: true,
-                        sizeAttenuation: true,
-                    });
-                    impMat.toneMapped = false;
-                    const impSprite = new THREE.Sprite(impMat);
-                    impSprite.name = 'doom-imp-sprite';
-                    impSprite.scale.set(3.2, 4.0, 1);
-                    // Actor mesh origin sits at capsule center (~1.18 above
-                    // ground from spawnShooterAiAt). Lift sprite slightly so
-                    // pixel feet line up with the floor.
-                    impSprite.position.set(0, -0.2, 0);
-                    impSprite.userData.ownedTextures = [impTex];
-                    impSprite.raycast = () => {};
-                    impMesh.add(impSprite);
-                }
+                const doomEnemy = spawnDoomEnemyAt(new THREE.Vector3(-5, 0, -8), {
+                    label: 'Doom Enemy',
+                    groundY: 0,
+                    health: DOOM_ENEMY_PREFAB.health,
+                    maxHealth: DOOM_ENEMY_PREFAB.health,
+                });
+                doomEnemy?.mesh?.updateMatrixWorld?.(true);
 
                 return null;
             },
