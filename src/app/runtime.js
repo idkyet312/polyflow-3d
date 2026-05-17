@@ -2821,7 +2821,7 @@ if (typeof window !== 'undefined') {
     queueMicrotask(() => { window.setPlayerHealth = setPlayerHealth; });
 }
 
-function damagePlayer(amount = SHOOTER_AI_PREFAB.damage) {
+function damagePlayer(amount = SHOOTER_AI_PREFAB.damage, sourcePos = null) {
     if (gameplay.dead) return;
 
     const now = performance.now?.() || Date.now();
@@ -2831,6 +2831,20 @@ function damagePlayer(amount = SHOOTER_AI_PREFAB.damage) {
     const damageAmount = THREE.MathUtils.clamp(Number(amount) || 0, 0, SHOOTER_AI_PREFAB.damage);
     setPlayerHealth((gameplay.health ?? 1) - damageAmount);
     triggerPlayerHitFeedback();
+
+    // Directional indicator: angle of the hit relative to where the player
+    // faces. 0 = front, +right, PI = behind. Overridable hook.
+    if (sourcePos && camera) {
+        const dx = sourcePos.x - camera.position.x;
+        const dz = sourcePos.z - camera.position.z;
+        const worldAngle = Math.atan2(dx, -dz);   // 0 = -Z (forward), CW
+        const rel = worldAngle - (gameplay.yaw || 0);
+        if (typeof window !== 'undefined' && window.onPlayerDamaged) {
+            try { window.onPlayerDamaged(rel, damageAmount); } catch (e) { /* script error */ }
+        } else {
+            showDamageIndicator(rel);
+        }
+    }
 }
 
 function ensurePlayerHitOverlay() {
@@ -3213,7 +3227,17 @@ function damageShooterAi(actor, amount = SHOOTER_AI_PREFAB.hitDamage) {
     if (!shooter || shooter.defeated) return;
 
     const health = shooter.health ?? shooter.maxHealth ?? SHOOTER_AI_PREFAB.health;
-    setShooterHealth(actor, health - Math.max(0, Number(amount) || 0));
+    const dmg = Math.max(0, Number(amount) || 0);
+    const fatal = health - dmg <= 0;
+    setShooterHealth(actor, health - dmg);
+    // Overridable hook: weapon scripts decide hurt FX. setShooterHealth already
+    // plays the death sound on a fatal hit, so default only handles non-fatal.
+    if (typeof window !== 'undefined' && window.onEnemyDamaged) {
+        try { window.onEnemyDamaged(actor, dmg, fatal); } catch (e) { /* script error */ }
+    } else if (!fatal) {
+        flashActorHit(actor, 0xff5555);
+        playEnemyHurtSound(0.7);
+    }
 }
 
 function emitShooterDeathEffect(actor) {
@@ -3392,6 +3416,15 @@ function updateShooterProjectiles(delta = 0) {
             if (ray?.hit && !ray.actor?.userData?.shooterAi) {
                 hitWall = true;
                 if (ray.point) projectile.mesh.position.copy(ray.point);
+                // Overridable hook: weapon scripts decide impact FX. Default
+                // (no override) = small spark + thud.
+                const ip = ray.point || projectile.mesh.position;
+                if (typeof window !== 'undefined' && window.onBulletImpact) {
+                    try { window.onBulletImpact(ip.x, ip.y, ip.z, projectile); } catch (e) { /* script error */ }
+                } else {
+                    spawnImpactBurst(ip.x, ip.y, ip.z);
+                    playImpactSound(0.8, ip.x, ip.y, ip.z);
+                }
             }
         }
         if (!hitWall && projectile.hitsPlayer !== false && hitPoints) {
@@ -3435,7 +3468,7 @@ function updateShooterProjectiles(delta = 0) {
             releaseProjectile(projectile);
             gameplayPrefabState.shooterProjectiles.splice(i, 1);
             if (hitPlayer) {
-                damagePlayer(projectile.damage);
+                damagePlayer(projectile.damage, projectile.mesh.position);
                 if (!gameplayPrefabState.shooterProjectiles.length) break;
             }
         }
@@ -4384,8 +4417,188 @@ function playEnemyDeathSound(volume = 1) {
     noise.start(t);
     noise.stop(t + dur);
 }
+// Short noisy "thud/spark" — bullet hitting a wall.
+// Build a PannerNode at world (x,y,z) so the sound is spatialized relative to
+// the camera-mounted listener. Returns the panner (connected to destination),
+// or context.destination itself if no position given / panner unsupported.
+function makeSpatialSink(context, x, y, z) {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        return context.destination;
+    }
+    let panner;
+    try {
+        panner = context.createPanner();
+    } catch (e) {
+        return context.destination;
+    }
+    panner.panningModel = 'HRTF';
+    panner.distanceModel = 'inverse';
+    panner.refDistance = 4;
+    panner.maxDistance = 90;
+    panner.rolloffFactor = 1.1;
+    const tt = context.currentTime;
+    if (panner.positionX) {
+        panner.positionX.setValueAtTime(x, tt);
+        panner.positionY.setValueAtTime(y, tt);
+        panner.positionZ.setValueAtTime(z, tt);
+    } else {
+        panner.setPosition(x, y, z); // legacy
+    }
+    panner.connect(context.destination);
+    return panner;
+}
+function playImpactSound(volume = 1, x, y, z) {
+    const context = runtimeAudio.listener?.context;
+    if (!context || context.state !== 'running') return;
+    const t = context.currentTime;
+    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+    const sink = makeSpatialSink(context, x, y, z);
+
+    // Lowpassed noise body (the dull thwack), darker + slightly longer.
+    const dur = 0.16;
+    const buffer = context.createBuffer(1, Math.ceil(context.sampleRate * dur), context.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    const noise = context.createBufferSource();
+    noise.buffer = buffer;
+    const f = context.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.setValueAtTime(900, t);
+    f.frequency.exponentialRampToValueAtTime(220, t + dur);
+    const g = context.createGain();
+    g.gain.setValueAtTime(0.32 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    noise.connect(f).connect(g).connect(sink);
+    noise.start(t);
+    noise.stop(t + dur);
+
+    // Low sine thump for weight.
+    const osc = context.createOscillator();
+    const og = context.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(120, t);
+    osc.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+    og.gain.setValueAtTime(0.34 * vol, t);
+    og.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+    osc.connect(og).connect(sink);
+    osc.start(t);
+    osc.stop(t + 0.15);
+}
+// Short grunt — enemy took non-fatal damage.
+function playEnemyHurtSound(volume = 1) {
+    const context = runtimeAudio.listener?.context;
+    if (!context || context.state !== 'running') return;
+    const t = context.currentTime;
+    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+    const o = context.createOscillator();
+    const g = context.createGain();
+    o.type = 'square';
+    o.frequency.setValueAtTime(420, t);
+    o.frequency.exponentialRampToValueAtTime(190, t + 0.11);
+    g.gain.setValueAtTime(0.16 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+    o.connect(g).connect(context.destination);
+    o.start(t);
+    o.stop(t + 0.13);
+}
+// Small spark/puff burst at a world point (reuses the effect particle system).
+function spawnImpactBurst(x, y, z, opts = {}) {
+    if (!scene) return;
+    const color = opts.color ?? 0xffd27a;
+    const count = opts.count ?? 7;
+    const spread = opts.spread ?? 2.6;
+    const particles = [];
+    for (let i = 0; i < count; i++) {
+        const p = new THREE.Mesh(
+            new THREE.SphereGeometry(0.035, 6, 5),
+            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 })
+        );
+        p.position.set(x, y, z);
+        scene.add(p);
+        particles.push({
+            mesh: p,
+            velocity: new THREE.Vector3(
+                (Math.random() - 0.5) * spread,
+                Math.random() * spread * 0.6,
+                (Math.random() - 0.5) * spread
+            ),
+        });
+    }
+    gameplayPrefabState.effects.push({ type: 'impact', particles, ttl: 0.35, maxTtl: 0.35 });
+}
+// Muzzle smoke puff + a tumbling ejected shell, at the held weapon's muzzle
+// (derived from the camera so it tracks aim). Cosmetic.
+function spawnMuzzleSmoke() {
+    if (!scene || !camera) return;
+    const muzzle = camera.localToWorld(tempVectorA.set(0.05, -0.05, -1.0)).clone();
+    const right = tempVectorD.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+    const fwd = tempVectorC.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+    const particles = [];
+
+    // Smoke: a few soft grey puffs drifting forward + up.
+    for (let i = 0; i < 5; i++) {
+        const p = new THREE.Mesh(
+            new THREE.SphereGeometry(0.05 + Math.random() * 0.04, 6, 5),
+            new THREE.MeshBasicMaterial({ color: 0x9a9a9a, transparent: true, opacity: 0.55 })
+        );
+        p.position.copy(muzzle);
+        scene.add(p);
+        particles.push({
+            mesh: p,
+            velocity: fwd.clone().multiplyScalar(1.6 + Math.random())
+                .add(new THREE.Vector3(0, 0.7 + Math.random() * 0.5, 0))
+                .addScaledVector(right, (Math.random() - 0.5) * 0.6),
+        });
+    }
+    // Shell: one brassy box flicked to the right.
+    const shell = new THREE.Mesh(
+        new THREE.BoxGeometry(0.05, 0.05, 0.11),
+        new THREE.MeshBasicMaterial({ color: 0xd9a441 })
+    );
+    shell.position.copy(muzzle).addScaledVector(right, 0.1);
+    scene.add(shell);
+    particles.push({
+        mesh: shell,
+        velocity: right.clone().multiplyScalar(2.4 + Math.random())
+            .add(new THREE.Vector3(0, 1.2, 0)),
+    });
+
+    gameplayPrefabState.effects.push({ type: 'muzzle', particles, ttl: 0.5, maxTtl: 0.5 });
+}
+if (typeof window !== 'undefined') {
+    window.spawnMuzzleSmoke = spawnMuzzleSmoke;
+}
+// Brief emissive flash on an actor's mesh (non-fatal hit feedback).
+function flashActorHit(actor, color = 0xffffff) {
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return;
+    mesh.traverse?.((node) => {
+        const mats = node?.material ? (Array.isArray(node.material) ? node.material : [node.material]) : [];
+        mats.forEach((mat) => {
+            if (!mat?.emissive) return;
+            if (mat.userData._hitFlashRestore == null) {
+                mat.userData._hitFlashRestore = {
+                    e: mat.emissive.getHex(),
+                    i: mat.emissiveIntensity ?? 1,
+                };
+            }
+            mat.emissive.set(color);
+            mat.emissiveIntensity = 1.8;
+            clearTimeout(mat.userData._hitFlashTimer);
+            mat.userData._hitFlashTimer = setTimeout(() => {
+                const r = mat.userData._hitFlashRestore;
+                if (r) { mat.emissive.setHex(r.e); mat.emissiveIntensity = r.i; }
+                mat.userData._hitFlashRestore = null;
+            }, 90);
+        });
+    });
+}
 if (typeof window !== 'undefined') {
     window.playEnemyDeathSound = playEnemyDeathSound;
+    window.playImpactSound = playImpactSound;
+    window.playEnemyHurtSound = playEnemyHurtSound;
+    window.spawnImpactBurst = spawnImpactBurst;
+    window.flashActorHit = flashActorHit;
 }
 // Bottom-right weapon HUD (ammo / reload text). One reused DOM element.
 let weaponHudEl = null;
@@ -4420,12 +4633,50 @@ function setWeaponHud(text) {
     el.textContent = String(text);
     el.style.opacity = '1';
 }
+
+// Directional damage indicator: a red arc that flashes at screen edge in the
+// direction the hit came from. `angleRad` = angle relative to player facing
+// (0 = front, +PI/2 = right, PI = behind). One reused DOM element.
+let dmgIndicatorEl = null;
+function showDamageIndicator(angleRad = Math.PI) {
+    if (!dmgIndicatorEl?.parentNode) {
+        const el = document.createElement('div');
+        el.style.cssText = `
+            position:absolute;
+            left:50%;
+            top:50%;
+            width:240px;
+            height:240px;
+            margin:-120px 0 0 -120px;
+            pointer-events:none;
+            opacity:0;
+            transition:opacity 0.18s linear;
+            z-index:997;
+            background:conic-gradient(from -20deg, rgba(255,30,30,0) 0deg,
+                rgba(255,30,30,0.55) 20deg, rgba(255,30,30,0) 40deg);
+            border-radius:50%;
+            mask:radial-gradient(circle, transparent 58%, #000 70%);
+            -webkit-mask:radial-gradient(circle, transparent 58%, #000 70%);
+        `;
+        (document.getElementById('canvas-container') || document.body)?.appendChild(el);
+        dmgIndicatorEl = el;
+    }
+    const el = dmgIndicatorEl;
+    // Rotate so the arc points toward the hit. 0deg = top of screen = front.
+    el.style.transform = `rotate(${(Number(angleRad) || 0) * 180 / Math.PI}deg)`;
+    el.style.opacity = '1';
+    clearTimeout(el._hideTimer);
+    el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 320);
+}
+if (typeof window !== 'undefined') {
+    window.setWeaponHud = setWeaponHud;
+    window.showDamageIndicator = showDamageIndicator;
+}
 if (typeof window !== 'undefined') {
     window.spawnDoomPellet = spawnDoomPellet;
     window.flashDoomShotgun = flashDoomShotgun;
     window.playDoomShotgunSound = playDoomShotgunSound;
     window.playDoomPickupSound = playDoomPickupSound;
-    window.setWeaponHud = setWeaponHud;
     // Defaults the script can read instead of hardcoding numbers.
     window.DOOM_SHOTGUN_DEFAULTS = Object.freeze({ ...DOOM_SHOTGUN_PREFAB });
 }
@@ -13417,6 +13668,16 @@ const DOOM_SHOTGUN_USER_SCRIPT = `// ===== DOOM SHOTGUN — all weapon logic liv
 //   window.applyCameraRecoil(pitch, yaw)   -> camera kick (radians)
 //   window.setWeaponHud(text)              -> bottom-right text ('' hides)
 //   window.equipDoomShotgun(Self)          -> equip
+//   window.spawnMuzzleSmoke()              -> smoke puff + ejected shell
+//   window.spawnImpactBurst(x,y,z,opts)    -> spark/puff at point
+//   window.playImpactSound(v,x,y,z)        -> bullet-on-wall thud (3D if xyz)
+//   window.flashActorHit(actor,color)      -> brief emissive flash
+//   window.playEnemyHurtSound(v)           -> enemy grunt
+//   window.showDamageIndicator(angleRad)   -> directional red arc
+// Overridable engine hooks (set on window; defaults used if unset):
+//   window.onBulletImpact(x,y,z,proj)      -> a bullet hit a wall
+//   window.onEnemyDamaged(actor,dmg,fatal) -> an enemy took damage
+//   window.onPlayerDamaged(angleRad,dmg)   -> the player was hit
 // Input: gameplay.input.firePressed / .reloadPressed (press 'R').
 
 // ---- TUNABLES: change anything here ----
@@ -13431,6 +13692,10 @@ const SPREAD          = 0.075; // pellet cone size
 const VOLUME          = 1.0;   // blast sound loudness, 0..1
 const RECOIL_PITCH    = 0.05;  // upward camera kick per shot (radians)
 const RECOIL_YAW      = 0.014; // random sideways kick per shot
+const MUZZLE_SMOKE    = true;  // smoke puff + shell eject per shot
+const IMPACT_FX       = true;  // spark + thud when bullets hit walls
+const ENEMY_HURT_FX   = true;  // flash + grunt on non-fatal enemy hits
+const DMG_INDICATOR   = true;  // directional red arc when player is hit
 const PELLET_PATTERN  = [      // per-pellet [x, y] offsets, scaled by SPREAD
     [0, 0], [-0.65, -0.2], [0.65, -0.18], [-0.35, 0.42],
     [0.38, 0.38], [-0.95, 0.16], [0.92, 0.12],
@@ -13441,6 +13706,25 @@ function ammo(ud) {
     return ud;
 }
 
+// Install combat-feedback hooks. Engine calls these on impact/hurt/player-hit
+// (defaults used if a hook is null). Edit these bodies to change the feel.
+function installHooks() {
+    window.onBulletImpact = IMPACT_FX ? function (x, y, z) {
+        window.spawnImpactBurst?.(x, y, z, { color: 0xffd27a, count: 7 });
+        window.playImpactSound?.(0.8, x, y, z); // 3D positional
+    } : null;
+
+    window.onEnemyDamaged = ENEMY_HURT_FX ? function (actor, dmg, fatal) {
+        if (fatal) return; // engine already played the death sound/effect
+        window.flashActorHit?.(actor, 0xff5555);
+        window.playEnemyHurtSound?.(0.7);
+    } : null;
+
+    window.onPlayerDamaged = DMG_INDICATOR ? function (angleRad) {
+        window.showDamageIndicator?.(angleRad);
+    } : null;
+}
+
 function OnTrigger(subject) {
     if (Self?.userData?.collected) return;
     const mesh = object || Self?.mesh;
@@ -13448,6 +13732,7 @@ function OnTrigger(subject) {
     Self.userData.collected = true;
     mesh.visible = false;
     ammo(Self.userData);
+    installHooks();
     window.equipDoomShotgun?.(Self);
     window.playDoomPickupSound?.(1);
 }
@@ -13460,6 +13745,7 @@ function fireOneShot() {
     window.flashDoomShotgun?.(85);
     window.playDoomShotgunSound?.(VOLUME);
     window.applyCameraRecoil?.(RECOIL_PITCH, (Math.random() - 0.5) * 2 * RECOIL_YAW);
+    if (MUZZLE_SMOKE) window.spawnMuzzleSmoke?.();
 }
 
 function startReload(ud, now) {
