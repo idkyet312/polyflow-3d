@@ -3189,7 +3189,12 @@ function setShooterHealth(actor, value = SHOOTER_AI_PREFAB.health) {
         const mesh = getActorRenderObject(actor);
         if (!wasDefeated) {
             emitShooterDeathEffect(actor);
-            playEnemyDeathSound(1);
+            if (mesh) {
+                mesh.getWorldPosition(tempVectorA);
+                playEnemyDeathSound(1, tempVectorA.x, tempVectorA.y + 0.9, tempVectorA.z);
+            } else {
+                playEnemyDeathSound(1);
+            }
             addGameScore(shooter.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue);
             if (mesh) {
                 mesh.traverse?.((node) => {
@@ -3232,11 +3237,21 @@ function damageShooterAi(actor, amount = SHOOTER_AI_PREFAB.hitDamage) {
     setShooterHealth(actor, health - dmg);
     // Overridable hook: weapon scripts decide hurt FX. setShooterHealth already
     // plays the death sound on a fatal hit, so default only handles non-fatal.
+    // x,y,z = enemy world position (for spatial audio in the hook).
     if (typeof window !== 'undefined' && window.onEnemyDamaged) {
-        try { window.onEnemyDamaged(actor, dmg, fatal); } catch (e) { /* script error */ }
+        const hm = getActorRenderObject(actor);
+        let hx, hy, hz;
+        if (hm) { hm.getWorldPosition(tempVectorA); hx = tempVectorA.x; hy = tempVectorA.y + 0.9; hz = tempVectorA.z; }
+        try { window.onEnemyDamaged(actor, dmg, fatal, hx, hy, hz); } catch (e) { /* script error */ }
     } else if (!fatal) {
         flashActorHit(actor, 0xff5555);
-        playEnemyHurtSound(0.7);
+        const m = getActorRenderObject(actor);
+        if (m) {
+            m.getWorldPosition(tempVectorA);
+            playEnemyHurtSound(0.7, tempVectorA.x, tempVectorA.y + 0.9, tempVectorA.z);
+        } else {
+            playEnemyHurtSound(0.7);
+        }
     }
 }
 
@@ -3277,9 +3292,14 @@ function updateGameplayEffects(delta = 0) {
         effect.ttl -= delta;
         const alpha = Math.max(0, effect.ttl / (effect.maxTtl || 1));
         for (const particle of effect.particles || []) {
-            particle.velocity.y -= 7.5 * delta;
-            particle.mesh.position.addScaledVector(particle.velocity, delta);
-            if (particle.mesh.material) particle.mesh.material.opacity = alpha;
+            // staticFx effects (tracers, decals) don't move or fall — just fade.
+            if (!effect.staticFx) {
+                particle.velocity.y -= 7.5 * delta;
+                particle.mesh.position.addScaledVector(particle.velocity, delta);
+            }
+            if (particle.mesh.material) {
+                particle.mesh.material.opacity = (particle.baseOpacity ?? 1) * alpha;
+            }
         }
         if (effect.ttl <= 0) {
             for (const particle of effect.particles || []) {
@@ -3417,13 +3437,16 @@ function updateShooterProjectiles(delta = 0) {
                 hitWall = true;
                 if (ray.point) projectile.mesh.position.copy(ray.point);
                 // Overridable hook: weapon scripts decide impact FX. Default
-                // (no override) = small spark + thud.
+                // (no override) = spark + 3D thud + scorch decal. nx/ny/nz =
+                // surface normal (for orienting decals).
                 const ip = ray.point || projectile.mesh.position;
+                const nrm = ray.normal || { x: 0, y: 1, z: 0 };
                 if (typeof window !== 'undefined' && window.onBulletImpact) {
-                    try { window.onBulletImpact(ip.x, ip.y, ip.z, projectile); } catch (e) { /* script error */ }
+                    try { window.onBulletImpact(ip.x, ip.y, ip.z, projectile, nrm.x, nrm.y, nrm.z); } catch (e) { /* script error */ }
                 } else {
                     spawnImpactBurst(ip.x, ip.y, ip.z);
                     playImpactSound(0.8, ip.x, ip.y, ip.z);
+                    spawnImpactDecal(ip.x, ip.y, ip.z, nrm.x, nrm.y, nrm.z);
                 }
             }
         }
@@ -3595,7 +3618,8 @@ function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, has
     const groundOptions = {
         ignoreActors: getShooterGroundIgnoreActors(actor, shooter),
     };
-    if (currentMesh?.userData?.sampleType === 'doomTest') {
+    const _st = currentMesh?.userData?.sampleType;
+    if (_st === 'doomTest' || _st === 'doomArena') {
         groundOptions.hitFilter = (hit) => !isDoomRoofSurfaceHit(hit);
     }
     const groundY = getGroundHeightAt(mesh.position.x, mesh.position.z, true, {
@@ -3866,6 +3890,69 @@ function updateDoomMiniLevelState(subjectPosition = null) {
         state.exitUnlocked = true;
         setActorWorldPositionExact(state.exitActor, layout.exitTeleporter, { visible: true });
     }
+}
+
+// Rogue-like arena driver: escalating waves spawned around the room ring.
+// Enemies are plain shooterAi (they already chase the player). Each wave is
+// bigger than the last; clearing the final wave reveals the exit.
+function updateDoomArenaLevelState(subjectPosition = null) {
+    const layout = currentMesh?.userData?.doomArenaLevel;
+    const state = currentMesh?.userData?.doomArenaState;
+    if (!layout || !state || !subjectPosition || state.exitUnlocked) return;
+
+    const now = performance.now?.() || Date.now();
+
+    // Start once the player steps off the central pad (radius ~3.2 from spawn).
+    if (!state.started) {
+        const dx = subjectPosition.x - 0;
+        const dz = subjectPosition.z - 4.0;
+        if (dx * dx + dz * dz > 3.2 * 3.2) {
+            state.started = true;
+            state.nextWaveAt = now; // first wave immediately
+        } else {
+            return;
+        }
+    }
+
+    if (state.waveActive) {
+        if (isDoomMiniWaveCleared(state.waveActors)) {
+            state.waveActive = false;
+            // Final wave cleared → unlock exit.
+            if (state.wave >= (layout.waveCount ?? 4)) {
+                state.exitUnlocked = true;
+                setActorWorldPositionExact(state.exitActor, layout.exitTeleporter, { visible: true });
+                return;
+            }
+            state.nextWaveAt = now + 2200; // breather between waves
+        }
+        return;
+    }
+
+    // Between waves: spawn the next one once the gate passes.
+    if (now < state.nextWaveAt) return;
+    state.wave += 1;
+    const size = (layout.baseWaveSize ?? 3) + (state.wave - 1) * (layout.wavePerStep ?? 2);
+    const radius = layout.spawnRingRadius ?? 18;
+    const y = layout.spawnY ?? 0;
+    const actors = [];
+    const jitter = Math.random() * Math.PI * 2;
+    for (let i = 0; i < size; i++) {
+        const ang = jitter + (i / size) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+        const r = radius * (0.82 + Math.random() * 0.18);
+        const actor = spawnDoomEnemyAt(
+            new THREE.Vector3(Math.cos(ang) * r, y, Math.sin(ang) * r),
+            {
+                label: `Arena Wave ${state.wave}`,
+                groundY: y,
+                health: DOOM_ENEMY_PREFAB.health,
+                maxHealth: DOOM_ENEMY_PREFAB.health,
+                scoreValue: SHOOTER_AI_PREFAB.scoreValue + state.wave * 15,
+            },
+        );
+        if (actor) actors.push(actor);
+    }
+    state.waveActors = actors;
+    state.waveActive = true;
 }
 
 function updateShooterSpawnerActor(spawner) {
@@ -4294,6 +4381,9 @@ function spawnDoomPellet(opts = {}) {
         .addScaledVector(tempVectorD, spreadX)
         .addScaledVector(tempVectorE, spreadY)
         .normalize();
+    // Snapshot before spawnShooterProjectile mutates the shared temp vectors.
+    const ox = origin.x, oy = origin.y, oz = origin.z;
+    const vx = velocity.x, vy = velocity.y, vz = velocity.z;
     spawnShooterProjectile(origin, null, {
         velocity,
         name: 'Doom Shotgun Pellet',
@@ -4310,6 +4400,9 @@ function spawnDoomPellet(opts = {}) {
         emissiveIntensity: opts.emissiveIntensity ?? 4.8,
         light: opts.light ?? false,
     });
+    if (opts.tracer !== false) {
+        spawnTracer(ox, oy, oz, vx, vy, vz, opts.tracerLen ?? 7, opts.color ?? 0xfff1a8);
+    }
     return true;
 }
 // Show the held-weapon muzzle flash for `ms` from now (purely cosmetic).
@@ -4360,11 +4453,12 @@ function playDoomShotgunSound(volume = 1) {
     osc.stop(t + 0.19);
 }
 // Bright two-note pickup chime.
-function playDoomPickupSound(volume = 1) {
+function playDoomPickupSound(volume = 1, x, y, z) {
     const context = runtimeAudio.listener?.context;
     if (!context || context.state !== 'running') return;
     const t = context.currentTime;
     const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+    const sink = makeSpatialSink(context, x, y, z);
     [[660, 0], [990, 0.07]].forEach(([freq, dt]) => {
         const o = context.createOscillator();
         const g = context.createGain();
@@ -4373,17 +4467,18 @@ function playDoomPickupSound(volume = 1) {
         g.gain.setValueAtTime(0.0001, t + dt);
         g.gain.exponentialRampToValueAtTime(0.28 * vol, t + dt + 0.01);
         g.gain.exponentialRampToValueAtTime(0.0001, t + dt + 0.16);
-        o.connect(g).connect(context.destination);
+        o.connect(g).connect(sink);
         o.start(t + dt);
         o.stop(t + dt + 0.18);
     });
 }
 // Enemy death: a descending sawtooth growl + a short noisy splat.
-function playEnemyDeathSound(volume = 1) {
+function playEnemyDeathSound(volume = 1, x, y, z) {
     const context = runtimeAudio.listener?.context;
     if (!context || context.state !== 'running') return;
     const t = context.currentTime;
     const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+    const sink = makeSpatialSink(context, x, y, z);
 
     // Descending growl.
     const osc = context.createOscillator();
@@ -4393,7 +4488,7 @@ function playEnemyDeathSound(volume = 1) {
     osc.frequency.exponentialRampToValueAtTime(55, t + 0.34);
     oscGain.gain.setValueAtTime(0.32 * vol, t);
     oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.36);
-    osc.connect(oscGain).connect(context.destination);
+    osc.connect(oscGain).connect(sink);
     osc.start(t);
     osc.stop(t + 0.37);
 
@@ -4413,7 +4508,7 @@ function playEnemyDeathSound(volume = 1) {
     const ng = context.createGain();
     ng.gain.setValueAtTime(0.4 * vol, t);
     ng.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    noise.connect(nf).connect(ng).connect(context.destination);
+    noise.connect(nf).connect(ng).connect(sink);
     noise.start(t);
     noise.stop(t + dur);
 }
@@ -4485,11 +4580,12 @@ function playImpactSound(volume = 1, x, y, z) {
     osc.stop(t + 0.15);
 }
 // Short grunt — enemy took non-fatal damage.
-function playEnemyHurtSound(volume = 1) {
+function playEnemyHurtSound(volume = 1, x, y, z) {
     const context = runtimeAudio.listener?.context;
     if (!context || context.state !== 'running') return;
     const t = context.currentTime;
     const vol = Math.max(0, Math.min(1, Number(volume) || 0));
+    const sink = makeSpatialSink(context, x, y, z);
     const o = context.createOscillator();
     const g = context.createGain();
     o.type = 'square';
@@ -4497,7 +4593,7 @@ function playEnemyHurtSound(volume = 1) {
     o.frequency.exponentialRampToValueAtTime(190, t + 0.11);
     g.gain.setValueAtTime(0.16 * vol, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-    o.connect(g).connect(context.destination);
+    o.connect(g).connect(sink);
     o.start(t);
     o.stop(t + 0.13);
 }
@@ -4525,6 +4621,67 @@ function spawnImpactBurst(x, y, z, opts = {}) {
         });
     }
     gameplayPrefabState.effects.push({ type: 'impact', particles, ttl: 0.35, maxTtl: 0.35 });
+}
+// Bright stretched streak from (ox,oy,oz) along unit dir (dx,dy,dz). Static,
+// fades fast — reads as a bullet tracer without tracking the pooled bullet.
+function spawnTracer(ox, oy, oz, dx, dy, dz, len = 6, color = 0xfff1a8) {
+    if (!scene) return;
+    const dir = tempVectorD.set(dx, dy, dz);
+    if (dir.lengthSq() < 1e-6) return;
+    dir.normalize();
+    const length = Math.max(0.5, Number(len) || 6);
+    // Thin box, length along local +Z, then orient +Z to dir.
+    const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.03, 0.03, length),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85 })
+    );
+    mesh.material.toneMapped = false;
+    // Center the streak so its tail is at the origin, head `length` ahead.
+    mesh.position.set(ox + dir.x * length * 0.5, oy + dir.y * length * 0.5, oz + dir.z * length * 0.5);
+    mesh.quaternion.setFromUnitVectors(tempVectorE.set(0, 0, 1), dir);
+    scene.add(mesh);
+    gameplayPrefabState.effects.push({
+        type: 'tracer',
+        staticFx: true,
+        particles: [{ mesh, baseOpacity: 0.85, velocity: new THREE.Vector3() }],
+        ttl: 0.085,
+        maxTtl: 0.085,
+    });
+}
+// A flat scorch quad laid on a surface at (x,y,z), facing normal (nx,ny,nz).
+// Lingers, then fades. Stays put (staticFx).
+function spawnImpactDecal(x, y, z, nx = 0, ny = 1, nz = 0, opts = {}) {
+    if (!scene) return;
+    const n = tempVectorD.set(nx, ny, nz);
+    if (n.lengthSq() < 1e-6) n.set(0, 1, 0);
+    n.normalize();
+    const size = opts.size ?? 0.32;
+    const mesh = new THREE.Mesh(
+        new THREE.CircleGeometry(size, 12),
+        new THREE.MeshBasicMaterial({
+            color: opts.color ?? 0x1a1206,
+            transparent: true,
+            opacity: 0.7,
+            depthWrite: false,
+            polygonOffset: true,
+            polygonOffsetFactor: -1,
+        })
+    );
+    mesh.quaternion.setFromUnitVectors(tempVectorE.set(0, 0, 1), n);
+    // Nudge off the surface so it doesn't z-fight.
+    mesh.position.set(x + n.x * 0.012, y + n.y * 0.012, z + n.z * 0.012);
+    scene.add(mesh);
+    gameplayPrefabState.effects.push({
+        type: 'decal',
+        staticFx: true,
+        particles: [{ mesh, baseOpacity: 0.7, velocity: new THREE.Vector3() }],
+        ttl: opts.ttl ?? 3.0,
+        maxTtl: opts.ttl ?? 3.0,
+    });
+}
+if (typeof window !== 'undefined') {
+    window.spawnTracer = spawnTracer;
+    window.spawnImpactDecal = spawnImpactDecal;
 }
 // Muzzle smoke puff + a tumbling ejected shell, at the held weapon's muzzle
 // (derived from the camera so it tracks aim). Cosmetic.
@@ -5242,6 +5399,80 @@ function resetDoomMiniLevelState() {
         hallTriggered: false,
         arenaTriggered: false,
         finalTriggered: false,
+        exitUnlocked: false,
+    };
+
+    syncGameplaySpawnFromPlayerSpawnActor();
+    return true;
+}
+
+// Same rationale as resetDoomMiniLevelState, for the rogue arena: rebuild the
+// wave state, destroy live enemies, restore gun/exit/spawn prefabs (the gun
+// sprite is dropped by the snapshot restore — re-spawn it).
+function resetDoomArenaLevelState() {
+    if (currentMesh?.userData?.sampleType !== 'doomArena') return false;
+
+    const layout = currentMesh.userData.doomArenaLevel || {};
+    const prevState = currentMesh.userData.doomArenaState || null;
+
+    const toDestroy = new Set();
+    if (prevState) {
+        for (const actor of prevState.waveActors || []) toDestroy.add(actor);
+    }
+    for (const actor of getGameplayPrefabActors('shooterAi')) toDestroy.add(actor);
+    for (const actor of toDestroy) {
+        if (!actor) continue;
+        hideShooterAimWarning?.(actor);
+        destroyDynamicPhysicsProp(actor);
+        sceneSystem?.removeActor?.(actor);
+    }
+
+    resetGameplayPrefabs();
+
+    let exitActor = null;
+    let gunActor = null;
+    for (const actor of getGameplayPrefabActors()) {
+        const type = actor?.userData?.gameplayPrefab;
+        const mesh = getActorRenderObject(actor);
+        if (type === 'doomShotgunSprite' && mesh && Array.isArray(layout.shotgunPickup)) {
+            gunActor = actor;
+            actor.userData.collected = false;
+            actor.userData._bobBaseY = null;
+            actor.userData._mag = null;
+            actor.userData._reloadUntil = 0;
+            actor.userData._burstLeft = 0;
+            actor.userData._cooldownUntil = 0;
+            setActorWorldPositionExact(actor, layout.shotgunPickup, { visible: true });
+        } else if (type === 'teleporter') {
+            exitActor = actor;
+            setActorWorldPositionExact(
+                actor,
+                Array.isArray(layout.exitTeleporterHidden)
+                    ? layout.exitTeleporterHidden : layout.exitTeleporter,
+                { visible: false },
+            );
+        } else if (type === 'playerSpawn' && mesh && Array.isArray(layout.playerSpawn)) {
+            mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
+            mesh.updateMatrixWorld(true);
+            applyPlayerSpawnFromActor(actor);
+        }
+    }
+
+    if (!gunActor && Array.isArray(layout.shotgunPickup)) {
+        gunActor = spawnGameplayPrefab('doomShotgunSprite');
+        if (gunActor) {
+            gunActor.userData.collected = false;
+            setActorWorldPositionExact(gunActor, layout.shotgunPickup, { visible: true });
+        }
+    }
+
+    currentMesh.userData.doomArenaState = {
+        exitActor,
+        waveActors: [],
+        wave: 0,
+        waveActive: false,
+        started: false,
+        nextWaveAt: 0,
         exitUnlocked: false,
     };
 
@@ -11957,6 +12188,211 @@ function createDoomTestLevel() {
     return root;
 }
 
+// Rogue-like arena: ONE big square brick room (same doom material language as
+// createDoomTestLevel). Player spawns center, grabs the shotgun, then survives
+// escalating waves of enemies that spawn around the perimeter and walk in.
+// Clearing the final wave reveals the exit teleporter.
+function createDoomArenaLevel() {
+    const root = new THREE.Group();
+    root.name = 'PolyFlow_Doom_Arena';
+    root.userData.sampleType = 'doomArena';
+    root.userData.hideTerrainPresentation = true;
+    root.userData.skipNormalization = true;
+
+    const T = 0.4;            // wall thickness
+    const ARENA = 44;         // room is ARENA x ARENA
+    const ARENA_H = 7.5;      // ceiling height
+    const HALF = ARENA * 0.5;
+    const DOOM_WALL_COLOR = '#2b1514';
+    const DOOM_RED_LIGHT = 0xff3030;
+    const DOOM_RED_EMISSIVE = '#ff3030';
+
+    root.userData.preferredSpawn = {
+        position: [0, 0.3, 6.0],
+        yaw: Math.PI,
+        pitch: -0.05,
+    };
+    root.userData.preferredShowcase = {
+        position: [0, PLAYER_SETTINGS.eyeHeight + 0.6, 9.0],
+        target: [0, 1.4, -4.0],
+    };
+
+    const wallSet = getProceduralBrickSet('accent');
+    const floorSet = getProceduralBrickSet('white');
+    const accentSet = getProceduralBrickSet('accent');
+    const BRICK_TILE_M = 1.6;
+
+    const brickMat = (set, { color = '#ffffff', metal = 0.05 } = {}) => {
+        const albedo = set.albedo.clone();
+        const normal = set.normal.clone();
+        const height = set.height.clone();
+        const roughness = set.roughness.clone();
+        const ao = set.ao.clone();
+        registerBrickClone(set.albedo, albedo);
+        registerBrickClone(set.normal, normal);
+        registerBrickClone(set.height, height);
+        registerBrickClone(set.roughness, roughness);
+        registerBrickClone(set.ao, ao);
+        for (const t of [albedo, normal, height, roughness, ao]) {
+            t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            t.needsUpdate = true;
+        }
+        const mat = new DDGIMeshStandardNodeMaterial({
+            color: new THREE.Color(color),
+            roughness: 1.0,
+            metalness: metal,
+        });
+        mat.map = albedo;
+        mat.normalMap = normal;
+        mat.normalScale = new THREE.Vector2(1.1, 1.1);
+        mat.roughnessMap = roughness;
+        mat.heightMap = height;
+        mat.pomAOMap = ao;
+        mat.aoMap = ao;
+        mat.aoMapIntensity = 1.0;
+        mat.pomEnabled = true;
+        mat.pomIntensity = 0.035;
+        mat.pomQuality = 'high';
+        mat.pomClipMode = 'solid';
+        mat.pomDepthWrite = true;
+        mat.untileMaps = false;
+        mat.rebuildPomGraph?.();
+        mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
+        mat.userData.silPom = true;
+        mat.userData.brickWorldScale = true;
+        return mat;
+    };
+
+    const applyBrickWorldScale = (material, size) => {
+        if (!material?.userData?.brickWorldScale) return;
+        const [sx, sy, sz] = size;
+        const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
+        const tileM = material.userData.brickTileM || BRICK_TILE_M;
+        const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
+        const repV = Math.max(Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1);
+        for (const t of material.userData.ownedMaps || []) {
+            t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            t.repeat.set(repU, repV);
+            t.needsUpdate = true;
+        }
+    };
+
+    const flatMat = (color, { rough = 0.85, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
+        const mat = new DDGIMeshStandardNodeMaterial({
+            color: new THREE.Color(color),
+            roughness: rough,
+            metalness: metal,
+        });
+        if (emissive) {
+            mat.emissive = new THREE.Color(emissive);
+            mat.emissiveIntensity = emissiveIntensity;
+        }
+        return mat;
+    };
+
+    const addBox = (name, size, position, material, { actorSurface = '' } = {}) => {
+        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+        applyBrickWorldScale(material, size);
+        if (geometry.attributes.uv && !geometry.attributes.uv2) {
+            geometry.setAttribute('uv2', geometry.attributes.uv);
+        }
+        geometry.computeTangents();
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.name = name;
+        mesh.position.set(position[0], position[1], position[2]);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        if (actorSurface) mesh.userData.doomMapSurface = actorSurface;
+        root.add(mesh);
+        if (actorSurface) {
+            const actor = makeSampleLevelMeshActor(name, mesh, {
+                kind: 'imported',
+                castShadow: true,
+                receiveShadow: true,
+                skipPhysicsCollision: true,
+                userData: { doomMapSurface: actorSurface },
+            });
+            if (actorSurface === 'floor' || actorSurface === 'roof') {
+                enableStaticMeshActorCollision(actor);
+            }
+        }
+        return mesh;
+    };
+
+    // Shell: floor, ceiling, four walls.
+    addBox('arena-floor', [ARENA, T, ARENA], [0, -T * 0.5, 0],
+        brickMat(floorSet, { color: '#6c6258' }), { actorSurface: 'floor' });
+    addBox('arena-ceiling', [ARENA, T, ARENA], [0, ARENA_H + T * 0.5, 0],
+        flatMat('#241f1c', { rough: 0.95 }), { actorSurface: 'roof' });
+    addBox('arena-wall-n', [ARENA, ARENA_H, T], [0, ARENA_H * 0.5, -HALF],
+        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
+    addBox('arena-wall-s', [ARENA, ARENA_H, T], [0, ARENA_H * 0.5, HALF],
+        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
+    addBox('arena-wall-e', [T, ARENA_H, ARENA], [HALF, ARENA_H * 0.5, 0],
+        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
+    addBox('arena-wall-w', [T, ARENA_H, ARENA], [-HALF, ARENA_H * 0.5, 0],
+        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
+
+    // Scattered cover pillars so the open room has line-of-sight breaks.
+    const pillar = brickMat(accentSet, { color: '#8a7050' });
+    const COVER = [
+        [-12, -8], [12, -8], [-12, 10], [12, 10],
+        [0, -14], [0, 14], [-16, 2], [16, 2],
+    ];
+    for (let i = 0; i < COVER.length; i++) {
+        const [cx, cz] = COVER[i];
+        addBox(`arena-cover-${i}`, [1.6, 3.2, 1.6], [cx, 1.6, cz], pillar);
+    }
+
+    // Center pad (where the player starts / shotgun sits).
+    addBox('arena-pad', [4.0, 0.22, 4.0], [0, 0.11, 4.0],
+        flatMat('#241414', { rough: 0.35, emissive: '#6b1818', emissiveIntensity: 0.4 }));
+    addBox('arena-gun-pedestal', [1.0, 0.3, 1.0], [0, 0.15, 4.0],
+        flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#222222', emissiveIntensity: 0.2 }));
+    // Exit dais at the north wall — teleporter hidden until waves cleared.
+    addBox('arena-exit-dais', [4.4, 0.4, 4.4], [0, 0.2, -HALF + 3.0],
+        flatMat('#221212', { rough: 0.3, emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 0.45 }));
+
+    root.userData.doomArenaLevel = {
+        playerSpawn: [0, 0.85, 6.0],
+        shotgunPickup: [0, 0.75, 4.0],
+        exitTeleporter: [0, 0.42, -HALF + 3.0],
+        exitTeleporterHidden: [0, -48, -HALF + 3.0],
+        spawnRingRadius: HALF - 3.5,   // enemies appear just inside the walls
+        spawnY: 0,
+        waveCount: 4,                  // number of escalating waves
+        baseWaveSize: 3,               // wave 1 enemy count
+        wavePerStep: 2,                // +N enemies each subsequent wave
+    };
+
+    const gunGlow = new THREE.PointLight(DOOM_RED_LIGHT, 1.6, 4.5, 2.0);
+    gunGlow.position.set(0, 0.75, 4.0);
+    gunGlow.castShadow = false;
+    gunGlow.name = 'arena-gun-glow';
+    root.add(gunGlow);
+
+    const keyLight = new THREE.PointLight(DOOM_RED_LIGHT, 11, 46, 1.6);
+    keyLight.position.set(0, ARENA_H - 1.0, 0);
+    keyLight.castShadow = true;
+    configurePointLightShadow(keyLight);
+    keyLight.name = 'arena-key-light';
+    root.add(keyLight);
+
+    const cornerOffsets = [[-HALF + 4, -HALF + 4], [HALF - 4, -HALF + 4],
+        [-HALF + 4, HALF - 4], [HALF - 4, HALF - 4]];
+    for (let i = 0; i < cornerOffsets.length; i++) {
+        const [lx, lz] = cornerOffsets[i];
+        const cl = new THREE.PointLight(DOOM_RED_LIGHT, 3.4, 22, 2.0);
+        cl.position.set(lx, ARENA_H - 1.4, lz);
+        cl.castShadow = false;
+        cl.name = `arena-corner-light-${i}`;
+        root.add(cl);
+    }
+
+    applySilPomLighting(root, keyLight.position.clone());
+    return root;
+}
+
 function getBuiltinLevelDefinition(levelId = 'soccerField') {
     if (levelId === 'fpsStarter') {
         return {
@@ -12025,6 +12461,61 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
                     hallTriggered: false,
                     arenaTriggered: false,
                     finalTriggered: false,
+                    exitUnlocked: false,
+                };
+
+                return null;
+            },
+        };
+    }
+
+    if (levelId === 'doomArena') {
+        return {
+            id: 'doomArena',
+            assetName: 'Doom Arena (Rogue Waves)',
+            fileSize: 300000,
+            create: createDoomArenaLevel,
+            afterLoad: () => {
+                const layout = currentMesh?.userData?.doomArenaLevel || {};
+
+                const startActor = spawnGameplayPrefab('playerSpawn');
+                if (startActor) {
+                    startActor.userData.label = 'Start';
+                    const mesh = getActorRenderObject(startActor);
+                    if (mesh && Array.isArray(layout.playerSpawn)) {
+                        mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
+                        mesh.updateMatrixWorld(true);
+                    }
+                    applyPlayerSpawnFromActor(startActor);
+                }
+
+                const gunActor = spawnGameplayPrefab('doomShotgunSprite');
+                if (gunActor) {
+                    const mesh = getActorRenderObject(gunActor);
+                    if (mesh && Array.isArray(layout.shotgunPickup)) {
+                        mesh.position.set(layout.shotgunPickup[0], layout.shotgunPickup[1], layout.shotgunPickup[2]);
+                        mesh.updateMatrixWorld(true);
+                    }
+                }
+
+                const endActor = spawnGameplayPrefab('teleporter');
+                if (endActor) {
+                    endActor.userData.label = 'Level End';
+                    tintGameplayPrefabActor(endActor, '#ef4444', '#ef4444', 2.8);
+                    setActorWorldPositionExact(
+                        endActor,
+                        Array.isArray(layout.exitTeleporterHidden) ? layout.exitTeleporterHidden : layout.exitTeleporter,
+                        { visible: false },
+                    );
+                }
+
+                currentMesh.userData.doomArenaState = {
+                    exitActor: endActor || null,
+                    waveActors: [],
+                    wave: 0,            // 0 = not started; increments per wave
+                    waveActive: false,  // a wave is currently alive
+                    started: false,     // player has grabbed the gun / moved off pad
+                    nextWaveAt: 0,      // perf.now() gate between waves
                     exitUnlocked: false,
                 };
 
@@ -13091,6 +13582,7 @@ function handlePointerLockChange() {
             'actors=', sceneSystem?.actors?.size);
         repairSampleCollisionHierarchyAfterRestore();
         const did = resetDoomMiniLevelState();
+        resetDoomArenaLevelState();
         console.log('[STOP] resetDoomMiniLevelState ran =', did);
         syncTransformControlState();
     });
@@ -13176,6 +13668,7 @@ function exitGameplay() {
         repairSampleCollisionHierarchyAfterRestore();
         resetSoccerLevelState();
         const did = resetDoomMiniLevelState();
+        resetDoomArenaLevelState();
         console.log('[STOP] exitGameplay resetDoomMiniLevelState ran =', did);
     });
     gameplay.velocity.set(0, 0, 0);
@@ -13412,6 +13905,7 @@ function respawnPlayer(useStoredView = false) {
     // Re-arm the Doom wave state machine so killed enemies return on
     // respawn (no-op on every non-doomTest level via its own guard).
     resetDoomMiniLevelState();
+    resetDoomArenaLevelState();
 
     if (isDrivingVehicle()) {
         clearActiveVehicle();
@@ -13671,13 +14165,15 @@ const DOOM_SHOTGUN_USER_SCRIPT = `// ===== DOOM SHOTGUN — all weapon logic liv
 //   window.spawnMuzzleSmoke()              -> smoke puff + ejected shell
 //   window.spawnImpactBurst(x,y,z,opts)    -> spark/puff at point
 //   window.playImpactSound(v,x,y,z)        -> bullet-on-wall thud (3D if xyz)
+//   window.spawnTracer(ox,oy,oz,dx,dy,dz,len,color) -> bullet streak
+//   window.spawnImpactDecal(x,y,z,nx,ny,nz,opts)    -> scorch on surface
 //   window.flashActorHit(actor,color)      -> brief emissive flash
-//   window.playEnemyHurtSound(v)           -> enemy grunt
+//   window.playEnemyHurtSound(v,x,y,z)     -> enemy grunt (3D if xyz)
 //   window.showDamageIndicator(angleRad)   -> directional red arc
 // Overridable engine hooks (set on window; defaults used if unset):
-//   window.onBulletImpact(x,y,z,proj)      -> a bullet hit a wall
-//   window.onEnemyDamaged(actor,dmg,fatal) -> an enemy took damage
-//   window.onPlayerDamaged(angleRad,dmg)   -> the player was hit
+//   window.onBulletImpact(x,y,z,proj,nx,ny,nz)   -> a bullet hit a wall
+//   window.onEnemyDamaged(actor,dmg,fatal,x,y,z) -> an enemy took damage
+//   window.onPlayerDamaged(angleRad,dmg)         -> the player was hit
 // Input: gameplay.input.firePressed / .reloadPressed (press 'R').
 
 // ---- TUNABLES: change anything here ----
@@ -13694,6 +14190,8 @@ const RECOIL_PITCH    = 0.05;  // upward camera kick per shot (radians)
 const RECOIL_YAW      = 0.014; // random sideways kick per shot
 const MUZZLE_SMOKE    = true;  // smoke puff + shell eject per shot
 const IMPACT_FX       = true;  // spark + thud when bullets hit walls
+const IMPACT_DECAL    = true;  // scorch mark left on walls
+const TRACERS         = true;  // glowing streak per pellet
 const ENEMY_HURT_FX   = true;  // flash + grunt on non-fatal enemy hits
 const DMG_INDICATOR   = true;  // directional red arc when player is hit
 const PELLET_PATTERN  = [      // per-pellet [x, y] offsets, scaled by SPREAD
@@ -13709,15 +14207,16 @@ function ammo(ud) {
 // Install combat-feedback hooks. Engine calls these on impact/hurt/player-hit
 // (defaults used if a hook is null). Edit these bodies to change the feel.
 function installHooks() {
-    window.onBulletImpact = IMPACT_FX ? function (x, y, z) {
+    window.onBulletImpact = IMPACT_FX ? function (x, y, z, proj, nx, ny, nz) {
         window.spawnImpactBurst?.(x, y, z, { color: 0xffd27a, count: 7 });
         window.playImpactSound?.(0.8, x, y, z); // 3D positional
+        if (IMPACT_DECAL) window.spawnImpactDecal?.(x, y, z, nx, ny, nz);
     } : null;
 
-    window.onEnemyDamaged = ENEMY_HURT_FX ? function (actor, dmg, fatal) {
+    window.onEnemyDamaged = ENEMY_HURT_FX ? function (actor, dmg, fatal, x, y, z) {
         if (fatal) return; // engine already played the death sound/effect
         window.flashActorHit?.(actor, 0xff5555);
-        window.playEnemyHurtSound?.(0.7);
+        window.playEnemyHurtSound?.(0.7, x, y, z); // 3D positional
     } : null;
 
     window.onPlayerDamaged = DMG_INDICATOR ? function (angleRad) {
@@ -13730,17 +14229,18 @@ function OnTrigger(subject) {
     const mesh = object || Self?.mesh;
     if (!mesh?.visible) return;
     Self.userData.collected = true;
+    const px = mesh.position.x, py = mesh.position.y, pz = mesh.position.z;
     mesh.visible = false;
     ammo(Self.userData);
     installHooks();
     window.equipDoomShotgun?.(Self);
-    window.playDoomPickupSound?.(1);
+    window.playDoomPickupSound?.(1, px, py, pz); // 3D positional
 }
 
 function fireOneShot() {
     for (let i = 0; i < PELLETS; i++) {
         const p = PELLET_PATTERN[i % PELLET_PATTERN.length];
-        window.spawnDoomPellet?.({ spreadX: p[0] * SPREAD, spreadY: p[1] * SPREAD });
+        window.spawnDoomPellet?.({ spreadX: p[0] * SPREAD, spreadY: p[1] * SPREAD, tracer: TRACERS });
     }
     window.flashDoomShotgun?.(85);
     window.playDoomShotgunSound?.(VOLUME);
@@ -14479,6 +14979,7 @@ function updateGameplay(delta) {
     }
 
     updateDoomMiniLevelState(characterPosition);
+    updateDoomArenaLevelState(characterPosition);
     processGameplayPrefabs();
 
     if (wasGrounded !== gameplay.grounded) {
