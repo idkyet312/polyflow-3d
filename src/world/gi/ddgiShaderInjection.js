@@ -233,6 +233,7 @@ function convertToDDGIMaterial(mat) {
     if (mat.pomEnabled !== undefined) converted.pomEnabled = !!mat.pomEnabled;
     if (mat.pomIntensity !== undefined) converted.setPomIntensity?.(mat.pomIntensity);
     if (mat.pomQuality !== undefined) converted.pomQuality = mat.pomQuality;
+    if (mat.pomClipMode !== undefined) converted.pomClipMode = mat.pomClipMode === 'solid' ? 'solid' : 'silhouette';
     converted.rebuildPomGraph?.();
 
     if (mat.emissive) converted.emissive.copy(mat.emissive);

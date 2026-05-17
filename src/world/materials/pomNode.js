@@ -103,6 +103,10 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
     const STEPS = q.steps | 0;
     const MIN_STEPS = q.minSteps | 0;
 
+    // Heightfield sampler: the height texture's red channel. "1 = peak,
+    // 0 = valley"; the marcher works in depth = 1 - height.
+    const sampleHeight = (uvAt) => heightTextureNode.sample(uvAt).r;
+
     const packed = Fn(() => {
         const baseUV = uvNode();
 
@@ -140,23 +144,54 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
             .max(float(MIN_STEPS)).toVar('silPomLayers');
         const layerDepth = float(1.0).div(numLayers);
 
-        const heightScale = intensityUniform;
+        // Fade relief before it becomes subpixel. Distant/grazing brick
+        // bevels are the failure case: the ray march samples hard height
+        // ramps through a huge screen-space footprint and produces striped
+        // false side faces. Keep close relief, taper far relief.
+        const viewDist = posV.length().toVar('silPomViewDist');
+        const distFade = float(1.0)
+            .sub(viewDist.smoothstep(float(2.5), float(7.0)).mul(float(0.88)));
+        const grazeFade = V.z.abs().smoothstep(float(0.12), float(0.55))
+            .mul(float(0.8))
+            .add(float(0.2));
+        const heightScale = intensityUniform
+            .mul(distFade)
+            .mul(grazeFade)
+            .toVar('silPomHeightScale');
         // Standard POM offset: ΔUV = V.xy / V.z · scale. No separate
         // normalize() of V.xy — head-on views make V.xy≈0 and normalize
         // would divide by ~0 → NaN → every fragment marked off-prism →
         // whole surface discarded (black). Clamp |V.z| away from 0 so
         // grazing angles stay finite.
-        const totalOffset = V.xy
+        const rawOffset = V.xy
             .div(V.z.abs().max(float(0.1)))
             .mul(heightScale);
+        // Grazing-angle clamp. At V.z→0 the |V.z| floor (0.1) still lets
+        // the offset reach 10·scale — a UV slide so large that across a
+        // tiled floor texture the marched samples jump whole texels and
+        // the surface visibly MELTS/SMEARS when you look across it. A
+        // displaced point can never appear laterally further than the
+        // height range projected by the view; physically the parallax
+        // offset magnitude is bounded by ~scale. Cap the offset length at
+        // a small multiple of heightScale: this only bites at the extreme
+        // grazing angles where the smear occurs (moderate/head-on offsets
+        // are already << this and pass through untouched, so walls and
+        // normal viewing are unaffected).
+        const MAX_PARALLAX = 1.0; // × heightScale; ≤1 = strict, no smear.
+        const maxLen = heightScale.mul(float(MAX_PARALLAX));
+        const offLen = rawOffset.length().max(float(1e-6));
+        const totalOffset = rawOffset
+            .mul(maxLen.div(offLen).min(float(1.0)))
+            .toVar('silPomOffset');
         // Per-linear-step UV delta. Loop runs the compile-time STEPS bound
         // but advances by the dynamic stride so head-on fragments converge
         // in ~MIN_STEPS effective iterations.
         const uvStep = totalOffset.div(numLayers);
 
+        const baseDepth = float(1.0).sub(sampleHeight(baseUV)).toVar('silPomBaseDepth');
         const currentLayerDepth = float(0.0).toVar('silPomLayerDepth');
         const currentUV = baseUV.toVar('silPomUV');
-        const currentHeight = float(1.0).sub(heightTextureNode.sample(baseUV).r).toVar('silPomHeight');
+        const currentHeight = baseDepth.toVar('silPomHeight');
         const found = float(0.0).toVar('silPomFound');
 
         // Phase 1 — linear search. No Break (documented WGSL-loop
@@ -168,7 +203,7 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
                 }).Else(() => {
                     currentUV.assign(currentUV.add(uvStep));
                     currentLayerDepth.assign(currentLayerDepth.add(layerDepth));
-                    currentHeight.assign(float(1.0).sub(heightTextureNode.sample(currentUV).r));
+                    currentHeight.assign(float(1.0).sub(sampleHeight(currentUV)));
                 });
             });
         });
@@ -182,7 +217,7 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
         Loop(BINARY_STEPS, () => {
             dUV.assign(dUV.mul(0.5));
             dDepth.assign(dDepth.mul(0.5));
-            const h = float(1.0).sub(heightTextureNode.sample(currentUV).r);
+            const h = float(1.0).sub(sampleHeight(currentUV));
             If(h.greaterThan(currentLayerDepth), () => {
                 currentUV.assign(currentUV.add(dUV));
                 currentLayerDepth.assign(currentLayerDepth.add(dDepth));
@@ -192,15 +227,15 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
             });
         });
 
-        // Stage 3 — prism clip. The silhouette condition is ONLY "the ray
-        // traversed the full prism depth without ever crossing the
-        // heightfield" (found == 0). It is NOT a UV-bounds test: brick
-        // textures tile with RepeatWrapping (repeat 4×1.5 …), so the
-        // marched UV is legitimately well outside [0,1] on every fragment —
-        // an absolute-bounds discard would erase the entire surface.
-        // Encode "missed" as a negative hit depth so it survives the vec4
-        // pack without corrupting the (tiled) UV the sampler needs.
+        // Stage 3 — miss handling. A full-depth miss is not a reliable
+        // silhouette signal for tiled brick heightfields: steep procedural
+        // bevel ramps can make the linear march step under the surface and
+        // leave found=0 in the middle of a brick. Treat that as a
+        // conservative hit at the original texel instead of punching a
+        // transparent hole through the bevel.
         const rayMissed = found.lessThan(float(0.5));
+        const resolvedUV = rayMissed.select(baseUV, currentUV).toVar('silPomResolvedUV');
+        const resolvedDepth = rayMissed.select(baseDepth, currentLayerDepth).toVar('silPomResolvedDepth');
 
         // Stage 3b — view-dependent horizon erosion (Crimson Desert look).
         // V.z is NdotV in tangent space: 1 head-on, →0 at grazing. As the
@@ -217,14 +252,11 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
         const heightCutoff = horizon.mul(float(HORIZON_STRENGTH));
         // Surface height at the resolved hit (0 = valley floor … 1 = peak),
         // i.e. the inverse of the depth convention used in the march.
-        const hitSurfaceH = float(1.0).sub(
-            float(1.0).sub(heightTextureNode.sample(currentUV).r),
-        );
+        const hitSurfaceH = sampleHeight(resolvedUV);
         const erodeAmount = heightCutoff.sub(hitSurfaceH);
         const eroded = erodeAmount.greaterThan(float(0.0));
 
-        const missed = rayMissed.or(eroded);
-        const packedDepth = missed.select(float(-1.0), currentLayerDepth);
+        const missed = eroded;
 
         // Stage 5 — internal self-shadow: from the hit point, march toward
         // the (tangent-space) light. Instead of a binary occluded test,
@@ -242,9 +274,9 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
                 // no normalize() (L.xy≈0 head-on would divide by ~0).
                 const sStep = L.xy.div(L.z.max(float(0.1)))
                     .mul(heightScale).div(float(SHADOW_STEPS));
-                const sDepthStep = currentLayerDepth.div(float(SHADOW_STEPS));
-                const sUV = currentUV.add(sStep).toVar('silPomShUV');
-                const sDepth = currentLayerDepth.sub(sDepthStep).toVar('silPomShDepth');
+                const sDepthStep = resolvedDepth.div(float(SHADOW_STEPS));
+                const sUV = resolvedUV.add(sStep).toVar('silPomShUV');
+                const sDepth = resolvedDepth.sub(sDepthStep).toVar('silPomShDepth');
                 // Penumbra accumulator: smallest (blockerHeight − rayDepth)
                 // scaled by SHADOW_SOFTNESS / step-index. Starts large
                 // (= lit). Replaced by min() each step it's in the slab.
@@ -252,7 +284,7 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
                 const stepIdx = float(1.0).toVar('silPomStepIdx');
                 Loop(SHADOW_STEPS, () => {
                     If(sDepth.greaterThan(float(0.0)), () => {
-                        const sh = float(1.0).sub(heightTextureNode.sample(sUV).r);
+                        const sh = float(1.0).sub(sampleHeight(sUV));
                         // How far the blocker pokes above the shadow ray at
                         // this sample (>0 ⇒ occluding). Distance-weighted:
                         // a near blocker (small stepIdx) casts a sharper,
@@ -280,20 +312,14 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
         // ray sailed under the surface by a margin ⇒ fade coverage to 0
         // over SILHOUETTE_FEATHER. The caller turns coverage<threshold into
         // the discard, but the band gives a smooth alpha for MSAA/edges.
-        const shortfall = currentHeight.sub(currentLayerDepth);
-        const prismCov = float(1.0)
-            .sub(shortfall.div(float(SILHOUETTE_FEATHER)).clamp(0.0, 1.0));
         // Eroded fragments fade by how far past the cutoff they fell, over
         // the same feather band, so the Stage 3b horizon contour is
         // anti-aliased (not the ref's hard discard). Take the tighter of
         // the two coverages where both apply.
         const erodeCov = float(1.0)
             .sub(erodeAmount.div(float(SILHOUETTE_FEATHER)).clamp(0.0, 1.0));
-        const coverage = rayMissed
-            .select(
-                prismCov,
-                eroded.select(erodeCov, float(1.0)),
-            )
+        const coverage = eroded
+            .select(erodeCov, float(1.0))
             .toVar('silPomCoverage');
 
         // Pack into one vec4 — a TSL Fn returns a single node, not a JS
@@ -303,8 +329,8 @@ export function createPomUVNode({ heightTextureNode, intensityUniform, quality, 
         // Encode coverage in the sentinel: missed ⇒ −(1 + coverage) so the
         // sign still flags "missed" and |z|−1 recovers coverage∈[0,1].
         const encodedDepth = missed
-            .select(float(-1.0).sub(coverage), currentLayerDepth);
-        return vec4(currentUV.x, currentUV.y, encodedDepth, shadow);
+            .select(float(-1.0).sub(coverage), resolvedDepth);
+        return vec4(resolvedUV.x, resolvedUV.y, encodedDepth, shadow);
     })();
 
     const uv = packed.xy.toVar('silPomOutUV');

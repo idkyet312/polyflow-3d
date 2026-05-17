@@ -47,7 +47,10 @@
       "Bash(netstat -ano)",
       "Bash(node -e \"const{chromium}=require\\('playwright'\\);chromium.launch\\({channel:'chrome'}\\).then\\(b=>{console.log\\('system chrome OK'\\);return b.close\\(\\)}\\).catch\\(e=>console.log\\('no system chrome:',e.message.split\\('\\\\n'\\)[0]\\)\\)\")",
       "Bash(timeout 100 node __ssdm_probe.mjs)",
-      "Bash(node -e \"const t=require\\('three/tsl'\\); console.log\\('clamp',typeof t.clamp,'smoothstep',typeof t.smoothstep,'min',typeof t.min\\);\")"
+      "Bash(node -e \"const t=require\\('three/tsl'\\); console.log\\('clamp',typeof t.clamp,'smoothstep',typeof t.smoothstep,'min',typeof t.min\\);\")",
+      "Bash(ls \"E:\\\\JOBS\\\\c++ddgitest\" 2>&1 | head -50)",
+      "Read(//e/JOBS/c++ddgitest/**)",
+      "Bash(node -e \"const t=require\\('three/tsl'\\); const names=['Fn','Loop','If','vec2','vec3','vec4','float','int','floor','fract','mod','min','max','clamp','mix','sin','pow','abs','dot','smoothstep','select','sign','uv','add','sub','mul','div']; for\\(const n of names\\) process.stdout.write\\(n+\\(t[n]?'=ok':'=MISSING'\\)+'  '\\);\")"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"

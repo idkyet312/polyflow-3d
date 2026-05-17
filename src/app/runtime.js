@@ -47,6 +47,7 @@ import { getDDGIManager } from '../world/gi/ddgiManager.js';
 import { createDDGIRayDebug } from '../world/gi/ddgiRayDebug.js';
 import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
 import { getBrickTextureSet, registerBrickClone } from '../world/materials/brickTextures.js';
+import { getProceduralBrickSet } from '../world/materials/proceduralBrickTexture.js';
 import {
     createActor,
     createSceneSystem,
@@ -985,6 +986,29 @@ const SNIPER_RIFLE_PREFAB = {
     damage: SHOOTER_AI_PREFAB.health,
     hitRadius: 0.28,
     bulletPoolSize: 20,
+};
+const DOOM_SHOTGUN_PREFAB = {
+    cooldownMs: 760,
+    projectileSpeed: 82,
+    projectileLife: 1.05,
+    damage: 0.2,
+    hitRadius: 0.5,
+    pellets: 7,
+    spread: 0.075,
+    bulletPoolSize: 40,
+    flashMs: 85,
+};
+const DOOM_SHOTGUN_PELLET_PATTERN = [
+    [0, 0],
+    [-0.65, -0.2],
+    [0.65, -0.18],
+    [-0.35, 0.42],
+    [0.38, 0.38],
+    [-0.95, 0.16],
+    [0.92, 0.12],
+];
+const DOOM_ENEMY_PREFAB = {
+    health: SHOOTER_AI_PREFAB.health * 0.25,
 };
 const soccerGoalieState = {
     elapsed: 0,
@@ -3122,9 +3146,10 @@ function setShooterHealth(actor, value = SHOOTER_AI_PREFAB.health) {
     const shooter = actor?.userData?.shooterAi;
     if (!shooter) return;
 
+    const maxHealth = Number.isFinite(shooter.maxHealth) ? shooter.maxHealth : SHOOTER_AI_PREFAB.health;
     const wasDefeated = !!shooter.defeated;
-    shooter.health = THREE.MathUtils.clamp(Number(value) || 0, 0, SHOOTER_AI_PREFAB.health);
-    const percent = SHOOTER_AI_PREFAB.health > 0 ? shooter.health / SHOOTER_AI_PREFAB.health : 0;
+    shooter.health = THREE.MathUtils.clamp(Number(value) || 0, 0, maxHealth);
+    const percent = maxHealth > 0 ? shooter.health / maxHealth : 0;
     const healthBar = ensureShooterHealthBar(actor);
     if (healthBar?.fill) {
         healthBar.fill.scale.x = Math.max(0.001, percent);
@@ -3168,14 +3193,15 @@ function resetShooterAiState(actor) {
     mesh.visible = true;
     ensureShooterHealthBar(actor);
     ensureShooterAimWarning(actor);
-    setShooterHealth(actor, SHOOTER_AI_PREFAB.health);
+    setShooterHealth(actor, Number.isFinite(shooter.maxHealth) ? shooter.maxHealth : SHOOTER_AI_PREFAB.health);
 }
 
 function damageShooterAi(actor, amount = SHOOTER_AI_PREFAB.hitDamage) {
     const shooter = actor?.userData?.shooterAi;
     if (!shooter || shooter.defeated) return;
 
-    setShooterHealth(actor, (shooter.health ?? SHOOTER_AI_PREFAB.health) - Math.max(0, Number(amount) || 0));
+    const health = shooter.health ?? shooter.maxHealth ?? SHOOTER_AI_PREFAB.health;
+    setShooterHealth(actor, health - Math.max(0, Number(amount) || 0));
 }
 
 function emitShooterDeathEffect(actor) {
@@ -3524,7 +3550,9 @@ function updateShooterAiActor(actor, delta = 0) {
     const mesh = getActorRenderObject(actor);
     const shooter = actor?.userData?.shooterAi;
     if (!mesh || !shooter || shooter.defeated || mesh.visible === false) return;
-    if (!Number.isFinite(shooter.health)) setShooterHealth(actor, SHOOTER_AI_PREFAB.health);
+    if (!Number.isFinite(shooter.health)) {
+        setShooterHealth(actor, Number.isFinite(shooter.maxHealth) ? shooter.maxHealth : SHOOTER_AI_PREFAB.health);
+    }
     ensureShooterHealthBar(actor);
 
     const origin = mesh.getWorldPosition(_shooterActorOrigin);
@@ -3591,6 +3619,12 @@ function spawnShooterAiAt(position, options = {}) {
     const groundY = Number.isFinite(options.groundY)
         ? options.groundY
         : getGroundHeightAt(position.x, position.z, true, { ignoreActors: shooterGroundIgnoreActors }) ?? position.y;
+    const maxHealth = Number.isFinite(options.maxHealth)
+        ? options.maxHealth
+        : Number.isFinite(options.health)
+            ? options.health
+            : SHOOTER_AI_PREFAB.health;
+    const health = Number.isFinite(options.health) ? options.health : maxHealth;
     const actor = spawnDynamicPrimitive('capsule', new THREE.Vector3(position.x, groundY + 1.18, position.z), SHOOTER_AI_PREFAB.scale, {
         local: false,
         includeCollisionBody: false,
@@ -3601,7 +3635,8 @@ function spawnShooterAiAt(position, options = {}) {
                 range: SHOOTER_AI_PREFAB.range,
                 cooldownMs: SHOOTER_AI_PREFAB.cooldownMs,
                 nextShotAt: 0,
-                health: SHOOTER_AI_PREFAB.health,
+                health,
+                maxHealth,
                 defeated: false,
                 spawnedBy: options.spawnedBy || '',
                 scoreValue: options.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue,
@@ -3818,10 +3853,151 @@ function createHeldSniperRifleMesh() {
     return group;
 }
 
+function makeDoomShotgunHudTexture() {
+    const W = 160, H = 112;
+    const canvas = document.createElement('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    ctx.imageSmoothingEnabled = false;
+
+    const rect = (x, y, w, h, color) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, w, h);
+    };
+
+    const poly = (points, color) => {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(points[0][0], points[0][1]);
+        for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+        ctx.closePath();
+        ctx.fill();
+    };
+
+    rect(25, 104, 110, 5, '#050505');
+
+    poly([[52, 6], [73, 6], [82, 80], [43, 80]], '#020202');
+    poly([[87, 6], [108, 6], [117, 80], [78, 80]], '#020202');
+    poly([[57, 9], [68, 9], [75, 75], [51, 75]], '#1f2322');
+    poly([[92, 9], [103, 9], [109, 75], [86, 75]], '#272a28');
+    poly([[61, 11], [66, 11], [70, 71], [58, 71]], '#565852');
+    poly([[94, 11], [100, 11], [104, 71], [92, 71]], '#60625b');
+    rect(54, 5, 20, 8, '#080808');
+    rect(86, 5, 20, 8, '#080808');
+    rect(59, 7, 10, 3, '#000000');
+    rect(91, 7, 10, 3, '#000000');
+
+    poly([[73, 15], [87, 15], [88, 79], [72, 79]], '#090909');
+    rect(76, 20, 8, 52, '#20201d');
+    rect(78, 20, 4, 48, '#52524b');
+
+    poly([[37, 66], [123, 66], [134, 101], [26, 101]], '#050505');
+    poly([[45, 69], [115, 69], [123, 89], [37, 89]], '#1b1b18');
+    poly([[51, 72], [109, 72], [114, 82], [46, 82]], '#55554e');
+    poly([[46, 83], [114, 83], [126, 101], [34, 101]], '#0d0907');
+    poly([[52, 84], [108, 84], [116, 96], [44, 96]], '#2e2118');
+    rect(56, 88, 48, 4, '#5a4030');
+    rect(62, 95, 36, 5, '#120d0a');
+
+    poly([[17, 88], [43, 79], [62, 102], [25, 110]], '#80502f');
+    poly([[143, 88], [117, 79], [98, 102], [135, 110]], '#8c5735');
+    poly([[23, 90], [42, 85], [53, 99], [30, 104]], '#c58b61');
+    poly([[137, 90], [118, 85], [107, 99], [130, 104]], '#d39666');
+    rect(54, 100, 52, 8, '#050505');
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+function makeDoomShotgunFlashTexture() {
+    const W = 64, H = 64;
+    const canvas = document.createElement('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    ctx.imageSmoothingEnabled = false;
+
+    const rect = (x, y, w, h, color) => {
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, w, h);
+    };
+
+    rect(28, 4, 8, 52, '#fff7b8');
+    rect(18, 12, 28, 32, '#ff2b16');
+    rect(22, 8, 20, 42, '#ff6b1a');
+    rect(27, 10, 10, 36, '#fff1a8');
+    rect(10, 24, 44, 10, '#ff1a12');
+    rect(16, 26, 32, 6, '#ffd35a');
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+function createHeldDoomShotgunMesh() {
+    const group = new THREE.Group();
+    group.name = 'Held Doom Shotgun Sprite';
+
+    const gunTex = makeDoomShotgunHudTexture();
+    const gunMat = new THREE.MeshBasicMaterial({
+        map: gunTex,
+        transparent: true,
+        alphaTest: 0.05,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
+    gunMat.toneMapped = false;
+    const gun = new THREE.Mesh(new THREE.PlaneGeometry(1.22, 0.86), gunMat);
+    gun.name = 'Doom Shotgun HUD';
+    gun.position.set(0, -0.52, -1.05);
+    gun.rotation.x = -0.13;
+    gun.renderOrder = 1000;
+    group.add(gun);
+
+    const flashTex = makeDoomShotgunFlashTexture();
+    const flashMat = new THREE.MeshBasicMaterial({
+        map: flashTex,
+        transparent: true,
+        alphaTest: 0.05,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+    });
+    flashMat.toneMapped = false;
+    const flash = new THREE.Mesh(new THREE.PlaneGeometry(0.68, 0.68), flashMat);
+    flash.name = 'Doom Shotgun Muzzle Flash';
+    flash.position.set(0, -0.08, -1.04);
+    flash.rotation.x = -0.13;
+    flash.renderOrder = 1001;
+    flash.visible = false;
+    group.add(flash);
+
+    group.userData.ownedTextures = [gunTex, flashTex];
+    group.userData.flash = flash;
+    group.userData.flashUntil = 0;
+    return group;
+}
+
 function clearHeldWeapon() {
     const heldMesh = gameplay.weapon.mesh;
     if (heldMesh) {
         heldMesh.parent?.remove(heldMesh);
+        for (const tex of heldMesh.userData?.ownedTextures || []) {
+            tex?.dispose?.();
+        }
         heldMesh.traverse?.((node) => {
             node.geometry?.dispose?.();
             if (Array.isArray(node.material)) {
@@ -3861,9 +4037,68 @@ function equipSniperRifle(sourceActor = null) {
     gameplay.weapon.sourceActorId = sourceActor?.id || '';
 }
 
+function equipDoomShotgun(sourceActor = null) {
+    if (gameplay.weapon.type === 'doomShotgun') return;
+    clearHeldWeapon();
+    const heldMesh = createHeldDoomShotgunMesh();
+    camera?.add(heldMesh);
+    gameplay.weapon.type = 'doomShotgun';
+    gameplay.weapon.mesh = heldMesh;
+    gameplay.weapon.nextShotAt = 0;
+    gameplay.weapon.sourceActorId = sourceActor?.id || '';
+}
+
+function updateDoomShotgunHud(now = performance.now?.() || Date.now()) {
+    const flash = gameplay.weapon.mesh?.userData?.flash;
+    if (flash) flash.visible = now < (gameplay.weapon.mesh.userData.flashUntil || 0);
+}
+
 function updateStraightGuns() {
     if (!gameplay.active) return;
     if (!gameplay.weapon.type || isDrivingVehicle()) return;
+
+    const now = performance.now?.() || Date.now();
+    if (gameplay.weapon.type === 'doomShotgun') {
+        updateDoomShotgunHud(now);
+        if (!gameplay.input.firePressed) return;
+        gameplay.input.firePressed = false;
+        if ((gameplay.weapon.nextShotAt || 0) > now) return;
+
+        const config = DOOM_SHOTGUN_PREFAB;
+        camera.getWorldDirection(tempVectorC).normalize();
+        tempVectorD.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+        tempVectorE.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
+        const origin = camera.localToWorld(tempVectorA.set(0, -0.08, -0.85));
+        for (let i = 0; i < config.pellets; i++) {
+            const [sx, sy] = DOOM_SHOTGUN_PELLET_PATTERN[i % DOOM_SHOTGUN_PELLET_PATTERN.length];
+            const velocity = tempVectorF.copy(tempVectorC)
+                .addScaledVector(tempVectorD, sx * config.spread)
+                .addScaledVector(tempVectorE, sy * config.spread)
+                .normalize();
+            spawnShooterProjectile(origin, null, {
+                velocity,
+                name: 'Doom Shotgun Pellet',
+                poolKey: 'doomShotgunPellets',
+                maxPoolSize: config.bulletPoolSize,
+                radius: 0.065,
+                color: 0xfff1a8,
+                speed: config.projectileSpeed,
+                life: config.projectileLife,
+                damage: config.damage,
+                hitRadius: config.hitRadius,
+                hitsPlayer: false,
+                damagesShooters: true,
+                emissiveIntensity: 4.8,
+                light: false,
+            });
+        }
+        gameplay.weapon.nextShotAt = now + config.cooldownMs;
+        if (gameplay.weapon.mesh?.userData) {
+            gameplay.weapon.mesh.userData.flashUntil = now + config.flashMs;
+        }
+        updateDoomShotgunHud(now);
+        return;
+    }
 
     const isSniper = gameplay.weapon.type === 'sniperRifle';
     if (isSniper) {
@@ -3873,7 +4108,6 @@ function updateStraightGuns() {
         return;
     }
 
-    const now = performance.now?.() || Date.now();
     if ((gameplay.weapon.nextShotAt || 0) > now) {
         if (!gameplay.input.fire) gameplay.input.firePressed = false;
         return;
@@ -4109,6 +4343,63 @@ function spawnGameplayPrefab(type) {
         }
         tintGameplayPrefabActor(actor, '#475569', '#38bdf8', 0.5);
         addStraightGunVisual(actor);
+    } else if (type === 'doomShotgunSprite') {
+        const spawnDirection = tempVectorB;
+        camera.getWorldDirection(spawnDirection);
+        spawnDirection.y = 0;
+        if (spawnDirection.lengthSq() < 1e-6) {
+            spawnDirection.set(0, 0, -1);
+        } else {
+            spawnDirection.normalize();
+        }
+        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 6);
+        const groundY = getGroundHeightAt(spawnPosition.x, spawnPosition.z, true) ?? spawnPosition.y;
+        const tex = makeDoomShotgunSpriteTexture();
+        const mat = new THREE.SpriteMaterial({
+            map: tex,
+            transparent: true,
+            alphaTest: 0.5,
+            depthWrite: true,
+            sizeAttenuation: true,
+        });
+        mat.toneMapped = false;
+        const sprite = new THREE.Sprite(mat);
+        sprite.name = 'doom-shotgun-sprite';
+        sprite.position.set(spawnPosition.x, groundY + 0.7, spawnPosition.z);
+        sprite.scale.set(2.0, 1.0, 1);
+        sprite.userData = {
+            label: 'Doom Shotgun Sprite',
+            ownedTextures: [tex],
+        };
+        actor = createActor({
+            name: 'Doom Shotgun Sprite',
+            kind: 'sprite',
+            mesh: sprite,
+            userData: {
+                label: 'Doom Shotgun Sprite',
+                doomShotgun: { nextShotAt: 0, cooldownMs: DOOM_SHOTGUN_PREFAB.cooldownMs },
+            },
+        });
+        sceneSystem?.addActor(actor);
+        ensureActorIdentity(actor);
+        setActorComponentFlags(actor, { collision: false, physics: false, scripts: false });
+        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.7, groundOffset: 0.7 });
+    } else if (type === 'doomEnemy') {
+        const spawnDirection = tempVectorB;
+        camera.getWorldDirection(spawnDirection);
+        spawnDirection.y = 0;
+        if (spawnDirection.lengthSq() < 1e-6) {
+            spawnDirection.set(0, 0, -1);
+        } else {
+            spawnDirection.normalize();
+        }
+        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 9);
+        actor = spawnShooterAiAt(spawnPosition, {
+            label: 'Doom Enemy',
+            health: DOOM_ENEMY_PREFAB.health,
+            maxHealth: DOOM_ENEMY_PREFAB.health,
+        });
+        applyDoomEnemySpriteSkin(actor);
     } else if (type === 'shooterAi') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -4172,6 +4463,8 @@ function resetGameplayPrefabs() {
             actor.userData.smg = { nextShotAt: 0, cooldownMs: STRAIGHT_GUN_PREFAB.cooldownMs };
         } else if (actor.userData.gameplayPrefab === 'sniperRifle') {
             actor.userData.sniperRifle = { nextShotAt: 0, cooldownMs: SNIPER_RIFLE_PREFAB.cooldownMs };
+        } else if (actor.userData.gameplayPrefab === 'doomShotgunSprite') {
+            actor.userData.doomShotgun = { nextShotAt: 0, cooldownMs: DOOM_SHOTGUN_PREFAB.cooldownMs };
         }
     });
 
@@ -4468,6 +4761,16 @@ function processGameplayPrefabs() {
         weapon.userData.collected = true;
         mesh.visible = false;
         equipSniperRifle(weapon);
+    }
+
+    actors = getGameplayPrefabActors('doomShotgunSprite', _scratchPrefab1);
+    for (let i = 0; i < actors.length; i++) {
+        const weapon = actors[i];
+        const mesh = getActorRenderObject(weapon);
+        if (!mesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
+        weapon.userData.collected = true;
+        mesh.visible = false;
+        equipDoomShotgun(weapon);
     }
 
     actors = getGameplayPrefabActors('target', _scratchPrefab1);
@@ -5040,6 +5343,27 @@ function rebuildActorPhysics(prop) {
     
     const rootMesh = getActorRenderObject(prop);
     rootMesh.updateMatrixWorld(true);
+
+    if (prop.userData?.staticMeshActorCollision) {
+        const previousSkipPhysicsCollision = !!rootMesh.userData?.skipPhysicsCollision;
+        let newBody = null;
+        try {
+            rootMesh.userData.skipPhysicsCollision = false;
+            newBody = createStaticMeshBody(rootMesh, bodyOptions);
+        } finally {
+            rootMesh.userData.skipPhysicsCollision = previousSkipPhysicsCollision;
+        }
+        prop.body = newBody;
+        if (physicsBodyComponent) physicsBodyComponent.body = newBody;
+        setActorComponentFlags(prop, {
+            ...componentFlags,
+            collision: !!newBody,
+            physics: false,
+        });
+        if (newBody) physics.staticBodies.push(prop);
+        if (actorPhysicsEditorState.previewActorId === prop.id) refreshActorPhysicsPreview();
+        return;
+    }
 
     if (useExactMeshCollision) {
         const newBody = createStaticMeshBody(rootMesh, bodyOptions);
@@ -6627,7 +6951,7 @@ function refreshCollisionDebugOverlays() {
 
     for (const actor of sceneSystem?.actors || []) {
         const actorMesh = getActorRenderObject(actor);
-        if (actorMesh && currentMesh && isObjectWithinRoot(actorMesh, currentMesh)) continue;
+        if (actorMesh && currentMesh && isObjectWithinRoot(actorMesh, currentMesh) && !actor.userData?.staticMeshActorCollision) continue;
         const overlay = buildActorCollisionOverlay(actor);
         if (!overlay || !actorMesh) continue;
 
@@ -9378,6 +9702,19 @@ function makeSampleLevelMeshActor(name, mesh, {
     });
 }
 
+function enableStaticMeshActorCollision(actor, { friction = 0.9, restitution = 0.08 } = {}) {
+    const mesh = getActorRenderObject(actor);
+    if (!actor || !mesh) return false;
+
+    actor.userData.staticMeshActorCollision = true;
+    actor.userData.physicsFriction = friction;
+    actor.userData.physicsRestitution = restitution;
+    mesh.userData.skipPhysicsCollision = true;
+    setActorComponentFlags(actor, { collision: true, physics: false, scripts: false });
+    rebuildActorPhysics(actor);
+    return !!getActorBody(actor);
+}
+
 function createFpsStarterLevel() {
     const MAP_SCALE = 2;
     const scaleScalar = (value) => value * MAP_SCALE;
@@ -10014,17 +10351,22 @@ function createBrickRoomLevel() {
         pitch: -0.05,
     };
     root.userData.preferredShowcase = {
-        position: [ROOM_W * 0.55, ROOM_H * 0.6, ROOM_D * 0.55],
-        target: [0, 1.2, 0],
+        position: [ROOM_W * 0.32, ROOM_H * 0.55, ROOM_D * 0.32],
+        target: [0, ROOM_H * 0.42, 0],
     };
 
-    const wallSet = getBrickTextureSet('wall');
-    const floorSet = getBrickTextureSet('floor');
-    const accentSet = getBrickTextureSet('accent');
+    const floorSet = getProceduralBrickSet('white');
+    // Showcase pillars use the standalone procedural brick set — a basic
+    // canvas brick that is NEVER overwritten by a streamed PolyHaven photo
+    // (getBrickTextureSet streams real PBR over its procedural draw, so its
+    // procedural look is never actually seen). This is the visible
+    // procedural brick.
+    const accentSet = getProceduralBrickSet('accent');
+    const wallSet = accentSet;
 
     const makeBrickMaterial = (set, {
         repeatU = 2, repeatV = 2, color = '#ffffff',
-        normalScale = 1.2, pomIntensity = 0.03, tileM = null,
+        normalScale = 1.2, pomIntensity = 0.03, tileM = null, untile = true,
     } = {}) => {
         // Clone the shared textures so per-material UV repeats don't fight
         // each other — three.js's repeat lives on the texture, not the
@@ -10070,12 +10412,18 @@ function createBrickRoomLevel() {
         // deep mortar joints without grazing-angle smearing.
         mat.pomIntensity = pomIntensity;
         mat.pomQuality = 'high';
+        mat.pomClipMode = 'solid';
         mat.pomDepthWrite = true;
         mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
         mat.userData.silPom = true;
-        // IQ untiling: these are heavily-tiled brick/cobble; opt in so the
-        // visible repeat grid is broken up (works POM on AND off).
-        mat.untileMaps = true;
+        // IQ untiling: heavily-tiled photo brick/cobble opt in so the
+        // visible repeat grid is broken up (works POM on AND off). The
+        // standalone PROCEDURAL brick set opts OUT (untile=false): it tiles
+        // cleanly by construction, and the untiler's per-cell UV offset is
+        // applied to color/normal/rough/AO but NOT to the raw-sampled POM
+        // height — desyncing relief from color (sharp procedural edges make
+        // the fractional-brick offset glaring; photo brick masks it).
+        mat.untileMaps = untile;
         // Opt into world-scale UVs: addBox() derives texture.repeat from the
         // box dimensions so a brick is the same physical size on every
         // surface regardless of wall/floor extent. tileM overrides the
@@ -10149,7 +10497,7 @@ function createBrickRoomLevel() {
             // Smaller tile ⇒ more cobble repeats across the floor (denser,
             // requested). Rounded to whole tiles by applyBrickWorldScale so
             // the X and Z edges stay seamless.
-            tileM: 2.2, normalScale: 0.6, pomIntensity: 0.015,
+            tileM: BRICK_TILE_M, normalScale: 0.45, pomIntensity: 0.0, untile: false,
         }),
     );
 
@@ -10168,7 +10516,12 @@ function createBrickRoomLevel() {
     );
 
     // Four perimeter walls
-    const wallMaterial = () => makeBrickMaterial(wallSet, { repeatU: 4, repeatV: 1.5 });
+    const wallMaterial = () => makeBrickMaterial(wallSet, {
+        repeatU: 4, repeatV: 1.5,
+        normalScale: 0.9,
+        pomIntensity: 0.012,
+        untile: false,
+    });
     addBox('brick-wall-north', [ROOM_W, ROOM_H, WALL_THICKNESS], [0, ROOM_H * 0.5, -ROOM_D * 0.5], wallMaterial());
     addBox('brick-wall-south', [ROOM_W, ROOM_H, WALL_THICKNESS], [0, ROOM_H * 0.5,  ROOM_D * 0.5], wallMaterial());
     addBox('brick-wall-east',  [WALL_THICKNESS, ROOM_H, ROOM_D], [ ROOM_W * 0.5, ROOM_H * 0.5, 0], wallMaterial());
@@ -10176,7 +10529,9 @@ function createBrickRoomLevel() {
 
     // Two free-standing partitions with accent bricks — POM shows clearest
     // when you can walk past an edge at a grazing angle.
-    const accentMaterial = () => makeBrickMaterial(accentSet, { repeatU: 2, repeatV: 1 });
+    // accentSet is the standalone PROCEDURAL brick set → untile:false so the
+    // POM relief stays locked to the brick color (see mat.untileMaps note).
+    const accentMaterial = () => makeBrickMaterial(accentSet, { repeatU: 2, repeatV: 1, untile: false });
     addBox('brick-pillar-a', [WALL_THICKNESS * 1.8, ROOM_H * 0.95, 2.8], [-2.5, ROOM_H * 0.475, -2], accentMaterial());
     addBox('brick-pillar-b', [WALL_THICKNESS * 1.8, ROOM_H * 0.95, 2.8], [ 2.5, ROOM_H * 0.475,  2], accentMaterial(), { rotationY: Math.PI * 0.1 });
 
@@ -10276,6 +10631,52 @@ function makeDoomImpSpriteTexture() {
     tex.generateMipmaps = false;
     tex.needsUpdate = true;
     return tex;
+}
+
+function applyDoomEnemySpriteSkin(actor) {
+    const mesh = getActorRenderObject(actor);
+    if (!mesh) return actor;
+
+    mesh.traverse((child) => {
+        if (child === mesh) return;
+        if (child.name === 'Shooter Barrel'
+            || child.name === 'doom-imp-sprite'
+            || child.isMesh && child.geometry?.type === 'CapsuleGeometry') {
+            child.visible = false;
+        }
+    });
+
+    if (mesh.isMesh && mesh.material) {
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const m of mats) {
+            if (!m) continue;
+            m.transparent = true;
+            m.opacity = 0.0;
+            m.depthWrite = false;
+            m.needsUpdate = true;
+        }
+    }
+
+    const impTex = makeDoomImpSpriteTexture();
+    const impMat = new THREE.SpriteMaterial({
+        map: impTex,
+        transparent: true,
+        alphaTest: 0.5,
+        depthWrite: true,
+        sizeAttenuation: true,
+    });
+    impMat.toneMapped = false;
+    const impSprite = new THREE.Sprite(impMat);
+    impSprite.name = 'doom-imp-sprite';
+    impSprite.scale.set(3.2, 4.0, 1);
+    impSprite.position.set(0, -0.2, 0);
+    impSprite.userData.ownedTextures = [impTex];
+    impSprite.raycast = () => {};
+    mesh.add(impSprite);
+
+    actor.userData.label = actor.userData.label || 'Doom Enemy';
+    actor.userData.doomEnemy = true;
+    return actor;
 }
 
 function makeDoomShotgunSpriteTexture() {
@@ -10385,9 +10786,9 @@ function createDoomTestLevel() {
         target: [0, 1.4, 0],
     };
 
-    const wallSet = getBrickTextureSet('wall');
-    const floorSet = getBrickTextureSet('floor');
-    const accentSet = getBrickTextureSet('accent');
+    const wallSet = getProceduralBrickSet('accent');
+    const floorSet = getProceduralBrickSet('white');
+    const accentSet = getProceduralBrickSet('accent');
 
     const brickMat = (set, { repeatU = 2, repeatV = 2, color = '#ffffff', rough = 0.9, metal = 0.05 } = {}) => {
         const albedo = set.albedo.clone();
@@ -10425,9 +10826,9 @@ function createDoomTestLevel() {
         // procedural field. 0.035 = deep joints, minimal smear.
         mat.pomIntensity = 0.035;
         mat.pomQuality = 'high';
+        mat.pomClipMode = 'solid';
         mat.pomDepthWrite = true;
-        // IQ untiling on before the build so the graph bakes it in.
-        mat.untileMaps = true;
+        mat.untileMaps = false;
         mat.rebuildPomGraph?.();
         mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
         mat.userData.silPom = true;
@@ -10470,7 +10871,9 @@ function createDoomTestLevel() {
         return mat;
     };
 
-    const addBox = (name, size, position, material, { rotationY = 0, cast = true, receive = true } = {}) => {
+    const addBox = (name, size, position, material, {
+        rotationY = 0, cast = true, receive = true, actorSurface = '',
+    } = {}) => {
         const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
         applyBrickWorldScale(material, size);
         if (geometry.attributes.uv && !geometry.attributes.uv2) {
@@ -10486,6 +10889,20 @@ function createDoomTestLevel() {
         mesh.castShadow = cast;
         mesh.receiveShadow = receive;
         root.add(mesh);
+        if (actorSurface) {
+            const actor = makeSampleLevelMeshActor(name, mesh, {
+                kind: 'imported',
+                castShadow: cast,
+                receiveShadow: receive,
+                skipPhysicsCollision: true,
+                userData: {
+                    doomMapSurface: actorSurface,
+                },
+            });
+            if (actorSurface === 'floor' || actorSurface === 'roof') {
+                enableStaticMeshActorCollision(actor);
+            }
+        }
         return mesh;
     };
 
@@ -10499,6 +10916,7 @@ function createDoomTestLevel() {
         [ROOM_W, T, ROOM_D],
         [0, -T * 0.5, roomCenterZ],
         brickMat(floorSet, { repeatU: 6, repeatV: 6, color: '#6c6258' }),
+        { actorSurface: 'floor' },
     );
     // Ceiling
     addBox(
@@ -10506,6 +10924,7 @@ function createDoomTestLevel() {
         [ROOM_W, T, ROOM_D],
         [0, ROOM_H + T * 0.5, roomCenterZ],
         flatMat('#2a2724', { rough: 0.95 }),
+        { actorSurface: 'roof' },
     );
 
     // Perimeter walls — leave a doorway gap on south wall for corridor
@@ -10545,19 +10964,6 @@ function createDoomTestLevel() {
     addBox('doom-slime-floor', [PIT_W, T, PIT_D],
         [4.5, -PIT_DEPTH - T * 0.5, 4.5],
         flatMat('#1e3a12', { rough: 0.4, metal: 0.0, emissive: '#39ff14', emissiveIntensity: 0.85 }));
-    // pit walls (4 thin slabs framing the dip — floor cutout faked with surround)
-    addBox('doom-pit-rim-n', [PIT_W + 0.4, PIT_DEPTH, 0.2],
-        [4.5, -PIT_DEPTH * 0.5, 4.5 - PIT_D * 0.5 - 0.1],
-        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
-    addBox('doom-pit-rim-s', [PIT_W + 0.4, PIT_DEPTH, 0.2],
-        [4.5, -PIT_DEPTH * 0.5, 4.5 + PIT_D * 0.5 + 0.1],
-        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
-    addBox('doom-pit-rim-e', [0.2, PIT_DEPTH, PIT_D + 0.4],
-        [4.5 + PIT_W * 0.5 + 0.1, -PIT_DEPTH * 0.5, 4.5],
-        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
-    addBox('doom-pit-rim-w', [0.2, PIT_DEPTH, PIT_D + 0.4],
-        [4.5 - PIT_W * 0.5 - 0.1, -PIT_DEPTH * 0.5, 4.5],
-        brickMat(accentSet, { repeatU: 2, repeatV: 0.5, color: '#3a3026' }));
 
     // Two monster-closet alcoves carved into north wall (recessed boxes)
     const CLOSET_W = 2.2, CLOSET_D = 1.4, CLOSET_H = 2.6;
@@ -10593,10 +10999,12 @@ function createDoomTestLevel() {
     // ---- Corridor connecting south door to spawn ----
     addBox('doom-corr-floor', [CORR_W, T, CORR_LEN],
         [0, -T * 0.5, corridorCenterZ],
-        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }));
+        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }),
+        { actorSurface: 'floor' });
     addBox('doom-corr-ceiling', [CORR_W, T, CORR_LEN],
         [0, CORR_H + T * 0.5, corridorCenterZ],
-        flatMat('#1a1816', { rough: 0.95 }));
+        flatMat('#1a1816', { rough: 0.95 }),
+        { actorSurface: 'roof' });
     addBox('doom-corr-wall-e', [T, CORR_H, CORR_LEN],
         [CORR_W * 0.5, CORR_H * 0.5, corridorCenterZ],
         brickMat(wallSet, { repeatU: 3, repeatV: 1, color: '#6a5a4a' }));
@@ -10688,13 +11096,11 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
             fileSize: 260000,
             create: createDoomTestLevel,
             afterLoad: () => {
-                // SMG pickup on pedestal
-                const gunActor = spawnGameplayPrefab('smg');
+                const gunActor = spawnGameplayPrefab('doomShotgunSprite');
                 if (gunActor) {
                     const mesh = getActorRenderObject(gunActor);
                     if (mesh) {
                         mesh.position.set(0, 0.75, -2);
-                        mesh.rotation.set(0, Math.PI * 0.5, 0);
                         mesh.updateMatrixWorld(true);
                     }
                     rebuildActorPhysics?.(gunActor);
@@ -10712,7 +11118,12 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
                     // Use the spot's own Y as ground; default raycast from
                     // probeHeight down hits the ceiling first in a sealed
                     // room and stamps the imp onto the roof.
-                    const imp = spawnShooterAiAt(spot, { label: 'Doom Imp', groundY: spot.y });
+                    const imp = spawnShooterAiAt(spot, {
+                        label: 'Doom Imp',
+                        groundY: spot.y,
+                        health: DOOM_ENEMY_PREFAB.health,
+                        maxHealth: DOOM_ENEMY_PREFAB.health,
+                    });
                     if (!imp) continue;
                     const impMesh = getActorRenderObject(imp);
                     if (!impMesh) continue;
@@ -10752,7 +11163,7 @@ function getBuiltinLevelDefinition(levelId = 'soccerField') {
                     impMat.toneMapped = false;
                     const impSprite = new THREE.Sprite(impMat);
                     impSprite.name = 'doom-imp-sprite';
-                    impSprite.scale.set(1.6, 2.0, 1);
+                    impSprite.scale.set(3.2, 4.0, 1);
                     // Actor mesh origin sits at capsule center (~1.18 above
                     // ground from spawnShooterAiAt). Lift sprite slightly so
                     // pixel feet line up with the floor.
@@ -13552,7 +13963,7 @@ document.getElementById('scene-folder-input')?.addEventListener('change', (e) =>
 });
 
 const PREFAB_MANIFEST_URL = assetRegistry.resolvePrefabManifest();
-const PREFAB_CATEGORY_ORDER = ['Vehicles', 'Lights', 'Shapes', 'Gameplay', 'AI'];
+const PREFAB_CATEGORY_ORDER = ['Vehicles', 'Lights', 'Shapes', 'Gameplay', 'Weapons', 'AI'];
 const BUILTIN_PREFAB_ITEMS = [
     { id: 'helicopter', name: 'Helicopter', category: 'Vehicles', modelPrefab: 'helicopter', image: 'helicopter.svg' },
     { id: 'point-light', name: 'Point Light', category: 'Lights', kind: 'pointLight', image: 'light-point.svg' },
@@ -13566,8 +13977,10 @@ const BUILTIN_PREFAB_ITEMS = [
     { id: 'coin', name: 'Coin +10', category: 'Gameplay', gameplayPrefab: 'coin', image: 'gameplay-coin.svg' },
     { id: 'health-pickup', name: 'Health +35%', category: 'Gameplay', gameplayPrefab: 'healthPickup', image: 'gameplay-coin.svg' },
     { id: 'target', name: 'Target +25', category: 'Gameplay', gameplayPrefab: 'target', image: 'gameplay-target.svg' },
+    { id: 'doom-shotgun-sprite', name: 'Doom Shotgun Sprite', category: 'Weapons', gameplayPrefab: 'doomShotgunSprite', image: 'doom-shotgun.svg' },
     { id: 'navmesh-circle-ai', name: 'Circle Patrol AI', category: 'AI', gameplayPrefab: 'navmeshCircleAi', image: 'ai-navmesh-circle.svg' },
     { id: 'shooter-ai', name: 'Shooter AI', category: 'AI', gameplayPrefab: 'shooterAi', image: 'ai-shooter.svg' },
+    { id: 'doom-enemy', name: 'Doom Enemy', category: 'AI', gameplayPrefab: 'doomEnemy', image: 'doom-enemy.svg' },
     { id: 'shooter-spawner', name: 'Shooter Spawner', category: 'AI', gameplayPrefab: 'shooterSpawner', image: 'ai-shooter.svg' },
     { id: 'smg', name: 'SMG', category: 'AI', gameplayPrefab: 'smg', image: 'ai-shooter.svg' },
     { id: 'sniper-rifle', name: 'Bolt Action Sniper Rifle', category: 'AI', gameplayPrefab: 'sniperRifle', image: 'ai-shooter.svg' },

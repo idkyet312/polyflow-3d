@@ -22,8 +22,8 @@ import { untileTextureSample } from '../materials/untileUVNode.js';
  * the compiled shader.
  *
  * Live-editable knobs (no recompile): `pomIntensity` (height scale).
- * Recompile knobs: `pomEnabled`, `pomQuality`, the heightMap texture
- * identity.
+ * Recompile knobs: `pomEnabled`, `pomQuality`, `pomClipMode`, the heightMap
+ * texture identity.
  */
 export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
     constructor(parameters) {
@@ -42,6 +42,9 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
         this.pomEnabled = false;
         this.pomIntensity = 0.04;
         this.pomQuality = POM_QUALITY.MEDIUM;
+        // 'silhouette' clips displaced contours; 'solid' keeps tiled POM
+        // surfaces opaque while retaining parallax UV/normal/AO sampling.
+        this.pomClipMode = 'silhouette';
         // Stage 4: rewrite fragment depth so the displaced surface clips
         // against real geometry. Off by default (disables Early-Z); only
         // showcase brick materials opt in.
@@ -60,7 +63,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
         this._silPomTmpDir = new Vector3();
         // Snapshot of which graph is currently compiled so we know when a
         // recompile is required.
-        this._pomCompiled = { enabled: false, quality: null, heightMap: null, depthWrite: false };
+        this._pomCompiled = { enabled: false, quality: null, heightMap: null, depthWrite: false, clipMode: null };
     }
 
     setupLightMap(builder) {
@@ -83,6 +86,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
     rebuildPomGraph() {
         const wantPom = !!(this.pomEnabled && this.heightMap);
         const quality = resolvePomQuality(this.pomQuality);
+        const clipMode = this.pomClipMode === 'solid' ? 'solid' : 'silhouette';
 
         // Sampling UV: parallax-marched when POM is on, the plain mesh UV
         // when off. EITHER way every surface map is routed through the IQ
@@ -143,20 +147,26 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
             : null;
 
         if (wantPom) {
+            const solidClip = clipMode === 'solid';
             // Silhouette discard: maskNode keeps the fragment where the
             // node is true (three discards on `mask.not()`). silhouette is
             // true past the displaced contour, so keep = NOT silhouette.
             // Same node for the shadow pass so cast shadows clip alike.
-            const keepMask = silhouette.not();
-            this.maskNode = keepMask;
-            this.maskShadowNode = keepMask;
+            if (solidClip) {
+                this.maskNode = null;
+                this.maskShadowNode = null;
+            } else {
+                const keepMask = silhouette.not();
+                this.maskNode = keepMask;
+                this.maskShadowNode = keepMask;
+            }
 
             // Stage 5: self-shadow → AO term, combined with the baked AO
             // map (untiled at the parallax UV so mortar joints stay
             // occluded as the surface displaces). coverage feathers the
             // silhouette so the eroded contour reads as a soft contact
             // line, not a 1-bit stair-step.
-            const edgeShade = shadow.mul(coverage);
+            const edgeShade = solidClip ? shadow : shadow.mul(coverage);
             this.aoNode = this.pomAOMap
                 ? edgeShade.mul(
                     untileTextureSample(texture(this.pomAOMap), sampleUV, opts).r,
@@ -166,7 +176,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
             // Stage 4: rewrite fragment depth from the marched hit so the
             // displaced surface z-fights/clips correctly against real
             // geometry. Gated: Early-Z loss is opt-in.
-            if (this.pomDepthWrite) {
+            if (!solidClip && this.pomDepthWrite) {
                 const localHit = positionLocal.sub(
                     normalLocal.mul(hitDepth.mul(this._pomIntensityUniform)),
                 );
@@ -193,6 +203,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
             quality: wantPom ? quality.name : null,
             heightMap: wantPom ? this.heightMap : null,
             depthWrite: wantPom ? !!this.pomDepthWrite : false,
+            clipMode: wantPom ? clipMode : null,
         };
         this._graphBuilt = true;
         this.needsUpdate = true;
@@ -230,6 +241,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
             || snap.quality !== (wantEnabled ? wantQuality : null)
             || snap.heightMap !== (wantEnabled ? this.heightMap : null)
             || snap.depthWrite !== (wantEnabled ? !!this.pomDepthWrite : false)
+            || snap.clipMode !== (wantEnabled ? (this.pomClipMode === 'solid' ? 'solid' : 'silhouette') : null)
         ) {
             this.rebuildPomGraph();
         }
@@ -265,6 +277,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
         this.pomEnabled = !!source.pomEnabled;
         this.pomIntensity = source.pomIntensity ?? 0.04;
         this.pomQuality = source.pomQuality ?? POM_QUALITY.MEDIUM;
+        this.pomClipMode = source.pomClipMode === 'solid' ? 'solid' : 'silhouette';
         this.pomDepthWrite = !!source.pomDepthWrite;
         this.setPomIntensity(this.pomIntensity);
         this.rebuildPomGraph();
