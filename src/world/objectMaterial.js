@@ -33,6 +33,12 @@ export function setActorColor(actor, hexColor) {
     if (!mesh) return;
     const color = new THREE.Color(hexColor);
     mesh.traverse((child) => {
+        // Skip subtrees flagged skipTint (e.g. enemy health bars) so their
+        // own colors aren't overwritten by actor recolors.
+        for (let p = child; p && p !== mesh.parent; p = p.parent) {
+            if (p.userData?.skipTint) return;
+            if (p === mesh) break;
+        }
         if (child.isLight && child.color) {
             child.color.copy(color);
         }

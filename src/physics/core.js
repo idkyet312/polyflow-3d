@@ -393,41 +393,79 @@ export function createPhysicsCore({
             z: oz + dz * distance,
         };
 
-        // Normal extraction is optional. Guard every embind boundary because
-        // older compat builds can surface opaque "undefined at 0" errors when
-        // SubShapeID/body accessors are missing.
+        // Surface-normal extraction. RayCastResult itself carries no normal —
+        // it must be resolved from the hit body's shape. The previous code
+        // used Jolt.BodyLockRead and BodyInterface.TryGetBody, neither of
+        // which exist in this jolt-physics/wasm-compat binding, so it always
+        // threw and every wall reported the (0,1,0) fallback. The correct
+        // APIs here: BodyInterface.GetTransformedShape(bodyID) and, as a
+        // backup, GetBodyLockInterfaceNoLock().TryGetBody(bodyID). hasNormal
+        // tells the caller whether `normal` is real so it can derive one
+        // geometrically when this genuinely can't resolve.
         let normal = { x: 0, y: 1, z: 0 };
+        let hasNormal = false;
         let bodyId = -1;
         try {
             const id = typeof hit?.get_mBodyID === 'function' ? hit.get_mBodyID() : hit?.mBodyID;
             bodyId = id?.GetIndexAndSequenceNumber?.() ?? -1;
 
-            if (id && bodyId >= 0) {
-                const body = physics.bodyInterface?.TryGetBody?.(id) ?? null;
-                const subShapeId = typeof hit?.get_mSubShapeID2 === 'function'
-                    ? hit.get_mSubShapeID2()
-                    : hit?.mSubShapeID2;
+            const subShapeId = typeof hit?.get_mSubShapeID2 === 'function'
+                ? hit.get_mSubShapeID2()
+                : hit?.mSubShapeID2;
 
-                if (body && subShapeId) {
-                    const jPoint = new Jolt.RVec3(point.x, point.y, point.z);
+            if (id && bodyId >= 0 && subShapeId) {
+                const jPoint = new Jolt.RVec3(point.x, point.y, point.z);
+                try {
+                    // Primary: TransformedShape from the BodyID (no lock).
                     try {
-                        const n = body.GetWorldSpaceSurfaceNormal(subShapeId, jPoint);
-                        if (n) {
-                            normal = { x: n.GetX(), y: n.GetY(), z: n.GetZ() };
+                        const ts = physics.bodyInterface?.GetTransformedShape?.(id);
+                        if (ts) {
+                            const n = ts.GetWorldSpaceSurfaceNormal(subShapeId, jPoint);
+                            if (n) {
+                                normal = { x: n.GetX(), y: n.GetY(), z: n.GetZ() };
+                                hasNormal = true;
+                            }
                         }
-                    } finally {
-                        Jolt.destroy(jPoint);
+                    } catch (_) { /* fall through to the body-lock path */ }
+
+                    // Backup: the no-lock body-lock interface actually carries
+                    // TryGetBody (BodyInterface does not), then query the body.
+                    if (!hasNormal) {
+                        try {
+                            const blic = physicsSystem.GetBodyLockInterfaceNoLock?.();
+                            const body = blic ? blic.TryGetBody(id) : null;
+                            if (body) {
+                                const n = body.GetWorldSpaceSurfaceNormal(subShapeId, jPoint);
+                                if (n) {
+                                    normal = { x: n.GetX(), y: n.GetY(), z: n.GetZ() };
+                                    hasNormal = true;
+                                }
+                            }
+                        } catch (_) { /* hasNormal stays false */ }
                     }
+                } finally {
+                    Jolt.destroy(jPoint);
                 }
             }
-        } catch (_) { /* keep default normal */ }
+        } catch (_) { /* hasNormal stays false; caller derives one */ }
+
+        // Reject degenerate / non-finite normals so a bad read can't masquerade
+        // as a valid surface normal.
+        if (hasNormal) {
+            const ln = normal.x * normal.x + normal.y * normal.y + normal.z * normal.z;
+            if (!Number.isFinite(ln) || ln < 1e-6) hasNormal = false;
+            else {
+                const inv = 1 / Math.sqrt(ln);
+                normal = { x: normal.x * inv, y: normal.y * inv, z: normal.z * inv };
+            }
+        }
 
         Jolt.destroy(o);
         Jolt.destroy(d);
         Jolt.destroy(settings);
         Jolt.destroy(collector);
 
-        return { hit: true, point, normal, distance, fraction, bodyId };
+        return { hit: true, point, normal, hasNormal, distance, fraction, bodyId };
     }
 
     return {

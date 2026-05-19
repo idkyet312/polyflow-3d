@@ -167,8 +167,8 @@
                                 <option value="fpsStarter">Sample Level</option>
                                 <option value="brickRoom">Brick Room (POM Demo)</option>
                                 <option value="doomTest">Doom Test Arena</option>
-                                <option value="doomArena">Doom Arena (Rogue Waves)</option>
-                                <option value="soccerField" selected>Soccer Field</option>
+                                <option value="doomArena" selected>Rogue Waves</option>
+                                <option value="soccerField">Soccer Field</option>
                                 <option value="soccerFieldTerrain">Terrain</option>
                             </select>
                         </label>
@@ -1279,6 +1279,15 @@
 
                 <button class="btn desktop-mobile-toggle" id="desktop-mobile-toggle" type="button">Mobile UI</button>
                 <div class="desktop-version-badge" aria-label="Desktop app version">v0.0.1</div>
+
+                <div class="mobile-rotate-notice" id="mobile-rotate-notice" aria-live="polite">
+                    <div class="mobile-rotate-inner">
+                        <div class="mobile-rotate-icon" aria-hidden="true">⟳</div>
+                        <div class="mobile-rotate-title">Rotate your device</div>
+                        <div class="mobile-rotate-sub">Turn horizontal to play. You can still switch levels below.</div>
+                        <button class="btn mobile-chip" id="mobile-rotate-menu" type="button">Menu / Level</button>
+                    </div>
+                </div>
 
                 <div class="mobile-ui" aria-label="Mobile controls">
                     <div class="mobile-version-badge" aria-label="App version">v0.0.1</div>

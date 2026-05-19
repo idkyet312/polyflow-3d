@@ -7,7 +7,7 @@ import * as THREE from 'three';
 
 // ─── Module-scope deps populated by setupMobileControls ─────────────────────
 let mobileState, gameplay, showcase, vehicleState, physics;
-let mobileMenuToggleBtn, mobileModeToggleBtn, mobileExitPlayBtn;
+let mobileMenuToggleBtn, mobileModeToggleBtn, mobileExitPlayBtn, mobileRotateMenuBtn;
 let mobileMovePad, mobileMoveThumb, mobileLookPad, mobileLookThumb;
 let mobileJumpBtn, mobileRightActionBtn, mobileAction2Btn;
 
@@ -48,6 +48,7 @@ export function setupMobileControls(deps) {
     mobileMenuToggleBtn = document.getElementById('mobile-menu-toggle');
     mobileModeToggleBtn = document.getElementById('mobile-mode-toggle');
     mobileExitPlayBtn = document.getElementById('mobile-exit-play');
+    mobileRotateMenuBtn = document.getElementById('mobile-rotate-menu');
     mobileMovePad = document.getElementById('mobile-move-pad');
     mobileMoveThumb = document.getElementById('mobile-move-thumb');
     mobileLookPad = document.getElementById('mobile-look-pad');
@@ -59,6 +60,7 @@ export function setupMobileControls(deps) {
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
     mobileModeToggleBtn?.addEventListener('click', () => setCameraMode(gameplay.active ? 'showcase' : 'play'));
     mobileExitPlayBtn?.addEventListener('click', () => setCameraMode('showcase'));
+    mobileRotateMenuBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
 
     mobileJumpBtn?.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.pointerType === 'mouse') return;

@@ -1813,6 +1813,97 @@ body.console-open #crosshair {
   display: none;
 }
 
+/* Portrait lock: on a real touch phone held vertically, the game controls
+   don't fit. Hide everything and show only a rotate prompt + a Menu button
+   that opens the level switcher. */
+.mobile-rotate-notice {
+  display: none;
+}
+
+@media (hover: none) and (pointer: coarse) and (max-width: 960px) and (orientation: portrait) {
+  .mobile-rotate-notice {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    z-index: 9000;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 50% 40%, #0d1b2a 0%, #05080d 100%);
+    color: #eaf6ff;
+    font-family: "Trebuchet MS", system-ui, sans-serif;
+    text-align: center;
+    padding: 1.5rem;
+  }
+
+  .mobile-rotate-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.9rem;
+    max-width: 22rem;
+  }
+
+  .mobile-rotate-icon {
+    font-size: 3.4rem;
+    line-height: 1;
+    color: #7fe0ff;
+    animation: mobile-rotate-spin 2.4s ease-in-out infinite;
+  }
+
+  .mobile-rotate-title {
+    font: 800 1.4rem/1.1 inherit;
+    letter-spacing: 1px;
+    text-shadow: 0 0 18px rgba(60, 180, 255, 0.6);
+  }
+
+  .mobile-rotate-sub {
+    font: 600 0.95rem/1.4 inherit;
+    opacity: 0.8;
+  }
+
+  #mobile-rotate-menu {
+    margin-top: 0.6rem;
+    min-width: 9rem;
+    padding: 0.7rem 1.2rem;
+    border-radius: 999px;
+    background: rgba(60, 160, 255, 0.22);
+    color: #fff;
+    border: 1px solid rgba(120, 200, 255, 0.5);
+    font: 700 1rem/1 inherit;
+    pointer-events: auto;
+  }
+
+  /* Suppress every other surface while the portrait lock is up. */
+  .mobile-ui,
+  .workspace > *:not(.mobile-rotate-notice),
+  .viewer-menu,
+  .debug-console,
+  .debug-stats-overlay,
+  #crosshair {
+    display: none !important;
+  }
+
+  /* When the user opens the level menu from the notice, surface the menu
+     above the lock so they can switch levels in portrait. */
+  body.mobile-menu-open .viewer-menu {
+    display: block !important;
+    position: fixed;
+    inset: 0;
+    z-index: 9100;
+    overflow: auto;
+    background: rgba(5, 8, 13, 0.97);
+  }
+
+  body.mobile-menu-open .mobile-rotate-notice {
+    z-index: 9050;
+  }
+}
+
+@keyframes mobile-rotate-spin {
+  0%, 100% { transform: rotate(0deg); }
+  45%, 55% { transform: rotate(-90deg); }
+}
+
 body.mobile-ui-preview,
 body.mobile-ui-preview main,
 body.mobile-ui-preview .workspace,

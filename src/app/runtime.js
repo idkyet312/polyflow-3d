@@ -27,6 +27,22 @@ import {
 } from '../audio/synthesis.js';
 import { createDrivableCarVisual } from '../vehicle/visual.js';
 import { createVehicleFx } from '../vehicle/fx.js';
+import { createCombatFx } from '../gameplay/combatFx.js';
+import { createHeldWeapons } from '../gameplay/heldWeapons.js';
+import { createSceneBundle } from '../world/sceneBundle.js';
+import { createLevels } from '../world/levels.js';
+import { createPrefabSystem } from '../runtime/prefabSystem.js';
+import {
+    HELICOPTER_USER_SCRIPT,
+    COIN_USER_SCRIPT,
+    HEALTH_PICKUP_USER_SCRIPT,
+    TARGET_USER_SCRIPT,
+    TELEPORTER_USER_SCRIPT,
+    DOOM_SHOTGUN_USER_SCRIPT,
+    SHOOTER_AI_USER_SCRIPT,
+    SHOOTER_SPAWNER_USER_SCRIPT,
+    ROGUE_GAMEMODE_SCRIPT,
+} from '../gameplay/prefabScripts.js';
 import {
     cloneDisposableObject,
     formatImportedPropName,
@@ -93,6 +109,7 @@ import { createLightmapBaker } from '../world/lightmapBaker.js';
 import { createPostProcessUiController } from '../world/postProcessUiController.js';
 import { createLitePhysicsPool } from '../physics/litePool.js';
 import { createProjectileInstancer } from '../gameplay/projectileInstancer.js';
+import { createRogueWaves } from '../gameplay/rogueWaves.js';
 import {
     AHUD,
     installUePrototypeMethods,
@@ -1001,6 +1018,19 @@ const DOOM_SHOTGUN_PREFAB = {
     bulletPoolSize: 40,
     flashMs: 85,
 };
+// Bouncing throwing star: slower + shorter range than bullets, but ricochets
+// off walls (and arcs slightly under gravity) so it can hit around cover.
+const THROWING_STAR_PREFAB = {
+    cooldownMs: 900,       // slower fire rate
+    projectileSpeed: 58,   // fast -> travels far across the arena
+    projectileLife: 1.0,   // despawns 2s after the throw
+    damage: 0.26,
+    hitRadius: 0.6,
+    bounces: 1,            // wall ricochets before it dies
+    gravity: 0.2,            // no drop -> straight line, bounces flat off walls
+    bounceDamping: 0.88,   // keeps almost all speed per bounce
+    bulletPoolSize: 32,
+};
 const DOOM_SHOTGUN_PELLET_PATTERN = [
     [0, 0],
     [-0.65, -0.2],
@@ -1011,7 +1041,7 @@ const DOOM_SHOTGUN_PELLET_PATTERN = [
     [0.92, 0.12],
 ];
 const DOOM_ENEMY_PREFAB = {
-    health: SHOOTER_AI_PREFAB.health * 0.25,
+    health: SHOOTER_AI_PREFAB.health * 0.12,
 };
 const soccerGoalieState = {
     elapsed: 0,
@@ -2713,6 +2743,11 @@ function tintGameplayPrefabActor(actor, color, emissive = null, emissiveIntensit
     setActorColor(actor, color);
     const mesh = getActorRenderObject(actor);
     mesh?.traverse?.((node) => {
+        // Skip health-bar (and any skipTint-flagged) subtrees.
+        for (let p = node; p; p = p.parent) {
+            if (p.userData?.skipTint) return;
+            if (p === mesh) break;
+        }
         const materials = node?.material
             ? (Array.isArray(node.material) ? node.material : [node.material])
             : [];
@@ -2828,7 +2863,8 @@ function damagePlayer(amount = SHOOTER_AI_PREFAB.damage, sourcePos = null) {
     if (now - (gameplay.lastDamageAt || 0) < SHOOTER_AI_PREFAB.playerDamageCooldownMs) return;
     gameplay.lastDamageAt = now;
 
-    const damageAmount = THREE.MathUtils.clamp(Number(amount) || 0, 0, SHOOTER_AI_PREFAB.damage);
+    const damageAmount = THREE.MathUtils.clamp(Number(amount) || 0, 0, SHOOTER_AI_PREFAB.damage)
+        * (window.rogueBuffs?.damageTaken ?? 1);
     setPlayerHealth((gameplay.health ?? 1) - damageAmount);
     triggerPlayerHitFeedback();
 
@@ -2918,6 +2954,10 @@ function queuePlayerDeathRespawn() {
     physics.desiredVelocity.set(0, 0, 0);
     gameplay.velocity.set(0, 0, 0);
     if (isDrivingVehicle()) clearActiveVehicle();
+
+    // In Rogue Waves the run ENDS on death — the game-mode script shows the
+    // death screen and restart button, so don't auto-respawn here.
+    if (currentMesh?.userData?.sampleType === 'doomArena') return;
 
     if (gameplay.respawnTimer) clearTimeout(gameplay.respawnTimer);
     gameplay.respawnTimer = setTimeout(() => {
@@ -3130,6 +3170,9 @@ function ensureShooterHealthBar(actor) {
     group.name = 'Shooter AI Health';
     group.position.set(0, 2.15, 0);
     group.renderOrder = 8;
+    // Exclude the bar from actor recolor/tint traversals so the variant
+    // tint can't override its green fill.
+    group.userData.skipTint = true;
 
     const background = new THREE.Mesh(
         new THREE.PlaneGeometry(width, height),
@@ -3177,9 +3220,10 @@ function setShooterHealth(actor, value = SHOOTER_AI_PREFAB.health) {
     const percent = maxHealth > 0 ? shooter.health / maxHealth : 0;
     const healthBar = ensureShooterHealthBar(actor);
     if (healthBar?.fill) {
+        // Bar length is normalised to maxHealth (percent = health / maxHealth).
         healthBar.fill.scale.x = Math.max(0.001, percent);
         healthBar.fill.position.x = -healthBar.width * 0.5 + (healthBar.width * percent * 0.5);
-        healthBar.fill.material.color.set(percent > 0.35 ? 0x22c55e : 0xef4444);
+        healthBar.fill.material.color.set(0x22c55e); // always green
         healthBar.group.visible = percent > 0;
     }
 
@@ -3196,6 +3240,24 @@ function setShooterHealth(actor, value = SHOOTER_AI_PREFAB.health) {
                 playEnemyDeathSound(1);
             }
             addGameScore(shooter.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue);
+            if (currentMesh?.userData?.sampleType === 'doomArena') {
+                let ex = 0, ey = 0, ez = 0;
+                if (mesh) { mesh.getWorldPosition(tempVectorA); ex = tempVectorA.x; ey = tempVectorA.y; ez = tempVectorA.z; }
+                // Decoupled from the rogueWaves module via its window surface so
+                // the shooter-AI code carries no direct dependency on it.
+                const rw = window.rogueWaves;
+                if (rw) {
+                    // Variant XP weight: tanks/bosses drop more orbs.
+                    const orbCount = Math.max(1, Math.round(actor?.userData?.rogueXp || 1));
+                    for (let o = 0; o < orbCount; o++) {
+                        rw.spawnRogueXpOrb(ex + (Math.random() - 0.5) * 0.6, ey + 0.9, ez + (Math.random() - 0.5) * 0.6);
+                    }
+                    rw.onRogueEnemyKilled?.(ex, ey, ez, actor);
+                }
+                if (window.rogueBuffs && (window.rogueBuffs.lifesteal || 0) > 0) {
+                    setPlayerHealth((gameplay.health ?? 1) + window.rogueBuffs.lifesteal);
+                }
+            }
             if (mesh) {
                 mesh.traverse?.((node) => {
                     const mats = node?.material ? (Array.isArray(node.material) ? node.material : [node.material]) : [];
@@ -3399,6 +3461,9 @@ function spawnShooterProjectile(origin, target, options = {}) {
         hitRadius: options.hitRadius ?? SHOOTER_AI_PREFAB.hitRadius,
         hitsPlayer: options.hitsPlayer !== false,
         damagesShooters: options.damagesShooters === true,
+        bounces: options.bounces ?? 0,
+        bounceDamping: options.bounceDamping ?? 0.86,
+        gravity: options.gravity ?? 0,
     });
 }
 
@@ -3414,6 +3479,10 @@ function updateShooterProjectiles(delta = 0) {
         const projectile = gameplayPrefabState.shooterProjectiles[i];
         if (!projectile?.mesh) continue;
         projectile.ttl -= delta;
+        // Lobbed projectiles (throwing star) arc under their own gravity.
+        if (projectile.gravity) {
+            projectile.velocity.y -= projectile.gravity * delta;
+        }
         const previousPosition = tempVectorA.copy(projectile.mesh.position);
         projectile.mesh.position.addScaledVector(projectile.velocity, delta);
 
@@ -3434,19 +3503,43 @@ function updateShooterProjectiles(delta = 0) {
             const dir = tempVectorC.copy(segVec).multiplyScalar(1 / segLen);
             const ray = raycastWorld(previousPosition, dir, segLen + (projectile.hitRadius ?? 0.1));
             if (ray?.hit && !ray.actor?.userData?.shooterAi) {
-                hitWall = true;
-                if (ray.point) projectile.mesh.position.copy(ray.point);
-                // Overridable hook: weapon scripts decide impact FX. Default
-                // (no override) = spark + 3D thud + scorch decal. nx/ny/nz =
-                // surface normal (for orienting decals).
                 const ip = ray.point || projectile.mesh.position;
                 const nrm = ray.normal || { x: 0, y: 1, z: 0 };
-                if (typeof window !== 'undefined' && window.onBulletImpact) {
-                    try { window.onBulletImpact(ip.x, ip.y, ip.z, projectile, nrm.x, nrm.y, nrm.z); } catch (e) { /* script error */ }
+                if ((projectile.bounces || 0) > 0) {
+                    // Ricochet: reflect velocity about the surface normal,
+                    // damp the speed, nudge off the wall so we don't re-hit
+                    // the same face next frame. Star keeps flying.
+                    projectile.bounces -= 1;
+                    const v = projectile.velocity;
+                    const dot = v.x * nrm.x + v.y * nrm.y + v.z * nrm.z;
+                    v.x -= 2 * dot * nrm.x;
+                    v.y -= 2 * dot * nrm.y;
+                    v.z -= 2 * dot * nrm.z;
+                    const damp = projectile.bounceDamping ?? 0.86;
+                    v.multiplyScalar(damp);
+                    projectile.mesh.position.set(
+                        ip.x + nrm.x * 0.12,
+                        ip.y + nrm.y * 0.12,
+                        ip.z + nrm.z * 0.12,
+                    );
+                    spawnImpactBurst(ip.x, ip.y, ip.z, { color: 0x9be7ff, count: 5 });
+                    playImpactSound(0.5, ip.x, ip.y, ip.z);
                 } else {
-                    spawnImpactBurst(ip.x, ip.y, ip.z);
-                    playImpactSound(0.8, ip.x, ip.y, ip.z);
-                    spawnImpactDecal(ip.x, ip.y, ip.z, nrm.x, nrm.y, nrm.z);
+                    hitWall = true;
+                    if (ray.point) projectile.mesh.position.copy(ray.point);
+                    // Overridable hook: weapon scripts decide impact FX. Default
+                    // (no override) = spark + 3D thud + scorch decal. nx/ny/nz =
+                    // surface normal (for orienting decals).
+                    if (typeof window !== 'undefined' && window.onBulletImpact) {
+                        try { window.onBulletImpact(ip.x, ip.y, ip.z, projectile, nrm.x, nrm.y, nrm.z); } catch (e) { /* script error */ }
+                    } else {
+                        spawnImpactBurst(ip.x, ip.y, ip.z);
+                        playImpactSound(0.8, ip.x, ip.y, ip.z);
+                        spawnImpactDecal(ip.x, ip.y, ip.z, nrm.x, nrm.y, nrm.z, {
+                            dir: projectile.velocity,
+                            hasNormal: ray.hasNormal === true,
+                        });
+                    }
                 }
             }
         }
@@ -3473,8 +3566,8 @@ function updateShooterProjectiles(delta = 0) {
                 }
                 mesh.getWorldPosition(tempVectorB);
                 tempVectorC.copy(tempVectorB);
-                tempVectorC.y += 1.15;
-                tempVectorB.y += 0.55;
+                tempVectorC.y += 0.7;   // head point, lowered from 1.15
+                tempVectorB.y += 0.15;  // body point, lowered from 0.55
                 const dBody = getPointSegmentDistanceSq(tempVectorB, previousPosition, projectile.mesh.position);
                 const dHead = getPointSegmentDistanceSq(tempVectorC, previousPosition, projectile.mesh.position);
                 if (window.DEBUG_BULLET_HITS) {
@@ -3525,16 +3618,48 @@ function updateShooterAiPhysicsHits() {
             const speed = velocity.length();
             if (speed < SHOOTER_AI_PREFAB.hitSpeedThreshold) continue;
 
+            // Star uses a wider contact test so fast ricochets reliably
+            // register a hit instead of skimming past the enemy.
+            const isStar = !!prop.userData?.isThrowingStar;
+            const pad = isStar ? 0.7 : 0.35;
+            const reach = isStar ? 1.05 : 0.65;
             propMesh.updateMatrixWorld(true);
-            tempBoxA.setFromObject(propMesh).expandByScalar(0.35);
-            const hitBody = tempBoxA.distanceToPoint(tempVectorC) <= 0.65;
-            const hitHead = tempBoxA.distanceToPoint(tempVectorA) <= 0.65;
+            tempBoxA.setFromObject(propMesh).expandByScalar(pad);
+            const hitBody = tempBoxA.distanceToPoint(tempVectorC) <= reach;
+            const hitHead = tempBoxA.distanceToPoint(tempVectorA) <= reach;
             if (!hitBody && !hitHead) continue;
 
             shooter.lastPhysicsHitAt = now;
-            damageShooterAi(actor, THREE.MathUtils.clamp(SHOOTER_AI_PREFAB.hitDamage * (speed / 5), 0.12, 0.45));
+            const dmg = THREE.MathUtils.clamp(SHOOTER_AI_PREFAB.hitDamage * (speed / 5), 0.12, 0.45)
+                * (isStar ? 0.5 : 1);
+            damageShooterAi(actor, dmg);
             break;
         }
+    }
+}
+
+// A perfectly-elastic sphere can gain speed bouncing off moving bodies
+// (enemies, the player capsule). Re-normalize each star's velocity back to
+// its launch speed every frame so collisions only redirect it, never
+// accelerate it — direction is kept, magnitude is pinned.
+function clampThrowingStarSpeed() {
+    if (!physics.ready || !physics.dynamicBodies?.length || !physics.Jolt) return;
+    for (const prop of physics.dynamicBodies) {
+        if (!prop?.userData?.isThrowingStar) continue;
+        // Spin the shuriken blades regardless of the speed-clamp branches.
+        const blades = prop.userData.starBlades;
+        if (blades) blades.rotation.z -= 0.9;
+        const body = getActorBody(prop);
+        if (!body) continue;
+        const target = prop.userData.starSpeed || 0;
+        if (target <= 0) continue;
+        const v = copyJoltVector(tempVectorB, physics.bodyInterface.GetLinearVelocity(body.GetID()));
+        const speed = v.length();
+        if (speed < 1e-3 || Math.abs(speed - target) < 0.5) continue;
+        v.multiplyScalar(target / speed);
+        const jv = new physics.Jolt.Vec3(v.x, v.y, v.z);
+        physics.bodyInterface.SetLinearVelocity(body.GetID(), jv);
+        physics.Jolt.destroy(jv);
     }
 }
 
@@ -3613,7 +3738,37 @@ function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, has
     }
 
     if (move.lengthSq() < 1e-6) return false;
-    move.normalize().multiplyScalar(SHOOTER_AI_PREFAB.strafeSpeed * delta);
+    // Per-actor speed multiplier lets wave variants move faster/slower
+    // (rusher charges in, tank lumbers) without touching the shared prefab.
+    const speedMul = Number.isFinite(shooter.speedMul) ? shooter.speedMul : 1;
+    move.normalize().multiplyScalar(SHOOTER_AI_PREFAB.strafeSpeed * speedMul * delta);
+    // Rushers bias hard toward the player instead of strafing around.
+    if (speedMul > 1.4 && !coverPoint) {
+        move.addScaledVector(toPlayer, SHOOTER_AI_PREFAB.strafeSpeed * speedMul * delta * 0.9);
+    }
+    // Wall block: these enemies have no physics body, so without this they
+    // walk straight through walls. Cast from mid-body along the intended
+    // move; if world geometry is within (step + bodyRadius), clamp the move
+    // to stop a bodyRadius short of the surface.
+    {
+        const bodyRadius = 0.85; // generous so they keep clear of walls
+        const stepLen = move.length();
+        if (stepLen > 1e-5) {
+            tempVectorD.copy(move).multiplyScalar(1 / stepLen); // move dir
+            tempVectorB.copy(mesh.position); tempVectorB.y += 1.0; // mid-body
+            const probe = stepLen + bodyRadius;
+            const wallHit = raycastWorld(tempVectorB, tempVectorD, probe);
+            // Block on world geometry; ignore other enemies + thrown spheres
+            // (horizontal probe at mid-body height rarely hits roofs).
+            const blocked = wallHit?.hit
+                && !wallHit.actor?.userData?.shooterAi
+                && wallHit.actor?.kind !== 'sphere';
+            if (blocked) {
+                const allowed = Math.max(0, (Number(wallHit.distance) || 0) - bodyRadius);
+                if (allowed < stepLen) move.multiplyScalar(allowed / stepLen);
+            }
+        }
+    }
     mesh.position.add(move);
     const groundOptions = {
         ignoreActors: getShooterGroundIgnoreActors(actor, shooter),
@@ -3700,6 +3855,7 @@ function updateShooterAiActor(actor, delta = 0) {
 function updateShooterAis(delta = 0) {
     updateShooterProjectiles(delta);
     updateShooterAiPhysicsHits();
+    clampThrowingStarSpeed();
     if (!gameplay.active) return;
 
     const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab1);
@@ -3732,14 +3888,16 @@ function spawnShooterAiAt(position, options = {}) {
         userData: {
             label: options.label || 'Shooter AI',
             shooterAi: {
-                range: SHOOTER_AI_PREFAB.range,
-                cooldownMs: SHOOTER_AI_PREFAB.cooldownMs,
+                range: Number.isFinite(options.range) ? options.range : SHOOTER_AI_PREFAB.range,
+                cooldownMs: Number.isFinite(options.cooldownMs) ? options.cooldownMs : SHOOTER_AI_PREFAB.cooldownMs,
+                speedMul: Number.isFinite(options.speedMul) ? options.speedMul : 1,
                 nextShotAt: 0,
                 health,
                 maxHealth,
                 defeated: false,
                 spawnedBy: options.spawnedBy || '',
                 scoreValue: options.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue,
+                rogueVariant: options.rogueVariant || '',
             },
         },
         returnActor: true,
@@ -3768,6 +3926,11 @@ function spawnDoomEnemyAt(position, options = {}) {
     applyDoomEnemySpriteSkin(actor);
     return actor;
 }
+
+// Rogue Waves (enemy variants, XP, cards, HUD, death, game mode) was extracted
+// to src/gameplay/rogueWaves.js. createRogueWaves() is instantiated in the
+// setup block; its API is aliased to the legacy names used by call sites.
+let spawnRogueEnemy = () => null;
 
 function isDoomRoofSurfaceHit(hit) {
     let object = hit?.object || null;
@@ -3892,68 +4055,28 @@ function updateDoomMiniLevelState(subjectPosition = null) {
     }
 }
 
-// Rogue-like arena driver: escalating waves spawned around the room ring.
-// Enemies are plain shooterAi (they already chase the player). Each wave is
-// bigger than the last; clearing the final wave reveals the exit.
-function updateDoomArenaLevelState(subjectPosition = null) {
-    const layout = currentMesh?.userData?.doomArenaLevel;
-    const state = currentMesh?.userData?.doomArenaState;
-    if (!layout || !state || !subjectPosition || state.exitUnlocked) return;
+// ===== ROGUE WAVES =====
+// Moved to src/gameplay/rogueWaves.js (createRogueWaves factory). The API is
+// instantiated in the setup block and aliased to the legacy names below so
+// existing call sites + the game-mode script keep working unchanged.
+let updateDoomArenaLevelState = () => {};
+let updateRogueGameMode = () => {};
+let updateRogueXpOrbs = () => {};
+let resetRogueState = () => {};
+let updateRogueXpBar = () => {};
+let openRogueWeaponPicker = () => {};
+let closeRogueCardPicker = () => {};
+let openRogueCardPicker = () => {};
+let openRogueDeathScreen = () => {};
+let closeRogueDeathScreen = () => {};
+let onRogueEnemyKilled = () => {};
+let ensureRogueState = () => ({});
+let spawnRogueXpOrb = () => {};
+let spawnRogueHealthOrb = () => {};
+let grantRogueXp = () => {};
+let setRogueWaveHud = () => {};
+let RogueAPI = null;
 
-    const now = performance.now?.() || Date.now();
-
-    // Start once the player steps off the central pad (radius ~3.2 from spawn).
-    if (!state.started) {
-        const dx = subjectPosition.x - 0;
-        const dz = subjectPosition.z - 4.0;
-        if (dx * dx + dz * dz > 3.2 * 3.2) {
-            state.started = true;
-            state.nextWaveAt = now; // first wave immediately
-        } else {
-            return;
-        }
-    }
-
-    if (state.waveActive) {
-        if (isDoomMiniWaveCleared(state.waveActors)) {
-            state.waveActive = false;
-            // Final wave cleared → unlock exit.
-            if (state.wave >= (layout.waveCount ?? 4)) {
-                state.exitUnlocked = true;
-                setActorWorldPositionExact(state.exitActor, layout.exitTeleporter, { visible: true });
-                return;
-            }
-            state.nextWaveAt = now + 2200; // breather between waves
-        }
-        return;
-    }
-
-    // Between waves: spawn the next one once the gate passes.
-    if (now < state.nextWaveAt) return;
-    state.wave += 1;
-    const size = (layout.baseWaveSize ?? 3) + (state.wave - 1) * (layout.wavePerStep ?? 2);
-    const radius = layout.spawnRingRadius ?? 18;
-    const y = layout.spawnY ?? 0;
-    const actors = [];
-    const jitter = Math.random() * Math.PI * 2;
-    for (let i = 0; i < size; i++) {
-        const ang = jitter + (i / size) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
-        const r = radius * (0.82 + Math.random() * 0.18);
-        const actor = spawnDoomEnemyAt(
-            new THREE.Vector3(Math.cos(ang) * r, y, Math.sin(ang) * r),
-            {
-                label: `Arena Wave ${state.wave}`,
-                groundY: y,
-                health: DOOM_ENEMY_PREFAB.health,
-                maxHealth: DOOM_ENEMY_PREFAB.health,
-                scoreValue: SHOOTER_AI_PREFAB.scoreValue + state.wave * 15,
-            },
-        );
-        if (actor) actors.push(actor);
-    }
-    state.waveActors = actors;
-    state.waveActive = true;
-}
 
 function updateShooterSpawnerActor(spawner) {
     if (!gameplay.active || !spawner) return;
@@ -4013,749 +4136,70 @@ if (typeof window !== 'undefined') {
     window.setShooterHealth = setShooterHealth;
 }
 
-function addStraightGunVisual(actor) {
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return;
-
-    const barrel = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.08, 0.11, 1.35, 18),
-        new THREE.MeshStandardMaterial({
-            color: 0x151923,
-            metalness: 0.65,
-            roughness: 0.24,
-            emissive: 0x0f172a,
-            emissiveIntensity: 0.35,
-        })
-    );
-    barrel.name = 'SMG Barrel';
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.set(0, STRAIGHT_GUN_PREFAB.barrelHeight, -0.62);
-    mesh.add(barrel);
-
-    const muzzle = new THREE.Mesh(
-        new THREE.SphereGeometry(0.14, 18, 12),
-        new THREE.MeshBasicMaterial({ color: 0xfff1a8 })
-    );
-    muzzle.name = 'SMG Muzzle Glow';
-    muzzle.position.set(0, STRAIGHT_GUN_PREFAB.barrelHeight, -1.28);
-    mesh.add(muzzle);
-    const light = new THREE.PointLight(0xffcc66, 1.1, 2.5);
-    light.position.copy(muzzle.position);
-    mesh.add(light);
-}
-
-function createHeldStraightGunMesh() {
-    const group = new THREE.Group();
-    group.name = 'Held SMG';
-    group.position.set(0.32, -0.28, -0.62);
-    group.rotation.set(-0.08, -0.16, 0.03);
-
-    const grip = new THREE.Mesh(
-        new THREE.BoxGeometry(0.16, 0.38, 0.18),
-        new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.35, roughness: 0.35 })
-    );
-    grip.name = 'Held Gun Grip';
-    grip.position.set(0, -0.12, 0.14);
-    grip.rotation.x = -0.28;
-    group.add(grip);
-
-    const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.24, 0.18, 0.46),
-        new THREE.MeshStandardMaterial({
-            color: 0x334155,
-            metalness: 0.6,
-            roughness: 0.22,
-            emissive: 0x201000,
-            emissiveIntensity: 0.4,
-        })
-    );
-    body.name = 'Held Gun Body';
-    group.add(body);
-
-    const barrel = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.045, 0.058, 0.68, 18),
-        new THREE.MeshStandardMaterial({
-            color: 0x111827,
-            metalness: 0.78,
-            roughness: 0.18,
-            emissive: 0x2b1600,
-            emissiveIntensity: 0.4,
-        })
-    );
-    barrel.name = 'Held Gun Barrel';
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.z = -0.48;
-    group.add(barrel);
-
-    const muzzle = new THREE.Mesh(
-        new THREE.SphereGeometry(0.07, 16, 10),
-        new THREE.MeshBasicMaterial({ color: 0xffd166 })
-    );
-    muzzle.name = 'Held Gun Muzzle';
-    muzzle.position.z = -0.84;
-    group.add(muzzle);
-
-    const light = new THREE.PointLight(0xffcc66, 1.0, 2.0);
-    light.position.copy(muzzle.position);
-    group.add(light);
-    return group;
-}
-
-function createHeldSniperRifleMesh() {
-    const group = new THREE.Group();
-    group.name = 'Held Bolt Action Sniper Rifle';
-    group.position.set(0.25, -0.25, -0.82);
-    group.rotation.set(-0.06, -0.12, 0.02);
-
-    const stock = new THREE.Mesh(
-        new THREE.BoxGeometry(0.18, 0.16, 0.46),
-        new THREE.MeshStandardMaterial({ color: 0x31251b, metalness: 0.15, roughness: 0.55 })
-    );
-    stock.name = 'Sniper Stock';
-    stock.position.z = 0.3;
-    group.add(stock);
-
-    const body = new THREE.Mesh(
-        new THREE.BoxGeometry(0.18, 0.16, 0.58),
-        new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.62, roughness: 0.24 })
-    );
-    body.name = 'Sniper Body';
-    body.position.z = -0.05;
-    group.add(body);
-
-    const barrel = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.035, 0.045, 1.28, 18),
-        new THREE.MeshStandardMaterial({
-            color: 0x0f172a,
-            metalness: 0.82,
-            roughness: 0.18,
-            emissive: 0x101827,
-            emissiveIntensity: 0.25,
-        })
-    );
-    barrel.name = 'Sniper Barrel';
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.z = -0.72;
-    group.add(barrel);
-
-    const scope = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.06, 0.06, 0.42, 16),
-        new THREE.MeshStandardMaterial({ color: 0x020617, metalness: 0.5, roughness: 0.28 })
-    );
-    scope.name = 'Sniper Scope';
-    scope.rotation.z = Math.PI / 2;
-    scope.position.set(0, 0.13, -0.12);
-    group.add(scope);
-
-    const muzzle = new THREE.Mesh(
-        new THREE.SphereGeometry(0.055, 16, 10),
-        new THREE.MeshBasicMaterial({ color: 0xbde7ff })
-    );
-    muzzle.name = 'Sniper Muzzle';
-    muzzle.position.z = -1.38;
-    group.add(muzzle);
-    return group;
-}
-
-function makeDoomShotgunHudTexture() {
-    const W = 160, H = 112;
-    const canvas = document.createElement('canvas');
-    canvas.width = W;
-    canvas.height = H;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, W, H);
-    ctx.imageSmoothingEnabled = false;
-
-    const rect = (x, y, w, h, color) => {
-        ctx.fillStyle = color;
-        ctx.fillRect(x, y, w, h);
-    };
-
-    const poly = (points, color) => {
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.moveTo(points[0][0], points[0][1]);
-        for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
-        ctx.closePath();
-        ctx.fill();
-    };
-
-    rect(25, 104, 110, 5, '#050505');
-
-    poly([[52, 6], [73, 6], [82, 80], [43, 80]], '#020202');
-    poly([[87, 6], [108, 6], [117, 80], [78, 80]], '#020202');
-    poly([[57, 9], [68, 9], [75, 75], [51, 75]], '#1f2322');
-    poly([[92, 9], [103, 9], [109, 75], [86, 75]], '#272a28');
-    poly([[61, 11], [66, 11], [70, 71], [58, 71]], '#565852');
-    poly([[94, 11], [100, 11], [104, 71], [92, 71]], '#60625b');
-    rect(54, 5, 20, 8, '#080808');
-    rect(86, 5, 20, 8, '#080808');
-    rect(59, 7, 10, 3, '#000000');
-    rect(91, 7, 10, 3, '#000000');
-
-    poly([[73, 15], [87, 15], [88, 79], [72, 79]], '#090909');
-    rect(76, 20, 8, 52, '#20201d');
-    rect(78, 20, 4, 48, '#52524b');
-
-    poly([[37, 66], [123, 66], [134, 101], [26, 101]], '#050505');
-    poly([[45, 69], [115, 69], [123, 89], [37, 89]], '#1b1b18');
-    poly([[51, 72], [109, 72], [114, 82], [46, 82]], '#55554e');
-    poly([[46, 83], [114, 83], [126, 101], [34, 101]], '#0d0907');
-    poly([[52, 84], [108, 84], [116, 96], [44, 96]], '#2e2118');
-    rect(56, 88, 48, 4, '#5a4030');
-    rect(62, 95, 36, 5, '#120d0a');
-
-    poly([[17, 88], [43, 79], [62, 102], [25, 110]], '#80502f');
-    poly([[143, 88], [117, 79], [98, 102], [135, 110]], '#8c5735');
-    poly([[23, 90], [42, 85], [53, 99], [30, 104]], '#c58b61');
-    poly([[137, 90], [118, 85], [107, 99], [130, 104]], '#d39666');
-    rect(54, 100, 52, 8, '#050505');
-
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.magFilter = THREE.NearestFilter;
-    tex.minFilter = THREE.NearestFilter;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.generateMipmaps = false;
-    tex.needsUpdate = true;
-    return tex;
-}
-
-function makeDoomShotgunFlashTexture() {
-    const W = 64, H = 64;
-    const canvas = document.createElement('canvas');
-    canvas.width = W;
-    canvas.height = H;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, W, H);
-    ctx.imageSmoothingEnabled = false;
-
-    const rect = (x, y, w, h, color) => {
-        ctx.fillStyle = color;
-        ctx.fillRect(x, y, w, h);
-    };
-
-    rect(28, 4, 8, 52, '#fff7b8');
-    rect(18, 12, 28, 32, '#ff2b16');
-    rect(22, 8, 20, 42, '#ff6b1a');
-    rect(27, 10, 10, 36, '#fff1a8');
-    rect(10, 24, 44, 10, '#ff1a12');
-    rect(16, 26, 32, 6, '#ffd35a');
-
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.magFilter = THREE.NearestFilter;
-    tex.minFilter = THREE.NearestFilter;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.generateMipmaps = false;
-    tex.needsUpdate = true;
-    return tex;
-}
-
-function createHeldDoomShotgunMesh() {
-    const group = new THREE.Group();
-    group.name = 'Held Doom Shotgun Sprite';
-
-    const gunTex = makeDoomShotgunHudTexture();
-    const gunMat = new THREE.MeshBasicMaterial({
-        map: gunTex,
-        transparent: true,
-        alphaTest: 0.05,
-        depthTest: false,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-    });
-    gunMat.toneMapped = false;
-    const gun = new THREE.Mesh(new THREE.PlaneGeometry(1.22, 0.86), gunMat);
-    gun.name = 'Doom Shotgun HUD';
-    gun.position.set(0, -0.52, -1.05);
-    gun.rotation.x = -0.13;
-    gun.renderOrder = 1000;
-    group.add(gun);
-
-    const flashTex = makeDoomShotgunFlashTexture();
-    const flashMat = new THREE.MeshBasicMaterial({
-        map: flashTex,
-        transparent: true,
-        alphaTest: 0.05,
-        depthTest: false,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-    });
-    flashMat.toneMapped = false;
-    const flash = new THREE.Mesh(new THREE.PlaneGeometry(0.68, 0.68), flashMat);
-    flash.name = 'Doom Shotgun Muzzle Flash';
-    flash.position.set(0, -0.08, -1.04);
-    flash.rotation.x = -0.13;
-    flash.renderOrder = 1001;
-    flash.visible = false;
-    group.add(flash);
-
-    group.userData.ownedTextures = [gunTex, flashTex];
-    group.userData.flash = flash;
-    group.userData.flashUntil = 0;
-    return group;
-}
-
-function clearHeldWeapon() {
-    const heldMesh = gameplay.weapon.mesh;
-    if (heldMesh) {
-        heldMesh.parent?.remove(heldMesh);
-        for (const tex of heldMesh.userData?.ownedTextures || []) {
-            tex?.dispose?.();
-        }
-        heldMesh.traverse?.((node) => {
-            node.geometry?.dispose?.();
-            if (Array.isArray(node.material)) {
-                node.material.forEach((material) => material?.dispose?.());
-            } else {
-                node.material?.dispose?.();
-            }
-        });
-    }
-    gameplay.weapon.type = '';
-    gameplay.weapon.mesh = null;
-    gameplay.weapon.nextShotAt = 0;
-    gameplay.weapon.sourceActorId = '';
-    gameplay.input.fire = false;
-    gameplay.input.firePressed = false;
-    gameplay.input.reloadPressed = false;
-    if (weaponHudEl) weaponHudEl.style.opacity = '0';
-}
-
-function equipStraightGun(sourceActor = null) {
-    if (gameplay.weapon.type === 'smg') return;
-    clearHeldWeapon();
-    const heldMesh = createHeldStraightGunMesh();
-    camera?.add(heldMesh);
-    gameplay.weapon.type = 'smg';
-    gameplay.weapon.mesh = heldMesh;
-    gameplay.weapon.nextShotAt = 0;
-    gameplay.weapon.sourceActorId = sourceActor?.id || '';
-}
-
-function equipSniperRifle(sourceActor = null) {
-    if (gameplay.weapon.type === 'sniperRifle') return;
-    clearHeldWeapon();
-    const heldMesh = createHeldSniperRifleMesh();
-    camera?.add(heldMesh);
-    gameplay.weapon.type = 'sniperRifle';
-    gameplay.weapon.mesh = heldMesh;
-    gameplay.weapon.nextShotAt = 0;
-    gameplay.weapon.sourceActorId = sourceActor?.id || '';
-}
-
-function equipDoomShotgun(sourceActor = null) {
-    if (gameplay.weapon.type === 'doomShotgun') return;
-    clearHeldWeapon();
-    const heldMesh = createHeldDoomShotgunMesh();
-    camera?.add(heldMesh);
-    gameplay.weapon.type = 'doomShotgun';
-    gameplay.weapon.mesh = heldMesh;
-    gameplay.weapon.nextShotAt = 0;
-    gameplay.weapon.sourceActorId = sourceActor?.id || '';
-}
-if (typeof window !== 'undefined') {
-    window.equipDoomShotgun = equipDoomShotgun;
-}
-
-function updateDoomShotgunHud(now = performance.now?.() || Date.now()) {
-    const flash = gameplay.weapon.mesh?.userData?.flash;
-    if (flash) flash.visible = now < (gameplay.weapon.mesh.userData.flashUntil || 0);
-}
-
-// Low-level primitive: spawn ONE pellet from the camera, aimed forward with
-// an optional spread offset (in the camera's right/up plane). Every numeric
-// is overridable so the prefab user script owns ALL weapon behavior (pellet
-// count, spread pattern, burst, cooldown, damage). Engine keeps no weapon
-// logic — just camera math + projectile pooling. spreadX/spreadY are the
-// per-pellet aim offsets; pass them from whatever pattern the script wants.
-function spawnDoomPellet(opts = {}) {
-    if (!camera) return false;
-    const d = DOOM_SHOTGUN_PREFAB;
-    const spreadX = Number(opts.spreadX) || 0;
-    const spreadY = Number(opts.spreadY) || 0;
-    camera.getWorldDirection(tempVectorC).normalize();
-    tempVectorD.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
-    tempVectorE.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
-    const origin = camera.localToWorld(tempVectorA.set(0, -0.08, -0.85));
-    const velocity = tempVectorF.copy(tempVectorC)
-        .addScaledVector(tempVectorD, spreadX)
-        .addScaledVector(tempVectorE, spreadY)
-        .normalize();
-    // Snapshot before spawnShooterProjectile mutates the shared temp vectors.
-    const ox = origin.x, oy = origin.y, oz = origin.z;
-    const vx = velocity.x, vy = velocity.y, vz = velocity.z;
-    spawnShooterProjectile(origin, null, {
-        velocity,
-        name: 'Doom Shotgun Pellet',
-        poolKey: 'doomShotgunPellets',
-        maxPoolSize: opts.poolSize ?? d.bulletPoolSize,
-        radius: opts.radius ?? 0.065,
-        color: opts.color ?? 0xfff1a8,
-        speed: opts.speed ?? d.projectileSpeed,
-        life: opts.life ?? d.projectileLife,
-        damage: opts.damage ?? d.damage,
-        hitRadius: opts.hitRadius ?? d.hitRadius,
-        hitsPlayer: opts.hitsPlayer ?? false,
-        damagesShooters: opts.damagesShooters ?? true,
-        emissiveIntensity: opts.emissiveIntensity ?? 4.8,
-        light: opts.light ?? false,
-    });
-    if (opts.tracer !== false) {
-        spawnTracer(ox, oy, oz, vx, vy, vz, opts.tracerLen ?? 7, opts.color ?? 0xfff1a8);
-    }
-    return true;
-}
-// Show the held-weapon muzzle flash for `ms` from now (purely cosmetic).
-function flashDoomShotgun(ms = DOOM_SHOTGUN_PREFAB.flashMs, now = performance.now?.() || Date.now()) {
-    if (gameplay.weapon.mesh?.userData) {
-        gameplay.weapon.mesh.userData.flashUntil = now + ms;
-    }
-    updateDoomShotgunHud(now);
-}
 // Procedural shotgun blast: a short filtered noise burst + a low thump.
 // `volume` 0..1 scales loudness. Synthesized so there's no asset to ship.
-function playDoomShotgunSound(volume = 1) {
-    const context = runtimeAudio.listener?.context;
-    if (!context || context.state !== 'running') return;
-    const t = context.currentTime;
-    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
-
-    // Noise burst (the "crack").
-    const dur = 0.22;
-    const buffer = context.createBuffer(1, Math.ceil(context.sampleRate * dur), context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i++) {
-        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-    }
-    const noise = context.createBufferSource();
-    noise.buffer = buffer;
-    const noiseFilter = context.createBiquadFilter();
-    noiseFilter.type = 'lowpass';
-    noiseFilter.frequency.setValueAtTime(2600, t);
-    noiseFilter.frequency.exponentialRampToValueAtTime(420, t + dur);
-    const noiseGain = context.createGain();
-    noiseGain.gain.setValueAtTime(0.55 * vol, t);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    noise.connect(noiseFilter).connect(noiseGain).connect(context.destination);
-    noise.start(t);
-    noise.stop(t + dur);
-
-    // Low thump (the "boom" body).
-    const osc = context.createOscillator();
-    const oscGain = context.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(140, t);
-    osc.frequency.exponentialRampToValueAtTime(48, t + 0.16);
-    oscGain.gain.setValueAtTime(0.5 * vol, t);
-    oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
-    osc.connect(oscGain).connect(context.destination);
-    osc.start(t);
-    osc.stop(t + 0.19);
-}
-// Bright two-note pickup chime.
-function playDoomPickupSound(volume = 1, x, y, z) {
-    const context = runtimeAudio.listener?.context;
-    if (!context || context.state !== 'running') return;
-    const t = context.currentTime;
-    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
-    const sink = makeSpatialSink(context, x, y, z);
-    [[660, 0], [990, 0.07]].forEach(([freq, dt]) => {
-        const o = context.createOscillator();
-        const g = context.createGain();
-        o.type = 'triangle';
-        o.frequency.setValueAtTime(freq, t + dt);
-        g.gain.setValueAtTime(0.0001, t + dt);
-        g.gain.exponentialRampToValueAtTime(0.28 * vol, t + dt + 0.01);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + dt + 0.16);
-        o.connect(g).connect(sink);
-        o.start(t + dt);
-        o.stop(t + dt + 0.18);
-    });
-}
-// Enemy death: a descending sawtooth growl + a short noisy splat.
-function playEnemyDeathSound(volume = 1, x, y, z) {
-    const context = runtimeAudio.listener?.context;
-    if (!context || context.state !== 'running') return;
-    const t = context.currentTime;
-    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
-    const sink = makeSpatialSink(context, x, y, z);
-
-    // Descending growl.
-    const osc = context.createOscillator();
-    const oscGain = context.createGain();
-    osc.type = 'sawtooth';
-    osc.frequency.setValueAtTime(320, t);
-    osc.frequency.exponentialRampToValueAtTime(55, t + 0.34);
-    oscGain.gain.setValueAtTime(0.32 * vol, t);
-    oscGain.gain.exponentialRampToValueAtTime(0.001, t + 0.36);
-    osc.connect(oscGain).connect(sink);
-    osc.start(t);
-    osc.stop(t + 0.37);
-
-    // Noisy splat.
-    const dur = 0.18;
-    const buffer = context.createBuffer(1, Math.ceil(context.sampleRate * dur), context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i++) {
-        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-    }
-    const noise = context.createBufferSource();
-    noise.buffer = buffer;
-    const nf = context.createBiquadFilter();
-    nf.type = 'bandpass';
-    nf.frequency.setValueAtTime(900, t);
-    nf.frequency.exponentialRampToValueAtTime(220, t + dur);
-    const ng = context.createGain();
-    ng.gain.setValueAtTime(0.4 * vol, t);
-    ng.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    noise.connect(nf).connect(ng).connect(sink);
-    noise.start(t);
-    noise.stop(t + dur);
-}
-// Short noisy "thud/spark" — bullet hitting a wall.
-// Build a PannerNode at world (x,y,z) so the sound is spatialized relative to
-// the camera-mounted listener. Returns the panner (connected to destination),
-// or context.destination itself if no position given / panner unsupported.
-function makeSpatialSink(context, x, y, z) {
-    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-        return context.destination;
-    }
-    let panner;
-    try {
-        panner = context.createPanner();
-    } catch (e) {
-        return context.destination;
-    }
-    panner.panningModel = 'HRTF';
-    panner.distanceModel = 'inverse';
-    panner.refDistance = 4;
-    panner.maxDistance = 90;
-    panner.rolloffFactor = 1.1;
-    const tt = context.currentTime;
-    if (panner.positionX) {
-        panner.positionX.setValueAtTime(x, tt);
-        panner.positionY.setValueAtTime(y, tt);
-        panner.positionZ.setValueAtTime(z, tt);
-    } else {
-        panner.setPosition(x, y, z); // legacy
-    }
-    panner.connect(context.destination);
-    return panner;
-}
-function playImpactSound(volume = 1, x, y, z) {
-    const context = runtimeAudio.listener?.context;
-    if (!context || context.state !== 'running') return;
-    const t = context.currentTime;
-    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
-    const sink = makeSpatialSink(context, x, y, z);
-
-    // Lowpassed noise body (the dull thwack), darker + slightly longer.
-    const dur = 0.16;
-    const buffer = context.createBuffer(1, Math.ceil(context.sampleRate * dur), context.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-    const noise = context.createBufferSource();
-    noise.buffer = buffer;
-    const f = context.createBiquadFilter();
-    f.type = 'lowpass';
-    f.frequency.setValueAtTime(900, t);
-    f.frequency.exponentialRampToValueAtTime(220, t + dur);
-    const g = context.createGain();
-    g.gain.setValueAtTime(0.32 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    noise.connect(f).connect(g).connect(sink);
-    noise.start(t);
-    noise.stop(t + dur);
-
-    // Low sine thump for weight.
-    const osc = context.createOscillator();
-    const og = context.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(120, t);
-    osc.frequency.exponentialRampToValueAtTime(45, t + 0.12);
-    og.gain.setValueAtTime(0.34 * vol, t);
-    og.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
-    osc.connect(og).connect(sink);
-    osc.start(t);
-    osc.stop(t + 0.15);
-}
-// Short grunt — enemy took non-fatal damage.
-function playEnemyHurtSound(volume = 1, x, y, z) {
-    const context = runtimeAudio.listener?.context;
-    if (!context || context.state !== 'running') return;
-    const t = context.currentTime;
-    const vol = Math.max(0, Math.min(1, Number(volume) || 0));
-    const sink = makeSpatialSink(context, x, y, z);
-    const o = context.createOscillator();
-    const g = context.createGain();
-    o.type = 'square';
-    o.frequency.setValueAtTime(420, t);
-    o.frequency.exponentialRampToValueAtTime(190, t + 0.11);
-    g.gain.setValueAtTime(0.16 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-    o.connect(g).connect(sink);
-    o.start(t);
-    o.stop(t + 0.13);
-}
-// Small spark/puff burst at a world point (reuses the effect particle system).
-function spawnImpactBurst(x, y, z, opts = {}) {
-    if (!scene) return;
-    const color = opts.color ?? 0xffd27a;
-    const count = opts.count ?? 7;
-    const spread = opts.spread ?? 2.6;
-    const particles = [];
-    for (let i = 0; i < count; i++) {
-        const p = new THREE.Mesh(
-            new THREE.SphereGeometry(0.035, 6, 5),
-            new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 })
-        );
-        p.position.set(x, y, z);
-        scene.add(p);
-        particles.push({
-            mesh: p,
-            velocity: new THREE.Vector3(
-                (Math.random() - 0.5) * spread,
-                Math.random() * spread * 0.6,
-                (Math.random() - 0.5) * spread
-            ),
-        });
-    }
-    gameplayPrefabState.effects.push({ type: 'impact', particles, ttl: 0.35, maxTtl: 0.35 });
-}
-// Bright stretched streak from (ox,oy,oz) along unit dir (dx,dy,dz). Static,
-// fades fast — reads as a bullet tracer without tracking the pooled bullet.
-function spawnTracer(ox, oy, oz, dx, dy, dz, len = 6, color = 0xfff1a8) {
-    if (!scene) return;
-    const dir = tempVectorD.set(dx, dy, dz);
-    if (dir.lengthSq() < 1e-6) return;
-    dir.normalize();
-    const length = Math.max(0.5, Number(len) || 6);
-    // Thin box, length along local +Z, then orient +Z to dir.
-    const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(0.03, 0.03, length),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85 })
-    );
-    mesh.material.toneMapped = false;
-    // Center the streak so its tail is at the origin, head `length` ahead.
-    mesh.position.set(ox + dir.x * length * 0.5, oy + dir.y * length * 0.5, oz + dir.z * length * 0.5);
-    mesh.quaternion.setFromUnitVectors(tempVectorE.set(0, 0, 1), dir);
-    scene.add(mesh);
-    gameplayPrefabState.effects.push({
-        type: 'tracer',
-        staticFx: true,
-        particles: [{ mesh, baseOpacity: 0.85, velocity: new THREE.Vector3() }],
-        ttl: 0.085,
-        maxTtl: 0.085,
-    });
-}
-// A flat scorch quad laid on a surface at (x,y,z), facing normal (nx,ny,nz).
-// Lingers, then fades. Stays put (staticFx).
-function spawnImpactDecal(x, y, z, nx = 0, ny = 1, nz = 0, opts = {}) {
-    if (!scene) return;
-    const n = tempVectorD.set(nx, ny, nz);
-    if (n.lengthSq() < 1e-6) n.set(0, 1, 0);
-    n.normalize();
-    const size = opts.size ?? 0.32;
-    const mesh = new THREE.Mesh(
-        new THREE.CircleGeometry(size, 12),
-        new THREE.MeshBasicMaterial({
-            color: opts.color ?? 0x1a1206,
-            transparent: true,
-            opacity: 0.7,
-            depthWrite: false,
-            polygonOffset: true,
-            polygonOffsetFactor: -1,
-        })
-    );
-    mesh.quaternion.setFromUnitVectors(tempVectorE.set(0, 0, 1), n);
-    // Nudge off the surface so it doesn't z-fight.
-    mesh.position.set(x + n.x * 0.012, y + n.y * 0.012, z + n.z * 0.012);
-    scene.add(mesh);
-    gameplayPrefabState.effects.push({
-        type: 'decal',
-        staticFx: true,
-        particles: [{ mesh, baseOpacity: 0.7, velocity: new THREE.Vector3() }],
-        ttl: opts.ttl ?? 3.0,
-        maxTtl: opts.ttl ?? 3.0,
-    });
-}
+const combatFx = createCombatFx({
+    runtimeAudio,
+    getScene: () => scene,
+    getCamera: () => camera,
+    gameplayPrefabState,
+    getActorRenderObject: (actor) => getActorRenderObject(actor),
+    tmp: { a: tempVectorA, c: tempVectorC, d: tempVectorD, e: tempVectorE },
+});
+const makeSpatialSink = combatFx.makeSpatialSink;
+const playDoomShotgunSound = combatFx.playDoomShotgunSound;
+const playDoomPickupSound = combatFx.playDoomPickupSound;
+const playEnemyDeathSound = combatFx.playEnemyDeathSound;
+const playImpactSound = combatFx.playImpactSound;
+const playEnemyHurtSound = combatFx.playEnemyHurtSound;
+const spawnImpactBurst = combatFx.spawnImpactBurst;
+const spawnTracer = combatFx.spawnTracer;
+const spawnImpactDecal = combatFx.spawnImpactDecal;
+const spawnMuzzleSmoke = combatFx.spawnMuzzleSmoke;
+const flashActorHit = combatFx.flashActorHit;
 if (typeof window !== 'undefined') {
-    window.spawnTracer = spawnTracer;
-    window.spawnImpactDecal = spawnImpactDecal;
-}
-// Muzzle smoke puff + a tumbling ejected shell, at the held weapon's muzzle
-// (derived from the camera so it tracks aim). Cosmetic.
-function spawnMuzzleSmoke() {
-    if (!scene || !camera) return;
-    const muzzle = camera.localToWorld(tempVectorA.set(0.05, -0.05, -1.0)).clone();
-    const right = tempVectorD.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
-    const fwd = tempVectorC.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
-    const particles = [];
-
-    // Smoke: a few soft grey puffs drifting forward + up.
-    for (let i = 0; i < 5; i++) {
-        const p = new THREE.Mesh(
-            new THREE.SphereGeometry(0.05 + Math.random() * 0.04, 6, 5),
-            new THREE.MeshBasicMaterial({ color: 0x9a9a9a, transparent: true, opacity: 0.55 })
-        );
-        p.position.copy(muzzle);
-        scene.add(p);
-        particles.push({
-            mesh: p,
-            velocity: fwd.clone().multiplyScalar(1.6 + Math.random())
-                .add(new THREE.Vector3(0, 0.7 + Math.random() * 0.5, 0))
-                .addScaledVector(right, (Math.random() - 0.5) * 0.6),
-        });
-    }
-    // Shell: one brassy box flicked to the right.
-    const shell = new THREE.Mesh(
-        new THREE.BoxGeometry(0.05, 0.05, 0.11),
-        new THREE.MeshBasicMaterial({ color: 0xd9a441 })
-    );
-    shell.position.copy(muzzle).addScaledVector(right, 0.1);
-    scene.add(shell);
-    particles.push({
-        mesh: shell,
-        velocity: right.clone().multiplyScalar(2.4 + Math.random())
-            .add(new THREE.Vector3(0, 1.2, 0)),
-    });
-
-    gameplayPrefabState.effects.push({ type: 'muzzle', particles, ttl: 0.5, maxTtl: 0.5 });
-}
-if (typeof window !== 'undefined') {
-    window.spawnMuzzleSmoke = spawnMuzzleSmoke;
-}
-// Brief emissive flash on an actor's mesh (non-fatal hit feedback).
-function flashActorHit(actor, color = 0xffffff) {
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return;
-    mesh.traverse?.((node) => {
-        const mats = node?.material ? (Array.isArray(node.material) ? node.material : [node.material]) : [];
-        mats.forEach((mat) => {
-            if (!mat?.emissive) return;
-            if (mat.userData._hitFlashRestore == null) {
-                mat.userData._hitFlashRestore = {
-                    e: mat.emissive.getHex(),
-                    i: mat.emissiveIntensity ?? 1,
-                };
-            }
-            mat.emissive.set(color);
-            mat.emissiveIntensity = 1.8;
-            clearTimeout(mat.userData._hitFlashTimer);
-            mat.userData._hitFlashTimer = setTimeout(() => {
-                const r = mat.userData._hitFlashRestore;
-                if (r) { mat.emissive.setHex(r.e); mat.emissiveIntensity = r.i; }
-                mat.userData._hitFlashRestore = null;
-            }, 90);
-        });
-    });
-}
-if (typeof window !== 'undefined') {
+    window.playDoomShotgunSound = playDoomShotgunSound;
+    window.playDoomPickupSound = playDoomPickupSound;
     window.playEnemyDeathSound = playEnemyDeathSound;
     window.playImpactSound = playImpactSound;
     window.playEnemyHurtSound = playEnemyHurtSound;
     window.spawnImpactBurst = spawnImpactBurst;
+    window.spawnTracer = spawnTracer;
+    window.spawnImpactDecal = spawnImpactDecal;
+    window.spawnMuzzleSmoke = spawnMuzzleSmoke;
     window.flashActorHit = flashActorHit;
+}
+
+const heldWeapons = createHeldWeapons({
+    getCamera: () => camera,
+    gameplay,
+    getWeaponHudEl: () => weaponHudEl,
+    getActorRenderObject: (actor) => getActorRenderObject(actor),
+    spawnShooterProjectile: (origin, target, opts) => spawnShooterProjectile(origin, target, opts),
+    spawnTracer: (...args) => combatFx.spawnTracer(...args),
+    prefabs: { STRAIGHT_GUN: STRAIGHT_GUN_PREFAB, DOOM_SHOTGUN: DOOM_SHOTGUN_PREFAB },
+    tmp: { a: tempVectorA, c: tempVectorC, d: tempVectorD, e: tempVectorE, f: tempVectorF },
+});
+const addStraightGunVisual = heldWeapons.addStraightGunVisual;
+const createHeldThrowingStarMesh = heldWeapons.createHeldThrowingStarMesh;
+const createHeldStraightGunMesh = heldWeapons.createHeldStraightGunMesh;
+const createHeldSniperRifleMesh = heldWeapons.createHeldSniperRifleMesh;
+const createHeldDoomShotgunMesh = heldWeapons.createHeldDoomShotgunMesh;
+const clearHeldWeapon = heldWeapons.clearHeldWeapon;
+const equipStraightGun = heldWeapons.equipStraightGun;
+const equipSniperRifle = heldWeapons.equipSniperRifle;
+const equipDoomShotgun = heldWeapons.equipDoomShotgun;
+const equipThrowingStar = heldWeapons.equipThrowingStar;
+const updateDoomShotgunHud = heldWeapons.updateDoomShotgunHud;
+const spawnDoomPellet = heldWeapons.spawnDoomPellet;
+const flashDoomShotgun = heldWeapons.flashDoomShotgun;
+if (typeof window !== 'undefined') {
+    window.equipDoomShotgun = equipDoomShotgun;
+    window.equipThrowingStar = equipThrowingStar;
+    window.equipStraightGun = equipStraightGun;
+    window.equipSniperRifle = equipSniperRifle;
+    window.spawnDoomPellet = spawnDoomPellet;
+    window.flashDoomShotgun = flashDoomShotgun;
 }
 // Bottom-right weapon HUD (ammo / reload text). One reused DOM element.
 let weaponHudEl = null;
@@ -4830,8 +4274,6 @@ if (typeof window !== 'undefined') {
     window.showDamageIndicator = showDamageIndicator;
 }
 if (typeof window !== 'undefined') {
-    window.spawnDoomPellet = spawnDoomPellet;
-    window.flashDoomShotgun = flashDoomShotgun;
     window.playDoomShotgunSound = playDoomShotgunSound;
     window.playDoomPickupSound = playDoomPickupSound;
     // Defaults the script can read instead of hardcoding numbers.
@@ -4876,6 +4318,92 @@ function updateStraightGuns() {
         return;
     }
 
+    const b = window.rogueBuffs || {};
+
+    if (gameplay.weapon.type === 'throwingStar') {
+        // Held blade always spins; throw on hold/press, cooldown-gated.
+        const spinner = gameplay.weapon.mesh?.userData?.spinner;
+        if (spinner) spinner.rotation.z -= 0.45;
+        if (!gameplay.input.fire && !gameplay.input.firePressed) return;
+        if ((gameplay.weapon.nextShotAt || 0) > now) {
+            if (!gameplay.input.fire) gameplay.input.firePressed = false;
+            return;
+        }
+        const s = THROWING_STAR_PREFAB;
+        // Real physics body: spawn a small bouncy sphere at the muzzle and
+        // launch it flat along the look direction. Jolt handles the wall
+        // ricochets (high restitution). updateShooterAiPhysicsHits already
+        // damages enemies hit by fast non-prefab dynamic props.
+        camera.getWorldDirection(tempVectorC).normalize();
+        const origin = camera.localToWorld(tempVectorA.set(0.16, -0.16, -0.7));
+        const dx = tempVectorC.x, dy = tempVectorC.y, dz = tempVectorC.z;
+        const star = spawnDynamicPrimitive('sphere', origin.clone(), 0.16, {
+            local: false,
+            skipImpulse: true,
+            restitution: 1.0,    // perfectly elastic — bounce never decays
+            friction: 0.0,
+            linearDamping: 0.0,  // no speed bleed between bounces
+            angularDamping: 0.0,
+            // Continuous collision (swept) so the fast sphere can't tunnel
+            // through walls or enemies at speed — tests collision every step.
+            motionQuality: physics.Jolt.EMotionQuality_LinearCast,
+            returnActor: true,
+            userData: { label: 'Throwing Star', isThrowingStar: true, starSpeed: s.projectileSpeed },
+        });
+        const body = star ? getActorBody(star) : null;
+        if (body && physics.Jolt) {
+            const speed = s.projectileSpeed;
+            const vel = new physics.Jolt.Vec3(dx * speed, dy * speed, dz * speed);
+            physics.bodyInterface.SetLinearVelocity(body.GetID(), vel);
+            physics.Jolt.destroy(vel);
+            // Zero gravity so it keeps a flat path and the bounce energy
+            // never resets/decays — ricochets at full speed until it dies.
+            try { physics.bodyInterface.SetGravityFactor?.(body.GetID(), 0.0); } catch (e) {}
+            // Swap the plain sphere look for a spinning 4-point shuriken:
+            // make the collision sphere invisible and hang a blade group off
+            // it. clampThrowingStarSpeed() spins this group every frame.
+            const mr = getActorRenderObject(star);
+            if (mr) {
+                if (mr.material) {
+                    mr.material.transparent = true;
+                    mr.material.opacity = 0;
+                    mr.material.depthWrite = false;
+                }
+                const blades = new THREE.Group();
+                blades.name = 'Throwing Star Blades';
+                const bmat = new THREE.MeshStandardMaterial({
+                    color: 0xcfe8ff, metalness: 0.85, roughness: 0.2,
+                    emissive: 0x2bd4ff, emissiveIntensity: 2.0,
+                });
+                // Geometry is in the sphere's LOCAL space (mesh is scaled to
+                // the 0.16 radius), so local 3 ≈ 0.5m blade across in world.
+                for (let i = 0; i < 2; i++) {
+                    const blade = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.18, 0.7), bmat);
+                    blade.rotation.y = i * Math.PI / 2;
+                    blades.add(blade);
+                }
+                const hub = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.5, 0.5, 0.28, 12),
+                    new THREE.MeshStandardMaterial({ color: 0x7fd0ff, metalness: 0.7, roughness: 0.3 }),
+                );
+                hub.rotation.x = Math.PI / 2;
+                blades.add(hub);
+                mr.add(blades);
+                star.userData.starBlades = blades;
+            }
+            // Auto-despawn so spheres don't pile up. "Ricochet+" cards
+            // (b.pellets) extend how long the star stays alive bouncing.
+            const lifeS = s.projectileLife + (b.pellets || 0) * 0.5;
+            setTimeout(() => { try { destroyDynamicPhysicsProp(star); } catch (e) {} },
+                Math.round(lifeS * 1000));
+        }
+        playDoomShotgunSound?.(0.35);
+        applyCameraRecoil?.(0.02, (Math.random() - 0.5) * 0.01);
+        gameplay.weapon.nextShotAt = now + s.cooldownMs / (b.fireRate || 1);
+        gameplay.input.firePressed = false;
+        return;
+    }
+
     const isSniper = gameplay.weapon.type === 'sniperRifle';
     if (isSniper) {
         if (!gameplay.input.firePressed) return;
@@ -4901,14 +4429,14 @@ function updateStraightGuns() {
         color: isSniper ? 0xbde7ff : 0xffd166,
         speed: config.projectileSpeed,
         life: config.projectileLife,
-        damage: config.damage,
+        damage: config.damage * (isSniper ? 1 : (b.damage || 1)),
         hitRadius: config.hitRadius,
         hitsPlayer: false,
         damagesShooters: true,
         emissiveIntensity: isSniper ? 5.5 : 4.2,
         light: false,
     });
-    gameplay.weapon.nextShotAt = now + config.cooldownMs;
+    gameplay.weapon.nextShotAt = now + config.cooldownMs / (isSniper ? 1 : (b.fireRate || 1));
     if (!isSniper) gameplay.input.firePressed = false;
 }
 
@@ -5187,6 +4715,20 @@ function spawnGameplayPrefab(type) {
         }
         const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 9);
         actor = spawnShooterAiAt(spawnPosition);
+    } else if (type === 'rogueGameMode') {
+        // Invisible logic actor that carries the level-blueprint / game-mode
+        // script. No collision, no physics, hidden mesh — pure script host.
+        actor = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, -50, 0), 0.2, {
+            local: false,
+            includeCollisionBody: false,
+            includeScripts: false,
+            userData: { label: 'Rogue Game Mode' },
+            returnActor: true,
+        });
+        const mesh = getActorRenderObject(actor);
+        if (mesh) mesh.visible = false;
+        tagGameplayPrefabActor(actor, type, { triggerRadius: 0, groundOffset: 0 });
+        attachDefaultPrefabScript(actor, ROGUE_GAMEMODE_SCRIPT);
     }
 
     if (actor) {
@@ -5458,22 +5000,26 @@ function resetDoomArenaLevelState() {
         }
     }
 
-    if (!gunActor && Array.isArray(layout.shotgunPickup)) {
-        gunActor = spawnGameplayPrefab('doomShotgunSprite');
-        if (gunActor) {
-            gunActor.userData.collected = false;
-            setActorWorldPositionExact(gunActor, layout.shotgunPickup, { visible: true });
-        }
+    // Rogue Waves: weapon comes from the start-of-run card, not a world
+    // pickup — don't re-spawn the shotgun sprite on reset.
+
+    resetRogueState();
+    clearHeldWeapon();
+
+    // Rebuild the game-mode actor so its script state (phase/wave) restarts
+    // cleanly via a fresh BeginPlay.
+    for (const actor of getGameplayPrefabActors('rogueGameMode')) {
+        destroyDynamicPhysicsProp(actor);
+        sceneSystem?.removeActor?.(actor);
     }
+    const gm = spawnGameplayPrefab('rogueGameMode');
+    if (gm) gm.userData.label = 'Rogue Game Mode';
+    currentMesh.userData.rogueGameModeActorId = gm?.id || '';
 
     currentMesh.userData.doomArenaState = {
         exitActor,
-        waveActors: [],
-        wave: 0,
-        waveActive: false,
         started: false,
-        nextWaveAt: 0,
-        exitUnlocked: false,
+        weaponPromptShown: false,
     };
 
     syncGameplaySpawnFromPlayerSpawnActor();
@@ -10251,6 +9797,22 @@ async function init() {
     const sceneNormal = scenePass.getTextureNode('normal');
     const sceneDepth = scenePass.getTextureNode('depth');
     const bloomNode = bloom(sceneEmissive, globalPostProcessUniforms.bloomStrength, globalPostProcessUniforms.bloomRadius, globalPostProcessUniforms.bloomThreshold);
+    // BloomNode names its internal render-target textures "UnrealBloomPass.*".
+    // The WebGPU backend uses texture.name as the GPU resource label, and
+    // Dawn rejects '.' in labels → uncaught validation errors on boot that
+    // break bloom. Drop the "Unreal" prefix and the '.' so the labels are
+    // valid (e.g. "BloomPass_bright"). Done in place (can't patch node_modules).
+    {
+        const sanitize = (rt) => {
+            const tex = rt?.texture;
+            if (tex?.name) {
+                tex.name = tex.name.replace(/^Unreal/, '').replace(/\./g, '_');
+            }
+        };
+        sanitize(bloomNode?._renderTargetBright);
+        (bloomNode?._renderTargetsHorizontal || []).forEach(sanitize);
+        (bloomNode?._renderTargetsVertical || []).forEach(sanitize);
+    }
     const ssgiNode = ssgi(sceneColor, sceneDepth, sceneNormal, camera);
     ssgiNode.useTemporalFiltering = false;
     const ssgiOutput = ssgiNode.getTextureNode();
@@ -10486,7 +10048,7 @@ async function init() {
     setupGameplayEvents();
     setupTerrainPanel();
     if (!currentMesh) {
-        loadSample();
+        loadSample('doomArena');
     }
     updateGameplayUI();
     try {
@@ -10500,8 +10062,10 @@ async function init() {
         const delta = Math.min(frameTimer.getDelta(), 0.05);
 
         const updateStart = performance.now();
-        if (gameplay.active) {
+        if (gameplay.active && !gameplay.roguePaused) {
             updateGameplay(delta);
+        } else if (gameplay.roguePaused) {
+            // Card picker open: hold the sim frozen, keep rendering the frame.
         } else {
             silenceVehicleEngineAudio();
             updateEngineAudioDebugOverlay('idle', null, null);
@@ -10612,1924 +10176,13 @@ async function init() {
     });
 }
 
-function makeSampleLevelPart(name, shape, material, position, rotation = [0, 0, 0], { castShadow = true, receiveShadow = true, skipPhysicsCollision = false } = {}) {
-    const kind = shape?.kind;
-    const mesh = kind ? buildPrimitiveActorMesh(kind) : null;
-    if (!mesh) return null;
-
-    const defaultMaterial = mesh.material;
-    if (Array.isArray(defaultMaterial)) {
-        defaultMaterial.forEach((entry) => entry?.dispose?.());
-    } else {
-        defaultMaterial?.dispose?.();
-    }
-
-    mesh.material = material;
-    mesh.name = name;
-    mesh.position.fromArray(position);
-    mesh.rotation.set(...rotation);
-    if (Array.isArray(shape?.scale) && shape.scale.length === 3) {
-        mesh.scale.fromArray(shape.scale);
-    }
-    mesh.userData.hasMaterialOverrides = true;
-    mesh.userData.skipPhysicsCollision = !!skipPhysicsCollision;
-    mesh.castShadow = castShadow;
-    mesh.receiveShadow = receiveShadow;
-
-    return createDynamicPropActor({
-        body: null,
-        mesh,
-        kind,
-        userData: {
-            label: name,
-            sampleLevelPart: true,
-        },
-        includeScripts: false,
-    });
-}
-
-function makeSampleLevelMeshActor(name, mesh, {
-    kind = 'imported',
-    castShadow = false,
-    receiveShadow = true,
-    skipPhysicsCollision = false,
-    userData = {},
-} = {}) {
-    if (!mesh) return null;
-
-    mesh.name = name;
-    mesh.userData = {
-        ...(mesh.userData || {}),
-        hasMaterialOverrides: true,
-        skipPhysicsCollision: !!skipPhysicsCollision,
-    };
-    mesh.castShadow = castShadow;
-    mesh.receiveShadow = receiveShadow;
-
-    return createDynamicPropActor({
-        body: null,
-        mesh,
-        kind,
-        userData: {
-            label: name,
-            sampleLevelPart: true,
-            ...userData,
-        },
-        includeScripts: false,
-    });
-}
-
-function enableStaticMeshActorCollision(actor, { friction = 0.9, restitution = 0.08 } = {}) {
-    const mesh = getActorRenderObject(actor);
-    if (!actor || !mesh) return false;
-
-    actor.userData.staticMeshActorCollision = true;
-    actor.userData.physicsFriction = friction;
-    actor.userData.physicsRestitution = restitution;
-    mesh.userData.skipPhysicsCollision = true;
-    setActorComponentFlags(actor, { collision: true, physics: false, scripts: false });
-    rebuildActorPhysics(actor);
-    return !!getActorBody(actor);
-}
-
-function createFpsStarterLevel() {
-    const MAP_SCALE = 2;
-    const scaleScalar = (value) => value * MAP_SCALE;
-    const scaleVector = (values) => values.map((value) => value * MAP_SCALE);
-    const makeBoxShape = (size) => ({
-        kind: 'cube',
-        scale: [scaleScalar(size[0]) * 0.5, scaleScalar(size[1]) * 0.5, scaleScalar(size[2]) * 0.5],
-    });
-    const makeCylinderShape = (radius, height) => ({
-        kind: 'cylinder',
-        scale: [scaleScalar(radius), scaleScalar(height) * 0.5, scaleScalar(radius)],
-    });
-
-    const root = new THREE.Group();
-    root.name = 'PolyFlow_FPS_Starter_Level';
-    root.userData.sampleType = 'fpsStarterLevel';
-    root.userData.hideTerrainPresentation = true;
-    root.userData.skipNormalization = true;
-    root.userData.sampleMapScale = MAP_SCALE;
-
-    root.userData.preferredSpawn = {
-        position: scaleVector([0.0, 0.3, 8.6]),
-        yaw: Math.PI,
-        pitch: -0.06,
-    };
-    root.userData.preferredShowcase = {
-        position: scaleVector([20.0, 13.5, 16.5]),
-        target: scaleVector([0.0, 1.7, -1.0]),
-    };
-
-    const stylePresets = {
-        light: { baseColor: '#d4cec8', roughness: 0.97, metalness: 0.02 },
-        floor: { baseColor: '#a7adb4', roughness: 0.96, metalness: 0.02 },
-        dark: { baseColor: '#5a5d61', roughness: 0.92, metalness: 0.05 },
-        blue: { baseColor: '#149cff', roughness: 0.34, metalness: 0.04 },
-    };
-
-    const createGridMaterial = ({ baseColor, roughness = 0.95, metalness = 0.02 }) => {
-        return new THREE.MeshStandardMaterial({
-            color: new THREE.Color(baseColor),
-            roughness,
-            metalness,
-        });
-    };
-
-    const createMaterial = (styleName) => {
-        const style = stylePresets[styleName] ?? stylePresets.light;
-        return createGridMaterial({
-            baseColor: style.baseColor,
-            roughness: style.roughness,
-            metalness: style.metalness,
-        });
-    };
-
-    const contactShadowMaterialCache = new Map();
-    const smoothstep = (edge0, edge1, value) => {
-        const t = THREE.MathUtils.clamp((value - edge0) / (edge1 - edge0), 0, 1);
-        return t * t * (3 - 2 * t);
-    };
-    const createDistanceFieldContactShadowMaterial = (width, depth, spread = 2.2, strength = 0.55) => {
-        const key = `${width.toFixed(2)}:${depth.toFixed(2)}:${spread.toFixed(2)}:${strength.toFixed(2)}`;
-        if (contactShadowMaterialCache.has(key)) {
-            return contactShadowMaterialCache.get(key).clone();
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = 192;
-        canvas.height = 192;
-        const ctx = canvas.getContext('2d');
-        const image = ctx.createImageData(canvas.width, canvas.height);
-        const planeWidth = width + spread * 2;
-        const planeDepth = depth + spread * 2;
-
-        for (let y = 0; y < canvas.height; y++) {
-            for (let x = 0; x < canvas.width; x++) {
-                const u = (x + 0.5) / canvas.width - 0.5;
-                const v = (y + 0.5) / canvas.height - 0.5;
-                const px = u * planeWidth;
-                const pz = v * planeDepth;
-                const dx = Math.max(Math.abs(px) - width * 0.5, 0);
-                const dz = Math.max(Math.abs(pz) - depth * 0.5, 0);
-                const dist = Math.sqrt(dx * dx + dz * dz);
-                const contact = 1 - smoothstep(0, spread, dist);
-                const insideFade = smoothstep(-0.05, 0.45, Math.max(dx, dz));
-                const alpha = Math.round(255 * strength * Math.max(contact, insideFade * contact));
-                const index = (y * canvas.width + x) * 4;
-                image.data[index] = 0;
-                image.data[index + 1] = 0;
-                image.data[index + 2] = 0;
-                image.data[index + 3] = alpha;
-            }
-        }
-        ctx.putImageData(image, 0, 0);
-
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.minFilter = THREE.LinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        const material = new THREE.MeshBasicMaterial({
-            color: 0x000000,
-            map: texture,
-            transparent: true,
-            depthTest: true,
-            depthWrite: false,
-            opacity: 1,
-            toneMapped: false,
-        });
-        material.userData = { ownedMaps: [texture] };
-        contactShadowMaterialCache.set(key, material);
-        return material.clone();
-    };
-    const addDistanceFieldContactShadow = (name, size, position, options = {}) => {
-        if (options.contactShadow === false) return null;
-        const rotation = Array.isArray(options.rotation) ? options.rotation : [0, 0, 0];
-        if (Math.abs(rotation[0] || 0) > 1e-4 || Math.abs(rotation[2] || 0) > 1e-4) return null;
-        if ((position[1] - size[1] * 0.5) > 0.25 || size[1] < 0.5) return null;
-
-        const width = scaleScalar(Math.max(size[0], 0.35));
-        const depth = scaleScalar(Math.max(size[2], 0.35));
-        const spread = THREE.MathUtils.clamp(Math.min(width, depth) * 0.72, 2.0, 5.5);
-        const mesh = new THREE.Mesh(
-            new THREE.PlaneGeometry(width + spread * 2, depth + spread * 2),
-            createDistanceFieldContactShadowMaterial(width, depth, spread)
-        );
-        mesh.name = `${name}_DistanceFieldContactShadow`;
-        const scaledPosition = scaleVector(position);
-        mesh.position.set(scaledPosition[0], 0.455, scaledPosition[2]);
-        mesh.rotation.set(-Math.PI / 2, 0, -(rotation[1] || 0));
-        mesh.renderOrder = 6;
-        mesh.castShadow = false;
-        mesh.receiveShadow = false;
-        mesh.userData.skipPhysicsCollision = true;
-        markDDGISkipCapture(mesh);
-        root.add(mesh);
-        return mesh;
-    };
-
-    const createBoxNode = (name, size, position, styleName = 'light', options = {}) => {
-        return makeSampleLevelPart(name, makeBoxShape(size), createMaterial(styleName), scaleVector(position), options.rotation || [0, 0, 0], options);
-    };
-
-    const createCylinderNode = (name, radius, height, position, styleName = 'light', options = {}) => {
-        return makeSampleLevelPart(name, makeCylinderShape(radius, height), createMaterial(styleName), scaleVector(position), options.rotation || [0, 0, 0], options);
-    };
-
-    const addNode = (actor) => {
-        const mesh = getActorRenderObject(actor);
-        if (mesh) {
-            root.add(mesh);
-        }
-        return actor;
-    };
-
-    const addBox = (name, size, position, styleName = 'light', options = {}) => {
-        const actor = addNode(createBoxNode(name, size, position, styleName, options));
-        addDistanceFieldContactShadow(name, size, position, options);
-        return actor;
-    };
-    const addCylinder = (name, radius, height, position, styleName = 'light', options = {}) => addNode(createCylinderNode(name, radius, height, position, styleName, options));
-    const addCollisionPlane = (name, size, position) => {
-        const mesh = new THREE.Mesh(
-            new THREE.PlaneGeometry(scaleScalar(size[0]), scaleScalar(size[1])),
-            new THREE.MeshBasicMaterial({ visible: false })
-        );
-        mesh.name = name;
-        mesh.position.fromArray(scaleVector(position));
-        mesh.rotation.x = -Math.PI / 2;
-        mesh.visible = false;
-        mesh.userData.collisionOnly = true;
-        root.add(mesh);
-        return mesh;
-    };
-
-    addBox('Graybox_Floor', [36, 0.2, 22], [0, 0.1, 0], 'floor', { skipPhysicsCollision: true, contactShadow: false });
-    addCollisionPlane('Graybox_Floor_Collision', [36, 22], [0, 0.21, 0]);
-    addBox('Graybox_LeftWall', [0.45, 5.4, 22], [-17.78, 2.7, 0], 'dark');
-    addBox('Graybox_RightWall', [0.45, 5.4, 22], [17.78, 2.7, 0], 'dark');
-    addBox('Graybox_BackWall', [36, 5.4, 0.45], [0, 2.7, -10.78], 'light');
-    addBox('Graybox_FrontWall', [36, 5.4, 0.45], [0, 2.7, 10.78], 'light');
-    addBox('Graybox_BackRightPanel', [10.5, 5.2, 0.18], [11.6, 2.6, -10.56], 'dark', { castShadow: false });
-    addBox('Graybox_RightRearPanel', [0.18, 5.2, 8.4], [17.62, 2.6, -6.35], 'dark', { castShadow: false });
-
-    addBox('Graybox_LeftBlock', [5.8, 2.6, 4.4], [-8.6, 1.3, -0.9], 'light');
-    addBox('Graybox_LeftRamp', [4.2, 0.34, 6.0], [-12.4, 1.06, -2.7], 'dark', { rotation: [0.28, 0, 0] });
-    addBox('Graybox_CenterBackBar', [11.0, 2.7, 2.2], [2.0, 1.35, -2.8], 'dark');
-    addBox('Graybox_CenterFrontBar', [2.05, 2.25, 7.2], [2.0, 1.125, 3.0], 'dark');
-    addBox('Graybox_RightFrontBar', [10.0, 2.5, 2.35], [10.6, 1.25, 4.2], 'dark');
-    addCylinder('Graybox_RightCylinder', 1.8, 2.2, [9.4, 1.1, -2.7], 'light');
-    addBox('Graybox_RightRearShelf', [6.6, 0.8, 2.2], [10.9, 0.4, -6.1], 'dark');
-
-    return root;
-}
-
-const SOCCER_FIELD_LEVEL_SCALE = 3;
-
-function createSoccerTargetFieldScene({
-    name = 'PolyFlow_Soccer_Target_Field',
-    hideTerrainPresentation = true,
-} = {}) {
-    const S = SOCCER_FIELD_LEVEL_SCALE;
-    const FIELD_WIDTH = 18 * S;
-    const FIELD_LENGTH = 28 * S;
-    const GOAL_Z = FIELD_LENGTH * 0.5 - 0.45 * S;
-    const LINE_Y = 0.145 * S;
-
-    const root = new THREE.Group();
-    root.name = name;
-    root.userData.sampleType = 'soccerTargetField';
-    root.userData.hideTerrainPresentation = hideTerrainPresentation;
-    root.userData.skipNormalization = true;
-    root.userData.preferredSpawn = {
-        position: [0, 0.24 * S, FIELD_LENGTH * 0.34],
-        yaw: Math.PI,
-        pitch: -0.08,
-    };
-    root.userData.preferredShowcase = {
-        position: [12.5 * S, 9.2 * S, 19.5 * S],
-        target: [0, 0.45 * S, 0],
-    };
-    root.userData.soccerGoalTargets = [
-        { position: [-2.2 * S, 1.35 * S, -GOAL_Z], rotationY: Math.PI, label: 'North Goal Target L', scale: S },
-        { position: [2.2 * S, 1.35 * S, -GOAL_Z], rotationY: Math.PI, label: 'North Goal Target R', scale: S },
-        { position: [-2.2 * S, 1.35 * S, GOAL_Z], rotationY: 0, label: 'South Goal Target L', scale: S },
-        { position: [2.2 * S, 1.35 * S, GOAL_Z], rotationY: 0, label: 'South Goal Target R', scale: S },
-    ];
-    root.userData.soccerGoalies = [
-        {
-            position: [0, 0.78 * S, -GOAL_Z + 0.9 * S],
-            size: [1.7 * S, 1.35 * S, 0.24 * S],
-            axis: [1, 0, 0],
-            amplitude: 1.65 * S,
-            speed: 1.7,
-            phase: 0,
-            label: 'North Goalie Wall',
-        },
-        {
-            position: [0, 0.78 * S, GOAL_Z - 0.9 * S],
-            size: [1.7 * S, 1.35 * S, 0.24 * S],
-            axis: [1, 0, 0],
-            amplitude: 1.65 * S,
-            speed: 1.7,
-            phase: Math.PI,
-            label: 'South Goalie Wall',
-        },
-    ];
-    root.userData.soccerPlayerSpawns = [
-        { playerIndex: 1, position: [0, 0.85, FIELD_LENGTH * 0.34], label: 'Player 1 Spawn', color: '#22c55e' },
-        { playerIndex: 2, position: [0, 0.85, -FIELD_LENGTH * 0.34], label: 'Player 2 Spawn', color: '#38bdf8' },
-    ];
-
-    const materials = {
-        turf: new THREE.MeshStandardMaterial({ color: 0x2f7d32, roughness: 0.86, metalness: 0.02 }),
-        turfStripe: new THREE.MeshStandardMaterial({ color: 0x3f9a42, roughness: 0.88, metalness: 0.02 }),
-        line: new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.62, metalness: 0.0 }),
-        goalFrame: new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.54, metalness: 0.04 }),
-        net: new THREE.MeshStandardMaterial({
-            color: 0xdbeafe,
-            roughness: 0.6,
-            metalness: 0,
-            transparent: true,
-            opacity: 0.24,
-            side: THREE.DoubleSide,
-        }),
-    };
-
-    const addBox = (name, size, position, material, options = {}) => {
-        const actor = makeSampleLevelPart(
-            name,
-            { kind: 'cube', scale: [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5] },
-            material,
-            position,
-            options.rotation || [0, 0, 0],
-            options
-        );
-        const mesh = getActorRenderObject(actor);
-        if (mesh) root.add(mesh);
-        return mesh;
-    };
-
-    addBox('Soccer_Field_Surface', [FIELD_WIDTH, 0.12 * S, FIELD_LENGTH], [0, 0.06 * S, 0], materials.turf, {
-        contactShadow: false,
-        receiveShadow: true,
-    });
-
-    for (let index = -3; index <= 3; index += 1) {
-        addBox(
-            `Soccer_Turf_Stripe_${index + 4}`,
-            [FIELD_WIDTH - 0.18 * S, 0.012 * S, FIELD_LENGTH / 7 - 0.08 * S],
-            [0, 0.132 * S, index * FIELD_LENGTH / 7],
-            index % 2 === 0 ? materials.turfStripe : materials.turf,
-            { skipPhysicsCollision: true, castShadow: false, receiveShadow: false }
-        );
-    }
-
-    const addLine = (name, size, position) => addBox(name, size, position, materials.line, {
-        skipPhysicsCollision: true,
-        castShadow: false,
-        receiveShadow: false,
-    });
-
-    addLine('Soccer_Line_LeftTouch', [0.08 * S, 0.026 * S, FIELD_LENGTH], [-FIELD_WIDTH * 0.5, LINE_Y, 0]);
-    addLine('Soccer_Line_RightTouch', [0.08 * S, 0.026 * S, FIELD_LENGTH], [FIELD_WIDTH * 0.5, LINE_Y, 0]);
-    addLine('Soccer_Line_NorthGoal', [FIELD_WIDTH, 0.026 * S, 0.08 * S], [0, LINE_Y, -FIELD_LENGTH * 0.5]);
-    addLine('Soccer_Line_SouthGoal', [FIELD_WIDTH, 0.026 * S, 0.08 * S], [0, LINE_Y, FIELD_LENGTH * 0.5]);
-    addLine('Soccer_Line_Midfield', [FIELD_WIDTH, 0.026 * S, 0.07 * S], [0, LINE_Y, 0]);
-    addLine('Soccer_Box_North_Back', [6.7 * S, 0.026 * S, 0.07 * S], [0, LINE_Y, -FIELD_LENGTH * 0.5 + 3.9 * S]);
-    addLine('Soccer_Box_North_Left', [0.07 * S, 0.026 * S, 3.9 * S], [-3.35 * S, LINE_Y, -FIELD_LENGTH * 0.5 + 1.95 * S]);
-    addLine('Soccer_Box_North_Right', [0.07 * S, 0.026 * S, 3.9 * S], [3.35 * S, LINE_Y, -FIELD_LENGTH * 0.5 + 1.95 * S]);
-    addLine('Soccer_Box_South_Back', [6.7 * S, 0.026 * S, 0.07 * S], [0, LINE_Y, FIELD_LENGTH * 0.5 - 3.9 * S]);
-    addLine('Soccer_Box_South_Left', [0.07 * S, 0.026 * S, 3.9 * S], [-3.35 * S, LINE_Y, FIELD_LENGTH * 0.5 - 1.95 * S]);
-    addLine('Soccer_Box_South_Right', [0.07 * S, 0.026 * S, 3.9 * S], [3.35 * S, LINE_Y, FIELD_LENGTH * 0.5 - 1.95 * S]);
-
-    const centerCircle = new THREE.Mesh(
-        new THREE.TorusGeometry(2.25 * S, 0.035 * S, 8, 96),
-        materials.line.clone()
-    );
-    centerCircle.name = 'Soccer_Line_CenterCircle';
-    centerCircle.position.set(0, LINE_Y + 0.018 * S, 0);
-    centerCircle.rotation.x = Math.PI / 2;
-    centerCircle.castShadow = false;
-    centerCircle.receiveShadow = false;
-    centerCircle.userData.skipPhysicsCollision = true;
-    root.add(centerCircle);
-
-    const addGoalFrame = (prefix, z, dir) => {
-        const depth = 1.2 * S;
-        const mouthWidth = 5.6 * S;
-        const postHeight = 1.85 * S;
-        const postThickness = 0.12 * S;
-        const backZ = z + dir * depth;
-        const postY = 0.12 * S + postHeight * 0.5;
-        const topY = 0.12 * S + postHeight;
-
-        addBox(`${prefix}_LeftPost`, [postThickness, postHeight, postThickness], [-mouthWidth * 0.5, postY, z], materials.goalFrame, { skipPhysicsCollision: true });
-        addBox(`${prefix}_RightPost`, [postThickness, postHeight, postThickness], [mouthWidth * 0.5, postY, z], materials.goalFrame, { skipPhysicsCollision: true });
-        addBox(`${prefix}_Crossbar`, [mouthWidth + postThickness, postThickness, postThickness], [0, topY, z], materials.goalFrame, { skipPhysicsCollision: true });
-        addBox(`${prefix}_BackBar`, [mouthWidth + postThickness, postThickness, postThickness], [0, topY, backZ], materials.goalFrame, { skipPhysicsCollision: true });
-        addBox(`${prefix}_LeftDepth`, [postThickness, postThickness, depth], [-mouthWidth * 0.5, topY, z + dir * depth * 0.5], materials.goalFrame, { skipPhysicsCollision: true });
-        addBox(`${prefix}_RightDepth`, [postThickness, postThickness, depth], [mouthWidth * 0.5, topY, z + dir * depth * 0.5], materials.goalFrame, { skipPhysicsCollision: true });
-        addBox(`${prefix}_Net`, [mouthWidth, postHeight, 0.035], [0, postY, backZ], materials.net, {
-            skipPhysicsCollision: true,
-            castShadow: false,
-            receiveShadow: false,
-        });
-    };
-
-    addGoalFrame('Soccer_NorthGoal', -GOAL_Z, -1);
-    addGoalFrame('Soccer_SouthGoal', GOAL_Z, 1);
-
-    return root;
-}
-
-function spawnSoccerGoalTarget(spec) {
-    const targetScale = Number.isFinite(spec.scale) && spec.scale > 0 ? spec.scale : 1;
-    const actor = spawnDynamicPrimitive('cylinder', new THREE.Vector3(...spec.position), 0.6 * targetScale, {
-        local: false,
-        includeCollisionBody: true,
-        simulatePhysics: false,
-        includeScripts: false,
-        skipImpulse: true,
-        userData: { label: spec.label },
-        returnActor: true,
-    });
-    const mesh = getActorRenderObject(actor);
-    if (!actor || !mesh) return null;
-
-    mesh.position.fromArray(spec.position);
-    mesh.rotation.set(Math.PI / 2, spec.rotationY || 0, 0);
-    mesh.scale.set(0.45 * targetScale, 0.06 * targetScale, 0.45 * targetScale);
-    mesh.name = spec.label;
-    tagGameplayPrefabActor(actor, 'target', { triggerRadius: 0.62 * targetScale, groundOffset: spec.position[1], scoreValue: 25 });
-    mesh.position.fromArray(spec.position);
-    mesh.updateMatrixWorld(true);
-    actor.userData.label = spec.label;
-    tintGameplayPrefabActor(actor, '#ef4444', '#ef4444', 1.4);
-    rebuildActorPhysics(actor);
-    setActorResetTransform(actor, spec.position, mesh.quaternion);
-    return actor;
-}
-
-function spawnSoccerGoalie(spec) {
-    if (!Array.isArray(spec?.position) || spec.position.length !== 3) return null;
-
-    const size = Array.isArray(spec.size) && spec.size.length === 3
-        ? spec.size
-        : [SOCCER_FIELD_LEVEL_SCALE * 1.7, SOCCER_FIELD_LEVEL_SCALE * 1.35, SOCCER_FIELD_LEVEL_SCALE * 0.24];
-    const actor = spawnDynamicPrimitive('cube', new THREE.Vector3(...spec.position), 1, {
-        local: false,
-        includeCollisionBody: true,
-        simulatePhysics: false,
-        includeScripts: false,
-        skipImpulse: true,
-        userData: {
-            label: spec.label || 'Soccer Goalie Wall',
-            soccerGoalie: true,
-            kinematic: true,
-            friction: 0.88,
-            restitution: 0.12,
-            soccerGoalieMotion: {
-                homePosition: [...spec.position],
-                axis: Array.isArray(spec.axis) && spec.axis.length === 3 ? [...spec.axis] : [1, 0, 0],
-                amplitude: Number.isFinite(spec.amplitude) ? spec.amplitude : SOCCER_FIELD_LEVEL_SCALE * 1.65,
-                speed: Number.isFinite(spec.speed) ? spec.speed : 1.7,
-                phase: Number.isFinite(spec.phase) ? spec.phase : 0,
-            },
-        },
-        returnActor: true,
-    });
-    const mesh = getActorRenderObject(actor);
-    if (!actor || !mesh) return null;
-
-    mesh.position.fromArray(spec.position);
-    mesh.scale.set(
-        Math.max(0.08, size[0] * 0.5),
-        Math.max(0.08, size[1] * 0.5),
-        Math.max(0.04, size[2] * 0.5)
-    );
-    mesh.name = spec.label || 'Soccer Goalie Wall';
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    actor.userData.label = mesh.name;
-    actor.userData.soccerGoalie = true;
-    tintGameplayPrefabActor(actor, '#ef4444', '#7f1d1d', 0.42);
-    rebuildActorPhysics(actor);
-    setActorResetTransform(actor, spec.position, mesh.quaternion);
-    return actor;
-}
-
-function spawnSoccerPlayerSpawn(spec) {
-    const actor = spawnDynamicPrimitive('capsule', new THREE.Vector3(...spec.position), 0.75, {
-        local: false,
-        includeCollisionBody: false,
-        includeScripts: false,
-        skipImpulse: true,
-        userData: { label: spec.label, playerIndex: spec.playerIndex },
-        returnActor: true,
-    });
-    const mesh = getActorRenderObject(actor);
-    if (!actor || !mesh) return null;
-
-    mesh.position.fromArray(spec.position);
-    mesh.name = spec.label;
-    tagGameplayPrefabActor(actor, 'playerSpawn', { triggerRadius: 0.9, groundOffset: spec.position[1] });
-    mesh.position.fromArray(spec.position);
-    mesh.updateMatrixWorld(true);
-    actor.userData.label = spec.label;
-    actor.userData.playerIndex = spec.playerIndex;
-    tintGameplayPrefabActor(actor, spec.color || '#22c55e', spec.color || '#22c55e', 1.8);
-    setActorResetTransform(actor, spec.position, mesh.quaternion);
-    if (spec.playerIndex === 1) {
-        applyPlayerSpawnFromActor(actor);
-    }
-    return actor;
-}
-
-function spawnSoccerBall() {
-    const actor = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, 0.54, 0), 0.38, {
-        local: false,
-        includeCollisionBody: true,
-        simulatePhysics: true,
-        includeScripts: false,
-        skipImpulse: true,
-        mass: 0.45,
-        restitution: 0.62,
-        friction: 0.72,
-        userData: { label: 'Soccer Ball' },
-        returnActor: true,
-    });
-    if (!actor) return null;
-
-    setActorColor(actor, '#f8fafc');
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return actor;
-
-    mesh.name = 'Soccer Ball';
-    setActorResetTransform(actor, [0, 0.54, 0], mesh.quaternion);
-    const patchMaterial = new THREE.MeshStandardMaterial({
-        color: 0x111827,
-        roughness: 0.56,
-        metalness: 0.02,
-    });
-    const patchPositions = [
-        [0, 0.39, 0],
-        [0.31, 0.14, 0.18],
-        [-0.31, 0.14, 0.18],
-        [0.0, 0.14, -0.36],
-        [0.22, -0.22, -0.24],
-        [-0.22, -0.22, 0.24],
-    ];
-    patchPositions.forEach((position, index) => {
-        const patch = new THREE.Mesh(new THREE.CircleGeometry(0.105, 6), patchMaterial.clone());
-        patch.name = `Soccer_Ball_Patch_${index + 1}`;
-        patch.position.fromArray(position);
-        patch.lookAt(position[0] * 2, position[1] * 2, position[2] * 2);
-        patch.userData.skipPhysicsCollision = true;
-        mesh.add(patch);
-    });
-    return actor;
-}
-
-function createSoccerLevelDefinition({
-    id = 'soccerField',
-    assetName = 'Soccer Field',
-    sceneName = 'Soccer_Field',
-    hideTerrainPresentation = true,
-} = {}) {
-    return {
-        id,
-        assetName,
-        fileSize: 160000,
-        create: () => createSoccerTargetFieldScene({
-            name: sceneName,
-            hideTerrainPresentation,
-        }),
-        afterLoad: () => {
-            soccerGoalieState.elapsed = 0;
-            const playerSpawns = Array.isArray(currentMesh.userData?.soccerPlayerSpawns)
-                ? currentMesh.userData.soccerPlayerSpawns.map(spawnSoccerPlayerSpawn).filter(Boolean)
-                : [];
-            const goalTargets = Array.isArray(currentMesh.userData?.soccerGoalTargets)
-                ? currentMesh.userData.soccerGoalTargets.map(spawnSoccerGoalTarget).filter(Boolean)
-                : [];
-            const goalies = Array.isArray(currentMesh.userData?.soccerGoalies)
-                ? currentMesh.userData.soccerGoalies.map(spawnSoccerGoalie).filter(Boolean)
-                : [];
-            const soccerBall = spawnSoccerBall();
-            updateSoccerGoalies(0);
-            return playerSpawns[0] || goalTargets[0] || goalies[0] || soccerBall || null;
-        },
-    };
-}
-
-function createFlatTerrainLevelDefinition({
-    id = 'soccerFieldTerrain',
-    assetName = 'Terrain',
-    sceneName = 'Terrain',
-} = {}) {
-    return {
-        id,
-        assetName,
-        fileSize: 48000,
-        create: () => {
-            const root = new THREE.Group();
-            root.name = sceneName;
-            root.userData.sampleType = 'flatTerrainLevel';
-            root.userData.hideTerrainPresentation = true;
-            root.userData.skipNormalization = true;
-            root.userData.preferredSpawn = {
-                position: [0, 1.35, 18],
-                yaw: Math.PI,
-                pitch: -0.08,
-            };
-            root.userData.preferredShowcase = {
-                position: [28, 18, 28],
-                target: [0, 0.4, 0],
-            };
-
-            const terrain = createTerrainMesh();
-            terrain.name = 'Flat_Terrain_Surface';
-            terrain.castShadow = false;
-            terrain.receiveShadow = true;
-            const position = terrain.geometry?.getAttribute?.('position');
-            if (position) {
-                for (let index = 0; index < position.count; index += 1) {
-                    position.setZ(index, 0);
-                }
-                position.needsUpdate = true;
-                terrain.geometry.computeVertexNormals();
-                terrain.geometry.computeBoundingSphere();
-                terrain.geometry.computeBoundingBox();
-            }
-            setTerrainModeGrid(terrain);
-            terrain.material.color.set('#ffffff');
-            terrain.material.roughness = 0.96;
-            terrain.material.metalness = 0.01;
-            terrain.material.needsUpdate = true;
-            const terrainActor = makeSampleLevelMeshActor('Flat_Terrain_Surface', terrain, {
-                kind: 'imported',
-                castShadow: false,
-                receiveShadow: true,
-                userData: {
-                    flatTerrainActor: true,
-                    terrainBrushTarget: true,
-                },
-            });
-            const terrainMesh = getActorRenderObject(terrainActor);
-            if (terrainMesh) root.add(terrainMesh);
-            return root;
-        },
-        afterLoad: () => Array.from(sceneSystem?.actors || []).find((actor) => actorBelongsToCurrentMesh(actor)) || null,
-    };
-}
-
-// Stage 5 feed: point every SilPOM material's self-shadow uniform from a
-// world-space light position toward the mesh it's on. Levels here use
-// static lights, so a one-shot call at build time is sufficient.
-function applySilPomLighting(root, lightWorldPos) {
-    const dir = new THREE.Vector3();
-    root.updateWorldMatrix(true, true);
-    root.traverse((obj) => {
-        if (!obj.isMesh) return;
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const m of mats) {
-            if (!m?.userData?.silPom || typeof m.setSilPomLightDirection !== 'function') continue;
-            obj.getWorldPosition(dir);
-            dir.subVectors(lightWorldPos, dir).normalize();
-            m.setSilPomLightDirection(dir, obj);
-        }
-    });
-}
-
-function createBrickRoomLevel() {
-    // Sample level that showcases Parallax Occlusion Mapping — every wall
-    // and the floor get a procedurally-generated brick set (albedo + normal
-    // + heightmap). Materials are spawned as DDGIMeshStandardNodeMaterial
-    // up-front so the World Options "Parallax (POM)" toggle drives the
-    // surfaces without needing a manual rebuild. The room is sealed, lit by
-    // one warm point light, with a couple of free-standing partitions so the
-    // user can walk past edges and see the parallax warp at grazing angles.
-    const root = new THREE.Group();
-    root.name = 'PolyFlow_Brick_Room';
-    root.userData.sampleType = 'brickRoom';
-    root.userData.hideTerrainPresentation = true;
-    root.userData.skipNormalization = true;
-
-    const ROOM_W = 14;
-    const ROOM_D = 14;
-    const ROOM_H = 5;
-    const WALL_THICKNESS = 0.4;
-
-    root.userData.preferredSpawn = {
-        position: [0, 0.3, ROOM_D * 0.5 - 1.5],
-        yaw: Math.PI,
-        pitch: -0.05,
-    };
-    root.userData.preferredShowcase = {
-        position: [ROOM_W * 0.32, ROOM_H * 0.55, ROOM_D * 0.32],
-        target: [0, ROOM_H * 0.42, 0],
-    };
-
-    const floorSet = getProceduralBrickSet('white');
-    // Showcase pillars use the standalone procedural brick set — a basic
-    // canvas brick that is NEVER overwritten by a streamed PolyHaven photo
-    // (getBrickTextureSet streams real PBR over its procedural draw, so its
-    // procedural look is never actually seen). This is the visible
-    // procedural brick.
-    const accentSet = getProceduralBrickSet('accent');
-    const wallSet = accentSet;
-
-    const makeBrickMaterial = (set, {
-        repeatU = 2, repeatV = 2, color = '#ffffff',
-        normalScale = 1.2, pomIntensity = 0.03, tileM = null, untile = true,
-    } = {}) => {
-        // Clone the shared textures so per-material UV repeats don't fight
-        // each other — three.js's repeat lives on the texture, not the
-        // material. Cloning is cheap; the underlying canvas/image is shared.
-        const albedo = set.albedo.clone();
-        const normal = set.normal.clone();
-        const height = set.height.clone();
-        const roughness = set.roughness.clone();
-        const ao = set.ao.clone();
-        // Subscribe clones to the async PolyHaven PBR upgrade.
-        registerBrickClone(set.albedo, albedo);
-        registerBrickClone(set.normal, normal);
-        registerBrickClone(set.height, height);
-        registerBrickClone(set.roughness, roughness);
-        registerBrickClone(set.ao, ao);
-        for (const t of [albedo, normal, height, roughness, ao]) {
-            t.wrapS = t.wrapT = THREE.RepeatWrapping;
-            t.repeat.set(repeatU, repeatV);
-            t.needsUpdate = true;
-        }
-        const mat = new DDGIMeshStandardNodeMaterial({
-            color: new THREE.Color(color),
-            roughness: 1.0, // roughnessMap is multiplicative — keep scalar at 1
-            metalness: 0.0,
-        });
-        mat.map = albedo;
-        mat.normalMap = normal;
-        mat.normalScale = new THREE.Vector2(normalScale, normalScale);
-        mat.roughnessMap = roughness;
-        mat.heightMap = height;
-        // pomAOMap → sampled at the parallax UV when POM is on. aoMap → the
-        // built-in uv2 path used when POM is off (addBox copies uv→uv2).
-        mat.pomAOMap = ao;
-        mat.aoMap = ao;
-        mat.aoMapIntensity = 1.0;
-        // POM is opt-in via the global toggle; the material is fully equipped
-        // here so flipping World Options → Parallax → On lights it up
-        // immediately. Default-off so the level still looks correct without
-        // the effect.
-        mat.pomEnabled = false;
-        // Real PolyHaven disp maps use the full 0..1 range, so a smaller
-        // scale than the procedural heightfield needed. ~0.03 reads as
-        // deep mortar joints without grazing-angle smearing.
-        mat.pomIntensity = pomIntensity;
-        mat.pomQuality = 'high';
-        mat.pomClipMode = 'solid';
-        mat.pomDepthWrite = true;
-        mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
-        mat.userData.silPom = true;
-        // IQ untiling: heavily-tiled photo brick/cobble opt in so the
-        // visible repeat grid is broken up (works POM on AND off). The
-        // standalone PROCEDURAL brick set opts OUT (untile=false): it tiles
-        // cleanly by construction, and the untiler's per-cell UV offset is
-        // applied to color/normal/rough/AO but NOT to the raw-sampled POM
-        // height — desyncing relief from color (sharp procedural edges make
-        // the fractional-brick offset glaring; photo brick masks it).
-        mat.untileMaps = untile;
-        // Opt into world-scale UVs: addBox() derives texture.repeat from the
-        // box dimensions so a brick is the same physical size on every
-        // surface regardless of wall/floor extent. tileM overrides the
-        // default BRICK_TILE_M per-material (cobble floor needs bigger
-        // tiles than wall brick or it reads as noisy fish-scales).
-        mat.userData.brickWorldScale = true;
-        if (tileM) mat.userData.brickTileM = tileM;
-        return mat;
-    };
-
-    // Meters of surface covered by one full brick-texture tile. Single knob
-    // → constant brick size across the whole level. Larger ⇒ bigger, fewer
-    // bricks. PolyHaven brick_wall_006 is ~6 courses/tile; 2.6 m ≈ 12 cm
-    // courses (chunkier, requested).
-    const BRICK_TILE_M = 2.6;
-
-    const applyBrickWorldScale = (material, size) => {
-        if (!material?.userData?.brickWorldScale) return;
-        const [sx, sy, sz] = size;
-        // BoxGeometry shares one UV set across all faces, so pick the two
-        // dominant extents. Floor-like (thin in Y) tiles over X×Z; wall-like
-        // tiles over its longest horizontal span × height.
-        const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
-        const tileM = material.userData.brickTileM || BRICK_TILE_M;
-        // Round to a WHOLE number of tiles per face. Fractional repeats cut
-        // a tile mid-pattern at the box edge → visible seam where surfaces
-        // meet; an integer count makes the RepeatWrapping wrap land exactly
-        // on the edge, so adjacent faces line up seamlessly.
-        const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
-        const repV = Math.max(
-            Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1,
-        );
-        for (const t of material.userData.ownedMaps || []) {
-            t.wrapS = t.wrapT = THREE.RepeatWrapping;
-            t.repeat.set(repU, repV);
-            t.needsUpdate = true;
-        }
-    };
-
-    const addBox = (name, size, position, material, { rotationY = 0 } = {}) => {
-        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
-        applyBrickWorldScale(material, size);
-        // aoMap (POM-off path) samples uv2; BoxGeometry only ships uv, so
-        // mirror it. POM-on path uses pomAOMap at the parallax UV instead.
-        if (geometry.attributes.uv && !geometry.attributes.uv2) {
-            geometry.setAttribute('uv2', geometry.attributes.uv);
-        }
-        // Real per-vertex tangents so silhouette POM uses a stable TBN
-        // instead of the screen-derivative fallback.
-        geometry.computeTangents();
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.name = name;
-        mesh.position.set(position[0], position[1], position[2]);
-        mesh.rotation.y = rotationY;
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        root.add(mesh);
-        return mesh;
-    };
-
-    // Floor
-    addBox(
-        'brick-floor',
-        [ROOM_W, WALL_THICKNESS, ROOM_D],
-        [0, -WALL_THICKNESS * 0.5, 0],
-        // Cobblestone: bigger tile (4 m vs 1.6 m brick) so stones read at
-        // human scale instead of a dense fish-scale shimmer; softer normal
-        // and shallower parallax so grazing angles don't smear the relief.
-        makeBrickMaterial(floorSet, {
-            repeatU: 4, repeatV: 4,
-            // Smaller tile ⇒ more cobble repeats across the floor (denser,
-            // requested). Rounded to whole tiles by applyBrickWorldScale so
-            // the X and Z edges stay seamless.
-            tileM: BRICK_TILE_M, normalScale: 0.45, pomIntensity: 0.0, untile: false,
-        }),
-    );
-
-    // Ceiling — keep DDGI surface; no parallax (it's overhead, not great
-    // viewing angle for POM and saves shader cost).
-    const ceilingMat = new DDGIMeshStandardNodeMaterial({
-        color: new THREE.Color('#d4cec8'),
-        roughness: 0.95,
-        metalness: 0.02,
-    });
-    addBox(
-        'brick-ceiling',
-        [ROOM_W, WALL_THICKNESS, ROOM_D],
-        [0, ROOM_H + WALL_THICKNESS * 0.5, 0],
-        ceilingMat,
-    );
-
-    // Four perimeter walls
-    const wallMaterial = () => makeBrickMaterial(wallSet, {
-        repeatU: 4, repeatV: 1.5,
-        normalScale: 0.9,
-        pomIntensity: 0.012,
-        untile: false,
-    });
-    addBox('brick-wall-north', [ROOM_W, ROOM_H, WALL_THICKNESS], [0, ROOM_H * 0.5, -ROOM_D * 0.5], wallMaterial());
-    addBox('brick-wall-south', [ROOM_W, ROOM_H, WALL_THICKNESS], [0, ROOM_H * 0.5,  ROOM_D * 0.5], wallMaterial());
-    addBox('brick-wall-east',  [WALL_THICKNESS, ROOM_H, ROOM_D], [ ROOM_W * 0.5, ROOM_H * 0.5, 0], wallMaterial());
-    addBox('brick-wall-west',  [WALL_THICKNESS, ROOM_H, ROOM_D], [-ROOM_W * 0.5, ROOM_H * 0.5, 0], wallMaterial());
-
-    // Two free-standing partitions with accent bricks — POM shows clearest
-    // when you can walk past an edge at a grazing angle.
-    // accentSet is the standalone PROCEDURAL brick set → untile:false so the
-    // POM relief stays locked to the brick color (see mat.untileMaps note).
-    const accentMaterial = () => makeBrickMaterial(accentSet, { repeatU: 2, repeatV: 1, untile: false });
-    addBox('brick-pillar-a', [WALL_THICKNESS * 1.8, ROOM_H * 0.95, 2.8], [-2.5, ROOM_H * 0.475, -2], accentMaterial());
-    addBox('brick-pillar-b', [WALL_THICKNESS * 1.8, ROOM_H * 0.95, 2.8], [ 2.5, ROOM_H * 0.475,  2], accentMaterial(), { rotationY: Math.PI * 0.1 });
-
-    // Single warm point light to graze the brick. Positioned slightly off
-    // center so the parallax bumps cast asymmetric highlights.
-    const light = new THREE.PointLight(0xffd2a0, 8, 28, 1.4);
-    light.position.set(2.5, ROOM_H - 1.2, 0);
-    light.castShadow = true;
-    configurePointLightShadow(light);
-    light.name = 'brick-room-key-light';
-    root.add(light);
-
-    applySilPomLighting(root, light.position.clone());
-
-    return root;
-}
-
-const DOOM_ENEMY_SPRITE_FRAME_W = 32;
-const DOOM_ENEMY_SPRITE_FRAME_H = 40;
-const DOOM_ENEMY_SPRITE_COLS = 3;
-const DOOM_ENEMY_SPRITE_ROWS = 2;
-const DOOM_ENEMY_IDLE_FRAME = 1;
-const DOOM_ENEMY_WALK_FRAMES = [0, 1, 2, 5, 4, 3];
-const DOOM_ENEMY_WALK_FPS = 9;
-
-function setDoomEnemySpriteFrame(sprite, frameIndex = DOOM_ENEMY_IDLE_FRAME) {
-    const texture = sprite?.material?.map;
-    if (!texture) return;
-    const clampedFrame = Math.max(0, Math.min(DOOM_ENEMY_SPRITE_COLS * DOOM_ENEMY_SPRITE_ROWS - 1, frameIndex | 0));
-    const col = clampedFrame % DOOM_ENEMY_SPRITE_COLS;
-    const row = Math.floor(clampedFrame / DOOM_ENEMY_SPRITE_COLS);
-    texture.repeat.set(1 / DOOM_ENEMY_SPRITE_COLS, 1 / DOOM_ENEMY_SPRITE_ROWS);
-    texture.offset.set(col / DOOM_ENEMY_SPRITE_COLS, 1 - ((row + 1) / DOOM_ENEMY_SPRITE_ROWS));
-    texture.needsUpdate = true;
-    sprite.userData.frameIndex = clampedFrame;
-}
-
-function drawDoomEnemySpriteFrame(ctx, ox, oy, pose = {}) {
-    const rect = (x, y, w, h, color) => {
-        ctx.fillStyle = color;
-        ctx.fillRect(ox + x, oy + y, w, h);
-    };
-    const px = (x, y, color) => rect(x, y, 1, 1, color);
-
-    const lean = pose.lean || 0;
-    const headShift = pose.headShift || 0;
-    const gunShift = pose.gunShift || 0;
-    const gunLift = pose.gunLift || 0;
-    const leftArmShift = pose.leftArmShift || 0;
-    const rightArmShift = pose.rightArmShift || 0;
-    const leftLegLift = pose.leftLegLift || 0;
-    const rightLegLift = pose.rightLegLift || 0;
-
-    const FACE = '#0b0b0b';
-    const FACE_D = '#000000';
-    const FACE_L = '#2a2a2a';
-    const SKIN = '#d5a07a';
-    const SKIN_D = '#8e5b43';
-    const SKIN_L = '#efc6aa';
-    const ARMOR = '#27242c';
-    const ARMOR_D = '#131118';
-    const ARMOR_L = '#4a4650';
-    const RED = '#8a1e1c';
-    const RED_L = '#bb4036';
-    const RED_D = '#4c0d0f';
-    const PANTS = '#5f624c';
-    const PANTS_D = '#3e4034';
-    const GUN = '#6f737a';
-    const GUN_L = '#a2a7af';
-    const GUN_D = '#34383d';
-    const BLACK = '#090909';
-
-    // Head
-    rect(11 + lean + headShift, 3, 9, 8, FACE);
-    rect(11 + lean + headShift, 3, 9, 2, FACE_L);
-    rect(11 + lean + headShift, 10, 9, 1, FACE_D);
-    rect(13 + lean + headShift, 0, 5, 3, FACE_L);
-    px(14 + lean + headShift, 5, BLACK);
-    px(17 + lean + headShift, 5, BLACK);
-    rect(14 + lean + headShift, 7, 3, 1, FACE_D);
-
-    // Torso and shoulders
-    rect(9 + lean, 11, 14, 13, ARMOR);
-    rect(9 + lean, 11, 14, 2, ARMOR_L);
-    rect(9 + lean, 22, 14, 2, ARMOR_D);
-    rect(8 + lean, 12, 4, 4, RED);
-    rect(20 + lean, 12, 4, 4, RED);
-    rect(12 + lean, 15, 8, 5, ARMOR_L);
-    rect(13 + lean, 16, 6, 3, '#1b191f');
-
-    // Arms and gloves
-    rect(5 + lean, 14 + leftArmShift, 4, 9, ARMOR);
-    rect(23 + lean, 14 + rightArmShift, 4, 9, ARMOR);
-    rect(5 + lean, 21 + leftArmShift, 4, 3, RED);
-    rect(23 + lean, 21 + rightArmShift, 4, 3, RED);
-    rect(6 + lean, 23 + leftArmShift, 3, 2, SKIN);
-    rect(23 + lean, 23 + rightArmShift, 3, 2, SKIN);
-
-    // Shotgun
-    rect(8 + lean + gunShift, 19 + gunLift, 5, 2, '#65442a');
-    rect(12 + lean + gunShift, 18 + gunLift, 8, 3, GUN_D);
-    rect(19 + lean + gunShift, 17 + gunLift, 8, 3, GUN);
-    rect(26 + lean + gunShift, 16 + gunLift, 3, 2, GUN_L);
-    px(27 + lean + gunShift, 18 + gunLift, BLACK);
-
-    // Waist and legs
-    rect(10 + lean, 24, 12, 3, RED_D);
-    rect(10 + lean, 25 - leftLegLift, 4, 9 + leftLegLift, PANTS);
-    rect(18 + lean, 25 - rightLegLift, 4, 9 + rightLegLift, PANTS);
-    rect(10 + lean, 25 - leftLegLift, 4, 2, PANTS_D);
-    rect(18 + lean, 25 - rightLegLift, 4, 2, PANTS_D);
-    rect(10 + lean, 30 - leftLegLift, 4, 2, RED);
-    rect(18 + lean, 30 - rightLegLift, 4, 2, RED);
-    rect(9 + lean, 34, 6, 4, RED_D);
-    rect(17 + lean, 34, 6, 4, RED_D);
-    rect(9 + lean, 34, 6, 1, RED_L);
-    rect(17 + lean, 34, 6, 1, RED_L);
-}
-
-function makeDoomEnemySpriteSheet() {
-    const canvas = document.createElement('canvas');
-    canvas.width = DOOM_ENEMY_SPRITE_FRAME_W * DOOM_ENEMY_SPRITE_COLS;
-    canvas.height = DOOM_ENEMY_SPRITE_FRAME_H * DOOM_ENEMY_SPRITE_ROWS;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const poses = [
-        { lean: -1, headShift: -1, gunShift: -1, gunLift: -1, leftArmShift: -1, rightArmShift: 1, leftLegLift: 2, rightLegLift: 0 },
-        { lean: -1, headShift: 0, gunShift: 0, gunLift: 0, leftArmShift: 0, rightArmShift: 0, leftLegLift: 1, rightLegLift: 1 },
-        { lean: 0, headShift: 1, gunShift: 1, gunLift: 0, leftArmShift: 1, rightArmShift: -1, leftLegLift: 0, rightLegLift: 2 },
-        { lean: 1, headShift: 1, gunShift: 1, gunLift: 1, leftArmShift: 1, rightArmShift: 0, leftLegLift: 0, rightLegLift: 2 },
-        { lean: 1, headShift: 0, gunShift: 0, gunLift: 0, leftArmShift: 0, rightArmShift: 0, leftLegLift: 1, rightLegLift: 1 },
-        { lean: 0, headShift: -1, gunShift: -1, gunLift: -1, leftArmShift: -1, rightArmShift: 1, leftLegLift: 2, rightLegLift: 0 },
-    ];
-    poses.forEach((pose, index) => {
-        const ox = (index % DOOM_ENEMY_SPRITE_COLS) * DOOM_ENEMY_SPRITE_FRAME_W;
-        const oy = Math.floor(index / DOOM_ENEMY_SPRITE_COLS) * DOOM_ENEMY_SPRITE_FRAME_H;
-        drawDoomEnemySpriteFrame(ctx, ox, oy, pose);
-    });
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.magFilter = THREE.NearestFilter;
-    texture.minFilter = THREE.NearestFilter;
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.generateMipmaps = false;
-    texture.needsUpdate = true;
-
-    return {
-        texture,
-        idleFrame: DOOM_ENEMY_IDLE_FRAME,
-        walkFrames: DOOM_ENEMY_WALK_FRAMES.slice(),
-        fps: DOOM_ENEMY_WALK_FPS,
-    };
-}
-
-function updateDoomEnemySpriteAnimation(actor, delta = 0, moving = false) {
-    const state = actor?.userData?.doomEnemy;
-    const sprite = state?.sprite;
-    if (!state || !sprite) return;
-
-    if (!moving) {
-        state.elapsed = 0;
-        if (state.frameIndex !== state.idleFrame) {
-            state.frameIndex = state.idleFrame;
-            setDoomEnemySpriteFrame(sprite, state.idleFrame);
-        }
-        return;
-    }
-
-    state.elapsed = (state.elapsed || 0) + Math.max(0, delta);
-    const walkFrames = Array.isArray(state.walkFrames) && state.walkFrames.length
-        ? state.walkFrames
-        : DOOM_ENEMY_WALK_FRAMES;
-    const frameIndex = walkFrames[Math.floor(state.elapsed * (state.fps || DOOM_ENEMY_WALK_FPS)) % walkFrames.length];
-    if (state.frameIndex !== frameIndex) {
-        state.frameIndex = frameIndex;
-        setDoomEnemySpriteFrame(sprite, frameIndex);
-    }
-}
-
-function applyDoomEnemySpriteSkin(actor) {
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return actor;
-
-    const staleSprites = [];
-    mesh.traverse((child) => {
-        if (child === mesh) return;
-        if (child.name === 'doom-enemy-sprite' || child.name === 'doom-imp-sprite') {
-            staleSprites.push(child);
-        }
-        if (child.name === 'Shooter Barrel'
-            || child.isMesh && child.geometry?.type === 'CapsuleGeometry') {
-            child.visible = false;
-        }
-    });
-
-    for (const sprite of staleSprites) {
-        sprite.parent?.remove(sprite);
-        for (const tex of sprite.userData?.ownedTextures || []) tex?.dispose?.();
-        sprite.material?.dispose?.();
-    }
-
-    if (mesh.isMesh && mesh.material) {
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        for (const m of mats) {
-            if (!m) continue;
-            m.transparent = true;
-            m.opacity = 0.0;
-            m.depthWrite = false;
-            m.needsUpdate = true;
-        }
-    }
-
-    const spriteSheet = makeDoomEnemySpriteSheet();
-    const impMat = new THREE.SpriteMaterial({
-        map: spriteSheet.texture,
-        transparent: true,
-        alphaTest: 0.5,
-        depthWrite: true,
-        sizeAttenuation: true,
-    });
-    impMat.toneMapped = false;
-    const impSprite = new THREE.Sprite(impMat);
-    impSprite.name = 'doom-enemy-sprite';
-    impSprite.scale.set(3.2, 4.0, 1);
-    impSprite.position.set(0, -0.2, 0);
-    impSprite.userData.ownedTextures = [spriteSheet.texture];
-    impSprite.raycast = () => {};
-    mesh.add(impSprite);
-    setDoomEnemySpriteFrame(impSprite, spriteSheet.idleFrame);
-
-    actor.userData.label = actor.userData.label || 'Doom Enemy';
-    actor.userData.doomEnemy = {
-        sprite: impSprite,
-        frameIndex: spriteSheet.idleFrame,
-        idleFrame: spriteSheet.idleFrame,
-        walkFrames: spriteSheet.walkFrames,
-        fps: spriteSheet.fps,
-        elapsed: 0,
-    };
-    return actor;
-}
-
-function makeDoomShotgunSpriteTexture() {
-    // 48x24 pixel-art shotgun (super-shotgun silhouette): wood stock, double
-    // barrel, metallic receiver, brass shell sticking out.
-    const W = 48, H = 24;
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, W, H);
-
-    const rect = (x, y, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); };
-    const px = (x, y, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, 1, 1); };
-
-    const WOOD = '#6a3a1a';
-    const WOOD_D = '#3a1f0a';
-    const WOOD_L = '#9a5828';
-    const STEEL = '#7a7a82';
-    const STEEL_D = '#3a3a42';
-    const STEEL_L = '#b8b8c0';
-    const BLACK = '#0a0a0a';
-    const BRASS = '#d8a838';
-    const BRASS_L = '#ffd86a';
-    const BRASS_D = '#8a6a18';
-
-    // Stock (wood) — left side
-    rect(2, 9, 14, 9, WOOD);
-    rect(2, 9, 14, 1, WOOD_L);     // top highlight
-    rect(2, 17, 14, 1, WOOD_D);    // bottom shadow
-    rect(3, 11, 1, 5, WOOD_L);     // grain
-    rect(8, 12, 1, 4, WOOD_D);
-    // Butt curve
-    px(1, 10, WOOD_D); px(1, 16, WOOD_D);
-    px(2, 9, WOOD_D); px(2, 17, WOOD_D);
-
-    // Receiver (metallic block) middle
-    rect(15, 8, 9, 10, STEEL);
-    rect(15, 8, 9, 1, STEEL_L);
-    rect(15, 17, 9, 1, STEEL_D);
-    // Trigger guard
-    rect(17, 18, 4, 3, BLACK);
-    rect(18, 19, 2, 2, STEEL_D);
-    // Trigger
-    px(19, 18, BLACK);
-    // Shell ejector / port
-    rect(20, 10, 3, 2, BLACK);
-
-    // Pump action handle under barrel
-    rect(22, 13, 7, 3, WOOD);
-    rect(22, 13, 7, 1, WOOD_L);
-    rect(22, 15, 7, 1, WOOD_D);
-
-    // Double barrels (over/under)
-    rect(23, 9, 23, 2, STEEL);
-    rect(23, 11, 23, 2, STEEL_D);
-    rect(23, 9, 23, 1, STEEL_L);
-    // Muzzle
-    rect(45, 9, 1, 4, BLACK);
-    px(44, 9, STEEL_L); px(44, 12, STEEL_D);
-
-    // Brass shell on top of receiver
-    rect(16, 5, 3, 3, BRASS);
-    rect(16, 5, 3, 1, BRASS_L);
-    rect(15, 6, 1, 2, BRASS);
-    rect(19, 6, 1, 2, BRASS_D);
-
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.magFilter = THREE.NearestFilter;
-    tex.minFilter = THREE.NearestFilter;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.generateMipmaps = false;
-    tex.needsUpdate = true;
-    return tex;
-}
-
-function createDoomTestLevel() {
-    // Compact Doom-style mini level: start room, combat arena, and a clear end room.
-    const root = new THREE.Group();
-    root.name = 'PolyFlow_Doom_Test';
-    root.userData.sampleType = 'doomTest';
-    root.userData.hideTerrainPresentation = true;
-    root.userData.skipNormalization = true;
-
-    const T = 0.4;                // wall thickness
-    const CORR_W = 5;
-    const CORR_H = 3.4;
-    const CORR_LEN = 16;
-    const ROOM_W = 28;
-    const ROOM_D = 28;
-    const ROOM_H = 5.6;
-    const START_W = 14;
-    const START_D = 14;
-    const START_H = 4.4;
-    const END_W = 14;
-    const END_D = 14;
-    const END_H = 4.4;
-    const START_CENTER_Z = ROOM_D * 0.5 + CORR_LEN + START_D * 0.5;
-    const END_CENTER_Z = -(ROOM_D * 0.5 + CORR_LEN + END_D * 0.5);
-    const DOOM_WALL_COLOR = '#2b1514';
-    const DOOM_RED_LIGHT = 0xff3030;
-    const DOOM_RED_EMISSIVE = '#ff3030';
-
-    root.userData.preferredSpawn = {
-        position: [0, 0.3, START_CENTER_Z + START_D * 0.5 - 3.0],
-        yaw: Math.PI,
-        pitch: -0.05,
-    };
-    root.userData.preferredShowcase = {
-        position: [0, PLAYER_SETTINGS.eyeHeight + 0.35, START_CENTER_Z + START_D * 0.5 - 4.5],
-        target: [0, 1.4, 0],
-    };
-
-    const wallSet = getProceduralBrickSet('accent');
-    const floorSet = getProceduralBrickSet('white');
-    const accentSet = getProceduralBrickSet('accent');
-
-    const brickMat = (set, { repeatU = 2, repeatV = 2, color = '#ffffff', rough = 0.9, metal = 0.05 } = {}) => {
-        const albedo = set.albedo.clone();
-        const normal = set.normal.clone();
-        const height = set.height.clone();
-        const roughness = set.roughness.clone();
-        const ao = set.ao.clone();
-        registerBrickClone(set.albedo, albedo);
-        registerBrickClone(set.normal, normal);
-        registerBrickClone(set.height, height);
-        registerBrickClone(set.roughness, roughness);
-        registerBrickClone(set.ao, ao);
-        for (const t of [albedo, normal, height, roughness, ao]) {
-            t.wrapS = t.wrapT = THREE.RepeatWrapping;
-            t.repeat.set(repeatU, repeatV);
-            t.needsUpdate = true;
-        }
-        const mat = new DDGIMeshStandardNodeMaterial({
-            color: new THREE.Color(color),
-            roughness: 1.0,
-            metalness: metal,
-        });
-        mat.map = albedo;
-        mat.normalMap = normal;
-        mat.normalScale = new THREE.Vector2(1.1, 1.1);
-        mat.roughnessMap = roughness;
-        mat.heightMap = height;
-        mat.pomAOMap = ao;
-        mat.aoMap = ao;
-        mat.aoMapIntensity = 1.0;
-        mat.pomEnabled = true;
-        mat.pomIntensity = 0.035;
-        mat.pomQuality = 'high';
-        mat.pomClipMode = 'solid';
-        mat.pomDepthWrite = true;
-        mat.untileMaps = false;
-        mat.rebuildPomGraph?.();
-        mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
-        mat.userData.silPom = true;
-        mat.userData.brickWorldScale = true;
-        return mat;
-    };
-
-    const BRICK_TILE_M = 1.6;
-
-    const applyBrickWorldScale = (material, size) => {
-        if (!material?.userData?.brickWorldScale) return;
-        const [sx, sy, sz] = size;
-        const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
-        const tileM = material.userData.brickTileM || BRICK_TILE_M;
-        const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
-        const repV = Math.max(
-            Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1,
-        );
-        for (const t of material.userData.ownedMaps || []) {
-            t.wrapS = t.wrapT = THREE.RepeatWrapping;
-            t.repeat.set(repU, repV);
-            t.needsUpdate = true;
-        }
-    };
-
-    const flatMat = (color, { rough = 0.85, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
-        const mat = new DDGIMeshStandardNodeMaterial({
-            color: new THREE.Color(color),
-            roughness: rough,
-            metalness: metal,
-        });
-        if (emissive) {
-            mat.emissive = new THREE.Color(emissive);
-            mat.emissiveIntensity = emissiveIntensity;
-        }
-        return mat;
-    };
-
-    const addBox = (name, size, position, material, {
-        rotationY = 0, cast = true, receive = true, actorSurface = '',
-    } = {}) => {
-        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
-        applyBrickWorldScale(material, size);
-        if (geometry.attributes.uv && !geometry.attributes.uv2) {
-            geometry.setAttribute('uv2', geometry.attributes.uv);
-        }
-        geometry.computeTangents();
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.name = name;
-        mesh.position.set(position[0], position[1], position[2]);
-        mesh.rotation.y = rotationY;
-        mesh.castShadow = cast;
-        mesh.receiveShadow = receive;
-        if (actorSurface) mesh.userData.doomMapSurface = actorSurface;
-        root.add(mesh);
-        if (actorSurface) {
-            const actor = makeSampleLevelMeshActor(name, mesh, {
-                kind: 'imported',
-                castShadow: cast,
-                receiveShadow: receive,
-                skipPhysicsCollision: true,
-                userData: {
-                    doomMapSurface: actorSurface,
-                },
-            });
-            if (actorSurface === 'floor' || actorSurface === 'roof') {
-                enableStaticMeshActorCollision(actor);
-            }
-        }
-        return mesh;
-    };
-
-    const roomCenterZ = 0;
-    const southHallCenterZ = ROOM_D * 0.5 + CORR_LEN * 0.5;
-    const northHallCenterZ = -(ROOM_D * 0.5 + CORR_LEN * 0.5);
-    const startCenterZ = START_CENTER_Z;
-    const endCenterZ = END_CENTER_Z;
-    const portalGap = CORR_W;
-    const southSegW = (ROOM_W - portalGap) * 0.5;
-    const northSegW = (ROOM_W - portalGap) * 0.5;
-    const startSegW = (START_W - portalGap) * 0.5;
-    const endSegW = (END_W - portalGap) * 0.5;
-
-    const addHallSconce = (name, x, y, z) => {
-        addBox(name, [0.2, 0.6, 0.4], [x, y, z],
-            flatMat('#2a0f0f', { emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 1.6 }));
-    };
-
-    addBox('doom-start-floor', [START_W, T, START_D],
-        [0, -T * 0.5, startCenterZ],
-        brickMat(floorSet, { repeatU: 4, repeatV: 4, color: '#5a5048' }),
-        { actorSurface: 'floor' });
-    addBox('doom-start-ceiling', [START_W, T, START_D],
-        [0, START_H + T * 0.5, startCenterZ],
-        flatMat('#1a1816', { rough: 0.95 }),
-        { actorSurface: 'roof' });
-    addBox('doom-start-wall-south', [START_W, START_H, T],
-        [0, START_H * 0.5, startCenterZ + START_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-start-wall-north-l', [startSegW, START_H, T],
-        [-(portalGap * 0.5 + startSegW * 0.5), START_H * 0.5, startCenterZ - START_D * 0.5],
-        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-start-wall-north-r', [startSegW, START_H, T],
-        [(portalGap * 0.5 + startSegW * 0.5), START_H * 0.5, startCenterZ - START_D * 0.5],
-        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-start-wall-east', [T, START_H, START_D],
-        [START_W * 0.5, START_H * 0.5, startCenterZ],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-start-wall-west', [T, START_H, START_D],
-        [-START_W * 0.5, START_H * 0.5, startCenterZ],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-start-pad', [3.2, 0.24, 3.2],
-        [0, 0.12, startCenterZ + 2.6],
-        flatMat('#241414', { rough: 0.35, emissive: '#6b1818', emissiveIntensity: 0.35 }));
-
-    addBox('doom-south-hall-floor', [CORR_W, T, CORR_LEN],
-        [0, -T * 0.5, southHallCenterZ],
-        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }),
-        { actorSurface: 'floor' });
-    addBox('doom-south-hall-ceiling', [CORR_W, T, CORR_LEN],
-        [0, CORR_H + T * 0.5, southHallCenterZ],
-        flatMat('#1a1816', { rough: 0.95 }),
-        { actorSurface: 'roof' });
-    addBox('doom-south-hall-wall-e', [T, CORR_H, CORR_LEN],
-        [CORR_W * 0.5, CORR_H * 0.5, southHallCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
-    addBox('doom-south-hall-wall-w', [T, CORR_H, CORR_LEN],
-        [-CORR_W * 0.5, CORR_H * 0.5, southHallCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
-    addHallSconce('doom-south-hall-light-l', -CORR_W * 0.5 + 0.15, CORR_H - 1.0, southHallCenterZ - CORR_LEN * 0.25);
-    addHallSconce('doom-south-hall-light-r', CORR_W * 0.5 - 0.15, CORR_H - 1.0, southHallCenterZ + CORR_LEN * 0.25);
-
-    addBox('doom-room-floor', [ROOM_W, T, ROOM_D],
-        [0, -T * 0.5, roomCenterZ],
-        brickMat(floorSet, { repeatU: 7, repeatV: 7, color: '#6c6258' }),
-        { actorSurface: 'floor' });
-    addBox('doom-room-ceiling', [ROOM_W, T, ROOM_D],
-        [0, ROOM_H + T * 0.5, roomCenterZ],
-        flatMat('#2a2724', { rough: 0.95 }),
-        { actorSurface: 'roof' });
-    addBox('doom-wall-south-l', [southSegW, ROOM_H, T],
-        [-(portalGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-south-r', [southSegW, ROOM_H, T],
-        [(portalGap * 0.5 + southSegW * 0.5), ROOM_H * 0.5, ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-north-l', [northSegW, ROOM_H, T],
-        [-(portalGap * 0.5 + northSegW * 0.5), ROOM_H * 0.5, -ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-north-r', [northSegW, ROOM_H, T],
-        [(portalGap * 0.5 + northSegW * 0.5), ROOM_H * 0.5, -ROOM_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-east', [T, ROOM_H, ROOM_D],
-        [ROOM_W * 0.5, ROOM_H * 0.5, roomCenterZ],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-wall-west', [T, ROOM_H, ROOM_D],
-        [-ROOM_W * 0.5, ROOM_H * 0.5, roomCenterZ],
-        brickMat(wallSet, { repeatU: 6, repeatV: 1.5, color: DOOM_WALL_COLOR }));
-    addBox('doom-cover-a', [2.2, 1.6, 1.2], [-5.5, 0.8, 2.5],
-        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
-    addBox('doom-cover-b', [2.2, 1.6, 1.2], [5.5, 0.8, -1.5],
-        brickMat(accentSet, { repeatU: 1, repeatV: 1, color: '#8a7050' }));
-    addBox('doom-cover-c', [1.2, 3.0, 1.2], [0, 1.5, 6.5],
-        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: DOOM_WALL_COLOR }));
-    addBox('doom-cover-d', [1.2, 3.0, 1.2], [0, 1.5, -6.5],
-        brickMat(wallSet, { repeatU: 1, repeatV: 2, color: DOOM_WALL_COLOR }));
-
-    addBox('doom-north-hall-floor', [CORR_W, T, CORR_LEN],
-        [0, -T * 0.5, northHallCenterZ],
-        brickMat(floorSet, { repeatU: 2, repeatV: 4, color: '#5a5048' }),
-        { actorSurface: 'floor' });
-    addBox('doom-north-hall-ceiling', [CORR_W, T, CORR_LEN],
-        [0, CORR_H + T * 0.5, northHallCenterZ],
-        flatMat('#1a1816', { rough: 0.95 }),
-        { actorSurface: 'roof' });
-    addBox('doom-north-hall-wall-e', [T, CORR_H, CORR_LEN],
-        [CORR_W * 0.5, CORR_H * 0.5, northHallCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
-    addBox('doom-north-hall-wall-w', [T, CORR_H, CORR_LEN],
-        [-CORR_W * 0.5, CORR_H * 0.5, northHallCenterZ],
-        brickMat(wallSet, { repeatU: 3, repeatV: 1, color: DOOM_WALL_COLOR }));
-    addHallSconce('doom-north-hall-light-l', -CORR_W * 0.5 + 0.15, CORR_H - 1.0, northHallCenterZ - CORR_LEN * 0.25);
-    addHallSconce('doom-north-hall-light-r', CORR_W * 0.5 - 0.15, CORR_H - 1.0, northHallCenterZ + CORR_LEN * 0.25);
-
-    addBox('doom-end-floor', [END_W, T, END_D],
-        [0, -T * 0.5, endCenterZ],
-        brickMat(floorSet, { repeatU: 4, repeatV: 4, color: '#5a5048' }),
-        { actorSurface: 'floor' });
-    addBox('doom-end-ceiling', [END_W, T, END_D],
-        [0, END_H + T * 0.5, endCenterZ],
-        flatMat('#1a1816', { rough: 0.95 }),
-        { actorSurface: 'roof' });
-    addBox('doom-end-wall-north', [END_W, END_H, T],
-        [0, END_H * 0.5, endCenterZ - END_D * 0.5],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-end-wall-south-l', [endSegW, END_H, T],
-        [-(portalGap * 0.5 + endSegW * 0.5), END_H * 0.5, endCenterZ + END_D * 0.5],
-        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-end-wall-south-r', [endSegW, END_H, T],
-        [(portalGap * 0.5 + endSegW * 0.5), END_H * 0.5, endCenterZ + END_D * 0.5],
-        brickMat(wallSet, { repeatU: 2, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-end-wall-east', [T, END_H, END_D],
-        [END_W * 0.5, END_H * 0.5, endCenterZ],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-end-wall-west', [T, END_H, END_D],
-        [-END_W * 0.5, END_H * 0.5, endCenterZ],
-        brickMat(wallSet, { repeatU: 4, repeatV: 1.4, color: DOOM_WALL_COLOR }));
-    addBox('doom-end-dais', [4.2, 0.4, 4.2],
-        [0, 0.2, endCenterZ - 1.8],
-        flatMat('#221212', { rough: 0.3, emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 0.45 }));
-
-    root.userData.doomMiniLevel = {
-        playerSpawn: [0, 0.85, startCenterZ + START_D * 0.5 - 3.2],
-        shotgunPickup: [0, 0.75, startCenterZ - 1.6],
-        exitTeleporter: [0, 0.42, endCenterZ - 1.8],
-        exitTeleporterHidden: [0, -48, endCenterZ - 1.8],
-        hallTriggerZ: startCenterZ - START_D * 0.5 + 1.0,
-        arenaTriggerZ: ROOM_D * 0.5 - 1.5,
-        hallWave: [
-            [-1.25, 0, southHallCenterZ + 2.6],
-            [1.25, 0, southHallCenterZ - 2.2],
-        ],
-        arenaWave: [
-            [-6.0, 0, 4.0],
-            [6.0, 0, -4.5],
-            [0, 0, -6.0],
-        ],
-        finalWave: [
-            [-1.2, 0, northHallCenterZ - 1.2],
-            [1.2, 0, endCenterZ + 1.2],
-        ],
-        arenaBarrier: [0, 0.8, ROOM_D * 0.5 - 0.6],
-    };
-
-    addBox('doom-gun-pedestal', [1.0, 0.3, 1.0],
-        [0, 0.15, startCenterZ - 1.6],
-        flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#222222', emissiveIntensity: 0.2 }));
-
-    const gunGlow = new THREE.PointLight(DOOM_RED_LIGHT, 1.6, 4.5, 2.0);
-    gunGlow.position.set(0, 0.75, startCenterZ - 1.6);
-    gunGlow.castShadow = false;
-    gunGlow.name = 'doom-gun-glow';
-    root.add(gunGlow);
-
-    const startLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.6, 18, 1.8);
-    startLight.position.set(0, START_H - 0.8, startCenterZ + 0.5);
-    startLight.castShadow = false;
-    startLight.name = 'doom-start-light';
-    root.add(startLight);
-
-    const keyLight = new THREE.PointLight(DOOM_RED_LIGHT, 9, 28, 1.6);
-    keyLight.position.set(-5, ROOM_H - 1.2, -2);
-    keyLight.castShadow = true;
-    configurePointLightShadow(keyLight);
-    keyLight.name = 'doom-room-key';
-    root.add(keyLight);
-
-    const fillLight = new THREE.PointLight(DOOM_RED_LIGHT, 4.2, 24, 2.0);
-    fillLight.position.set(6, ROOM_H - 0.8, 6);
-    fillLight.castShadow = false;
-    fillLight.name = 'doom-room-fill';
-    root.add(fillLight);
-
-    const southHallLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.2, 16, 1.8);
-    southHallLight.position.set(0, CORR_H - 0.7, southHallCenterZ);
-    southHallLight.castShadow = false;
-    southHallLight.name = 'doom-south-hall-light';
-    root.add(southHallLight);
-
-    const northHallLight = new THREE.PointLight(DOOM_RED_LIGHT, 3.2, 16, 1.8);
-    northHallLight.position.set(0, CORR_H - 0.7, northHallCenterZ);
-    northHallLight.castShadow = false;
-    northHallLight.name = 'doom-north-hall-light';
-    root.add(northHallLight);
-
-    const endLight = new THREE.PointLight(DOOM_RED_LIGHT, 4.8, 18, 1.8);
-    endLight.position.set(0, END_H - 0.8, endCenterZ - 1.2);
-    endLight.castShadow = true;
-    configurePointLightShadow(endLight);
-    endLight.name = 'doom-end-light';
-    root.add(endLight);
-
-    applySilPomLighting(root, keyLight.position.clone());
-
-    return root;
-}
-
-// Rogue-like arena: ONE big square brick room (same doom material language as
-// createDoomTestLevel). Player spawns center, grabs the shotgun, then survives
-// escalating waves of enemies that spawn around the perimeter and walk in.
-// Clearing the final wave reveals the exit teleporter.
-function createDoomArenaLevel() {
-    const root = new THREE.Group();
-    root.name = 'PolyFlow_Doom_Arena';
-    root.userData.sampleType = 'doomArena';
-    root.userData.hideTerrainPresentation = true;
-    root.userData.skipNormalization = true;
-
-    const T = 0.4;            // wall thickness
-    const ARENA = 44;         // room is ARENA x ARENA
-    const ARENA_H = 7.5;      // ceiling height
-    const HALF = ARENA * 0.5;
-    const DOOM_WALL_COLOR = '#2b1514';
-    const DOOM_RED_LIGHT = 0xff3030;
-    const DOOM_RED_EMISSIVE = '#ff3030';
-
-    root.userData.preferredSpawn = {
-        position: [0, 0.3, 6.0],
-        yaw: Math.PI,
-        pitch: -0.05,
-    };
-    root.userData.preferredShowcase = {
-        position: [0, PLAYER_SETTINGS.eyeHeight + 0.6, 9.0],
-        target: [0, 1.4, -4.0],
-    };
-
-    const wallSet = getProceduralBrickSet('accent');
-    const floorSet = getProceduralBrickSet('white');
-    const accentSet = getProceduralBrickSet('accent');
-    const BRICK_TILE_M = 1.6;
-
-    const brickMat = (set, { color = '#ffffff', metal = 0.05 } = {}) => {
-        const albedo = set.albedo.clone();
-        const normal = set.normal.clone();
-        const height = set.height.clone();
-        const roughness = set.roughness.clone();
-        const ao = set.ao.clone();
-        registerBrickClone(set.albedo, albedo);
-        registerBrickClone(set.normal, normal);
-        registerBrickClone(set.height, height);
-        registerBrickClone(set.roughness, roughness);
-        registerBrickClone(set.ao, ao);
-        for (const t of [albedo, normal, height, roughness, ao]) {
-            t.wrapS = t.wrapT = THREE.RepeatWrapping;
-            t.needsUpdate = true;
-        }
-        const mat = new DDGIMeshStandardNodeMaterial({
-            color: new THREE.Color(color),
-            roughness: 1.0,
-            metalness: metal,
-        });
-        mat.map = albedo;
-        mat.normalMap = normal;
-        mat.normalScale = new THREE.Vector2(1.1, 1.1);
-        mat.roughnessMap = roughness;
-        mat.heightMap = height;
-        mat.pomAOMap = ao;
-        mat.aoMap = ao;
-        mat.aoMapIntensity = 1.0;
-        mat.pomEnabled = true;
-        mat.pomIntensity = 0.035;
-        mat.pomQuality = 'high';
-        mat.pomClipMode = 'solid';
-        mat.pomDepthWrite = true;
-        mat.untileMaps = false;
-        mat.rebuildPomGraph?.();
-        mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
-        mat.userData.silPom = true;
-        mat.userData.brickWorldScale = true;
-        return mat;
-    };
-
-    const applyBrickWorldScale = (material, size) => {
-        if (!material?.userData?.brickWorldScale) return;
-        const [sx, sy, sz] = size;
-        const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
-        const tileM = material.userData.brickTileM || BRICK_TILE_M;
-        const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
-        const repV = Math.max(Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1);
-        for (const t of material.userData.ownedMaps || []) {
-            t.wrapS = t.wrapT = THREE.RepeatWrapping;
-            t.repeat.set(repU, repV);
-            t.needsUpdate = true;
-        }
-    };
-
-    const flatMat = (color, { rough = 0.85, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
-        const mat = new DDGIMeshStandardNodeMaterial({
-            color: new THREE.Color(color),
-            roughness: rough,
-            metalness: metal,
-        });
-        if (emissive) {
-            mat.emissive = new THREE.Color(emissive);
-            mat.emissiveIntensity = emissiveIntensity;
-        }
-        return mat;
-    };
-
-    const addBox = (name, size, position, material, { actorSurface = '' } = {}) => {
-        const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
-        applyBrickWorldScale(material, size);
-        if (geometry.attributes.uv && !geometry.attributes.uv2) {
-            geometry.setAttribute('uv2', geometry.attributes.uv);
-        }
-        geometry.computeTangents();
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.name = name;
-        mesh.position.set(position[0], position[1], position[2]);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        if (actorSurface) mesh.userData.doomMapSurface = actorSurface;
-        root.add(mesh);
-        if (actorSurface) {
-            const actor = makeSampleLevelMeshActor(name, mesh, {
-                kind: 'imported',
-                castShadow: true,
-                receiveShadow: true,
-                skipPhysicsCollision: true,
-                userData: { doomMapSurface: actorSurface },
-            });
-            if (actorSurface === 'floor' || actorSurface === 'roof') {
-                enableStaticMeshActorCollision(actor);
-            }
-        }
-        return mesh;
-    };
-
-    // Shell: floor, ceiling, four walls.
-    addBox('arena-floor', [ARENA, T, ARENA], [0, -T * 0.5, 0],
-        brickMat(floorSet, { color: '#6c6258' }), { actorSurface: 'floor' });
-    addBox('arena-ceiling', [ARENA, T, ARENA], [0, ARENA_H + T * 0.5, 0],
-        flatMat('#241f1c', { rough: 0.95 }), { actorSurface: 'roof' });
-    addBox('arena-wall-n', [ARENA, ARENA_H, T], [0, ARENA_H * 0.5, -HALF],
-        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
-    addBox('arena-wall-s', [ARENA, ARENA_H, T], [0, ARENA_H * 0.5, HALF],
-        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
-    addBox('arena-wall-e', [T, ARENA_H, ARENA], [HALF, ARENA_H * 0.5, 0],
-        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
-    addBox('arena-wall-w', [T, ARENA_H, ARENA], [-HALF, ARENA_H * 0.5, 0],
-        brickMat(wallSet, { color: DOOM_WALL_COLOR }));
-
-    // Scattered cover pillars so the open room has line-of-sight breaks.
-    const pillar = brickMat(accentSet, { color: '#8a7050' });
-    const COVER = [
-        [-12, -8], [12, -8], [-12, 10], [12, 10],
-        [0, -14], [0, 14], [-16, 2], [16, 2],
-    ];
-    for (let i = 0; i < COVER.length; i++) {
-        const [cx, cz] = COVER[i];
-        addBox(`arena-cover-${i}`, [1.6, 3.2, 1.6], [cx, 1.6, cz], pillar);
-    }
-
-    // Center pad (where the player starts / shotgun sits).
-    addBox('arena-pad', [4.0, 0.22, 4.0], [0, 0.11, 4.0],
-        flatMat('#241414', { rough: 0.35, emissive: '#6b1818', emissiveIntensity: 0.4 }));
-    addBox('arena-gun-pedestal', [1.0, 0.3, 1.0], [0, 0.15, 4.0],
-        flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#222222', emissiveIntensity: 0.2 }));
-    // Exit dais at the north wall — teleporter hidden until waves cleared.
-    addBox('arena-exit-dais', [4.4, 0.4, 4.4], [0, 0.2, -HALF + 3.0],
-        flatMat('#221212', { rough: 0.3, emissive: DOOM_RED_EMISSIVE, emissiveIntensity: 0.45 }));
-
-    root.userData.doomArenaLevel = {
-        playerSpawn: [0, 0.85, 6.0],
-        shotgunPickup: [0, 0.75, 4.0],
-        exitTeleporter: [0, 0.42, -HALF + 3.0],
-        exitTeleporterHidden: [0, -48, -HALF + 3.0],
-        spawnRingRadius: HALF - 3.5,   // enemies appear just inside the walls
-        spawnY: 0,
-        waveCount: 4,                  // number of escalating waves
-        baseWaveSize: 3,               // wave 1 enemy count
-        wavePerStep: 2,                // +N enemies each subsequent wave
-    };
-
-    const gunGlow = new THREE.PointLight(DOOM_RED_LIGHT, 1.6, 4.5, 2.0);
-    gunGlow.position.set(0, 0.75, 4.0);
-    gunGlow.castShadow = false;
-    gunGlow.name = 'arena-gun-glow';
-    root.add(gunGlow);
-
-    const keyLight = new THREE.PointLight(DOOM_RED_LIGHT, 11, 46, 1.6);
-    keyLight.position.set(0, ARENA_H - 1.0, 0);
-    keyLight.castShadow = true;
-    configurePointLightShadow(keyLight);
-    keyLight.name = 'arena-key-light';
-    root.add(keyLight);
-
-    const cornerOffsets = [[-HALF + 4, -HALF + 4], [HALF - 4, -HALF + 4],
-        [-HALF + 4, HALF - 4], [HALF - 4, HALF - 4]];
-    for (let i = 0; i < cornerOffsets.length; i++) {
-        const [lx, lz] = cornerOffsets[i];
-        const cl = new THREE.PointLight(DOOM_RED_LIGHT, 3.4, 22, 2.0);
-        cl.position.set(lx, ARENA_H - 1.4, lz);
-        cl.castShadow = false;
-        cl.name = `arena-corner-light-${i}`;
-        root.add(cl);
-    }
-
-    applySilPomLighting(root, keyLight.position.clone());
-    return root;
-}
-
-function getBuiltinLevelDefinition(levelId = 'soccerField') {
-    if (levelId === 'fpsStarter') {
-        return {
-            id: 'fpsStarter',
-            assetName: 'Sample Level',
-            fileSize: 420000,
-            create: createFpsStarterLevel,
-        };
-    }
-
-    if (levelId === 'brickRoom') {
-        return {
-            id: 'brickRoom',
-            assetName: 'Brick Room (POM Demo)',
-            fileSize: 120000,
-            create: createBrickRoomLevel,
-        };
-    }
-
-    if (levelId === 'doomTest') {
-        return {
-            id: 'doomTest',
-            assetName: 'Doom Mini Level',
-            fileSize: 340000,
-            create: createDoomTestLevel,
-            afterLoad: () => {
-                const layout = currentMesh?.userData?.doomMiniLevel || {};
-
-                const startActor = spawnGameplayPrefab('playerSpawn');
-                if (startActor) {
-                    startActor.userData.label = 'Start';
-                    const mesh = getActorRenderObject(startActor);
-                    if (mesh && Array.isArray(layout.playerSpawn)) {
-                        mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
-                        mesh.updateMatrixWorld(true);
-                    }
-                    applyPlayerSpawnFromActor(startActor);
-                }
-
-                const gunActor = spawnGameplayPrefab('doomShotgunSprite');
-                if (gunActor) {
-                    const mesh = getActorRenderObject(gunActor);
-                    if (mesh && Array.isArray(layout.shotgunPickup)) {
-                        mesh.position.set(layout.shotgunPickup[0], layout.shotgunPickup[1], layout.shotgunPickup[2]);
-                        mesh.updateMatrixWorld(true);
-                    }
-                }
-
-                const endActor = spawnGameplayPrefab('teleporter');
-                if (endActor) {
-                    endActor.userData.label = 'Level End';
-                    tintGameplayPrefabActor(endActor, '#ef4444', '#ef4444', 2.8);
-                    setActorWorldPositionExact(
-                        endActor,
-                        Array.isArray(layout.exitTeleporterHidden) ? layout.exitTeleporterHidden : layout.exitTeleporter,
-                        { visible: false },
-                    );
-                }
-
-                currentMesh.userData.doomMiniLevelState = {
-                    exitActor: endActor || null,
-                    arenaBarrier: createDoomMiniBarrierEntries(layout.arenaBarrier),
-                    hallWaveActors: [],
-                    arenaWaveActors: [],
-                    finalWaveActors: [],
-                    hallTriggered: false,
-                    arenaTriggered: false,
-                    finalTriggered: false,
-                    exitUnlocked: false,
-                };
-
-                return null;
-            },
-        };
-    }
-
-    if (levelId === 'doomArena') {
-        return {
-            id: 'doomArena',
-            assetName: 'Doom Arena (Rogue Waves)',
-            fileSize: 300000,
-            create: createDoomArenaLevel,
-            afterLoad: () => {
-                const layout = currentMesh?.userData?.doomArenaLevel || {};
-
-                const startActor = spawnGameplayPrefab('playerSpawn');
-                if (startActor) {
-                    startActor.userData.label = 'Start';
-                    const mesh = getActorRenderObject(startActor);
-                    if (mesh && Array.isArray(layout.playerSpawn)) {
-                        mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
-                        mesh.updateMatrixWorld(true);
-                    }
-                    applyPlayerSpawnFromActor(startActor);
-                }
-
-                const gunActor = spawnGameplayPrefab('doomShotgunSprite');
-                if (gunActor) {
-                    const mesh = getActorRenderObject(gunActor);
-                    if (mesh && Array.isArray(layout.shotgunPickup)) {
-                        mesh.position.set(layout.shotgunPickup[0], layout.shotgunPickup[1], layout.shotgunPickup[2]);
-                        mesh.updateMatrixWorld(true);
-                    }
-                }
-
-                const endActor = spawnGameplayPrefab('teleporter');
-                if (endActor) {
-                    endActor.userData.label = 'Level End';
-                    tintGameplayPrefabActor(endActor, '#ef4444', '#ef4444', 2.8);
-                    setActorWorldPositionExact(
-                        endActor,
-                        Array.isArray(layout.exitTeleporterHidden) ? layout.exitTeleporterHidden : layout.exitTeleporter,
-                        { visible: false },
-                    );
-                }
-
-                currentMesh.userData.doomArenaState = {
-                    exitActor: endActor || null,
-                    waveActors: [],
-                    wave: 0,            // 0 = not started; increments per wave
-                    waveActive: false,  // a wave is currently alive
-                    started: false,     // player has grabbed the gun / moved off pad
-                    nextWaveAt: 0,      // perf.now() gate between waves
-                    exitUnlocked: false,
-                };
-
-                return null;
-            },
-        };
-    }
-
-    if (levelId === 'soccerFieldTerrain') {
-        return createFlatTerrainLevelDefinition();
-    }
-
-    return createSoccerLevelDefinition();
-}
+// Built-in level builders extracted to ../world/levels.js (createLevels
+// factory, wired in wireExtractedModules). These module-scope bindings are
+// reassigned there; only the engine-facing entry points are aliased back.
+let getBuiltinLevelDefinition = () => { throw new Error('levels not wired'); };
+let updateDoomEnemySpriteAnimation = () => {};
+let applyDoomEnemySpriteSkin = () => {};
+let makeDoomShotgunSpriteTexture = () => null;
 
 function loadSample(levelId = 'soccerField') {
     clearCurrentMesh();
@@ -13563,6 +11216,16 @@ function handlePointerLockChange() {
 
     if (!gameplay.pointerLocked && !gameplay.active) return;
 
+    // Rogue card picker released the lock on purpose to show the cursor.
+    // This is a PAUSE, not a Stop — don't tear down / restore the scene.
+    if (gameplay.roguePaused) {
+        gameplay.pointerLocked = false;
+        gameplay.velocity.set(0, 0, 0);
+        physics.desiredVelocity.set(0, 0, 0);
+        resetMovementInputState();
+        return;
+    }
+
     gameplay.pointerLocked = false;
     gameplay.active = false;
     gameplay.velocity.set(0, 0, 0);
@@ -13987,331 +11650,8 @@ const HELI_SETTINGS = {
     levelTorque: 4.5,
 };
 
-const HELICOPTER_USER_SCRIPT = `const HELI = {
-    maxLift: 14, liftAccel: 18, descendAccel: 10, hoverDamping: 1.6,
-    maxForwardSpeed: 22, maxStrafeSpeed: 12, pitchAccel: 2.8, rollAccel: 2.8,
-    yawRate: 1.8, yawAccel: 5, tiltAngle: 0.45, horizontalDrag: 0.55, levelTorque: 4.5,
-};
-const UP = new THREE.Vector3(0, 1, 0);
-let rotorSpeed = 30;
-let liftWidget = null;
-
-function ensureLiftWidget() {
-    if (liftWidget) return;
-    try {
-        liftWidget = CreateWidget(UTextWidget, {
-            Text: 'Lift Accel: ' + HELI.liftAccel,
-            fontSize: 18,
-            color: '#ffd166',
-            backgroundColor: 'rgba(0,0,0,0.6)',
-            position: { x: 0.5, y: 0.05 },
-        });
-        liftWidget?.AddToViewport(30);
-    } catch (e) { console.warn('[heli] widget create failed', e); }
-}
-
-function BeginPlay() {
-    rotorSpeed = 30;
-    ensureLiftWidget();
-}
-
-function Tick(DeltaTime) {
-    const root = object || Self?.mesh;
-    if (!root) return;
-    root.getObjectByName('helicopter-main-rotor')?.rotateY(DeltaTime * rotorSpeed);
-    root.getObjectByName('helicopter-tail-rotor')?.rotateZ(DeltaTime * rotorSpeed * 1.5);
-}
-
-function OnInput(Input, DeltaTime) {
-    if (!physics?.Jolt || !body) return;
-    const Jolt = physics.Jolt;
-    const bi = physics.bodyInterface;
-    const bodyId = body.GetID();
-
-    const throttleFwd = (Input.forward ? 1 : 0) - (Input.back ? 1 : 0);
-    const yawInput = (Input.right ? 1 : 0) - (Input.left ? 1 : 0);
-    const liftUp = Input.lift ? 1 : 0;
-    const liftDown = Input.descend ? 1 : 0;
-
-    rotorSpeed = 30 + (liftUp ? 12 : 0) + Math.abs(throttleFwd) * 6;
-
-    window.exampleWidgets?.speed?.SetText('Lift Accel: ' + HELI.liftAccel.toFixed(2));
-
-    const jp = bi.GetPosition(bodyId);
-    const position = new THREE.Vector3(jp.GetX(), jp.GetY(), jp.GetZ());
-    const jr = bi.GetRotation(bodyId);
-    const rotation = new THREE.Quaternion(jr.GetX(), jr.GetY(), jr.GetZ(), jr.GetW());
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(rotation).normalize();
-    const flatForward = forward.clone(); flatForward.y = 0;
-    if (flatForward.lengthSq() < 1e-4) flatForward.copy(forward);
-    flatForward.normalize();
-    const flatRight = new THREE.Vector3().crossVectors(flatForward, UP).normalize();
-
-    const jv = bi.GetLinearVelocity(bodyId);
-    const linVel = new THREE.Vector3(jv.GetX(), jv.GetY(), jv.GetZ());
-    const ja = bi.GetAngularVelocity(bodyId);
-    const angVel = new THREE.Vector3(ja.GetX(), ja.GetY(), ja.GetZ());
-
-    let verticalAccel = 9.81;
-    if (liftUp) verticalAccel += HELI.liftAccel;
-    if (liftDown) verticalAccel -= HELI.descendAccel;
-    if (!liftUp && !liftDown) verticalAccel -= linVel.y * HELI.hoverDamping;
-    let newVy = linVel.y + verticalAccel * DeltaTime;
-    newVy = THREE.MathUtils.clamp(newVy, -HELI.maxLift, HELI.maxLift);
-
-    const targetFwdSpeed = throttleFwd * HELI.maxForwardSpeed;
-    const horizVel = new THREE.Vector3(linVel.x, 0, linVel.z);
-    const fwdSpeed = horizVel.dot(flatForward);
-    const sideSpeed = horizVel.dot(flatRight);
-    const nextFwd = THREE.MathUtils.damp(fwdSpeed, targetFwdSpeed, HELI.horizontalDrag * 4, DeltaTime);
-    const nextSide = THREE.MathUtils.damp(sideSpeed, 0, HELI.horizontalDrag * 6, DeltaTime);
-    const nextHoriz = flatForward.clone().multiplyScalar(nextFwd).addScaledVector(flatRight, nextSide);
-
-    const nextVel = new Jolt.Vec3(nextHoriz.x, newVy, nextHoriz.z);
-    bi.SetLinearVelocity(bodyId, nextVel);
-    Jolt.destroy(nextVel);
-
-    const targetYaw = -yawInput * HELI.yawRate;
-    const nextYaw = THREE.MathUtils.damp(angVel.y, targetYaw, HELI.yawAccel, DeltaTime);
-    const euler = new THREE.Euler().setFromQuaternion(rotation, 'YXZ');
-    const targetPitch = -throttleFwd * HELI.tiltAngle;
-    const pitchError = targetPitch - euler.x;
-    const rollError = -euler.z;
-    const pitchTorque = pitchError * HELI.levelTorque - angVel.x * 1.4;
-    const rollTorque = rollError * HELI.levelTorque - angVel.z * 1.4;
-
-    const nextAng = new Jolt.Vec3(
-        angVel.x + pitchTorque * DeltaTime,
-        nextYaw,
-        angVel.z + rollTorque * DeltaTime,
-    );
-    bi.SetAngularVelocity(bodyId, nextAng);
-    Jolt.destroy(nextAng);
-    bi.ActivateBody(bodyId);
-}
-
-function OnPossessed() {
-    rotorSpeed = 42;
-}
-
-function OnUnpossessed() {
-    rotorSpeed = 30;
-}`;
-
-const COIN_USER_SCRIPT = `function OnTrigger(subject) {
-    if (Self?.userData?.collected) return;
-    Self.userData.collected = true;
-    const mesh = object || Self?.mesh;
-    if (mesh) mesh.visible = false;
-    window.addGameScore?.(Self.userData?.scoreValue ?? 10);
-}`;
-
-const HEALTH_PICKUP_USER_SCRIPT = `function Tick() {
-    if (!Self?.userData?.collected) return;
-    const now = performance.now();
-    if ((Self.userData.respawnAt || 0) > now) return;
-    Self.userData.collected = false;
-    const mesh = object || Self?.mesh;
-    if (mesh) mesh.visible = true;
-}
-
-function OnTrigger(subject) {
-    if (Self?.userData?.collected) return;
-    if ((gameplay.health ?? 1) >= 1) return;
-    const mesh = object || Self?.mesh;
-    if (!mesh?.visible) return;
-    Self.userData.collected = true;
-    Self.userData.respawnAt = performance.now() + (Self.userData.respawnMs ?? 10000);
-    mesh.visible = false;
-    const heal = Self.userData?.healValue ?? 0.35;
-    window.setPlayerHealth?.((gameplay.health ?? 1) + heal);
-}`;
-
-const TARGET_USER_SCRIPT = `function OnTrigger(subject) {
-    const now = performance.now();
-    if ((Self.userData.hitCooldownUntil || 0) > now) return;
-    Self.userData.hitCooldownUntil = now + 650;
-    window.addGameScore?.(Self.userData?.scoreValue ?? 25);
-}`;
-
-const TELEPORTER_USER_SCRIPT = `function OnTrigger(subject) {
-    const now = performance.now();
-    if ((Self.userData._tpCooldownUntil || 0) > now) return;
-
-    const peers = (window.getGameplayPrefabActors?.('teleporter') || [])
-        .filter((a) => a !== Self && (a.mesh || a.rootNode)?.visible !== false);
-    const destinationActor = peers.length ? peers[0] : (window.getGameplayPrefabActors?.('playerSpawn') || [])[0];
-    const destMesh = destinationActor && (destinationActor.mesh || destinationActor.rootNode);
-    const dest = destMesh ? destMesh.getWorldPosition(new THREE.Vector3()) : null;
-    if (!dest) return;
-
-    window.teleportActiveGameplaySubject?.(dest);
-
-    Self.userData._tpCooldownUntil = now + 900;
-    if (destinationActor) destinationActor.userData._tpCooldownUntil = now + 900;
-}`;
-
-const DOOM_SHOTGUN_USER_SCRIPT = `// ===== DOOM SHOTGUN — all weapon logic lives here. Edit freely. =====
-// OnTrigger: walk over the pickup -> equip (+ pickup chime).
-// Tick: runs every frame while equipped -> firing, ammo, reload, HUD, recoil.
-// Engine primitives:
-//   window.spawnDoomPellet({ spreadX, spreadY, speed, damage, ... }) -> 1 pellet
-//   window.flashDoomShotgun(ms)            -> muzzle flash
-//   window.playDoomShotgunSound(volume)    -> blast sfx
-//   window.playDoomPickupSound(volume)     -> pickup chime
-//   window.applyCameraRecoil(pitch, yaw)   -> camera kick (radians)
-//   window.setWeaponHud(text)              -> bottom-right text ('' hides)
-//   window.equipDoomShotgun(Self)          -> equip
-//   window.spawnMuzzleSmoke()              -> smoke puff + ejected shell
-//   window.spawnImpactBurst(x,y,z,opts)    -> spark/puff at point
-//   window.playImpactSound(v,x,y,z)        -> bullet-on-wall thud (3D if xyz)
-//   window.spawnTracer(ox,oy,oz,dx,dy,dz,len,color) -> bullet streak
-//   window.spawnImpactDecal(x,y,z,nx,ny,nz,opts)    -> scorch on surface
-//   window.flashActorHit(actor,color)      -> brief emissive flash
-//   window.playEnemyHurtSound(v,x,y,z)     -> enemy grunt (3D if xyz)
-//   window.showDamageIndicator(angleRad)   -> directional red arc
-// Overridable engine hooks (set on window; defaults used if unset):
-//   window.onBulletImpact(x,y,z,proj,nx,ny,nz)   -> a bullet hit a wall
-//   window.onEnemyDamaged(actor,dmg,fatal,x,y,z) -> an enemy took damage
-//   window.onPlayerDamaged(angleRad,dmg)         -> the player was hit
-// Input: gameplay.input.firePressed / .reloadPressed (press 'R').
-
-// ---- TUNABLES: change anything here ----
-const MAG_SIZE        = 8;     // shells per magazine
-const RESERVE_AMMO    = 24;    // spare shells carried
-const RELOAD_MS       = 1300;  // reload duration
-const SHOTS_PER_BURST = 1;     // bullets per fire press (1 = no burst)
-const BURST_GAP_MS    = 90;    // delay between burst shots
-const COOLDOWN_MS     = 760;   // lockout after a burst finishes
-const PELLETS         = 7;     // pellets per shot
-const SPREAD          = 0.075; // pellet cone size
-const VOLUME          = 1.0;   // blast sound loudness, 0..1
-const RECOIL_PITCH    = 0.05;  // upward camera kick per shot (radians)
-const RECOIL_YAW      = 0.014; // random sideways kick per shot
-const MUZZLE_SMOKE    = true;  // smoke puff + shell eject per shot
-const IMPACT_FX       = true;  // spark + thud when bullets hit walls
-const IMPACT_DECAL    = true;  // scorch mark left on walls
-const TRACERS         = true;  // glowing streak per pellet
-const ENEMY_HURT_FX   = true;  // flash + grunt on non-fatal enemy hits
-const DMG_INDICATOR   = true;  // directional red arc when player is hit
-const PELLET_PATTERN  = [      // per-pellet [x, y] offsets, scaled by SPREAD
-    [0, 0], [-0.65, -0.2], [0.65, -0.18], [-0.35, 0.42],
-    [0.38, 0.38], [-0.95, 0.16], [0.92, 0.12],
-];
-
-function ammo(ud) {
-    if (ud._mag == null) { ud._mag = MAG_SIZE; ud._reserve = RESERVE_AMMO; }
-    return ud;
-}
-
-// Install combat-feedback hooks. Engine calls these on impact/hurt/player-hit
-// (defaults used if a hook is null). Edit these bodies to change the feel.
-function installHooks() {
-    window.onBulletImpact = IMPACT_FX ? function (x, y, z, proj, nx, ny, nz) {
-        window.spawnImpactBurst?.(x, y, z, { color: 0xffd27a, count: 7 });
-        window.playImpactSound?.(0.8, x, y, z); // 3D positional
-        if (IMPACT_DECAL) window.spawnImpactDecal?.(x, y, z, nx, ny, nz);
-    } : null;
-
-    window.onEnemyDamaged = ENEMY_HURT_FX ? function (actor, dmg, fatal, x, y, z) {
-        if (fatal) return; // engine already played the death sound/effect
-        window.flashActorHit?.(actor, 0xff5555);
-        window.playEnemyHurtSound?.(0.7, x, y, z); // 3D positional
-    } : null;
-
-    window.onPlayerDamaged = DMG_INDICATOR ? function (angleRad) {
-        window.showDamageIndicator?.(angleRad);
-    } : null;
-}
-
-function OnTrigger(subject) {
-    if (Self?.userData?.collected) return;
-    const mesh = object || Self?.mesh;
-    if (!mesh?.visible) return;
-    Self.userData.collected = true;
-    const px = mesh.position.x, py = mesh.position.y, pz = mesh.position.z;
-    mesh.visible = false;
-    ammo(Self.userData);
-    installHooks();
-    window.equipDoomShotgun?.(Self);
-    window.playDoomPickupSound?.(1, px, py, pz); // 3D positional
-}
-
-function fireOneShot() {
-    for (let i = 0; i < PELLETS; i++) {
-        const p = PELLET_PATTERN[i % PELLET_PATTERN.length];
-        window.spawnDoomPellet?.({ spreadX: p[0] * SPREAD, spreadY: p[1] * SPREAD, tracer: TRACERS });
-    }
-    window.flashDoomShotgun?.(85);
-    window.playDoomShotgunSound?.(VOLUME);
-    window.applyCameraRecoil?.(RECOIL_PITCH, (Math.random() - 0.5) * 2 * RECOIL_YAW);
-    if (MUZZLE_SMOKE) window.spawnMuzzleSmoke?.();
-}
-
-function startReload(ud, now) {
-    if (ud._reloadUntil) return;
-    if (ud._reserve <= 0 || ud._mag >= MAG_SIZE) return;
-    ud._reloadUntil = now + RELOAD_MS;
-    ud._burstLeft = 0;
-}
-
-function Tick(DeltaTime) {
-    if (gameplay?.weapon?.type !== 'doomShotgun') return;
-
-    const now = performance.now();
-    const ud = ammo(Self.userData);
-
-    // Reload: by key, or auto when the mag runs dry.
-    if (gameplay.input.reloadPressed) {
-        gameplay.input.reloadPressed = false;
-        startReload(ud, now);
-    }
-    if (ud._reloadUntil) {
-        if (now >= ud._reloadUntil) {
-            const need = MAG_SIZE - ud._mag;
-            const take = Math.min(need, ud._reserve);
-            ud._mag += take;
-            ud._reserve -= take;
-            ud._reloadUntil = 0;
-        } else {
-            window.setWeaponHud?.('RELOADING');
-            return; // can't fire mid-reload
-        }
-    }
-
-    // Queue a burst on fire press (needs ammo + off cooldown).
-    if (gameplay.input.firePressed) {
-        gameplay.input.firePressed = false;
-        if ((ud._cooldownUntil || 0) <= now && (ud._burstLeft || 0) <= 0) {
-            if (ud._mag > 0) {
-                ud._burstLeft = Math.min(SHOTS_PER_BURST, ud._mag);
-                ud._nextShotAt = now;
-            } else {
-                startReload(ud, now); // dry-fire -> auto reload
-            }
-        }
-    }
-
-    // Drive the queued burst.
-    if ((ud._burstLeft || 0) > 0 && now >= (ud._nextShotAt || 0) && ud._mag > 0) {
-        fireOneShot();
-        ud._mag -= 1;
-        ud._burstLeft -= 1;
-        ud._nextShotAt = now + BURST_GAP_MS;
-        if (ud._burstLeft <= 0 || ud._mag <= 0) ud._cooldownUntil = now + COOLDOWN_MS;
-        if (ud._mag <= 0) startReload(ud, now);
-    }
-
-    window.setWeaponHud?.(ud._mag + ' / ' + ud._reserve);
-}`;
-
-const SHOOTER_AI_USER_SCRIPT = `function Tick(DeltaTime) {
-    window.updateShooterAiActor?.(Self, DeltaTime);
-}`;
-
-const SHOOTER_SPAWNER_USER_SCRIPT = `function Tick(DeltaTime) {
-    window.updateShooterSpawnerActor?.(Self, DeltaTime);
-}`;
+// Prefab user-script source strings moved to ../gameplay/prefabScripts.js
+// (imported at top of file). 421 lines of template-literal program text.
 
 // Dedicated scratch for updateHelicopterGameplay; same rationale as the car
 // scratch above (global tempVectors get overwritten mid-function).
@@ -14894,7 +12234,8 @@ function updateGameplay(delta) {
 
     const moveRight = (gameplay.input.right ? 1 : 0) - (gameplay.input.left ? 1 : 0);
     const moveForward = (gameplay.input.forward ? 1 : 0) - (gameplay.input.back ? 1 : 0);
-    const moveSpeed = gameplay.input.sprint ? PLAYER_SETTINGS.sprintSpeed : PLAYER_SETTINGS.walkSpeed;
+    const moveSpeed = (gameplay.input.sprint ? PLAYER_SETTINGS.sprintSpeed : PLAYER_SETTINGS.walkSpeed)
+        * (window.rogueBuffs?.moveSpeed || 1);
     const wasGrounded = gameplay.grounded;
 
     tempVectorA.set(0, 0, 0);
@@ -14980,6 +12321,9 @@ function updateGameplay(delta) {
 
     updateDoomMiniLevelState(characterPosition);
     updateDoomArenaLevelState(characterPosition);
+    if (currentMesh?.userData?.sampleType === 'doomArena') {
+        updateRogueXpOrbs(characterPosition, delta);
+    }
     processGameplayPrefabs();
 
     if (wasGrounded !== gameplay.grounded) {
@@ -15317,171 +12661,13 @@ document.getElementById('reset-view')?.addEventListener('click', () => {
 });
 
 // === UMAP SCENE EXPORT / IMPORT ===
-function exportWorldToUmap() {
-    const umap = exportWorldToJSON();
-    const blob = new Blob([JSON.stringify(umap, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'scene.umap';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 100);
-}
-
-// === SCENE FOLDER BUNDLE ============================================
-// Folder layout:
-//   <picked-folder>/
-//     scene.umap          (slim — actor records + assetPath references)
-//     assets/
-//       <fileName>.obj    (raw imported source files)
-//
-// Loading any folder bundle is far faster than a legacy .umap because
-// importedTemplates no longer carry rootJson; the OBJ/GLB importer runs
-// against the raw bytes the same way a fresh import does.
-
-async function exportWorldToSceneFolder() {
-    const umap = exportWorldToJSON({ preferAssetPath: true });
-    const vehicleTemplateIds = new Set();
-    for (const actor of umap.actors || []) {
-        if (actor?.kind !== 'vehicle') continue;
-        if (actor.vehicleBodyTemplateId) vehicleTemplateIds.add(actor.vehicleBodyTemplateId);
-        if (actor.vehicleWheelTemplateId) vehicleTemplateIds.add(actor.vehicleWheelTemplateId);
-    }
-
-    // Build a parallel GLB cache for every imported template referenced by the
-    // bundle. GLB parses ~10x faster than text OBJ for huge models (e.g. a
-    // 300 MB car), so on next load registerImportedPropTemplateFromSerializedData
-    // can skip the OBJ path entirely. Fall back to the raw source file for any
-    // template whose GLB export fails.
-    const glbAssets = new Map(); // templateId -> { fileName, blob }
-    const rawFiles = new Map();  // templateId -> File (fallback only)
-
-    for (const t of umap.importedTemplates || []) {
-        const template = getImportedTemplate(t.id);
-        if (!template?.root) continue;
-        const sourceFile = importedPropState.sourceFiles[t.id];
-
-        if (vehicleTemplateIds.has(t.id) && sourceFile) {
-            rawFiles.set(t.id, sourceFile);
-            t.assetPath = `assets/${sourceFile.name}`;
-            t.assetType = 'raw';
-            delete t.rootJson;
-            continue;
-        }
-
-        try {
-            const glbBlob = await exportRootToGlb(template.root);
-            const glbName = `${t.id}.glb`;
-            glbAssets.set(t.id, { fileName: glbName, blob: glbBlob });
-            t.assetPath = `assets/${glbName}`;
-            t.assetType = 'glb';
-        } catch (err) {
-            console.warn(`[scene] GLB export failed for template ${t.id}; falling back to raw source.`, err);
-            if (sourceFile) {
-                rawFiles.set(t.id, sourceFile);
-                t.assetPath = `assets/${sourceFile.name}`;
-                t.assetType = 'raw';
-            } else {
-                // No GLB and no raw file — re-inline rootJson so this template
-                // still loads (slower but correct).
-                delete t.assetPath;
-                delete t.assetType;
-                t.rootJson = template.root.toJSON();
-            }
-        }
-    }
-
-    const useFsAccess = typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
-    if (useFsAccess) {
-        let dirHandle;
-        try {
-            dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-        } catch (err) {
-            if (err?.name === 'AbortError') return;
-            console.error('Folder picker failed; falling back to multi-file download.', err);
-            return downloadSceneFolderFallback(umap, glbAssets, rawFiles);
-        }
-        try {
-            await writeFileToDirectory(dirHandle, 'scene.umap', JSON.stringify(umap, null, 2));
-            if (glbAssets.size > 0 || rawFiles.size > 0) {
-                const assetsDir = await dirHandle.getDirectoryHandle('assets', { create: true });
-                for (const { fileName, blob } of glbAssets.values()) {
-                    await writeFileToDirectory(assetsDir, fileName, blob);
-                }
-                for (const file of rawFiles.values()) {
-                    await writeFileToDirectory(assetsDir, file.name, file);
-                }
-            }
-            console.info('[scene] Saved scene folder to picked directory.');
-        } catch (err) {
-            console.error('Failed to write scene folder.', err);
-            alert('Failed to write scene folder. See console for details.');
-        }
-        return;
-    }
-
-    // Fallback for browsers without File System Access API: drop separate
-    // downloads. The user reassembles the folder manually.
-    downloadSceneFolderFallback(umap, glbAssets, rawFiles);
-}
-
-function exportRootToGlb(root) {
-    return new Promise((resolve, reject) => {
-        const exporter = new GLTFExporter();
-        exporter.parse(
-            root,
-            (result) => {
-                if (result instanceof ArrayBuffer) {
-                    resolve(new Blob([result], { type: 'model/gltf-binary' }));
-                } else {
-                    // Defensive: caller asked for binary, but if a runtime
-                    // returns JSON anyway, ship it as a non-binary GLB blob.
-                    resolve(new Blob([JSON.stringify(result)], { type: 'model/gltf+json' }));
-                }
-            },
-            reject,
-            { binary: true, onlyVisible: false }
-        );
-    });
-}
-
-async function writeFileToDirectory(dirHandle, name, contents) {
-    const fileHandle = await dirHandle.getFileHandle(name, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(contents);
-    await writable.close();
-}
-
-function downloadSceneFolderFallback(umap, glbAssets, rawFiles) {
-    const triggerDownload = (blob, name) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = name;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(url), 100);
-    };
-
-    triggerDownload(
-        new Blob([JSON.stringify(umap, null, 2)], { type: 'application/json' }),
-        'scene.umap'
-    );
-    if (glbAssets) {
-        for (const { fileName, blob } of glbAssets.values()) {
-            triggerDownload(blob, fileName);
-        }
-    }
-    if (rawFiles) {
-        for (const file of rawFiles.values()) {
-            triggerDownload(file, file.name);
-        }
-    }
-    alert('Saved scene.umap and its assets as separate downloads. Place them in a folder with assets/<file> next to scene.umap before loading.');
-}
+const sceneBundle = createSceneBundle({
+    exportWorldToJSON: (opts) => exportWorldToJSON(opts),
+    getImportedTemplate: (id) => getImportedTemplate(id),
+    importedPropState,
+});
+const exportWorldToUmap = sceneBundle.exportWorldToUmap;
+const exportWorldToSceneFolder = sceneBundle.exportWorldToSceneFolder;
 
 // === extracted: sceneSerialization (functions) (was lines 9531-10083 of original main.js) ===
 
@@ -15515,480 +12701,23 @@ document.getElementById('scene-folder-input')?.addEventListener('change', (e) =>
     }
 });
 
-const PREFAB_MANIFEST_URL = assetRegistry.resolvePrefabManifest();
-const PREFAB_CATEGORY_ORDER = ['Vehicles', 'Lights', 'Shapes', 'Gameplay', 'Weapons', 'AI'];
-const BUILTIN_PREFAB_ITEMS = [
-    { id: 'helicopter', name: 'Helicopter', category: 'Vehicles', modelPrefab: 'helicopter', image: 'helicopter.svg' },
-    { id: 'point-light', name: 'Point Light', category: 'Lights', kind: 'pointLight', image: 'light-point.svg' },
-    { id: 'spot-light', name: 'Spot Light', category: 'Lights', kind: 'spotLight', image: 'light-spot.svg' },
-    { id: 'sphere', name: 'Sphere', category: 'Shapes', kind: 'sphere', image: 'shape-sphere.svg' },
-    { id: 'cube', name: 'Cube', category: 'Shapes', kind: 'cube', image: 'shape-cube.svg' },
-    { id: 'cylinder', name: 'Cylinder', category: 'Shapes', kind: 'cylinder', image: 'shape-cylinder.svg' },
-    { id: 'capsule', name: 'Capsule', category: 'Shapes', kind: 'capsule', image: 'shape-capsule.svg' },
-    { id: 'player-spawn', name: 'Player Spawn', category: 'Gameplay', gameplayPrefab: 'playerSpawn', image: 'gameplay-spawn.svg' },
-    { id: 'teleporter', name: 'Teleporter', category: 'Gameplay', gameplayPrefab: 'teleporter', image: 'gameplay-teleporter.svg' },
-    { id: 'coin', name: 'Coin +10', category: 'Gameplay', gameplayPrefab: 'coin', image: 'gameplay-coin.svg' },
-    { id: 'health-pickup', name: 'Health +35%', category: 'Gameplay', gameplayPrefab: 'healthPickup', image: 'gameplay-coin.svg' },
-    { id: 'target', name: 'Target +25', category: 'Gameplay', gameplayPrefab: 'target', image: 'gameplay-target.svg' },
-    { id: 'doom-shotgun-sprite', name: 'Doom Shotgun Sprite', category: 'Weapons', gameplayPrefab: 'doomShotgunSprite', image: 'doom-shotgun.svg' },
-    { id: 'navmesh-circle-ai', name: 'Circle Patrol AI', category: 'AI', gameplayPrefab: 'navmeshCircleAi', image: 'ai-navmesh-circle.svg' },
-    { id: 'shooter-ai', name: 'Shooter AI', category: 'AI', gameplayPrefab: 'shooterAi', image: 'ai-shooter.svg' },
-    { id: 'doom-enemy', name: 'Doom Enemy', category: 'AI', gameplayPrefab: 'doomEnemy', image: 'doom-enemy.svg' },
-    { id: 'shooter-spawner', name: 'Shooter Spawner', category: 'AI', gameplayPrefab: 'shooterSpawner', image: 'ai-shooter.svg' },
-    { id: 'smg', name: 'SMG', category: 'AI', gameplayPrefab: 'smg', image: 'ai-shooter.svg' },
-    { id: 'sniper-rifle', name: 'Bolt Action Sniper Rifle', category: 'AI', gameplayPrefab: 'sniperRifle', image: 'ai-shooter.svg' },
-];
-let prefabManifestCache = null;
-let builtinPrefabsRegistered = false;
-
-function registerBuiltinPrefabs() {
-    if (builtinPrefabsRegistered) return;
-    builtinPrefabsRegistered = true;
-    prefabRegistry.registerMany(BUILTIN_PREFAB_ITEMS);
-}
-
-async function loadPrefabManifest() {
-    if (prefabManifestCache) return prefabManifestCache;
-    try {
-        const manifestResponse = await fetch(PREFAB_MANIFEST_URL);
-        if (!manifestResponse.ok) {
-            throw new Error(`Prefab manifest failed: ${manifestResponse.status}`);
-        }
-        prefabManifestCache = await manifestResponse.json();
-        prefabRegistry.registerMany(prefabManifestCache.prefabs || [], { category: 'Vehicles' });
-    } catch (err) {
-        console.warn('Prefab manifest unavailable. Using built-in prefabs only.', err);
-        prefabManifestCache = { prefabs: [] };
-    }
-    return prefabManifestCache;
-}
-
-async function loadPrefab(prefab) {
-    const button = document.getElementById('load-prefab-btn');
-    const previousText = button?.textContent;
-    const status = document.getElementById('prefab-browser-status');
-    if (button) {
-        button.disabled = true;
-        button.textContent = 'Loading...';
-    }
-    if (status) status.textContent = `Loading ${prefab?.name || 'prefab'}...`;
-
-    try {
-        if (!prefab?.file) {
-            throw new Error('Prefab has no file.');
-        }
-
-        const prefabUrl = new URL(prefab.file, new URL(PREFAB_MANIFEST_URL, window.location.href));
-        const prefabCacheKey = prefabUrl.href;
-        let file = prefabRegistry.getCachedActorFile(prefabCacheKey);
-        if (!file) {
-            const prefabResponse = await fetch(prefabUrl);
-            if (!prefabResponse.ok) {
-                throw new Error(`Prefab failed: ${prefabResponse.status}`);
-            }
-            const blob = await prefabResponse.blob();
-            file = new File([blob], prefab.file, { type: 'application/json' });
-            prefabRegistry.cacheActorFile(prefabCacheKey, file);
-        }
-        await loadActorFromFile(file, {
-            askSpawnLocation: false,
-            spawnInFrontOfPlayer: true,
-            prefab,
-        });
-        closePrefabBrowser();
-    } catch (err) {
-        console.error('Failed to load prefab.', err);
-        if (status) status.textContent = 'Failed to load prefab.';
-        alert('Failed to load prefab.');
-    } finally {
-        if (button) {
-            button.disabled = false;
-            button.textContent = previousText || 'Load Prefab';
-        }
-    }
-}
-
-function prefabAssetUrl(path = 'car.svg') {
-    return new URL(path, new URL(PREFAB_MANIFEST_URL, window.location.href));
-}
-
-function makeHelicopterMeshPart(geometry, material, name, position, rotation = null, scale = null) {
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.name = name;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.position.set(position[0], position[1], position[2]);
-    if (rotation) mesh.rotation.set(rotation[0], rotation[1], rotation[2]);
-    if (scale) mesh.scale.set(scale[0], scale[1], scale[2]);
-    return mesh;
-}
-
-function createHelicopterPrefabMesh() {
-    const root = new THREE.Group();
-    root.name = 'Helicopter';
-
-    const paint = new THREE.MeshStandardMaterial({
-        color: 0x2563eb,
-        metalness: 0.28,
-        roughness: 0.34,
-        emissive: 0x061a3f,
-        emissiveIntensity: 0.14,
-    });
-    const glass = new THREE.MeshStandardMaterial({
-        color: 0x9be7ff,
-        metalness: 0.08,
-        roughness: 0.12,
-        transparent: true,
-        opacity: 0.62,
-        emissive: 0x12384d,
-        emissiveIntensity: 0.18,
-    });
-    const dark = new THREE.MeshStandardMaterial({
-        color: 0x111827,
-        metalness: 0.35,
-        roughness: 0.42,
-    });
-    const metal = new THREE.MeshStandardMaterial({
-        color: 0xa7b0bf,
-        metalness: 0.58,
-        roughness: 0.26,
-    });
-
-    const fuselage = makeHelicopterMeshPart(
-        new THREE.CapsuleGeometry(0.48, 1.85, 8, 18),
-        paint,
-        'helicopter-fuselage',
-        [0, 0, -0.18],
-        [Math.PI / 2, 0, 0],
-        [1.08, 0.82, 0.82]
-    );
-    const cockpit = makeHelicopterMeshPart(
-        new THREE.SphereGeometry(0.42, 24, 16),
-        glass,
-        'helicopter-cockpit',
-        [0, 0.1, -1.12],
-        null,
-        [1.05, 0.7, 0.86]
-    );
-    const tailBoom = makeHelicopterMeshPart(
-        new THREE.CylinderGeometry(0.08, 0.13, 2.35, 14),
-        paint,
-        'helicopter-tail-boom',
-        [0, 0.06, 1.62],
-        [Math.PI / 2, 0, 0]
-    );
-    const tailFin = makeHelicopterMeshPart(
-        new THREE.BoxGeometry(0.12, 0.72, 0.48),
-        paint,
-        'helicopter-tail-fin',
-        [0, 0.42, 2.72],
-        [0.25, 0, 0]
-    );
-    const mast = makeHelicopterMeshPart(
-        new THREE.CylinderGeometry(0.07, 0.07, 0.52, 16),
-        metal,
-        'helicopter-rotor-mast',
-        [0, 0.68, -0.12]
-    );
-    const skidLeft = makeHelicopterMeshPart(
-        new THREE.CylinderGeometry(0.035, 0.035, 2.45, 10),
-        metal,
-        'helicopter-left-skid',
-        [-0.48, -0.58, -0.1],
-        [Math.PI / 2, 0, 0]
-    );
-    const skidRight = makeHelicopterMeshPart(
-        new THREE.CylinderGeometry(0.035, 0.035, 2.45, 10),
-        metal,
-        'helicopter-right-skid',
-        [0.48, -0.58, -0.1],
-        [Math.PI / 2, 0, 0]
-    );
-    const skidBarFront = makeHelicopterMeshPart(
-        new THREE.CylinderGeometry(0.025, 0.025, 1.08, 8),
-        metal,
-        'helicopter-front-skid-bar',
-        [0, -0.38, -0.82],
-        [0, 0, Math.PI / 2]
-    );
-    const skidBarRear = makeHelicopterMeshPart(
-        new THREE.CylinderGeometry(0.025, 0.025, 1.08, 8),
-        metal,
-        'helicopter-rear-skid-bar',
-        [0, -0.38, 0.82],
-        [0, 0, Math.PI / 2]
-    );
-
-    const mainRotor = new THREE.Group();
-    mainRotor.name = 'helicopter-main-rotor';
-    mainRotor.position.set(0, 0.98, -0.12);
-    mainRotor.add(
-        makeHelicopterMeshPart(new THREE.BoxGeometry(3.35, 0.035, 0.16), dark, 'helicopter-main-blade-a', [0, 0, 0]),
-        makeHelicopterMeshPart(new THREE.BoxGeometry(0.16, 0.035, 3.35), dark, 'helicopter-main-blade-b', [0, 0, 0]),
-        makeHelicopterMeshPart(new THREE.CylinderGeometry(0.13, 0.13, 0.08, 18), metal, 'helicopter-main-hub', [0, 0, 0])
-    );
-
-    const tailRotor = new THREE.Group();
-    tailRotor.name = 'helicopter-tail-rotor';
-    tailRotor.position.set(0, 0.37, 2.92);
-    tailRotor.add(
-        makeHelicopterMeshPart(new THREE.BoxGeometry(0.72, 0.035, 0.08), dark, 'helicopter-tail-blade-a', [0, 0, 0]),
-        makeHelicopterMeshPart(new THREE.BoxGeometry(0.08, 0.72, 0.035), dark, 'helicopter-tail-blade-b', [0, 0, 0]),
-        makeHelicopterMeshPart(new THREE.CylinderGeometry(0.07, 0.07, 0.06, 12), metal, 'helicopter-tail-hub', [0, 0, 0], [Math.PI / 2, 0, 0])
-    );
-
-    root.add(
-        fuselage,
-        cockpit,
-        tailBoom,
-        tailFin,
-        mast,
-        skidLeft,
-        skidRight,
-        skidBarFront,
-        skidBarRear,
-        mainRotor,
-        tailRotor
-    );
-    return root;
-}
-
-function findExistingHelicopterProp() {
-    return physics.dynamicBodies.find((prop) => prop?.userData?.prefabId === 'helicopter') ?? null;
-}
-
-function spawnHelicopterPrefab() {
-    if (!physics.ready || !scene || !camera) {
-        console.warn('Jolt physics is not ready yet.');
-        return null;
-    }
-
-    const existing = findExistingHelicopterProp();
-    if (existing) {
-        const status = document.getElementById('prefab-browser-status');
-        if (status) status.textContent = 'Helicopter already in scene.';
-        return existing;
-    }
-
-    const { Jolt } = physics;
-    const spawnPosition = tempVectorD;
-    const launchImpulse = tempVectorE;
-    getDynamicPropSpawn(spawnPosition, launchImpulse);
-
-    const halfExtentVector = new Jolt.Vec3(0.82, 0.62, 1.72);
-    const shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.05));
-    Jolt.destroy(halfExtentVector);
-
-    const body = createDynamicPrimitiveBody(shape, spawnPosition, launchImpulse, {
-        restitution: 0.08,
-        friction: 0.72,
-        mass: 220,
-        linearDamping: 0.36,
-        angularDamping: 0.54,
-    });
-    if (!body) return null;
-
-    const mesh = createHelicopterPrefabMesh();
-    mesh.position.copy(spawnPosition);
-    mesh.userData.prefabId = 'helicopter';
-
-    const actor = createDynamicPropActor({
-        body,
-        mesh,
-        kind: 'imported',
-        userData: {
-            label: 'Helicopter',
-            prefabId: 'helicopter',
-        },
-        includeScripts: true,
-    });
-    setActorComponentFlags(actor, {
-        collision: true,
-        physics: true,
-        scripts: true,
-    });
-
-    objectScriptState.drafts[actor.id] = {
-        tick: HELICOPTER_USER_SCRIPT,
-        tickEnabled: true,
-        collision: '',
-    };
-    syncPropScriptState(actor);
-    saveObjectScriptDrafts();
-
-    physics.dynamicBodies.push(actor);
-    dynamicBodySpatial.updateEntry(actor);
-    invalidateDDGI('helicopter spawned');
-    return actor;
-}
-
-function spawnBuiltinPrefab(prefab) {
-    if (prefab?.gameplayPrefab) {
-        const actor = spawnGameplayPrefab(prefab.gameplayPrefab);
-        if (actor) {
-            tagPrefabInstance(actor, prefab);
-        }
-        closePrefabBrowser();
-        return;
-    }
-
-    if (prefab?.modelPrefab === 'helicopter') {
-        const actor = spawnHelicopterPrefab();
-        if (!actor) {
-            const status = document.getElementById('prefab-browser-status');
-            if (status) status.textContent = 'Failed to spawn Helicopter.';
-            return;
-        }
-
-        refreshSceneUI();
-        tagPrefabInstance(actor, prefab);
-        selectShowcaseActor(actor.id);
-        closePrefabBrowser();
-        return;
-    }
-
-    const kind = prefab?.kind || 'sphere';
-    const label = prefab?.name || getActorKindLabel(kind);
-    let actor = null;
-
-    if (isLightActorKind(kind)) {
-        actor = spawnLightActor(kind, {
-            userData: { label },
-            includeScripts: true,
-            scale: Number.parseFloat(getActorKindDefaultScale(kind)),
-        });
-    } else {
-        const scale = Number.parseFloat(getActorKindDefaultScale(kind));
-        actor = spawnDynamicPrimitive(kind, undefined, scale, {
-            includeCollisionBody: true,
-            simulatePhysics: true,
-            includeScripts: true,
-            userData: { label },
-            returnActor: true,
-        });
-    }
-
-    if (!actor) {
-        const status = document.getElementById('prefab-browser-status');
-        if (status) status.textContent = `Failed to spawn ${label}.`;
-        return;
-    }
-
-    refreshSceneUI();
-    tagPrefabInstance(actor, prefab);
-    selectShowcaseActor(actor.id);
-    closePrefabBrowser();
-}
-
-function tagPrefabInstance(actor, prefab) {
-    if (!actor || !prefab?.id) return actor;
-    const assetId = prefab.assetId || prefabRegistry.getPrefabAssetId(prefab.id);
-    actor.userData = {
-        ...(actor.userData || {}),
-        prefabId: actor.userData?.prefabId || prefab.id,
-        prefabAssetId: assetId,
-    };
-    const mesh = getActorRenderObject(actor);
-    if (mesh?.userData) {
-        mesh.userData.prefabId = mesh.userData.prefabId || prefab.id;
-        mesh.userData.prefabAssetId = assetId;
-    }
-    return actor;
-}
-
-function closePrefabBrowser() {
-    const browser = document.getElementById('prefab-browser');
-    if (browser) browser.hidden = true;
-}
-
-function createPrefabBrowserTile(prefab) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'prefab-browser-item';
-
-    const img = document.createElement('img');
-    img.className = 'prefab-browser-thumb';
-    img.alt = prefab.name || 'Prefab';
-    img.src = prefabAssetUrl(prefab.image || 'car.svg');
-
-    const name = document.createElement('div');
-    name.className = 'prefab-browser-name';
-    name.textContent = prefab.name || prefab.file || 'Prefab';
-
-    item.append(img, name);
-    item.addEventListener('click', () => {
-        if (prefab.file) {
-            loadPrefab(prefab);
-        } else {
-            spawnBuiltinPrefab(prefab);
-        }
-    });
-    return item;
-}
-
-async function openPrefabBrowser() {
-    const browser = document.getElementById('prefab-browser');
-    const grid = document.getElementById('prefab-browser-grid');
-    const status = document.getElementById('prefab-browser-status');
-    if (!browser || !grid) return;
-
-    browser.hidden = false;
-    grid.textContent = '';
-    if (status) status.textContent = 'Loading prefabs...';
-
-    try {
-        await loadPrefabManifest();
-        registerBuiltinPrefabs();
-        const prefabs = prefabRegistry.list();
-        if (!prefabs.length) {
-            if (status) status.textContent = 'No prefabs found.';
-            return;
-        }
-
-        prefabRegistry.grouped(PREFAB_CATEGORY_ORDER).forEach(({ category, items }) => {
-            const heading = document.createElement('div');
-            heading.className = 'prefab-category-heading';
-
-            const title = document.createElement('div');
-            title.className = 'prefab-category-title';
-            title.textContent = category;
-
-            const count = document.createElement('div');
-            count.className = 'prefab-category-count';
-            count.textContent = `${items.length}`;
-
-            heading.append(title, count);
-            grid.appendChild(heading);
-            items.forEach((prefab) => grid.appendChild(createPrefabBrowserTile(prefab)));
-        });
-
-        if (status) status.textContent = `${prefabs.length} prefab${prefabs.length === 1 ? '' : 's'}`;
-    } catch (err) {
-        console.error('Failed to open prefab browser.', err);
-        if (status) status.textContent = 'Failed to load prefabs.';
-    }
-}
-
-document.getElementById('load-prefab-btn')?.addEventListener('click', () => {
-    openPrefabBrowser();
+// Prefab system extracted to ../runtime/prefabSystem.js. Instantiated
+// eagerly here (module-eval order) so init() can call
+// registerBuiltinPrefabs/loadPrefabManifest before wireExtractedModules.
+const _prefabSystem = createPrefabSystem({
+    sceneRef: () => scene,
+    cameraRef: () => camera,
+    dynamicBodySpatial, gameplay, objectScriptState, physics,
+    tempVectorD, tempVectorE,
+    createDynamicPrimitiveBody, createOwnedShape, getActorKindDefaultScale,
+    getActorKindLabel, getActorRenderObject, getDynamicPropSpawn,
+    invalidateDDGI, isLightActorKind, refreshSceneUI, saveObjectScriptDrafts,
+    selectShowcaseActor, spawnDynamicPrimitive, spawnGameplayPrefab,
+    spawnLightActor, createDynamicPropActor, loadActorFromFile,
+    setActorComponentFlags, syncPropScriptState,
 });
-document.getElementById('prefab-browser-close')?.addEventListener('click', () => {
-    closePrefabBrowser();
-});
-document.getElementById('prefab-browser')?.addEventListener('click', (event) => {
-    if (event.target?.id === 'prefab-browser') closePrefabBrowser();
-});
-
-document.getElementById('load-actor-btn')?.addEventListener('click', () => {
-    document.getElementById('actor-file-input')?.click();
-});
-document.getElementById('actor-file-input')?.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) {
-        loadActorFromFile(file);
-        e.target.value = '';
-    }
-});
+const registerBuiltinPrefabs = _prefabSystem.registerBuiltinPrefabs;
+const loadPrefabManifest = _prefabSystem.loadPrefabManifest;
 
 document.getElementById('reset-view')?.addEventListener('click', () => {
     if (gameplay.active) {
@@ -16315,6 +13044,66 @@ function wireExtractedModules() {
         currentMesh: () => currentMesh,
         transformControl: () => transformControl,
     });
+
+    // Rogue Waves game mode (extracted to src/gameplay/rogueWaves.js). Inject
+    // engine deps; reassigned vars (scene/currentMesh/renderer) are read live
+    // via appCore inside the module. Alias the returned API to the legacy
+    // module-scope names existing call sites + the game-mode script use.
+    {
+        const rw = createRogueWaves({
+            gameplay, mobileState, SHOOTER_AI_PREFAB,
+            spawnDoomEnemyAt, getActorRenderObject, tintGameplayPrefabActor,
+            setPlayerHealth, isDoomMiniWaveCleared, getGameplayPrefabActors,
+            ensureGameplayPrefabScript, runObjectEventScript,
+            scratchPrefab: () => _scratchPrefab1,
+            getRogueGameModeScript: () => ROGUE_GAMEMODE_SCRIPT,
+            getResetDoomArenaLevelState: () => resetDoomArenaLevelState,
+            respawnPlayer,
+            equipDoomShotgun, equipStraightGun, equipThrowingStar,
+        });
+        ensureRogueState = rw.ensureRogueState;
+        resetRogueState = rw.resetRogueState;
+        spawnRogueXpOrb = rw.spawnRogueXpOrb;
+        updateRogueXpOrbs = rw.updateRogueXpOrbs;
+        grantRogueXp = rw.grantRogueXp;
+        onRogueEnemyKilled = rw.onRogueEnemyKilled;
+        spawnRogueHealthOrb = rw.spawnRogueHealthOrb;
+        spawnRogueEnemy = rw.spawnRogueEnemy;
+        openRogueCardPicker = rw.openRogueCardPicker;
+        closeRogueCardPicker = rw.closeRogueCardPicker;
+        openRogueWeaponPicker = rw.openRogueWeaponPicker;
+        openRogueDeathScreen = rw.openRogueDeathScreen;
+        closeRogueDeathScreen = rw.closeRogueDeathScreen;
+        updateRogueXpBar = rw.updateRogueXpBar;
+        setRogueWaveHud = rw.setRogueWaveHud;
+        updateDoomArenaLevelState = rw.updateDoomArenaLevelState;
+        updateRogueGameMode = rw.updateRogueGameMode;
+        RogueAPI = rw.RogueAPI;
+    }
+
+    // Built-in level builders (extracted to ../world/levels.js). Inject engine
+    // deps; resetRogueState is a reassigned `let` (set by the rogue wiring
+    // above) so pass it through a live wrapper, not by value.
+    {
+        const lv = createLevels({
+            PLAYER_SETTINGS, physics, soccerGoalieState,
+            actorBelongsToCurrentMesh, applyPlayerSpawnFromActor, buildPrimitiveActorMesh,
+            configurePointLightShadow, createDoomMiniBarrierEntries, createDynamicPropActor,
+            createTerrainMesh, getActorBody, getActorRenderObject, markDDGISkipCapture,
+            rebuildActorPhysics,
+            resetRogueState: (...a) => resetRogueState(...a),
+            setActorColor, setActorComponentFlags,
+            setActorResetTransform, setActorWorldPositionExact, setTerrainModeGrid,
+            spawnDynamicPrimitive, spawnGameplayPrefab, tagGameplayPrefabActor,
+            tintGameplayPrefabActor,
+            updateSoccerGoalies: (...a) => updateSoccerGoalies(...a),
+            getCurrentMesh: () => currentMesh,
+        });
+        getBuiltinLevelDefinition = lv.getBuiltinLevelDefinition;
+        updateDoomEnemySpriteAnimation = lv.updateDoomEnemySpriteAnimation;
+        applyDoomEnemySpriteSkin = lv.applyDoomEnemySpriteSkin;
+        makeDoomShotgunSpriteTexture = lv.makeDoomShotgunSpriteTexture;
+    }
 
     setupVehicleEngineAudio({
         scene, camera,
