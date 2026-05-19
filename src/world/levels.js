@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
 import { getProceduralBrickSet } from '../world/materials/proceduralBrickTexture.js';
 import { registerBrickClone } from '../world/materials/brickTextures.js';
+import { core } from '../runtime/appCore.js';
 
 // Built-in level builders (FPS starter, soccer field, brick room, DOOM test
 // & arena) plus DOOM enemy sprite-sheet generation. Extracted verbatim from
@@ -16,11 +17,12 @@ export function createLevels(deps) {
         rebuildActorPhysics, resetRogueState, setActorColor, setActorComponentFlags,
         setActorResetTransform, setActorWorldPositionExact, setTerrainModeGrid,
         spawnDynamicPrimitive, spawnGameplayPrefab, tagGameplayPrefabActor,
-        tintGameplayPrefabActor, updateSoccerGoalies, getCurrentMesh,
+        tintGameplayPrefabActor, updateSoccerGoalies,
     } = deps;
     // Live accessor: currentMesh is reassigned on every level load in
-    // runtime.js, so always read it through the injected getter (never capture).
-    const cm = () => getCurrentMesh();
+    // runtime.js. Read it through the shared engine keystone (appCore.core),
+    // which is bound eagerly at runtime.js load — always live, never stale.
+    const cm = () => core.currentMesh;
 
     function makeSampleLevelPart(name, shape, material, position, rotation = [0, 0, 0], { castShadow = true, receiveShadow = true, skipPhysicsCollision = false } = {}) {
         const kind = shape?.kind;

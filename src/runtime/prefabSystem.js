@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { prefabRegistry } from '../runtime/assets/PrefabRegistry.js';
 import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 import { HELICOPTER_USER_SCRIPT } from '../gameplay/prefabScripts.js';
+import { core } from '../runtime/appCore.js';
 
 // Prefab system: manifest loading, builtin prefab registry, helicopter
 // prefab mesh + spawn, prefab-browser UI, and load-actor-file wiring.
@@ -11,7 +12,6 @@ import { HELICOPTER_USER_SCRIPT } from '../gameplay/prefabScripts.js';
 // registerBuiltinPrefabs/loadPrefabManifest before that wiring runs.
 export function createPrefabSystem(deps) {
     const {
-        sceneRef, cameraRef,
         dynamicBodySpatial, gameplay, objectScriptState, physics,
         tempVectorD, tempVectorE,
         createDynamicPrimitiveBody, createOwnedShape, getActorKindDefaultScale,
@@ -265,7 +265,7 @@ export function createPrefabSystem(deps) {
     }
 
     function spawnHelicopterPrefab() {
-        if (!physics.ready || !sceneRef() || !cameraRef()) {
+        if (!physics.ready || !core.scene || !core.camera) {
             console.warn('Jolt physics is not ready yet.');
             return null;
         }
