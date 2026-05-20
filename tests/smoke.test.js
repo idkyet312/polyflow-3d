@@ -155,6 +155,631 @@ test('CircularPatrolComponent: serialize returns plain data', async () => {
     });
 });
 
+// ───────────────────────── SoccerGoalieComponent ─────────────────────────
+
+test('SoccerGoalieComponent: tick offsets mesh by sin(elapsed*speed+phase)*amp on axis', async () => {
+    const { SoccerGoalieComponent } = await import('../src/runtime/components/SoccerGoalieComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let elapsed = 0;
+    let syncCalls = 0;
+    const mesh = new THREE.Group();
+    const actor = new Actor({ mesh });
+
+    const goalie = new SoccerGoalieComponent({
+        homePosition: [10, 1, 5],
+        axis: [1, 0, 0],
+        amplitude: 3,
+        speed: 2,
+        phase: 0,
+        getElapsed: () => elapsed,
+        getActivation: () => 'activate-token',
+        syncBody: (a, token) => {
+            syncCalls++;
+            assert.equal(a, actor);
+            assert.equal(token, 'activate-token');
+        },
+    });
+    actor.addComponent(goalie);
+
+    // elapsed=0 → sin(0)=0 → at home
+    goalie.tick(0);
+    assert.ok(Math.abs(mesh.position.x - 10) < 1e-9);
+    assert.ok(Math.abs(mesh.position.y - 1) < 1e-9);
+    assert.ok(Math.abs(mesh.position.z - 5) < 1e-9);
+    assert.equal(syncCalls, 1);
+
+    // elapsed=PI/4, speed=2 → sin(PI/2)=1 → +amplitude on axis x
+    elapsed = Math.PI / 4;
+    goalie.tick(0);
+    assert.ok(Math.abs(mesh.position.x - 13) < 1e-9);
+    assert.equal(syncCalls, 2);
+});
+
+test('SoccerGoalieComponent: missing syncBody is a no-op (not a crash)', async () => {
+    const { SoccerGoalieComponent } = await import('../src/runtime/components/SoccerGoalieComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const actor = new Actor({ mesh: new THREE.Group() });
+    const goalie = new SoccerGoalieComponent({
+        homePosition: [0, 0, 0],
+        axis: [0, 1, 0],
+        amplitude: 1,
+        speed: 1,
+        phase: 0,
+        getElapsed: () => Math.PI / 2,
+    });
+    actor.addComponent(goalie);
+    goalie.tick(0);
+    assert.ok(Math.abs(actor.mesh.position.y - 1) < 1e-9);
+});
+
+test('SoccerGoalieComponent: serialize returns plain data', async () => {
+    const { SoccerGoalieComponent } = await import('../src/runtime/components/SoccerGoalieComponent.js');
+    const g = new SoccerGoalieComponent({
+        homePosition: [1, 2, 3], axis: [0, 0, 1],
+        amplitude: 4.5, speed: 1.25, phase: 0.7,
+    });
+    assert.deepEqual(g.serialize(), {
+        homePosition: [1, 2, 3], axis: [0, 0, 1],
+        amplitude: 4.5, speed: 1.25, phase: 0.7,
+    });
+});
+
+// ───────────────────────── ShooterSpawnerComponent ─────────────────────────
+
+test('ShooterSpawnerComponent: tick 1 initializes nextWaveAt, does not spawn', async () => {
+    const { ShooterSpawnerComponent } = await import('../src/runtime/components/ShooterSpawnerComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const spawned = [];
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+
+    const comp = new ShooterSpawnerComponent({
+        tuning: { firstWaveDelayMs: 1000, cooldownMs: 2000, maxAlive: 4, spawnRadius: 6 },
+        baseScoreValue: 100,
+        isGameplayActive: () => true,
+        getMinions: () => [],
+        spawnMinion: (pos, opts) => { spawned.push({ pos: pos.toArray(), opts }); return {}; },
+        getRenderObject: (a) => a.mesh,
+        THREE,
+    });
+    actor.addComponent(comp);
+
+    // First tick should arm the timer, NOT spawn yet.
+    comp.tick(0);
+    assert.equal(spawned.length, 0);
+    assert.ok(comp.nextWaveAt > 0, 'nextWaveAt must be armed after first tick');
+    assert.equal(actor.userData.shooterSpawner?.wave, 0);
+});
+
+test('ShooterSpawnerComponent: tick past nextWaveAt spawns ring of minions, increments wave', async () => {
+    const { ShooterSpawnerComponent } = await import('../src/runtime/components/ShooterSpawnerComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const spawned = [];
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh, id: 'spawner-1' });
+
+    const comp = new ShooterSpawnerComponent({
+        tuning: { firstWaveDelayMs: 0, cooldownMs: 5000, maxAlive: 4, spawnRadius: 6 },
+        baseScoreValue: 100,
+        isGameplayActive: () => true,
+        getMinions: () => [],
+        spawnMinion: (pos, opts) => { spawned.push({ pos: pos.toArray(), opts }); return {}; },
+        getRenderObject: (a) => a.mesh,
+        THREE,
+    });
+    actor.addComponent(comp);
+
+    // First tick → arms timer at now+0. Second tick → satisfies now >= nextWaveAt.
+    comp.tick(0);
+    comp.tick(0);
+    assert.equal(spawned.length, 1, 'first wave should spawn 1 minion (1 + floor(1/2))');
+    assert.equal(spawned[0].opts.spawnedBy, 'spawner-1');
+    assert.equal(spawned[0].opts.scoreValue, 100 + 10);
+    assert.equal(comp.wave, 1);
+});
+
+test('ShooterSpawnerComponent: skips when render mesh hidden', async () => {
+    const { ShooterSpawnerComponent } = await import('../src/runtime/components/ShooterSpawnerComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let spawnCalls = 0;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = false;
+    const actor = new Actor({ mesh });
+
+    const comp = new ShooterSpawnerComponent({
+        tuning: { firstWaveDelayMs: 0, cooldownMs: 100, maxAlive: 4, spawnRadius: 1 },
+        baseScoreValue: 1,
+        isGameplayActive: () => true,
+        getMinions: () => [],
+        spawnMinion: () => { spawnCalls++; return {}; },
+        getRenderObject: (a) => a.mesh,
+        THREE,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    comp.tick(0);
+    assert.equal(spawnCalls, 0);
+});
+
+test('ShooterSpawnerComponent: respects maxAlive cap (already-alive minions block spawn)', async () => {
+    const { ShooterSpawnerComponent } = await import('../src/runtime/components/ShooterSpawnerComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let spawnCalls = 0;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh, id: 'spawner-2' });
+
+    // Two "alive" minions, max=2 → cap reached → no spawn.
+    const fakeMinionMesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    fakeMinionMesh.visible = true;
+    const m1 = { id: 'm1', userData: { shooterAi: { spawnedBy: 'spawner-2', defeated: false } }, mesh: fakeMinionMesh };
+    const m2 = { id: 'm2', userData: { shooterAi: { spawnedBy: 'spawner-2', defeated: false } }, mesh: fakeMinionMesh };
+
+    const comp = new ShooterSpawnerComponent({
+        tuning: { firstWaveDelayMs: 0, cooldownMs: 100, maxAlive: 2, spawnRadius: 1 },
+        baseScoreValue: 1,
+        isGameplayActive: () => true,
+        getMinions: () => [m1, m2],
+        spawnMinion: () => { spawnCalls++; return {}; },
+        getRenderObject: (a) => a.mesh,
+        THREE,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    comp.tick(0);
+    assert.equal(spawnCalls, 0);
+});
+
+test('ShooterSpawnerComponent: syncFromUserData hydrates wave + nextWaveAt', async () => {
+    const { ShooterSpawnerComponent } = await import('../src/runtime/components/ShooterSpawnerComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const actor = new Actor({ mesh: new THREE.Group(), userData: { shooterSpawner: { wave: 7, nextWaveAt: 12345 } } });
+    const comp = new ShooterSpawnerComponent({
+        tuning: { firstWaveDelayMs: 0, cooldownMs: 0, maxAlive: 1, spawnRadius: 1 },
+        THREE,
+    });
+    actor.addComponent(comp);
+    comp.syncFromUserData();
+    assert.equal(comp.wave, 7);
+    assert.equal(comp.nextWaveAt, 12345);
+});
+
+// ───────────────────────── HealthPickupComponent ─────────────────────────
+
+test('HealthPickupComponent: skips when scripted handler present', async () => {
+    const { HealthPickupComponent } = await import('../src/runtime/components/HealthPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let healCalls = 0;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+    const comp = new HealthPickupComponent({
+        tuning: { respawnMs: 5000, healValue: 0.35 },
+        isScripted: () => true,
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getCurrentHealth: () => 0.5,
+        applyHeal: () => { healCalls++; },
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(healCalls, 0);
+    assert.ok(mesh.visible, 'scripted pickup must stay visible — engine doesn\'t touch it');
+});
+
+test('HealthPickupComponent: collects, hides, heals, schedules respawn', async () => {
+    const { HealthPickupComponent } = await import('../src/runtime/components/HealthPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let appliedHealth = null;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+    const comp = new HealthPickupComponent({
+        tuning: { respawnMs: 4000, healValue: 0.35 },
+        isScripted: () => false,
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getCurrentHealth: () => 0.5,
+        applyHeal: (h) => { appliedHealth = h; },
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+
+    comp.tick(0);
+
+    assert.ok(Math.abs(appliedHealth - 0.85) < 1e-9, 'should heal current + healValue');
+    assert.equal(mesh.visible, false);
+    assert.equal(actor.userData.collected, true);
+    assert.ok(actor.userData.respawnAt > 0);
+});
+
+test('HealthPickupComponent: full health gate blocks pickup', async () => {
+    const { HealthPickupComponent } = await import('../src/runtime/components/HealthPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let healCalls = 0;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+    const comp = new HealthPickupComponent({
+        tuning: { respawnMs: 1000, healValue: 0.3 },
+        isScripted: () => false,
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getCurrentHealth: () => 1,
+        applyHeal: () => { healCalls++; },
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(healCalls, 0);
+    assert.ok(mesh.visible);
+    assert.ok(!actor.userData.collected);
+});
+
+test('HealthPickupComponent: respawnAt past now re-shows the mesh', async () => {
+    const { HealthPickupComponent } = await import('../src/runtime/components/HealthPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial());
+    mesh.visible = false;
+    const actor = new Actor({ mesh, userData: { collected: true, respawnAt: 1 } });
+    let appliedHealth = null;
+    const comp = new HealthPickupComponent({
+        tuning: { respawnMs: 1000, healValue: 0.3 },
+        isScripted: () => false,
+        // Already inside, but the un-collect happens FIRST in the tick — second
+        // tick performs the pickup. We assert only the un-collect step here.
+        isSubjectInsideTrigger: () => false,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getCurrentHealth: () => 0.4,
+        applyHeal: (h) => { appliedHealth = h; },
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(mesh.visible, true);
+    assert.equal(actor.userData.collected, false);
+    assert.equal(appliedHealth, null);
+});
+
+test('HealthPickupComponent: reset() clears collected + respawnAt + shows mesh', async () => {
+    const { HealthPickupComponent } = await import('../src/runtime/components/HealthPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.5), new THREE.MeshBasicMaterial());
+    mesh.visible = false;
+    const actor = new Actor({ mesh, userData: { collected: true, respawnAt: 12345 } });
+    const comp = new HealthPickupComponent({
+        tuning: { respawnMs: 1000, healValue: 0.3 },
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.reset();
+    assert.equal(actor.userData.collected, false);
+    assert.equal(actor.userData.respawnAt, 0);
+    assert.equal(mesh.visible, true);
+});
+
+// ───────────────────────── WeaponPickupComponent ─────────────────────────
+
+test('WeaponPickupComponent: equip+hide on trigger eat (smg/sniper variant)', async () => {
+    const { WeaponPickupComponent } = await import('../src/runtime/components/WeaponPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const calls = { equip: 0, sound: 0 };
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+    const comp = new WeaponPickupComponent({
+        equip: () => { calls.equip++; },
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(calls.equip, 1);
+    assert.equal(mesh.visible, false);
+    assert.equal(actor.userData.collected, true);
+    // Second tick — should not re-equip (already collected).
+    comp.tick(0);
+    assert.equal(calls.equip, 1);
+});
+
+test('WeaponPickupComponent: bob enabled bobs sprite y around base + spins material', async () => {
+    const { WeaponPickupComponent } = await import('../src/runtime/components/WeaponPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const mat = new THREE.MeshBasicMaterial();
+    mat.rotation = 0;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(), mat);
+    mesh.visible = true;
+    mesh.position.y = 2.0;
+    const actor = new Actor({ mesh });
+    const comp = new WeaponPickupComponent({
+        equip: () => {},
+        bob: true,
+        // Never collect during the bob test.
+        isSubjectInsideTrigger: () => false,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(actor.userData._bobBaseY, 2.0, 'must record base Y on first bob tick');
+    // Material rotation should now be a finite number (sin of phase).
+    assert.ok(Number.isFinite(mat.rotation));
+});
+
+test('WeaponPickupComponent: scripted variant defers to dispatchTrigger, skips engine eat', async () => {
+    const { WeaponPickupComponent } = await import('../src/runtime/components/WeaponPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const calls = { equip: 0, dispatch: 0 };
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+    const comp = new WeaponPickupComponent({
+        equip: () => { calls.equip++; },
+        isScripted: () => true,
+        dispatchTrigger: () => { calls.dispatch++; },
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(calls.dispatch, 1);
+    assert.equal(calls.equip, 0, 'engine-side equip must NOT run when scripted');
+    assert.equal(mesh.visible, true);
+});
+
+test('WeaponPickupComponent: reset() clears collected + bobBaseY + shows mesh', async () => {
+    const { WeaponPickupComponent } = await import('../src/runtime/components/WeaponPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = false;
+    const actor = new Actor({ mesh, userData: { collected: true, _bobBaseY: 1.5 } });
+    const comp = new WeaponPickupComponent({ getRenderObject: (a) => a.mesh });
+    actor.addComponent(comp);
+    comp.reset();
+    assert.equal(actor.userData.collected, false);
+    assert.equal(actor.userData._bobBaseY, null);
+    assert.equal(mesh.visible, true);
+});
+
+test('WeaponPickupComponent: playPickupSound only fires on actual collect', async () => {
+    const { WeaponPickupComponent } = await import('../src/runtime/components/WeaponPickupComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let soundCalls = 0;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+    let inside = false;
+    const comp = new WeaponPickupComponent({
+        equip: () => {},
+        playPickupSound: () => { soundCalls++; },
+        isSubjectInsideTrigger: () => inside,
+        getSubjectPosition: () => new THREE.Vector3(),
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);  // not inside → no sound
+    assert.equal(soundCalls, 0);
+    inside = true;
+    comp.tick(0);  // inside → collect + sound
+    assert.equal(soundCalls, 1);
+    comp.tick(0);  // already collected → no second sound
+    assert.equal(soundCalls, 1);
+});
+
+// ───────────────────────── CoinComponent ─────────────────────────
+
+test('CoinComponent: collects, hides, scores on subject enter', async () => {
+    const { CoinComponent } = await import('../src/runtime/components/CoinComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let score = 0;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh, userData: { scoreValue: 25 } });
+    const comp = new CoinComponent({
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        addScore: (n) => { score += n; },
+        getRenderObject: (a) => a.mesh,
+        defaultScoreValue: 10,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(score, 25);
+    assert.equal(mesh.visible, false);
+    assert.equal(actor.userData.collected, true);
+    comp.tick(0); // idempotent — already collected
+    assert.equal(score, 25);
+});
+
+test('CoinComponent: scripted handler short-circuits engine collect', async () => {
+    const { CoinComponent } = await import('../src/runtime/components/CoinComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let score = 0;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3), new THREE.MeshBasicMaterial());
+    mesh.visible = true;
+    const actor = new Actor({ mesh });
+    const comp = new CoinComponent({
+        isScripted: () => true,
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        addScore: (n) => { score += n; },
+        getRenderObject: (a) => a.mesh,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(score, 0);
+    assert.equal(mesh.visible, true);
+});
+
+test('CoinComponent: uses defaultScoreValue when actor.userData.scoreValue absent', async () => {
+    const { CoinComponent } = await import('../src/runtime/components/CoinComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let score = 0;
+    const actor = new Actor({ mesh: new THREE.Group() });
+    const comp = new CoinComponent({
+        isSubjectInsideTrigger: () => true,
+        getSubjectPosition: () => new THREE.Vector3(),
+        addScore: (n) => { score += n; },
+        defaultScoreValue: 7,
+    });
+    actor.addComponent(comp);
+    comp.tick(0);
+    assert.equal(score, 7);
+});
+
+// ───────────────────────── TargetComponent ─────────────────────────
+
+test('TargetComponent: scores + arms cooldown when a dynamic body enters zone', async () => {
+    const { TargetComponent } = await import('../src/runtime/components/TargetComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let score = 0;
+    const targetMesh = new THREE.Mesh(new THREE.CylinderGeometry(), new THREE.MeshBasicMaterial());
+    targetMesh.visible = true;
+    targetMesh.position.set(0, 0, 0);
+    const target = new Actor({ mesh: targetMesh, userData: { scoreValue: 25, triggerRadius: 1.5 } });
+
+    // Fake dynamic body inside the zone.
+    const bodyMesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    bodyMesh.visible = true;
+    bodyMesh.position.set(0.5, 0.5, 0);
+    const body = { userData: {}, mesh: bodyMesh };
+
+    const comp = new TargetComponent({
+        getDynamicBodies: () => [body],
+        isPhysicsReady: () => true,
+        getActorBody: () => ({}),
+        getRenderObject: (a) => a.mesh,
+        addScore: (n) => { score += n; },
+        THREE,
+        hitCooldownMs: 500,
+    });
+    target.addComponent(comp);
+
+    comp.tick(0);
+    assert.equal(score, 25);
+    assert.ok(target.userData.hitCooldownUntil > 0);
+
+    // Second tick is gated by cooldown.
+    comp.tick(0);
+    assert.equal(score, 25);
+});
+
+test('TargetComponent: ignores prefab-tagged dynamic bodies', async () => {
+    const { TargetComponent } = await import('../src/runtime/components/TargetComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let score = 0;
+    const targetMesh = new THREE.Mesh(new THREE.CylinderGeometry(), new THREE.MeshBasicMaterial());
+    targetMesh.visible = true;
+    const target = new Actor({ mesh: targetMesh, userData: { scoreValue: 30, triggerRadius: 2 } });
+
+    const ignoredMesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    ignoredMesh.visible = true;
+    // gameplayPrefab key tags it as engine-owned and the target must skip it.
+    const ignored = { userData: { gameplayPrefab: 'coin' }, mesh: ignoredMesh };
+
+    const comp = new TargetComponent({
+        getDynamicBodies: () => [ignored],
+        isPhysicsReady: () => true,
+        getActorBody: () => ({}),
+        getRenderObject: (a) => a.mesh,
+        addScore: (n) => { score += n; },
+        THREE,
+    });
+    target.addComponent(comp);
+    comp.tick(0);
+    assert.equal(score, 0);
+});
+
+test('TargetComponent: scripted variant emits OnTrigger on enter edge only', async () => {
+    const { TargetComponent } = await import('../src/runtime/components/TargetComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    const events = [];
+    const targetMesh = new THREE.Mesh(new THREE.CylinderGeometry(), new THREE.MeshBasicMaterial());
+    targetMesh.visible = true;
+    const target = new Actor({ mesh: targetMesh, userData: { triggerRadius: 1.5 } });
+
+    const bodyMesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    bodyMesh.visible = true;
+    bodyMesh.position.set(0.2, 0.0, 0.2);
+    const body = { userData: {}, mesh: bodyMesh };
+
+    let bodyInside = true;
+    const comp = new TargetComponent({
+        isScripted: () => true,
+        getDynamicBodies: () => (bodyInside ? [body] : []),
+        getRenderObject: (a) => a.mesh,
+        dispatchTriggerEvent: (a, payload, inside) => events.push({ inside, hasPayload: !!payload }),
+        THREE,
+    });
+    target.addComponent(comp);
+
+    // Enter
+    comp.tick(0);
+    // Same frame again — no new edge.
+    comp.tick(0);
+    // Body leaves.
+    bodyInside = false;
+    comp.tick(0);
+    // Edge again the next frame would also fire — but already exited.
+    comp.tick(0);
+
+    assert.deepEqual(events, [
+        { inside: true, hasPayload: true },
+        { inside: false, hasPayload: false },
+    ]);
+});
+
 // ───────────────────────── ActorComponent ─────────────────────────
 
 test('ActorComponent: lifecycle defaults + active flag', async () => {

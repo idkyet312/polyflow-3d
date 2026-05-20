@@ -81,6 +81,11 @@ import {
     TransformComponent,
     DDGIVolumeComponent,
     CircularPatrolComponent,
+    ShooterSpawnerComponent,
+    HealthPickupComponent,
+    WeaponPickupComponent,
+    CoinComponent,
+    TargetComponent,
 } from '../runtime/sceneRuntime.js';
 import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 import { prefabRegistry } from '../runtime/assets/PrefabRegistry.js';
@@ -114,6 +119,10 @@ import { createLightmapBaker } from '../world/lightmapBaker.js';
 import { createPostProcessUiController } from '../world/postProcessUiController.js';
 import { createLitePhysicsPool } from '../physics/litePool.js';
 import { createProjectileInstancer } from '../gameplay/projectileInstancer.js';
+import { createProjectileSystem } from '../gameplay/projectileSystem.js';
+import { createWeaponHud } from '../gameplay/weaponHud.js';
+import { createPlayerCombat } from '../gameplay/playerCombat.js';
+import { createTeleporterSystem } from '../gameplay/teleporterSystem.js';
 import { createRogueWaves } from '../gameplay/rogueWaves.js';
 import {
     AHUD,
@@ -2459,147 +2468,33 @@ function syncGameplaySpawnFromPlayerSpawnActor() {
     return applyPlayerSpawnFromActor(getGameplayPrefabActors('playerSpawn')[0]);
 }
 
-function setPlayerHealth(value = 1) {
-    const numericValue = Number(value);
-    gameplay.health = THREE.MathUtils.clamp(
-        Number.isFinite(numericValue) ? numericValue : gameplay.health,
-        0,
-        1
-    );
-    window.playerHealth = gameplay.health;
-    const fillColor = gameplay.health > 0.35 ? '#00ff66' : '#ff3b30';
-    const healthWidget = window.exampleWidgets?.health;
-    healthWidget?.SetPercent(gameplay.health);
-    healthWidget?._applyConfig?.({ fillColor });
-    window.exampleWidgets?.healthText?.SetText(`Health: ${Math.round(gameplay.health * 100)}%`);
-    window.exampleWidgets?.healthText?._applyConfig?.({ color: fillColor });
-
-    const widgetId = healthWidget?.GetWidgetId?.();
-    const widgetElement = widgetId ? widgetManager?.getWidget?.(widgetId)?.element : null;
-    const fillElement = widgetElement?.querySelector?.('div > div');
-    if (fillElement) {
-        fillElement.style.width = '100%';
-        fillElement.style.transform = `scaleX(${gameplay.health})`;
-        fillElement.style.transformOrigin = 'left center';
-        fillElement.style.backgroundColor = fillColor;
-    }
-
-    if (gameplay.active && gameplay.health <= 0) {
-        queuePlayerDeathRespawn();
-    }
-}
+// Player combat (health, hit feedback, hurt sound, death respawn) extracted
+// to ../gameplay/playerCombat.js. Lazy getters for camera/currentMesh/
+// showDamageIndicator/respawnPlayer/resetMovementInputState because they are
+// declared further down in this file (TDZ avoidance at module load).
+const _playerCombat = createPlayerCombat({
+    gameplay,
+    physics,
+    SHOOTER_AI_PREFAB,
+    getCamera: () => camera,
+    getCurrentMesh: () => currentMesh,
+    getWidgetManager: () => widgetManager,
+    getRuntimeAudio: () => runtimeAudio,
+    showDamageIndicator: (...a) => showDamageIndicator(...a),
+    isDrivingVehicle,
+    clearActiveVehicle,
+    resetMovementInputState: (...a) => resetMovementInputState(...a),
+    respawnPlayer: (...a) => respawnPlayer(...a),
+});
+const setPlayerHealth = _playerCombat.setPlayerHealth;
+const damagePlayer = _playerCombat.damagePlayer;
+const ensurePlayerHitOverlay = _playerCombat.ensurePlayerHitOverlay;
+const triggerPlayerHitFeedback = _playerCombat.triggerPlayerHitFeedback;
+const playPlayerHitSound = _playerCombat.playPlayerHitSound;
+const updatePlayerHitFeedback = _playerCombat.updatePlayerHitFeedback;
+const queuePlayerDeathRespawn = _playerCombat.queuePlayerDeathRespawn;
 if (typeof window !== 'undefined') {
     queueMicrotask(() => { window.setPlayerHealth = setPlayerHealth; });
-}
-
-function damagePlayer(amount = SHOOTER_AI_PREFAB.damage, sourcePos = null) {
-    if (gameplay.dead) return;
-
-    const now = performance.now?.() || Date.now();
-    if (now - (gameplay.lastDamageAt || 0) < SHOOTER_AI_PREFAB.playerDamageCooldownMs) return;
-    gameplay.lastDamageAt = now;
-
-    const damageAmount = THREE.MathUtils.clamp(Number(amount) || 0, 0, SHOOTER_AI_PREFAB.damage)
-        * (window.rogueBuffs?.damageTaken ?? 1);
-    setPlayerHealth((gameplay.health ?? 1) - damageAmount);
-    triggerPlayerHitFeedback();
-
-    // Directional indicator: angle of the hit relative to where the player
-    // faces. 0 = front, +right, PI = behind. Overridable hook.
-    if (sourcePos && camera) {
-        const dx = sourcePos.x - camera.position.x;
-        const dz = sourcePos.z - camera.position.z;
-        const worldAngle = Math.atan2(dx, -dz);   // 0 = -Z (forward), CW
-        const rel = worldAngle - (gameplay.yaw || 0);
-        if (typeof window !== 'undefined' && window.onPlayerDamaged) {
-            try { window.onPlayerDamaged(rel, damageAmount); } catch (e) { /* script error */ }
-        } else {
-            showDamageIndicator(rel);
-        }
-    }
-}
-
-function ensurePlayerHitOverlay() {
-    if (gameplay.hitFeedback.overlay?.parentNode) return gameplay.hitFeedback.overlay;
-    const overlay = document.createElement('div');
-    overlay.style.cssText = `
-        position:absolute;
-        inset:0;
-        pointer-events:none;
-        opacity:0;
-        background:rgba(255,0,0,0.28);
-        z-index:999;
-        transition:opacity 0.08s linear;
-    `;
-    (document.getElementById('canvas-container') || document.body)?.appendChild(overlay);
-    gameplay.hitFeedback.overlay = overlay;
-    return overlay;
-}
-
-function triggerPlayerHitFeedback() {
-    gameplay.hitFeedback.flash = 1;
-    gameplay.hitFeedback.shake = Math.max(gameplay.hitFeedback.shake, 1);
-    const overlay = ensurePlayerHitOverlay();
-    if (overlay) overlay.style.opacity = '1';
-    playPlayerHitSound();
-}
-
-function playPlayerHitSound() {
-    const context = runtimeAudio.listener?.context;
-    if (!context || context.state !== 'running') return;
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = 'square';
-    oscillator.frequency.setValueAtTime(150, context.currentTime);
-    oscillator.frequency.exponentialRampToValueAtTime(70, context.currentTime + 0.12);
-    gain.gain.setValueAtTime(0.08, context.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.12);
-    oscillator.connect(gain).connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.13);
-}
-
-function updatePlayerHitFeedback(delta = 0) {
-    const feedback = gameplay.hitFeedback;
-    if (feedback.flash > 0) {
-        feedback.flash = Math.max(0, feedback.flash - delta * 4.5);
-        if (feedback.overlay) feedback.overlay.style.opacity = String(feedback.flash * 0.42);
-    }
-    if (feedback.shake > 0 && gameplay.active && camera) {
-        feedback.shake = Math.max(0, feedback.shake - delta * 5.5);
-        const strength = 0.055 * feedback.shake;
-        camera.position.x += (Math.random() - 0.5) * strength;
-        camera.position.y += (Math.random() - 0.5) * strength;
-    }
-    // Exponential recoil recovery (~12/s) toward zero, frame-rate independent.
-    if (gameplay.recoilPitch || gameplay.recoilYaw) {
-        const k = Math.exp(-12 * delta);
-        gameplay.recoilPitch *= k;
-        gameplay.recoilYaw *= k;
-        if (Math.abs(gameplay.recoilPitch) < 1e-4) gameplay.recoilPitch = 0;
-        if (Math.abs(gameplay.recoilYaw) < 1e-4) gameplay.recoilYaw = 0;
-    }
-}
-
-function queuePlayerDeathRespawn() {
-    if (gameplay.dead) return;
-
-    gameplay.dead = true;
-    resetMovementInputState();
-    physics.jumpQueued = false;
-    physics.desiredVelocity.set(0, 0, 0);
-    gameplay.velocity.set(0, 0, 0);
-    if (isDrivingVehicle()) clearActiveVehicle();
-
-    // In Rogue Waves the run ENDS on death — the game-mode script shows the
-    // death screen and restart button, so don't auto-respawn here.
-    if (currentMesh?.userData?.sampleType === 'doomArena') return;
-
-    if (gameplay.respawnTimer) clearTimeout(gameplay.respawnTimer);
-    gameplay.respawnTimer = setTimeout(() => {
-        gameplay.respawnTimer = null;
-        respawnPlayer(true);
-    }, 450);
 }
 
 function getPointSegmentDistanceSq(point, start, end) {
@@ -2997,87 +2892,37 @@ function clearGameplayEffects() {
     gameplayPrefabState.effects.length = 0;
 }
 
-function clearShooterProjectiles() {
-    for (const projectile of gameplayPrefabState.shooterProjectiles) {
-        releaseProjectile(projectile);
-    }
-    gameplayPrefabState.shooterProjectiles.length = 0;
-}
+// Projectile spawn/clear extracted to ../gameplay/projectileSystem.js.
+// Instancer is lazily created on first spawn (scene must exist by then).
+const _projectileSystem = createProjectileSystem({
+    getScene: () => scene,
+    gameplayPrefabState,
+    SHOOTER_AI_PREFAB,
+});
+const getProjectileInstancer = _projectileSystem.getProjectileInstancer;
+const acquireProjectileMesh = _projectileSystem.acquireProjectileMesh;
+const releaseProjectile = _projectileSystem.releaseProjectile;
+const spawnShooterProjectile = _projectileSystem.spawnShooterProjectile;
+const clearShooterProjectiles = _projectileSystem.clearShooterProjectiles;
 
-// (disposeProjectileMesh removed — projectiles no longer own per-instance
-// geometry/material; the instancer owns shared geo/mat per visual key.)
-
-// Phase A: bullets render through one InstancedMesh per visual key instead of
-// a Mesh-per-bullet (see src/gameplay/projectileInstancer.js). The instancer
-// hands back a lightweight handle that quacks like the old `mesh` for the
-// fields the gameplay/hit code touches (.position/.name/.visible), so
-// spawnShooterProjectile + updateShooterProjectiles below are unchanged. The
-// instancer owns its own slot pooling, so the old projectilePools Map and the
-// createProjectileMesh/disposeProjectileMesh allocation path are retired.
-let _projectileInstancer = null;
-function getProjectileInstancer() {
-    if (!_projectileInstancer && scene) {
-        _projectileInstancer = createProjectileInstancer(scene);
-    }
-    return _projectileInstancer;
-}
-
-function acquireProjectileMesh(options) {
-    // Returns a handle, or null if that batch is at capacity (caller drops
-    // the shot — same observable effect as the old pool being exhausted).
-    return getProjectileInstancer()?.acquire(options) ?? null;
-}
-
-function releaseProjectile(projectile) {
-    const handle = projectile?.mesh;
-    if (!handle) return;
-    _projectileInstancer?.release(handle);
-}
-
-function spawnShooterProjectile(origin, target, options = {}) {
-    if (!scene || !origin || (!target && !options.velocity)) return;
-
-    const direction = options.velocity
-        ? options.velocity.clone()
-        : target.clone().sub(origin);
-    if (direction.lengthSq() < 1e-6) return;
-    direction.normalize();
-
-    const radius = options.radius ?? 0.12;
-    const color = options.color ?? 0xff2d2d;
-    const mesh = acquireProjectileMesh({
-        poolKey: options.poolKey,
-        radius,
-        color,
-        emissiveIntensity: options.emissiveIntensity ?? 2.6,
-        light: options.light,
-        lightIntensity: options.lightIntensity ?? 1.2,
-        lightDistance: options.lightDistance ?? 2.2,
-        name: options.name || 'Shooter AI Projectile',
-    });
-    // Batch at capacity → drop the shot (same observable effect the old
-    // fixed-size pool had when exhausted). `mesh` is an instancer handle,
-    // not an Object3D: it carries .position/.name/.visible and is added to
-    // the shared InstancedMesh by the instancer, so no scene.add() here.
-    if (!mesh) return;
-    mesh.name = options.name || 'Shooter AI Projectile';
-    mesh.position.copy(origin);
-
-    gameplayPrefabState.shooterProjectiles.push({
-        mesh,
-        poolKey: options.poolKey ?? 'shooterAiBullets',
-        maxPoolSize: options.maxPoolSize ?? SHOOTER_AI_PREFAB.projectilePoolSize,
-        velocity: direction.multiplyScalar(options.speed ?? SHOOTER_AI_PREFAB.projectileSpeed),
-        ttl: options.life ?? SHOOTER_AI_PREFAB.projectileLife,
-        damage: options.damage ?? SHOOTER_AI_PREFAB.damage,
-        hitRadius: options.hitRadius ?? SHOOTER_AI_PREFAB.hitRadius,
-        hitsPlayer: options.hitsPlayer !== false,
-        damagesShooters: options.damagesShooters === true,
-        bounces: options.bounces ?? 0,
-        bounceDamping: options.bounceDamping ?? 0.86,
-        gravity: options.gravity ?? 0,
-    });
-}
+// Teleporter system: shared-state pair-swap + drag-along + cooldown gate.
+// Extracted from processGameplayPrefabs. Lazy wrappers for the symbols
+// declared further down in this file (hasScriptedTriggerHandler, etc) so
+// the factory call happens at module load without TDZ.
+const _teleporterSystem = createTeleporterSystem({
+    gameplay,
+    gameplayPrefabState,
+    getGameplayPrefabActors: (...a) => getGameplayPrefabActors(...a),
+    getActorRenderObject: (...a) => getActorRenderObject(...a),
+    getSceneActors: () => sceneSystem?.actors ?? [],
+    hasScriptedTriggerHandler: (...a) => hasScriptedTriggerHandler(...a),
+    dispatchTriggerForActor: (...a) => dispatchTriggerForActor(...a),
+    isSubjectInsideTrigger: (...a) => isSubjectInsideTrigger(...a),
+    teleportActiveGameplaySubject: (...a) => teleportActiveGameplaySubject(...a),
+    teleportActorTo: (...a) => teleportActorTo(...a),
+    _scratchPrefab1,
+});
+const processTeleporters = _teleporterSystem.processTeleporters;
 
 // Shooter-AI per-frame logic extracted to ../gameplay/shooterAi.js.
 // Eager wiring (deps are hoisted fns or earlier const aliases; pub fns
@@ -3329,42 +3174,146 @@ let setRogueWaveHud = () => {};
 let RogueAPI = null;
 
 
+// ECS: wave-spawning state for shooter-spawner actors lives on
+// ShooterSpawnerComponent. Attach helper handles both fresh-spawn and
+// snapshot-restore paths. The legacy `updateShooterSpawnerActor(spawner)`
+// surface is kept as a back-compat shim — the prefab user script (see
+// SHOOTER_SPAWNER_USER_SCRIPT) calls it via `window.updateShooterSpawnerActor`
+// from its own Tick. We delegate to the component's tick() so behavior stays
+// identical and the SceneSystem's central pass would also drive it.
+const _shooterSpawnerTmp = { v: new THREE.Vector3() };
+function attachShooterSpawnerComponent(actor) {
+    if (!actor) return null;
+    let comp = actor.getComponentByClass?.(ShooterSpawnerComponent);
+    if (comp) {
+        comp.syncFromUserData();
+        return comp;
+    }
+    comp = new ShooterSpawnerComponent({
+        tuning: SHOOTER_SPAWNER_PREFAB,
+        baseScoreValue: SHOOTER_AI_PREFAB.scoreValue,
+        isGameplayActive: () => !!gameplay.active,
+        getMinions: () => getGameplayPrefabActors('shooterAi', _scratchPrefab2),
+        spawnMinion: (pos, opts) => spawnShooterAiAt(pos, opts),
+        getRenderObject: (a) => getActorRenderObject(a),
+        THREE,
+        tmp: _shooterSpawnerTmp,
+    });
+    actor.addComponent(comp);
+    // Driven by the prefab user-script Tick → window.updateShooterSpawnerActor.
+    // Deactivate from the SceneSystem auto-tick pass to avoid a double-tick;
+    // flip _active=true once the user script is retired in favor of ECS.
+    comp.setActive(false);
+    comp.syncFromUserData();
+    return comp;
+}
+
 function updateShooterSpawnerActor(spawner) {
-    if (!gameplay.active || !spawner) return;
-    const mesh = getActorRenderObject(spawner);
-    if (!mesh?.visible) return;
-    const now = performance.now?.() || Date.now();
-    const state = spawner.userData.shooterSpawner || (spawner.userData.shooterSpawner = {});
-    if (!Number.isFinite(state.nextWaveAt)) state.nextWaveAt = now + SHOOTER_SPAWNER_PREFAB.firstWaveDelayMs;
+    if (!spawner) return;
+    const comp = spawner.getComponentByClass?.(ShooterSpawnerComponent)
+        || attachShooterSpawnerComponent(spawner);
+    comp?.tick(0);
+}
 
-    const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab2);
-    let alive = 0;
-    for (let i = 0; i < shooters.length; i++) {
-        const actor = shooters[i];
-        const shooter = actor?.userData?.shooterAi;
-        if (shooter?.spawnedBy === spawner.id && !shooter.defeated && getActorRenderObject(actor)?.visible !== false) {
-            alive++;
-        }
-    }
-    if (alive >= SHOOTER_SPAWNER_PREFAB.maxAlive || now < state.nextWaveAt) return;
+// ECS: per-pickup respawn + trigger-eat state lives on HealthPickupComponent.
+// The component is auto-ticked by sceneSystem.tickComponents each frame; the
+// imperative `for (healthPickup) {...}` block inside processGameplayPrefabs
+// shrinks to "just dispatch the script trigger when scripted" (component
+// handles the engine fallback path).
+// ECS: WeaponPickupComponent covers smg/sniperRifle/doomShotgunSprite. The
+// variant differences (equip strategy, idle bob, pickup sound, script
+// precedence) are wired through the factory options.
+function attachWeaponPickupComponent(actor, variant) {
+    if (!actor) return null;
+    let comp = actor.getComponentByClass?.(WeaponPickupComponent);
+    if (comp) return comp;
+    const isDoom = variant === 'doomShotgun';
+    let equip;
+    if (variant === 'smg') equip = (a) => equipStraightGun(a);
+    else if (variant === 'sniperRifle') equip = (a) => equipSniperRifle(a);
+    else if (variant === 'doomShotgun') equip = (a) => equipDoomShotgun(a);
+    else return null;
 
-    state.wave = (state.wave || 0) + 1;
-    const spawnCount = Math.min(SHOOTER_SPAWNER_PREFAB.maxAlive - alive, 1 + Math.floor(state.wave / 2));
-    mesh.getWorldPosition(tempVectorA);
-    for (let i = 0; i < spawnCount; i++) {
-        const angle = (i / Math.max(1, spawnCount)) * Math.PI * 2 + Math.random() * 0.7;
-        const radius = SHOOTER_SPAWNER_PREFAB.spawnRadius * (0.65 + Math.random() * 0.5);
-        spawnShooterAiAt(new THREE.Vector3(
-            tempVectorA.x + Math.cos(angle) * radius,
-            tempVectorA.y,
-            tempVectorA.z + Math.sin(angle) * radius
-        ), {
-            spawnedBy: spawner.id,
-            scoreValue: SHOOTER_AI_PREFAB.scoreValue + state.wave * 10,
-            ignoreGroundActor: spawner,
-        });
-    }
-    state.nextWaveAt = now + SHOOTER_SPAWNER_PREFAB.cooldownMs;
+    comp = new WeaponPickupComponent({
+        equip,
+        bob: isDoom,
+        isScripted: isDoom ? (a) => hasScriptedTriggerHandler(a) : () => false,
+        dispatchTrigger: (a, pos, subj) => dispatchTriggerForActor(a, pos, subj),
+        isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
+        getSubjectPosition: () => _gameplaySubjectScratch.position,
+        getSubject: () => _gameplaySubjectScratch,
+        getRenderObject: (a) => getActorRenderObject(a),
+        playPickupSound: isDoom ? () => playDoomPickupSound?.() : null,
+    });
+    actor.addComponent(comp);
+    // Same staged migration as HealthPickup: inactive in ECS auto-tick;
+    // legacy loop drives via comp.tick(0) so behavior is identical.
+    comp.setActive(false);
+    return comp;
+}
+
+// ECS: CoinComponent owns the coin collect-on-trigger logic.
+function attachCoinComponent(actor) {
+    if (!actor) return null;
+    let comp = actor.getComponentByClass?.(CoinComponent);
+    if (comp) return comp;
+    comp = new CoinComponent({
+        isScripted: (a) => hasScriptedTriggerHandler(a),
+        isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
+        getSubjectPosition: () => _gameplaySubjectScratch.position,
+        addScore: (amount) => addGameScore(amount),
+        getRenderObject: (a) => getActorRenderObject(a),
+    });
+    actor.addComponent(comp);
+    comp.setActive(false);
+    return comp;
+}
+
+// ECS: TargetComponent owns the score-on-hit + script trigger edge for
+// "target" actors. Shared scratch reused across all targets each frame.
+const _targetTmp = { a: null, b: null };
+function attachTargetComponent(actor) {
+    if (!actor) return null;
+    let comp = actor.getComponentByClass?.(TargetComponent);
+    if (comp) return comp;
+    comp = new TargetComponent({
+        isScripted: (a) => hasScriptedTriggerHandler(a),
+        getDynamicBodies: () => physics.dynamicBodies || _emptyArray,
+        isPhysicsReady: () => !!physics.ready,
+        getActorBody: (a) => getActorBody(a),
+        getRenderObject: (a) => getActorRenderObject(a),
+        addScore: (amount) => addGameScore(amount),
+        dispatchTriggerEvent: (a, payload, inside) => dispatchTriggerEvent(a, payload, inside),
+        tmp: _targetTmp,
+        THREE,
+    });
+    actor.addComponent(comp);
+    comp.setActive(false);
+    return comp;
+}
+
+function attachHealthPickupComponent(actor) {
+    if (!actor) return null;
+    let comp = actor.getComponentByClass?.(HealthPickupComponent);
+    if (comp) return comp;
+    comp = new HealthPickupComponent({
+        tuning: HEALTH_PICKUP_PREFAB,
+        isScripted: (a) => hasScriptedTriggerHandler(a),
+        isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
+        // processGameplayPrefabs writes the live subject position into
+        // _gameplaySubjectScratch.position once per frame before iterating
+        // pickups; we read it from there so the component stays alloc-free.
+        getSubjectPosition: () => _gameplaySubjectScratch.position,
+        getCurrentHealth: () => gameplay.health ?? 1,
+        applyHeal: (newHealth) => setPlayerHealth(newHealth),
+        getRenderObject: (a) => getActorRenderObject(a),
+    });
+    actor.addComponent(comp);
+    // Driven by the legacy processGameplayPrefabs loop (it calls comp.tick(0)
+    // each frame so we keep behavior parity + script-handler precedence).
+    // Flip _active=true once the legacy loop block is removed entirely.
+    comp.setActive(false);
+    return comp;
 }
 
 function updateShooterSpawners(delta = 0) {
@@ -3427,10 +3376,15 @@ registerEngineSound({
     playDoomPickupSound,
 });
 
+// Weapon HUD (ammo text + directional damage indicator). Lazy DOM, no globals.
+const _weaponHud = createWeaponHud();
+const setWeaponHud = _weaponHud.setWeaponHud;
+const showDamageIndicator = _weaponHud.showDamageIndicator;
+
 const heldWeapons = createHeldWeapons({
     getCamera: () => camera,
     gameplay,
-    getWeaponHudEl: () => weaponHudEl,
+    getWeaponHudEl: _weaponHud.getWeaponHudEl,
     getActorRenderObject: (actor) => getActorRenderObject(actor),
     spawnShooterProjectile: (origin, target, opts) => spawnShooterProjectile(origin, target, opts),
     spawnTracer: (...args) => combatFx.spawnTracer(...args),
@@ -3458,74 +3412,8 @@ registerEngineWeapons({
     equipThrowingStar,
     spawnDoomPellet,
 });
-// Bottom-right weapon HUD (ammo / reload text). One reused DOM element.
-let weaponHudEl = null;
-function ensureWeaponHud() {
-    if (weaponHudEl?.parentNode) return weaponHudEl;
-    const el = document.createElement('div');
-    el.style.cssText = `
-        position:absolute;
-        right:28px;
-        bottom:22px;
-        pointer-events:none;
-        font:700 30px/1 "Trebuchet MS",system-ui,sans-serif;
-        color:#ffe27a;
-        text-shadow:0 2px 6px rgba(0,0,0,0.85);
-        letter-spacing:1px;
-        opacity:0;
-        transition:opacity 0.12s linear;
-        z-index:998;
-    `;
-    (document.getElementById('canvas-container') || document.body)?.appendChild(el);
-    weaponHudEl = el;
-    return el;
-}
-// Show HUD text (e.g. "7 / 21" or "RELOADING"). Empty/null hides it.
-function setWeaponHud(text) {
-    const el = ensureWeaponHud();
-    if (!el) return;
-    if (text == null || text === '') {
-        el.style.opacity = '0';
-        return;
-    }
-    el.textContent = String(text);
-    el.style.opacity = '1';
-}
-
-// Directional damage indicator: a red arc that flashes at screen edge in the
-// direction the hit came from. `angleRad` = angle relative to player facing
-// (0 = front, +PI/2 = right, PI = behind). One reused DOM element.
-let dmgIndicatorEl = null;
-function showDamageIndicator(angleRad = Math.PI) {
-    if (!dmgIndicatorEl?.parentNode) {
-        const el = document.createElement('div');
-        el.style.cssText = `
-            position:absolute;
-            left:50%;
-            top:50%;
-            width:240px;
-            height:240px;
-            margin:-120px 0 0 -120px;
-            pointer-events:none;
-            opacity:0;
-            transition:opacity 0.18s linear;
-            z-index:997;
-            background:conic-gradient(from -20deg, rgba(255,30,30,0) 0deg,
-                rgba(255,30,30,0.55) 20deg, rgba(255,30,30,0) 40deg);
-            border-radius:50%;
-            mask:radial-gradient(circle, transparent 58%, #000 70%);
-            -webkit-mask:radial-gradient(circle, transparent 58%, #000 70%);
-        `;
-        (document.getElementById('canvas-container') || document.body)?.appendChild(el);
-        dmgIndicatorEl = el;
-    }
-    const el = dmgIndicatorEl;
-    // Rotate so the arc points toward the hit. 0deg = top of screen = front.
-    el.style.transform = `rotate(${(Number(angleRad) || 0) * 180 / Math.PI}deg)`;
-    el.style.opacity = '1';
-    clearTimeout(el._hideTimer);
-    el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 320);
-}
+// Weapon HUD + damage indicator extracted to ../gameplay/weaponHud.js
+// (instantiated above as _weaponHud, just before createHeldWeapons).
 // HUD surface → engineApi.hud. setWeaponHud + showDamageIndicator
 // reach prefab scripts via the api parameter.
 registerEngineHud({ setWeaponHud, showDamageIndicator });
@@ -3740,6 +3628,7 @@ function spawnGameplayPrefab(type) {
         tagGameplayPrefabActor(actor, type, { triggerRadius: 0.95, groundOffset: 1.0, scoreValue: 10 });
         tintGameplayPrefabActor(actor, '#facc15', '#facc15', 2.8);
         attachDefaultPrefabScript(actor, COIN_USER_SCRIPT);
+        attachCoinComponent(actor);
     } else if (type === 'healthPickup') {
         actor = spawnDynamicPrimitive('sphere', undefined, 0.38, {
             includeCollisionBody: false,
@@ -3766,6 +3655,7 @@ function spawnGameplayPrefab(type) {
         actor.userData.respawnMs = HEALTH_PICKUP_PREFAB.respawnMs;
         tintGameplayPrefabActor(actor, '#22c55e', '#22ff88', 2.2);
         attachDefaultPrefabScript(actor, HEALTH_PICKUP_USER_SCRIPT);
+        attachHealthPickupComponent(actor);
     } else if (type === 'target') {
         actor = spawnDynamicPrimitive('cylinder', undefined, 0.6, {
             includeCollisionBody: true,
@@ -3780,6 +3670,7 @@ function spawnGameplayPrefab(type) {
         tintGameplayPrefabActor(actor, '#ef4444', '#ef4444', 1.2);
         rebuildActorPhysics(actor);
         attachDefaultPrefabScript(actor, TARGET_USER_SCRIPT);
+        attachTargetComponent(actor);
     } else if (type === 'navmeshCircleAi') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -3864,6 +3755,7 @@ function spawnGameplayPrefab(type) {
         tagGameplayPrefabActor(actor, type, { triggerRadius: 1.4, groundOffset: 0.25 });
         tintGameplayPrefabActor(actor, '#7c3aed', '#a855f7', 1.9);
         attachDefaultPrefabScript(actor, SHOOTER_SPAWNER_USER_SCRIPT);
+        attachShooterSpawnerComponent(actor);
     } else if (type === 'smg') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -3893,6 +3785,7 @@ function spawnGameplayPrefab(type) {
         }
         tintGameplayPrefabActor(actor, '#334155', '#f59e0b', 0.8);
         addStraightGunVisual(actor);
+        attachWeaponPickupComponent(actor, 'smg');
     } else if (type === 'sniperRifle') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -3922,6 +3815,7 @@ function spawnGameplayPrefab(type) {
         }
         tintGameplayPrefabActor(actor, '#475569', '#38bdf8', 0.5);
         addStraightGunVisual(actor);
+        attachWeaponPickupComponent(actor, 'sniperRifle');
     } else if (type === 'doomShotgunSprite') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -3964,6 +3858,7 @@ function spawnGameplayPrefab(type) {
         setActorComponentFlags(actor, { collision: false, physics: false, scripts: false });
         tagGameplayPrefabActor(actor, type, { triggerRadius: 0.7, groundOffset: 0.7 });
         attachDefaultPrefabScript(actor, DOOM_SHOTGUN_USER_SCRIPT);
+        attachWeaponPickupComponent(actor, 'doomShotgun');
     } else if (type === 'doomEnemy') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -4050,14 +3945,23 @@ function resetGameplayPrefabs() {
             actor.userData.respawnAt = 0;
             actor.userData.collected = false;
             if (mesh) mesh.visible = true;
+            const comp = actor.getComponentByClass?.(HealthPickupComponent)
+                || attachHealthPickupComponent(actor);
+            comp?.reset();
         } else if (actor.userData.gameplayPrefab === 'shooterSpawner') {
             actor.userData.shooterSpawner = { wave: 0, nextWaveAt: 0 };
+            const comp = actor.getComponentByClass?.(ShooterSpawnerComponent)
+                || attachShooterSpawnerComponent(actor);
+            if (comp) { comp.wave = 0; comp.nextWaveAt = 0; }
         } else if (actor.userData.gameplayPrefab === 'smg') {
             actor.userData.smg = { nextShotAt: 0, cooldownMs: STRAIGHT_GUN_PREFAB.cooldownMs };
+            actor.getComponentByClass?.(WeaponPickupComponent)?.reset();
         } else if (actor.userData.gameplayPrefab === 'sniperRifle') {
             actor.userData.sniperRifle = { nextShotAt: 0, cooldownMs: SNIPER_RIFLE_PREFAB.cooldownMs };
+            actor.getComponentByClass?.(WeaponPickupComponent)?.reset();
         } else if (actor.userData.gameplayPrefab === 'doomShotgunSprite') {
             actor.userData.doomShotgun = { nextShotAt: 0, cooldownMs: DOOM_SHOTGUN_PREFAB.cooldownMs };
+            actor.getComponentByClass?.(WeaponPickupComponent)?.reset();
         }
     });
 
@@ -4314,36 +4218,15 @@ function resetSoccerLevelState() {
     return true;
 }
 
+// Soccer goalies are now driven per-actor by SoccerGoalieComponent (attached
+// in world/levels.js spawnSoccerGoalieWall). This wrapper only advances the
+// shared sin-clock that all goalies' components read, so they stay phase-
+// locked across resets. The component tick pass runs in sceneSystem.tickComponents.
 function updateSoccerGoalies(delta = 0) {
     if (currentMesh?.userData?.sampleType !== 'soccerTargetField') return;
-
     const goalies = getSoccerGoalieActors();
     if (!goalies.length) return;
-
     soccerGoalieState.elapsed = Math.max(0, soccerGoalieState.elapsed + Math.max(0, delta));
-    const activation = gameplay.active && physics.ready
-        ? physics.Jolt.EActivation_Activate
-        : physics?.Jolt?.EActivation_DontActivate;
-
-    for (const actor of goalies) {
-        const mesh = getActorRenderObject(actor);
-        const motion = actor?.userData?.soccerGoalieMotion;
-        if (!mesh || !Array.isArray(motion?.homePosition) || motion.homePosition.length !== 3) continue;
-
-        const axis = Array.isArray(motion.axis) && motion.axis.length === 3 ? motion.axis : [1, 0, 0];
-        const amplitude = Number.isFinite(motion.amplitude) ? motion.amplitude : 0;
-        const speed = Number.isFinite(motion.speed) ? motion.speed : 1;
-        const phase = Number.isFinite(motion.phase) ? motion.phase : 0;
-        const offset = Math.sin(soccerGoalieState.elapsed * speed + phase) * amplitude;
-
-        mesh.position.set(
-            motion.homePosition[0] + axis[0] * offset,
-            motion.homePosition[1] + axis[1] * offset,
-            motion.homePosition[2] + axis[2] * offset
-        );
-        mesh.updateMatrixWorld(true);
-        syncActorBodyToRenderTransform(actor, activation);
-    }
 }
 
 function syncGameplayPrefabVisibility() {
@@ -4490,6 +4373,8 @@ function processGameplayPrefabs() {
     _gameplaySubjectScratch.health = gameplay.health;
     const subject = _gameplaySubjectScratch;
 
+    // Coin logic lives in CoinComponent. Scripted variant still routes through
+    // the trigger dispatcher here (matches the other pickup loops).
     let actors = getGameplayPrefabActors('coin', _scratchPrefab1);
     for (let i = 0; i < actors.length; i++) {
         const coin = actors[i];
@@ -4497,14 +4382,13 @@ function processGameplayPrefabs() {
             dispatchTriggerForActor(coin, subjectPosition, subject);
             continue;
         }
-        if (!isSubjectInsideTrigger(subjectPosition, coin)) continue;
-        coin.userData.collected = true;
-        const mesh = getActorRenderObject(coin);
-        if (mesh) mesh.visible = false;
-        addGameScore(coin.userData.scoreValue ?? 10);
+        const comp = coin.getComponentByClass?.(CoinComponent) || attachCoinComponent(coin);
+        comp?.tick(0);
     }
 
     const now = performance.now?.() || Date.now();
+    // Health pickup logic now lives in HealthPickupComponent. The script-trigger
+    // dispatch stays here because it's gameplay sequencing, not pickup state.
     actors = getGameplayPrefabActors('healthPickup', _scratchPrefab1);
     for (let i = 0; i < actors.length; i++) {
         const pickup = actors[i];
@@ -4512,163 +4396,36 @@ function processGameplayPrefabs() {
             dispatchTriggerForActor(pickup, subjectPosition, subject);
             continue;
         }
-        const mesh = getActorRenderObject(pickup);
-        if (!mesh) continue;
-        if (pickup.userData.collected) {
-            if ((pickup.userData.respawnAt || 0) > now) continue;
-            pickup.userData.collected = false;
-            mesh.visible = true;
+        const comp = pickup.getComponentByClass?.(HealthPickupComponent)
+            || attachHealthPickupComponent(pickup);
+        comp?.tick(0);
+    }
+
+    // Weapon pickups (smg/sniperRifle/doomShotgunSprite) all live on
+    // WeaponPickupComponent now. The component owns idle-bob, collect-on-
+    // trigger, equip, and (for doomShotgun) script-handler precedence + sound.
+    for (const variant of ['smg', 'sniperRifle', 'doomShotgunSprite']) {
+        actors = getGameplayPrefabActors(variant, _scratchPrefab1);
+        for (let i = 0; i < actors.length; i++) {
+            const weapon = actors[i];
+            const variantKey = variant === 'doomShotgunSprite' ? 'doomShotgun' : variant;
+            const comp = weapon.getComponentByClass?.(WeaponPickupComponent)
+                || attachWeaponPickupComponent(weapon, variantKey);
+            comp?.tick(0);
         }
-        if (!mesh.visible || gameplay.health >= 1 || !isSubjectInsideTrigger(subjectPosition, pickup)) continue;
-        pickup.userData.collected = true;
-        pickup.userData.respawnAt = now + (pickup.userData.respawnMs ?? HEALTH_PICKUP_PREFAB.respawnMs);
-        mesh.visible = false;
-        setPlayerHealth((gameplay.health ?? 1) + (pickup.userData.healValue ?? HEALTH_PICKUP_PREFAB.healValue));
     }
 
-    actors = getGameplayPrefabActors('smg', _scratchPrefab1);
-    for (let i = 0; i < actors.length; i++) {
-        const weapon = actors[i];
-        const mesh = getActorRenderObject(weapon);
-        if (!mesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
-        weapon.userData.collected = true;
-        mesh.visible = false;
-        equipStraightGun(weapon);
-    }
-
-    actors = getGameplayPrefabActors('sniperRifle', _scratchPrefab1);
-    for (let i = 0; i < actors.length; i++) {
-        const weapon = actors[i];
-        const mesh = getActorRenderObject(weapon);
-        if (!mesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
-        weapon.userData.collected = true;
-        mesh.visible = false;
-        equipSniperRifle(weapon);
-    }
-
-    actors = getGameplayPrefabActors('doomShotgunSprite', _scratchPrefab1);
-    for (let i = 0; i < actors.length; i++) {
-        const weapon = actors[i];
-        const wmesh = getActorRenderObject(weapon);
-        // Idle bob + spin while sitting un-collected (pickup polish). Sprites
-        // don't rotate visually, so bob the Y around the layout/base height.
-        if (wmesh?.visible && !weapon.userData.collected) {
-            if (weapon.userData._bobBaseY == null) weapon.userData._bobBaseY = wmesh.position.y;
-            const tphase = (performance.now?.() || Date.now()) * 0.004;
-            wmesh.position.y = weapon.userData._bobBaseY + Math.sin(tphase) * 0.12;
-            wmesh.material && (wmesh.material.rotation = Math.sin(tphase * 0.5) * 0.18);
-        }
-        // User script (OnTrigger) owns pickup when present; engine default
-        // only runs as fallback if the script was cleared.
-        if (hasScriptedTriggerHandler(weapon)) {
-            dispatchTriggerForActor(weapon, subjectPosition, subject);
-            continue;
-        }
-        if (!wmesh?.visible || weapon.userData.collected || !isSubjectInsideTrigger(subjectPosition, weapon)) continue;
-        weapon.userData.collected = true;
-        wmesh.visible = false;
-        playDoomPickupSound();
-        equipDoomShotgun(weapon);
-    }
-
+    // Target hit detection (scripted + engine paths) lives in TargetComponent.
     actors = getGameplayPrefabActors('target', _scratchPrefab1);
     for (let i = 0; i < actors.length; i++) {
         const target = actors[i];
-        if (hasScriptedTriggerHandler(target)) {
-            // Script-owned: dispatch OnTrigger when any non-prefab dynamic body enters.
-            const targetMesh = getActorRenderObject(target);
-            if (!targetMesh?.visible) continue;
-            targetMesh.getWorldPosition(tempVectorA);
-            const radius = Number(target.userData?.triggerRadius ?? 1.55);
-            let hitter = null;
-            for (const actor of physics.dynamicBodies || []) {
-                if (!actor || actor.userData?.gameplayPrefab) continue;
-                const mesh = getActorRenderObject(actor);
-                if (!mesh?.visible) continue;
-                mesh.getWorldPosition(tempVectorC);
-                const dx = tempVectorC.x - tempVectorA.x;
-                const dz = tempVectorC.z - tempVectorA.z;
-                const dy = Math.abs(tempVectorC.y - tempVectorA.y);
-                if (dx * dx + dz * dz <= radius * radius && dy <= 2.6) { hitter = actor; break; }
-            }
-            const wasInside = !!target.userData._wasInsideTrigger;
-            const inside = !!hitter;
-            if (inside !== wasInside) {
-                target.userData._wasInsideTrigger = inside;
-                dispatchTriggerEvent(target, hitter ? { hitter, position: tempVectorC.clone() } : null, inside);
-            }
-            continue;
-        }
-        if ((target.userData.hitCooldownUntil || 0) > now) continue;
-        const targetMesh = getActorRenderObject(target);
-        if (!targetMesh?.visible) continue;
-        targetMesh.getWorldPosition(tempVectorA);
-        const radius = Number(target.userData?.triggerRadius ?? 1.55);
-
-        const bodies = physics.dynamicBodies || _emptyArray;
-        for (let bi = 0; bi < bodies.length; bi++) {
-            const actor = bodies[bi];
-            if (!actor || actor.userData?.gameplayPrefab) continue;
-            const body = getActorBody(actor);
-            const mesh = getActorRenderObject(actor);
-            if (!body || !mesh?.visible || !physics.ready) continue;
-
-            mesh.getWorldPosition(tempVectorC);
-            const dx = tempVectorC.x - tempVectorA.x;
-            const dz = tempVectorC.z - tempVectorA.z;
-            const dy = Math.abs(tempVectorC.y - tempVectorA.y);
-            if (dx * dx + dz * dz <= radius * radius && dy <= 2.6) {
-                addGameScore(target.userData.scoreValue ?? 25);
-                target.userData.hitCooldownUntil = now + 650;
-                break;
-            }
-        }
+        const comp = target.getComponentByClass?.(TargetComponent) || attachTargetComponent(target);
+        comp?.tick(0);
     }
 
-    // Teleporter (script-owned path): if any teleporter has scripted trigger, let it
-    // handle via OnTrigger event. Engine still expects script to call teleportPlayer.
-    actors = getGameplayPrefabActors('teleporter', _scratchPrefab1);
-    for (let i = 0; i < actors.length; i++) {
-        const tp = actors[i];
-        if (!hasScriptedTriggerHandler(tp)) continue;
-        dispatchTriggerForActor(tp, subjectPosition, subject);
-    }
-
-    if (now < gameplayPrefabState.teleporterCooldownUntil) return;
-
-    const teleporters = getGameplayPrefabActors('teleporter')
-        .filter((tp) => !hasScriptedTriggerHandler(tp))
-        .filter((actor) => getActorRenderObject(actor)?.visible !== false);
-    const sourceIndex = teleporters.findIndex((actor) => isSubjectInsideTrigger(subjectPosition, actor));
-    if (sourceIndex < 0) return;
-
-    const destinationActor = teleporters.length > 1
-        ? teleporters[(sourceIndex + 1) % teleporters.length]
-        : getGameplayPrefabActors('playerSpawn')[0];
-    const destinationMesh = getActorRenderObject(destinationActor);
-    const destination = destinationMesh
-        ? destinationMesh.getWorldPosition(new THREE.Vector3())
-        : gameplay.spawnPoint.clone();
-    teleportActiveGameplaySubject(destination);
-
-    const sourceMesh = getActorRenderObject(teleporters[sourceIndex]);
-    const sourcePosition = sourceMesh?.getWorldPosition(new THREE.Vector3());
-    const sourceRadius = Number(teleporters[sourceIndex]?.userData?.triggerRadius ?? 1.45);
-    if (sourcePosition) {
-        for (const actor of Array.from(sceneSystem?.actors || [])) {
-            if (!actor || actor === teleporters[sourceIndex] || actor === destinationActor) continue;
-            const mesh = getActorRenderObject(actor);
-            if (!mesh?.visible) continue;
-            mesh.getWorldPosition(tempVectorA);
-            const dx = tempVectorA.x - sourcePosition.x;
-            const dz = tempVectorA.z - sourcePosition.z;
-            const dy = Math.abs(tempVectorA.y - sourcePosition.y);
-            if (dx * dx + dz * dz <= sourceRadius * sourceRadius && dy <= 2.5) {
-                teleportActorTo(actor, destination);
-            }
-        }
-    }
-    gameplayPrefabState.teleporterCooldownUntil = now + 900;
+    // Teleporter logic (scripted dispatch + engine pair-swap + drag-along +
+    // cooldown gate) lives in gameplay/teleporterSystem.js.
+    processTeleporters({ subjectPosition, subject, now });
 }
 
 function syncDynamicPhysicsBodies() {
@@ -8458,7 +8215,7 @@ async function init() {
         // once per frame, after every system that moves/spawns/releases a
         // projectile this frame has run (updateShooterAis →
         // updateShooterProjectiles advances positions; spawners add/remove).
-        _projectileInstancer?.flush();
+        getProjectileInstancer()?.flush();
 
         // Entity bridge (Phase 1): central component System pass. Purely
         // additive — ticks actor ActorComponents once per frame; existing
@@ -10066,7 +9823,7 @@ function wireExtractedModules() {
     // above) so pass it through a live wrapper, not by value.
     {
         const lv = createLevels({
-            PLAYER_SETTINGS, physics, soccerGoalieState,
+            PLAYER_SETTINGS, physics, soccerGoalieState, gameplay,
             actorBelongsToCurrentMesh, applyPlayerSpawnFromActor, buildPrimitiveActorMesh,
             configurePointLightShadow, createDoomMiniBarrierEntries, createDynamicPropActor,
             createTerrainMesh, getActorBody, getActorRenderObject, markDDGISkipCapture,
@@ -10074,7 +9831,9 @@ function wireExtractedModules() {
             resetRogueState: (...a) => resetRogueState(...a),
             setActorColor, setActorComponentFlags,
             setActorResetTransform, setActorWorldPositionExact, setTerrainModeGrid,
-            spawnDynamicPrimitive, spawnGameplayPrefab, tagGameplayPrefabActor,
+            spawnDynamicPrimitive, spawnGameplayPrefab,
+            syncActorBodyToRenderTransform,
+            tagGameplayPrefabActor,
             tintGameplayPrefabActor,
             updateSoccerGoalies: (...a) => updateSoccerGoalies(...a),
         });

@@ -3,6 +3,7 @@ import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMa
 import { getProceduralBrickSet } from '../world/materials/proceduralBrickTexture.js';
 import { registerBrickClone } from '../world/materials/brickTextures.js';
 import { core } from '../runtime/appCore.js';
+import { SoccerGoalieComponent } from '../runtime/components/SoccerGoalieComponent.js';
 
 // Built-in level builders (FPS starter, soccer field, brick room, DOOM test
 // & arena) plus DOOM enemy sprite-sheet generation. Extracted verbatim from
@@ -10,14 +11,14 @@ import { core } from '../runtime/appCore.js';
 // injected (same wireExtractedModules factory pattern as createRogueWaves).
 export function createLevels(deps) {
     const {
-        PLAYER_SETTINGS, physics, soccerGoalieState,
+        PLAYER_SETTINGS, physics, soccerGoalieState, gameplay,
         actorBelongsToCurrentMesh, applyPlayerSpawnFromActor, buildPrimitiveActorMesh,
         configurePointLightShadow, createDoomMiniBarrierEntries, createDynamicPropActor,
         createTerrainMesh, getActorBody, getActorRenderObject, markDDGISkipCapture,
         rebuildActorPhysics, resetRogueState, setActorColor, setActorComponentFlags,
         setActorResetTransform, setActorWorldPositionExact, setTerrainModeGrid,
-        spawnDynamicPrimitive, spawnGameplayPrefab, tagGameplayPrefabActor,
-        tintGameplayPrefabActor, updateSoccerGoalies,
+        spawnDynamicPrimitive, spawnGameplayPrefab, syncActorBodyToRenderTransform,
+        tagGameplayPrefabActor, tintGameplayPrefabActor, updateSoccerGoalies,
     } = deps;
     // Live accessor: currentMesh is reassigned on every level load in
     // runtime.js. Read it through the shared engine keystone (appCore.core),
@@ -529,6 +530,26 @@ export function createLevels(deps) {
         tintGameplayPrefabActor(actor, '#ef4444', '#7f1d1d', 0.42);
         rebuildActorPhysics(actor);
         setActorResetTransform(actor, spec.position, mesh.quaternion);
+
+        // ECS: attach a SoccerGoalieComponent so the SceneSystem tick pass
+        // drives the sin-bob motion. The imperative updateSoccerGoalies loop
+        // in runtime.js now only advances the shared soccerGoalieState.elapsed
+        // clock (kept here for phase-locking across all goalies + reset).
+        const motion = actor.userData.soccerGoalieMotion;
+        if (motion) {
+            actor.addComponent(new SoccerGoalieComponent({
+                homePosition: motion.homePosition,
+                axis: motion.axis,
+                amplitude: motion.amplitude,
+                speed: motion.speed,
+                phase: motion.phase,
+                getElapsed: () => soccerGoalieState.elapsed,
+                getActivation: () => (gameplay?.active && physics?.ready
+                    ? physics.Jolt.EActivation_Activate
+                    : physics?.Jolt?.EActivation_DontActivate),
+                syncBody: syncActorBodyToRenderTransform,
+            }));
+        }
         return actor;
     }
 

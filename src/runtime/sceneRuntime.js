@@ -633,6 +633,12 @@ export { TransformComponent } from './components/TransformComponent.js';
 export { DDGIVolumeComponent } from './components/DDGIVolumeComponent.js';
 export { MeshRendererComponent } from './components/MeshRendererComponent.js';
 export { CircularPatrolComponent } from './components/CircularPatrolComponent.js';
+export { SoccerGoalieComponent } from './components/SoccerGoalieComponent.js';
+export { ShooterSpawnerComponent } from './components/ShooterSpawnerComponent.js';
+export { HealthPickupComponent } from './components/HealthPickupComponent.js';
+export { WeaponPickupComponent } from './components/WeaponPickupComponent.js';
+export { CoinComponent } from './components/CoinComponent.js';
+export { TargetComponent } from './components/TargetComponent.js';
 
 /**
  * Convenience factory: create an Actor with a PhysicsComponent already attached.
