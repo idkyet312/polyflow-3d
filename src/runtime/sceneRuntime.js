@@ -632,6 +632,7 @@ export { PhysicsComponent } from './components/PhysicsComponent.js';
 export { TransformComponent } from './components/TransformComponent.js';
 export { DDGIVolumeComponent } from './components/DDGIVolumeComponent.js';
 export { MeshRendererComponent } from './components/MeshRendererComponent.js';
+export { CircularPatrolComponent } from './components/CircularPatrolComponent.js';
 
 /**
  * Convenience factory: create an Actor with a PhysicsComponent already attached.

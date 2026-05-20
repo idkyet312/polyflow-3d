@@ -5,7 +5,6 @@ import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
-import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
 import {
@@ -37,6 +36,7 @@ import { createVehiclePhysics } from '../vehicle/vehiclePhysics.js';
 import { createInputPanels } from '../ui/inputPanels.js';
 import { createDebugOverlays } from '../debug/overlays.js';
 import { createSceneActorUi } from '../ui/sceneActorUi.js';
+import { createShooterAi } from '../gameplay/shooterAi.js';
 import {
     HELICOPTER_USER_SCRIPT,
     COIN_USER_SCRIPT,
@@ -57,7 +57,6 @@ import {
     loadObjectFromFile,
 } from '../io/objectLoader.js';
 import { createSocketMultiplayer } from '../network/socketMultiplayer.js';
-import { runWebGPUBenchmark } from '../../webgpu_utils.js';
 import { createPhysicsCore } from '../physics/core.js';
 import { createPhysicsRuntime } from '../physics/runtime.js';
 import { createEnvironmentController } from '../world/environment.js';
@@ -81,6 +80,7 @@ import {
     PhysicsComponent,
     TransformComponent,
     DDGIVolumeComponent,
+    CircularPatrolComponent,
 } from '../runtime/sceneRuntime.js';
 import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 import { prefabRegistry } from '../runtime/assets/PrefabRegistry.js';
@@ -136,8 +136,14 @@ import {
     bindAppCore,
 } from '../runtime/appCore.js';
 import {
-    compressTextures,
-} from '../optim/textureCompression.js';
+    engineApi,
+    registerEngineFx,
+    registerEngineSound,
+    registerEngineHud,
+    registerEngineWeapons,
+    installLegacyWindowShims,
+} from '../runtime/engineApi.js';
+import { createShowcaseOptimizer } from '../optim/showcaseOptimizer.js';
 import {
     setupVehicleEngineAudio,
     setEngineAudioDebugEl,
@@ -539,11 +545,6 @@ bindAppCore(
 let lightmapBaker = null;
 let gpuTimestampResolvePending = null;
 let latestGpuRenderMs = 0;
-let originalTriCount = 0;
-let optimizedTriCount = 0;
-let scanPlane;
-let originalFileSize = 0;
-let optimizedBlobUrl = null;
 let environmentController, volumetricFogController, postProcessVolumeManager;
 const globalPostProcessUniforms = {
     bloomStrength: uniform(1.25),
@@ -619,7 +620,6 @@ const {
     updateObjectAnimations,
 } = createObjectLifecycle({ animationMixers });
 const actorCoreSyncState = new Map();
-const EXPORT_MAX_TEXTURE_SIZE = 1024;
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
 const VEHICLE_CUSTOM_IMPORT_VALUE = '__custom_import__';
@@ -1442,38 +1442,6 @@ function copyJoltQuaternion(target, source) {
 
 function createOwnedShape(settings) {
     return physicsCore?.createOwnedShape(settings) ?? null;
-}
-
-function enableOptimizationPipeline() {
-    if (!processTrigger) return;
-    processTrigger.style.opacity = '1';
-    processTrigger.style.cursor = 'pointer';
-    processTrigger.onclick = runOptimizationPipeline;
-}
-
-function updateLoadedAssetStats(name, fileSize, root) {
-    document.getElementById('asset-name').textContent = name;
-    document.getElementById('tri-count').textContent = 'Counting...';
-
-    originalFileSize = fileSize;
-    document.getElementById('file-size').textContent = (originalFileSize / (1024 * 1024)).toFixed(1) + ' MB';
-    document.getElementById('file-diff').textContent = '';
-    document.getElementById('webgpu-speedup').textContent = '--';
-
-    originalTriCount = Math.round(countTrianglesForObject(root));
-    console.log('Model loaded. Triangles:', originalTriCount);
-
-    const countObj = { val: 0 };
-    gsap.to(countObj, {
-        val: originalTriCount,
-        duration: 1.5,
-        ease: 'power2.out',
-        onUpdate: () => {
-            document.getElementById('tri-count').textContent = Math.ceil(countObj.val).toLocaleString();
-        },
-    });
-
-    enableOptimizationPipeline();
 }
 
 function updatePropImportStatus() {
@@ -2719,30 +2687,6 @@ function addCircularNavmeshVisual(navmeshActor) {
     mesh.add(center);
 }
 
-function updateCircularNavmeshAis(delta = 0) {
-    const actors = getGameplayPrefabActors('navmeshCircleAi', _scratchPrefab1);
-    if (!actors.length) return;
-
-    for (let i = 0; i < actors.length; i++) {
-        const actor = actors[i];
-        const mesh = getActorRenderObject(actor);
-        const patrol = actor?.userData?.aiPatrol;
-        if (!mesh || !patrol) continue;
-
-        const center = Array.isArray(patrol.center) ? patrol.center : [0, 0, 0];
-        const radius = Number.isFinite(patrol.radius) ? patrol.radius : BASIC_NAVMESH_AI_PREFAB.radius;
-        const speed = Number.isFinite(patrol.speed) ? patrol.speed : BASIC_NAVMESH_AI_PREFAB.speed;
-        patrol.angle = Number(patrol.angle || 0) + Math.max(0, delta) * speed;
-
-        const x = center[0] + Math.cos(patrol.angle) * radius;
-        const z = center[2] + Math.sin(patrol.angle) * radius;
-        const groundY = getGroundHeightAt(x, z, true, { ignoreActor: actor });
-        mesh.position.set(x, (groundY ?? center[1]) + BASIC_NAVMESH_AI_PREFAB.agentScale * 2.55, z);
-        mesh.rotation.y = -patrol.angle;
-        mesh.updateMatrixWorld(true);
-    }
-}
-
 function addShooterAiVisual(actor) {
     const mesh = getActorRenderObject(actor);
     if (!mesh) return;
@@ -3135,404 +3079,43 @@ function spawnShooterProjectile(origin, target, options = {}) {
     });
 }
 
-function updateShooterProjectiles(delta = 0) {
-    if (!gameplayPrefabState.shooterProjectiles.length) return;
-    const hitPoints = gameplay.active ? getShooterHitPoints() : null;
-    const hitPointsLen = hitPoints ? hitPoints.length : 0;
-    // Cache shooter list once per call; only re-fetch when a projectile actually
-    // needs it (damagesShooters), since it's the common-case path for player shots.
-    let cachedShooters = null;
-
-    for (let i = gameplayPrefabState.shooterProjectiles.length - 1; i >= 0; i--) {
-        const projectile = gameplayPrefabState.shooterProjectiles[i];
-        if (!projectile?.mesh) continue;
-        projectile.ttl -= delta;
-        // Lobbed projectiles (throwing star) arc under their own gravity.
-        if (projectile.gravity) {
-            projectile.velocity.y -= projectile.gravity * delta;
-        }
-        const previousPosition = tempVectorA.copy(projectile.mesh.position);
-        projectile.mesh.position.addScaledVector(projectile.velocity, delta);
-
-        let hitPlayer = false;
-        let hitShooter = false;
-        let hitWall = false;
-        const hitRadius = projectile.hitRadius ?? SHOOTER_AI_PREFAB.hitRadius;
-        const hitRadiusSq = hitRadius * hitRadius;
-
-        // Raycast the segment travelled this frame against world geometry so
-        // bullets stop on walls/floors instead of passing through. Only the
-        // short per-frame span is cast (cheap). Shooter actors are skipped —
-        // the proximity test below owns enemy hits (more forgiving radius);
-        // anything else (level static, props) blocks the bullet.
-        const segVec = tempVectorB.copy(projectile.mesh.position).sub(previousPosition);
-        const segLen = segVec.length();
-        if (segLen > 1e-5 && physicsCore?.castRay) {
-            const dir = tempVectorC.copy(segVec).multiplyScalar(1 / segLen);
-            const ray = raycastWorld(previousPosition, dir, segLen + (projectile.hitRadius ?? 0.1));
-            if (ray?.hit && !ray.actor?.userData?.shooterAi) {
-                const ip = ray.point || projectile.mesh.position;
-                const nrm = ray.normal || { x: 0, y: 1, z: 0 };
-                if ((projectile.bounces || 0) > 0) {
-                    // Ricochet: reflect velocity about the surface normal,
-                    // damp the speed, nudge off the wall so we don't re-hit
-                    // the same face next frame. Star keeps flying.
-                    projectile.bounces -= 1;
-                    const v = projectile.velocity;
-                    const dot = v.x * nrm.x + v.y * nrm.y + v.z * nrm.z;
-                    v.x -= 2 * dot * nrm.x;
-                    v.y -= 2 * dot * nrm.y;
-                    v.z -= 2 * dot * nrm.z;
-                    const damp = projectile.bounceDamping ?? 0.86;
-                    v.multiplyScalar(damp);
-                    projectile.mesh.position.set(
-                        ip.x + nrm.x * 0.12,
-                        ip.y + nrm.y * 0.12,
-                        ip.z + nrm.z * 0.12,
-                    );
-                    spawnImpactBurst(ip.x, ip.y, ip.z, { color: 0x9be7ff, count: 5 });
-                    playImpactSound(0.5, ip.x, ip.y, ip.z);
-                } else {
-                    hitWall = true;
-                    if (ray.point) projectile.mesh.position.copy(ray.point);
-                    // Overridable hook: weapon scripts decide impact FX. Default
-                    // (no override) = spark + 3D thud + scorch decal. nx/ny/nz =
-                    // surface normal (for orienting decals).
-                    if (typeof window !== 'undefined' && window.onBulletImpact) {
-                        try { window.onBulletImpact(ip.x, ip.y, ip.z, projectile, nrm.x, nrm.y, nrm.z); } catch (e) { /* script error */ }
-                    } else {
-                        spawnImpactBurst(ip.x, ip.y, ip.z);
-                        playImpactSound(0.8, ip.x, ip.y, ip.z);
-                        spawnImpactDecal(ip.x, ip.y, ip.z, nrm.x, nrm.y, nrm.z, {
-                            dir: projectile.velocity,
-                            hasNormal: ray.hasNormal === true,
-                        });
-                    }
-                }
-            }
-        }
-        if (!hitWall && projectile.hitsPlayer !== false && hitPoints) {
-            for (let p = 0; p < hitPointsLen; p++) {
-                if (getPointSegmentDistanceSq(hitPoints[p], previousPosition, projectile.mesh.position) <= hitRadiusSq) {
-                    hitPlayer = true;
-                    break;
-                }
-            }
-        }
-        if (!hitWall && !hitPlayer && projectile.damagesShooters) {
-            const shooters = cachedShooters || (cachedShooters = getGameplayPrefabActors('shooterAi', _scratchPrefab2));
-            if (window.DEBUG_BULLET_HITS) {
-                console.log('[bullet]', projectile.mesh.name, 'pos', projectile.mesh.position.toArray(), 'shooters', shooters.length, 'hitRadius', hitRadius);
-            }
-            for (let s = 0; s < shooters.length; s++) {
-                const actor = shooters[s];
-                const mesh = getActorRenderObject(actor);
-                const shooter = actor?.userData?.shooterAi;
-                if (!mesh?.visible || !shooter || shooter.defeated) {
-                    if (window.DEBUG_BULLET_HITS) console.log('[bullet] skip shooter', { visible: mesh?.visible, hasShooter: !!shooter, defeated: shooter?.defeated });
-                    continue;
-                }
-                mesh.getWorldPosition(tempVectorB);
-                tempVectorC.copy(tempVectorB);
-                tempVectorC.y += 0.7;   // head point, lowered from 1.15
-                tempVectorB.y += 0.15;  // body point, lowered from 0.55
-                const dBody = getPointSegmentDistanceSq(tempVectorB, previousPosition, projectile.mesh.position);
-                const dHead = getPointSegmentDistanceSq(tempVectorC, previousPosition, projectile.mesh.position);
-                if (window.DEBUG_BULLET_HITS) {
-                    console.log('[bullet] shooter at', tempVectorB.toArray(), 'dBody', Math.sqrt(dBody), 'dHead', Math.sqrt(dHead), 'r', hitRadius);
-                }
-                if (dBody <= hitRadiusSq || dHead <= hitRadiusSq) {
-                    damageShooterAi(actor, projectile.damage ?? SHOOTER_AI_PREFAB.hitDamage);
-                    hitShooter = true;
-                    break;
-                }
-            }
-        }
-        if (projectile.ttl <= 0 || hitPlayer || hitShooter || hitWall) {
-            releaseProjectile(projectile);
-            gameplayPrefabState.shooterProjectiles.splice(i, 1);
-            if (hitPlayer) {
-                damagePlayer(projectile.damage, projectile.mesh.position);
-                if (!gameplayPrefabState.shooterProjectiles.length) break;
-            }
-        }
-    }
-}
-
-function updateShooterAiPhysicsHits() {
-    if (!gameplay.active || !physics.ready || !physics.dynamicBodies?.length) return;
-
-    const now = performance.now?.() || Date.now();
-    const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab1);
-    for (let si = 0; si < shooters.length; si++) {
-        const actor = shooters[si];
-        const mesh = getActorRenderObject(actor);
-        const shooter = actor?.userData?.shooterAi;
-        if (!mesh || !shooter || shooter.defeated || mesh.visible === false) continue;
-        if ((shooter.lastPhysicsHitAt || 0) + SHOOTER_AI_PREFAB.hitCooldownMs > now) continue;
-
-        mesh.getWorldPosition(tempVectorA);
-        tempVectorC.copy(tempVectorA);
-        tempVectorC.y += 0.6;
-        tempVectorA.y += 1.2;
-
-        for (const prop of physics.dynamicBodies) {
-            if (!prop || prop.userData?.gameplayPrefab) continue;
-            const body = getActorBody(prop);
-            const propMesh = getActorRenderObject(prop);
-            if (!body || !propMesh?.visible) continue;
-
-            const velocity = copyJoltVector(tempVectorB, physics.bodyInterface.GetLinearVelocity(body.GetID()));
-            const speed = velocity.length();
-            if (speed < SHOOTER_AI_PREFAB.hitSpeedThreshold) continue;
-
-            // Star uses a wider contact test so fast ricochets reliably
-            // register a hit instead of skimming past the enemy.
-            const isStar = !!prop.userData?.isThrowingStar;
-            const pad = isStar ? 0.7 : 0.35;
-            const reach = isStar ? 1.05 : 0.65;
-            propMesh.updateMatrixWorld(true);
-            tempBoxA.setFromObject(propMesh).expandByScalar(pad);
-            const hitBody = tempBoxA.distanceToPoint(tempVectorC) <= reach;
-            const hitHead = tempBoxA.distanceToPoint(tempVectorA) <= reach;
-            if (!hitBody && !hitHead) continue;
-
-            shooter.lastPhysicsHitAt = now;
-            const dmg = THREE.MathUtils.clamp(SHOOTER_AI_PREFAB.hitDamage * (speed / 5), 0.12, 0.45)
-                * (isStar ? 0.5 : 1);
-            damageShooterAi(actor, dmg);
-            break;
-        }
-    }
-}
-
-// A perfectly-elastic sphere can gain speed bouncing off moving bodies
-// (enemies, the player capsule). Re-normalize each star's velocity back to
-// its launch speed every frame so collisions only redirect it, never
-// accelerate it — direction is kept, magnitude is pinned.
-function clampThrowingStarSpeed() {
-    if (!physics.ready || !physics.dynamicBodies?.length || !physics.Jolt) return;
-    for (const prop of physics.dynamicBodies) {
-        if (!prop?.userData?.isThrowingStar) continue;
-        // Spin the shuriken blades regardless of the speed-clamp branches.
-        const blades = prop.userData.starBlades;
-        if (blades) blades.rotation.z -= 0.9;
-        const body = getActorBody(prop);
-        if (!body) continue;
-        const target = prop.userData.starSpeed || 0;
-        if (target <= 0) continue;
-        const v = copyJoltVector(tempVectorB, physics.bodyInterface.GetLinearVelocity(body.GetID()));
-        const speed = v.length();
-        if (speed < 1e-3 || Math.abs(speed - target) < 0.5) continue;
-        v.multiplyScalar(target / speed);
-        const jv = new physics.Jolt.Vec3(v.x, v.y, v.z);
-        physics.bodyInterface.SetLinearVelocity(body.GetID(), jv);
-        physics.Jolt.destroy(jv);
-    }
-}
-
-function isShooterLineOfSightClear(origin, target) {
-    if (!origin || !target) return false;
-    const direction = tempVectorD.subVectors(target, origin);
-    const distance = direction.length();
-    if (distance <= 0.1) return true;
-    direction.normalize();
-    const result = raycastWorld(origin, direction, distance);
-    return !result?.hit || (Number(result.distance) || distance) >= distance - 0.75;
-}
-
-// Scratch vectors for getShooterCoverPoint; writes the best candidate directly
-// into `target` instead of allocating a clone per better-score branch.
-const _coverAway = new THREE.Vector3();
-function getShooterCoverPoint(mesh, subjectPosition, target = tempVectorC) {
-    if (!mesh || !subjectPosition || !physics.dynamicBodies?.length) return null;
-    const shooterPosition = mesh.getWorldPosition(tempVectorA);
-    let bestScore = Infinity;
-    let found = false;
-
-    const bodies = physics.dynamicBodies;
-    for (let i = 0; i < bodies.length; i++) {
-        const prop = bodies[i];
-        if (!prop || prop.userData?.gameplayPrefab) continue;
-        const propMesh = getActorRenderObject(prop);
-        if (!propMesh?.visible) continue;
-        const coverPosition = propMesh.getWorldPosition(tempVectorB);
-        const shooterDist = shooterPosition.distanceTo(coverPosition);
-        if (shooterDist > 18) continue;
-        const playerDist = subjectPosition.distanceTo(coverPosition);
-        if (playerDist < 2.2) continue;
-        const score = shooterDist + playerDist * 0.25;
-        if (score < bestScore) {
-            bestScore = score;
-            _coverAway.copy(coverPosition).sub(subjectPosition);
-            _coverAway.y = 0;
-            if (_coverAway.lengthSq() < 1e-6) _coverAway.set(1, 0, 0);
-            _coverAway.normalize();
-            target.copy(coverPosition).addScaledVector(_coverAway, 1.6);
-            found = true;
-        }
-    }
-
-    return found ? target : null;
-}
-
-function updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight) {
-    if (!mesh || !shooter || !subjectPosition || delta <= 0) return false;
-    const position = mesh.getWorldPosition(tempVectorA);
-    const toPlayer = tempVectorB.subVectors(subjectPosition, position);
-    toPlayer.y = 0;
-    const distance = toPlayer.length();
-    if (distance < 0.001) return false;
-    toPlayer.normalize();
-
-    const move = tempVectorC.set(0, 0, 0);
-    const lowHealth = (shooter.health ?? SHOOTER_AI_PREFAB.health) <= SHOOTER_AI_PREFAB.coverHealthThreshold;
-    const coverPoint = lowHealth && hasLineOfSight ? getShooterCoverPoint(mesh, subjectPosition, tempVectorE) : null;
-    if (coverPoint) {
-        move.subVectors(coverPoint, position);
-        move.y = 0;
-    } else {
-        // Perpendicular strafe direction (no Vector3 alloc).
-        const strafeX = -toPlayer.z;
-        const strafeZ = toPlayer.x;
-        if (!Number.isFinite(shooter.strafeDir)) shooter.strafeDir = Math.random() < 0.5 ? -1 : 1;
-        if (!Number.isFinite(shooter.nextStrafeFlipAt) || performance.now() > shooter.nextStrafeFlipAt) {
-            shooter.strafeDir *= -1;
-            shooter.nextStrafeFlipAt = performance.now() + 1400 + Math.random() * 1400;
-        }
-        move.set(strafeX * shooter.strafeDir, 0, strafeZ * shooter.strafeDir);
-        if (distance < 5.5) move.addScaledVector(toPlayer, -0.8);
-        if (distance > 15 && hasLineOfSight) move.addScaledVector(toPlayer, 0.35);
-    }
-
-    if (move.lengthSq() < 1e-6) return false;
-    // Per-actor speed multiplier lets wave variants move faster/slower
-    // (rusher charges in, tank lumbers) without touching the shared prefab.
-    const speedMul = Number.isFinite(shooter.speedMul) ? shooter.speedMul : 1;
-    move.normalize().multiplyScalar(SHOOTER_AI_PREFAB.strafeSpeed * speedMul * delta);
-    // Rushers bias hard toward the player instead of strafing around.
-    if (speedMul > 1.4 && !coverPoint) {
-        move.addScaledVector(toPlayer, SHOOTER_AI_PREFAB.strafeSpeed * speedMul * delta * 0.9);
-    }
-    // Wall block: these enemies have no physics body, so without this they
-    // walk straight through walls. Cast from mid-body along the intended
-    // move; if world geometry is within (step + bodyRadius), clamp the move
-    // to stop a bodyRadius short of the surface.
-    {
-        const bodyRadius = 0.85; // generous so they keep clear of walls
-        const stepLen = move.length();
-        if (stepLen > 1e-5) {
-            tempVectorD.copy(move).multiplyScalar(1 / stepLen); // move dir
-            tempVectorB.copy(mesh.position); tempVectorB.y += 1.0; // mid-body
-            const probe = stepLen + bodyRadius;
-            const wallHit = raycastWorld(tempVectorB, tempVectorD, probe);
-            // Block on world geometry; ignore other enemies + thrown spheres
-            // (horizontal probe at mid-body height rarely hits roofs).
-            const blocked = wallHit?.hit
-                && !wallHit.actor?.userData?.shooterAi
-                && wallHit.actor?.kind !== 'sphere';
-            if (blocked) {
-                const allowed = Math.max(0, (Number(wallHit.distance) || 0) - bodyRadius);
-                if (allowed < stepLen) move.multiplyScalar(allowed / stepLen);
-            }
-        }
-    }
-    mesh.position.add(move);
-    const groundOptions = {
-        ignoreActors: getShooterGroundIgnoreActors(actor, shooter),
-    };
-    const _st = currentMesh?.userData?.sampleType;
-    if (_st === 'doomTest' || _st === 'doomArena') {
-        groundOptions.hitFilter = (hit) => !isDoomRoofSurfaceHit(hit);
-    }
-    const groundY = getGroundHeightAt(mesh.position.x, mesh.position.z, true, {
-        ...groundOptions,
-    });
-    if (groundY !== null) mesh.position.y = groundY + 1.18;
-    mesh.updateMatrixWorld(true);
-    return true;
-}
-
-// Per-call scratch vectors for updateShooterAiActor (called per shooter per frame).
-const _shooterActorSubject = new THREE.Vector3();
-const _shooterActorOrigin = new THREE.Vector3();
-const _shooterActorMuzzleDir = new THREE.Vector3();
-function updateShooterAiActor(actor, delta = 0) {
-    if (!gameplay.active || !actor) return;
-    const subjectPosition = getShooterTargetPosition(_shooterActorSubject);
-    if (!subjectPosition) return;
-
-    const now = performance.now?.() || Date.now();
-    const mesh = getActorRenderObject(actor);
-    const shooter = actor?.userData?.shooterAi;
-    if (!mesh || !shooter || shooter.defeated || mesh.visible === false) return;
-    if (!Number.isFinite(shooter.health)) {
-        setShooterHealth(actor, Number.isFinite(shooter.maxHealth) ? shooter.maxHealth : SHOOTER_AI_PREFAB.health);
-    }
-    ensureShooterHealthBar(actor);
-
-    const origin = mesh.getWorldPosition(_shooterActorOrigin);
-    origin.y += SHOOTER_AI_PREFAB.muzzleHeight;
-    const distanceSq = origin.distanceToSquared(subjectPosition);
-    const range = Number.isFinite(shooter.range) ? shooter.range : SHOOTER_AI_PREFAB.range;
-    if (distanceSq > range * range) {
-        hideShooterAimWarning(actor);
-        updateDoomEnemySpriteAnimation(actor, delta, false);
-        return;
-    }
-
-    const hasLineOfSight = isShooterLineOfSightClear(origin, subjectPosition);
-    const moved = updateShooterMovement(actor, mesh, shooter, subjectPosition, delta, hasLineOfSight);
-    mesh.getWorldPosition(origin);
-    origin.y += SHOOTER_AI_PREFAB.muzzleHeight;
-
-    mesh.lookAt(subjectPosition.x, mesh.position.y + SHOOTER_AI_PREFAB.muzzleHeight, subjectPosition.z);
-    mesh.rotateY(Math.PI);
-    if (!hasLineOfSight) {
-        hideShooterAimWarning(actor);
-        shooter.windupUntil = 0;
-        updateDoomEnemySpriteAnimation(actor, delta, moved);
-        return;
-    }
-
-    if ((shooter.nextShotAt || 0) > now) {
-        hideShooterAimWarning(actor);
-        updateDoomEnemySpriteAnimation(actor, delta, moved);
-        return;
-    }
-
-    if (!shooter.windupUntil) {
-        shooter.windupUntil = now + SHOOTER_AI_PREFAB.aimWarningMs;
-    }
-    const charge = 1 - Math.max(0, shooter.windupUntil - now) / SHOOTER_AI_PREFAB.aimWarningMs;
-    updateShooterAimWarning(actor, origin, subjectPosition, charge, true);
-    if (now < shooter.windupUntil) {
-        updateDoomEnemySpriteAnimation(actor, delta, moved);
-        return;
-    }
-
-    hideShooterAimWarning(actor);
-    shooter.windupUntil = 0;
-    _shooterActorMuzzleDir.copy(subjectPosition).sub(origin).normalize().multiplyScalar(0.55);
-    origin.add(_shooterActorMuzzleDir);
-    spawnShooterProjectile(origin, subjectPosition);
-    shooter.nextShotAt = now + (Number.isFinite(shooter.cooldownMs) ? shooter.cooldownMs : SHOOTER_AI_PREFAB.cooldownMs);
-    updateDoomEnemySpriteAnimation(actor, delta, moved);
-}
-
-function updateShooterAis(delta = 0) {
-    updateShooterProjectiles(delta);
-    updateShooterAiPhysicsHits();
-    clampThrowingStarSpeed();
-    if (!gameplay.active) return;
-
-    const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab1);
-    for (let i = 0; i < shooters.length; i++) {
-        const actor = shooters[i];
-        ensureGameplayPrefabScript(actor, SHOOTER_AI_USER_SCRIPT);
-        runObjectEventScript(actor, 'tick', { deltaTime: delta });
-    }
-}
+// Shooter-AI per-frame logic extracted to ../gameplay/shooterAi.js.
+// Eager wiring (deps are hoisted fns or earlier const aliases; pub fns
+// called only at runtime by updateShooterAis from frame loop). No appCore
+// refs needed — pure logic over injected state.
+const _shooterAi = createShooterAi({
+    SHOOTER_AI_PREFAB, _scratchPrefab1, _scratchPrefab2,
+    gameplay, gameplayPrefabState, physics,
+    tempBoxA, tempVectorA, tempVectorB, tempVectorC, tempVectorD, tempVectorE,
+    // combatFx aliases are `const` defined further down (line ~3446); pass
+    // lazy wrappers to defer the binding lookup to call-time and avoid TDZ
+    // at this eager wiring site.
+    playImpactSound: (...a) => playImpactSound(...a),
+    spawnImpactBurst: (...a) => spawnImpactBurst(...a),
+    spawnImpactDecal: (...a) => spawnImpactDecal(...a),
+    copyJoltVector, getPointSegmentDistanceSq, getShooterHitPoints,
+    releaseProjectile,
+    damagePlayer, damageShooterAi, getActorBody, getActorRenderObject,
+    getGameplayPrefabActors,
+    // hoisted-function deps (safe by-ref even though textually after site):
+    ensureGameplayPrefabScript, ensureShooterHealthBar,
+    getShooterGroundIgnoreActors, getShooterTargetPosition,
+    hideShooterAimWarning, isDoomRoofSurfaceHit, raycastWorld,
+    runObjectEventScript, setShooterHealth, spawnShooterProjectile,
+    updateShooterAimWarning,
+    // lazy wrappers for `const` aliases / `let` placeholders defined later
+    // (TDZ avoidance, same pattern as the combatFx aliases above):
+    getGroundHeightAt: (...a) => getGroundHeightAt(...a),
+    updateDoomEnemySpriteAnimation: (...a) => updateDoomEnemySpriteAnimation(...a),
+});
+const updateShooterProjectiles = _shooterAi.updateShooterProjectiles;
+const updateShooterAiPhysicsHits = _shooterAi.updateShooterAiPhysicsHits;
+const clampThrowingStarSpeed = _shooterAi.clampThrowingStarSpeed;
+const isShooterLineOfSightClear = _shooterAi.isShooterLineOfSightClear;
+const getShooterCoverPoint = _shooterAi.getShooterCoverPoint;
+const updateShooterMovement = _shooterAi.updateShooterMovement;
+const updateShooterAiActor = _shooterAi.updateShooterAiActor;
+const updateShooterAis = _shooterAi.updateShooterAis;
 
 function spawnShooterAiAt(position, options = {}) {
     if (!position) return null;
@@ -3825,18 +3408,24 @@ const spawnTracer = combatFx.spawnTracer;
 const spawnImpactDecal = combatFx.spawnImpactDecal;
 const spawnMuzzleSmoke = combatFx.spawnMuzzleSmoke;
 const flashActorHit = combatFx.flashActorHit;
-if (typeof window !== 'undefined') {
-    window.playDoomShotgunSound = playDoomShotgunSound;
-    window.playDoomPickupSound = playDoomPickupSound;
-    window.playEnemyDeathSound = playEnemyDeathSound;
-    window.playImpactSound = playImpactSound;
-    window.playEnemyHurtSound = playEnemyHurtSound;
-    window.spawnImpactBurst = spawnImpactBurst;
-    window.spawnTracer = spawnTracer;
-    window.spawnImpactDecal = spawnImpactDecal;
-    window.spawnMuzzleSmoke = spawnMuzzleSmoke;
-    window.flashActorHit = flashActorHit;
-}
+// Publish combat FX + 3D sound surface via engineApi (typed) rather
+// than window.*. Eval'd prefab scripts read these from their `api`
+// parameter (see buildObjectEventApi). installLegacyWindowShims at the
+// end of init() keeps any remaining window.* readers alive.
+registerEngineFx({
+    spawnImpactBurst,
+    spawnTracer,
+    spawnImpactDecal,
+    spawnMuzzleSmoke,
+    flashActorHit,
+});
+registerEngineSound({
+    playImpactSound,
+    playEnemyHurtSound,
+    playEnemyDeathSound,
+    playDoomShotgunSound,
+    playDoomPickupSound,
+});
 
 const heldWeapons = createHeldWeapons({
     getCamera: () => camera,
@@ -3861,14 +3450,14 @@ const equipThrowingStar = heldWeapons.equipThrowingStar;
 const updateDoomShotgunHud = heldWeapons.updateDoomShotgunHud;
 const spawnDoomPellet = heldWeapons.spawnDoomPellet;
 const flashDoomShotgun = heldWeapons.flashDoomShotgun;
-if (typeof window !== 'undefined') {
-    window.equipDoomShotgun = equipDoomShotgun;
-    window.equipThrowingStar = equipThrowingStar;
-    window.equipStraightGun = equipStraightGun;
-    window.equipSniperRifle = equipSniperRifle;
-    window.spawnDoomPellet = spawnDoomPellet;
-    window.flashDoomShotgun = flashDoomShotgun;
-}
+registerEngineFx({ flashDoomShotgun });
+registerEngineWeapons({
+    equipDoomShotgun,
+    equipStraightGun,
+    equipSniperRifle,
+    equipThrowingStar,
+    spawnDoomPellet,
+});
 // Bottom-right weapon HUD (ammo / reload text). One reused DOM element.
 let weaponHudEl = null;
 function ensureWeaponHud() {
@@ -3937,16 +3526,23 @@ function showDamageIndicator(angleRad = Math.PI) {
     clearTimeout(el._hideTimer);
     el._hideTimer = setTimeout(() => { el.style.opacity = '0'; }, 320);
 }
+// HUD surface → engineApi.hud. setWeaponHud + showDamageIndicator
+// reach prefab scripts via the api parameter.
+registerEngineHud({ setWeaponHud, showDamageIndicator });
+// (playDoomShotgunSound/playDoomPickupSound were already registered
+// above via registerEngineSound; the duplicate window.* block here was
+// a leftover. DOOM_SHOTGUN_DEFAULTS stays a plain global for now —
+// it's a frozen const, not a function surface.)
 if (typeof window !== 'undefined') {
-    window.setWeaponHud = setWeaponHud;
-    window.showDamageIndicator = showDamageIndicator;
-}
-if (typeof window !== 'undefined') {
-    window.playDoomShotgunSound = playDoomShotgunSound;
-    window.playDoomPickupSound = playDoomPickupSound;
-    // Defaults the script can read instead of hardcoding numbers.
     window.DOOM_SHOTGUN_DEFAULTS = Object.freeze({ ...DOOM_SHOTGUN_PREFAB });
 }
+
+// Backwards-compat shims for any window.spawnImpactBurst / playImpactSound
+// / setWeaponHud call site we haven't migrated yet (DDGI debug helpers,
+// dev console, third-party). All registered FX/sound/HUD functions are
+// re-exposed on window. Pass { warn: true } once a session to hunt down
+// remaining global call sites.
+installLegacyWindowShims();
 
 function updateStraightGuns() {
     if (!gameplay.active) return;
@@ -4219,18 +3815,29 @@ function spawnGameplayPrefab(type) {
             includeScripts: false,
             userData: {
                 label: 'Circle Patrol AI',
-                aiPatrol: {
-                    navmeshActorId: navmeshActor?.id || '',
-                    center: [center.x, center.y, center.z],
-                    radius,
-                    speed: BASIC_NAVMESH_AI_PREFAB.speed,
-                    angle: 0,
-                },
+                // navmeshActorId retained on userData for the (separate)
+                // navmesh-circle visual lookup; patrol state itself now
+                // lives on the CircularPatrolComponent below.
+                navmeshActorId: navmeshActor?.id || '',
             },
             returnActor: true,
         });
         tagGameplayPrefabActor(actor, type, { triggerRadius: 0.65, groundOffset: 1.05 });
         tintGameplayPrefabActor(actor, '#a3e635', '#4d7c0f', 0.72);
+
+        // ECS: drive patrol motion via a CircularPatrolComponent instead of
+        // the legacy updateCircularNavmeshAis(delta) loop. The component is
+        // ticked by sceneSystem.tickComponents(delta) once per frame.
+        const patrolComp = new CircularPatrolComponent({
+            center: [center.x, center.y, center.z],
+            radius,
+            speed: BASIC_NAVMESH_AI_PREFAB.speed,
+            angle: 0,
+            yOffset: BASIC_NAVMESH_AI_PREFAB.agentScale * 2.55,
+        });
+        patrolComp.setGroundSampler((x, z, ignoreActor) =>
+            getGroundHeightAt(x, z, true, { ignoreActor }));
+        actor.addComponent(patrolComp);
     } else if (type === 'shooterSpawner') {
         const spawnDirection = tempVectorB;
         camera.getWorldDirection(spawnDirection);
@@ -7492,6 +7099,23 @@ const processingStep = document.getElementById('processing-step');
 const processTrigger = document.getElementById('process-trigger');
 const downloadBtn = document.getElementById('download-asset');
 
+// Showcase asset pipeline: drag-drop to load a model, optimize/export GLB.
+// Extracted to ../optim/showcaseOptimizer.js. Factory deps captured by
+// closure so the hoisted runtime helpers (clearCurrentMesh, etc.) resolve
+// live at call time. Three placeholder aliases keep call sites elsewhere
+// unchanged.
+const _showcaseOptimizer = createShowcaseOptimizer({
+    container,
+    clearCurrentMesh: (...args) => clearCurrentMesh(...args),
+    normalizeCurrentMesh: (...args) => normalizeCurrentMesh(...args),
+    refreshGameplayWorld: (...args) => refreshGameplayWorld(...args),
+    playObjectAnimation: (...args) => playObjectAnimation(...args),
+    countTrianglesForObject: (...args) => countTrianglesForObject(...args),
+});
+const enableOptimizationPipeline = _showcaseOptimizer.enableOptimizationPipeline;
+const updateLoadedAssetStats = _showcaseOptimizer.updateLoadedAssetStats;
+const setupDropHandlers = _showcaseOptimizer.setupDropHandlers;
+
 function setCameraMode(mode) {
     if (mode === 'play') {
         closeObjectScriptMenu();
@@ -8823,7 +8447,8 @@ async function init() {
         const updateDuration = performance.now() - updateStart;
 
         updateSoccerGoalies(delta);
-        updateCircularNavmeshAis(delta);
+        // Circular patrol AI: now driven by CircularPatrolComponent on each
+        // navmeshCircleAi actor, ticked by sceneSystem.tickComponents below.
         updateShooterSpawners(delta);
         updateStraightGuns();
         updateShooterAis(delta);
@@ -9841,7 +9466,7 @@ function respawnPlayer(useStoredView = false) {
 function applyGameplayCameraRotation() {
     camera.rotation.order = 'YXZ';
     // recoilPitch/recoilYaw are transient kick offsets (set by weapon scripts
-    // via window.applyCameraRecoil, decayed each frame in updatePlayerHitFeedback).
+    // via api.applyCameraRecoil, decayed each frame in updatePlayerHitFeedback).
     camera.rotation.x = gameplay.pitch + (gameplay.recoilPitch || 0);
     camera.rotation.y = gameplay.yaw + (gameplay.recoilYaw || 0);
     camera.rotation.z = 0;
@@ -9853,9 +9478,7 @@ function applyCameraRecoil(pitch = 0, yaw = 0) {
     gameplay.recoilPitch += Number(pitch) || 0;
     gameplay.recoilYaw += Number(yaw) || 0;
 }
-if (typeof window !== 'undefined') {
-    window.applyCameraRecoil = applyCameraRecoil;
-}
+registerEngineWeapons({ applyCameraRecoil });
 
 const HELI_SETTINGS = {
     maxLift: 14,
@@ -10009,322 +9632,8 @@ function updateGameplay(delta) {
     }
 }
 
-// --- File Handling ---
-
-// Reads all files from a dropped directory entry recursively, returns filename→{file,url} map
-async function readDirectoryFiles(dirEntry) {
-    const fileMap = {};
-    const readEntries = (entry) => new Promise((resolve) => {
-        if (entry.isFile) {
-            entry.file(file => {
-                const url = URL.createObjectURL(file);
-                // Store by lowercase filename so we can match case-insensitively
-                fileMap[file.name.toLowerCase()] = { file, url };
-                resolve();
-            });
-        } else if (entry.isDirectory) {
-            const reader = entry.createReader();
-            const readBatch = () => {
-                reader.readEntries(async (entries) => {
-                    if (entries.length === 0) return resolve();
-                    await Promise.all(entries.map(readEntries));
-                    readBatch(); // keep reading until empty batch
-                });
-            };
-            readBatch();
-        } else {
-            resolve();
-        }
-    });
-    await readEntries(dirEntry);
-    return fileMap;
-}
-
-function setupDropHandlers() {
-    container.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        container.classList.add('drag-active');
-    });
-
-    container.addEventListener('dragleave', (e) => {
-        if (e.relatedTarget && container.contains(e.relatedTarget)) return;
-        container.classList.remove('drag-active');
-    });
-
-    container.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        container.classList.remove('drag-active');
-
-        const items = [...e.dataTransfer.items];
-        const firstEntry = items[0]?.webkitGetAsEntry?.();
-
-        // --- Folder drop ---
-        if (firstEntry?.isDirectory) {
-            processingStep.textContent = 'Reading folder...';
-            processingOverlay.style.display = 'flex';
-            loaderBar.style.width = '10%';
-
-            const fileMap = await readDirectoryFiles(firstEntry);
-            const modelEntry = Object.values(fileMap).find(({ file }) =>
-                /\.(fbx|glb|gltf|obj)$/i.test(file.name)
-            );
-            processingOverlay.style.display = 'none';
-
-            if (!modelEntry) {
-                alert('No supported 3D file found in folder (.glb, .gltf, .obj, .fbx)');
-                return;
-            }
-            loadModel(modelEntry.file, fileMap);
-            return;
-        }
-
-        // --- Multi-file drop (files dropped directly, no folder) ---
-        if (items.length > 1) {
-            processingStep.textContent = 'Reading files...';
-            processingOverlay.style.display = 'flex';
-            loaderBar.style.width = '10%';
-
-            const fileMap = {};
-            let mainFile = null;
-
-            for (let i = 0; i < e.dataTransfer.files.length; i++) {
-                const file = e.dataTransfer.files[i];
-                const url = URL.createObjectURL(file);
-                fileMap[file.name.toLowerCase()] = { file, url };
-                
-                if (/\.(fbx|glb|gltf|obj)$/i.test(file.name)) {
-                    mainFile = file;
-                }
-            }
-
-            processingOverlay.style.display = 'none';
-
-            if (!mainFile) {
-                alert('No supported 3D file found in dropped files (.glb, .gltf, .obj, .fbx)');
-                return;
-            }
-            loadModel(mainFile, fileMap);
-            return;
-        }
-
-        // --- Single file drop ---
-        const file = e.dataTransfer.files[0];
-        if (file && /\.(glb|gltf|obj|fbx)$/i.test(file.name)) {
-            loadModel(file, {});
-        } else {
-            alert('Please drop a .glb, .gltf, .obj, or .fbx file — or drag a whole folder to load FBX textures.');
-        }
-    });
-
-    const fileInput = document.getElementById('file-input');
-
-    fileInput.addEventListener('change', (e) => {
-        const file = e.target.files[0];
-        if (file) loadModel(file, {});
-    });
-}
-
-async function loadModel(file, fileMap = {}) {
-    try {
-        const root = await loadObjectFromFile(file, fileMap);
-        clearCurrentMesh();
-        currentMesh = root;
-        scene.add(currentMesh);
-        normalizeCurrentMesh();
-        playObjectAnimation(currentMesh);
-        refreshGameplayWorld();
-        updateLoadedAssetStats(file.name, file.size, currentMesh);
-    } catch (error) {
-        console.error('Failed to load model.', error);
-        alert(error?.message === 'Unsupported file format'
-            ? 'Unsupported file format'
-            : 'Failed to load the selected model. Check the console for details.');
-    }
-}
-
-// --- Optimization Pipeline ---
-async function runOptimizationPipeline() {
-    processingOverlay.style.display = 'flex';
-    const isPro = false;
-
-    // --- Analytics Pixel Tracking ---
-    // Simple privacy-first ping to track how many users actually run the pipeline.
-    // Replace with your actual analytics tracking pixel URL (e.g. Plausible, SimpleAnalytics, or custom).
-    try {
-        new Image().src = `https://your-analytics-domain.com/pixel.gif?event=run_pipeline&isPro=${isPro}&ts=${Date.now()}`;
-        console.log('Analytics ping sent: run_pipeline');
-    } catch (e) {
-        /* Ignore analytics errors so it doesn't block the UI */
-    }
-
-    const steps = [
-        { label: 'Initializing WebGPU kernels...', progress: 10 },
-        { label: 'Analyzing mesh topology...', progress: 20 },
-        { label: 'Executing Parallel Decimation...', progress: 45 },
-        { label: isPro ? 'Optimizing PBR textures (KTX2 + BasisU)...' : 'Optimizing PBR textures (WebP)...', progress: 75 },
-        { label: 'Baking PBR texture maps...', progress: 85 },
-        { label: 'Exporting optimized GLB...', progress: 100 }
-    ];
-
-    for (const step of steps) {
-        processingStep.textContent = step.label;
-        if (step.label.includes('Decimation')) {
-            startScanEffect();
-        }
-        await gsap.to(loaderBar, { width: `${step.progress}%`, duration: 0.8 });
-        await new Promise(r => setTimeout(r, 400));
-    }
-
-    try {
-        // Run WebGPU Benchmark for UI "Wow" factor
-        const benchmark = await runWebGPUBenchmark(originalTriCount * 3);
-        if (benchmark) {
-            document.getElementById('webgpu-speedup').textContent = `${benchmark.speedup.toFixed(1)}x`;
-        }
-
-        // Actual Simplification
-        const ratio = parseFloat(document.getElementById('ratio-slider').value);
-        simplifyMesh(ratio);
-
-        // Best current in-browser path: aggressive texture recompression + smaller export textures.
-        await compressTextures(currentMesh, 0.8, EXPORT_MAX_TEXTURE_SIZE, isPro);
-
-        // Export to get real size
-        const exporter = new GLTFExporter();
-        const gltfData = await new Promise((resolve, reject) => {
-            exporter.parse(currentMesh, resolve, reject, {
-                binary: true,
-                maxTextureSize: EXPORT_MAX_TEXTURE_SIZE,
-                onlyVisible: true,
-            });
-        });
-
-        const blob = new Blob([gltfData], { type: 'application/octet-stream' });
-        if (optimizedBlobUrl) URL.revokeObjectURL(optimizedBlobUrl);
-        optimizedBlobUrl = URL.createObjectURL(blob);
-
-        const optimizedSize = blob.size;
-        document.getElementById('file-size').textContent = (optimizedSize / (1024 * 1024)).toFixed(1) + ' MB';
-        document.getElementById('file-diff').textContent = `(-${Math.round((1 - (optimizedSize / originalFileSize)) * 100)}%)`;
-
-        processingOverlay.style.display = 'none';
-        downloadBtn.style.display = 'flex';
-    } catch (err) {
-        console.error('Optimization failed:', err);
-        alert('Optimization failed. Check console for details.');
-        processingOverlay.style.display = 'none';
-        stopScanEffect();
-    }
-}
-
-function simplifyMesh(ratio = 0.12) {
-    if (!currentMesh) return;
-
-    stopScanEffect();
-
-    let totalReducedTris = 0;
-
-    currentMesh.traverse((child) => {
-        if (child.isMesh) {
-            const geometry = child.geometry.clone();
-            const positions = geometry.attributes.position.array;
-            let indices = geometry.index ? geometry.index.array : null;
-
-            if (!indices) {
-                // If no index, create one (meshoptimizer needs indices)
-                const count = positions.length / 3;
-                indices = new Uint32Array(count);
-                for (let i = 0; i < count; i++) indices[i] = i;
-            } else if (!(indices instanceof Uint32Array)) {
-                indices = new Uint32Array(indices);
-            }
-
-            const targetCount = Math.floor((indices.length / 3) * ratio) * 3;
-            const targetError = 0.01;
-
-            const [simplifiedIndices, error] = MeshoptSimplifier.simplify(
-                indices,
-                positions,
-                3,
-                targetCount,
-                targetError
-            );
-
-            geometry.setIndex(new THREE.BufferAttribute(simplifiedIndices, 1));
-            child.geometry = geometry;
-
-            totalReducedTris += simplifiedIndices.length / 3;
-
-            // Visual feedback: briefly show wireframe
-            child.material.wireframe = true;
-            setTimeout(() => { child.material.wireframe = false; }, 1000);
-        }
-    });
-
-    optimizedTriCount = Math.round(totalReducedTris);
-    document.getElementById('tri-diff').textContent = `(-${Math.round((1 - (optimizedTriCount / originalTriCount)) * 100)}%)`;
-
-    const countObj = { val: originalTriCount };
-    gsap.to(countObj, {
-        val: optimizedTriCount,
-        duration: 1.5,
-        ease: "power2.out",
-        onUpdate: () => {
-            document.getElementById('tri-count').textContent = Math.ceil(countObj.val).toLocaleString();
-        }
-    });
-}
-
-// === extracted: textureCompression (was lines 9098-9301 of original main.js) ===
-function downloadAsset() {
-    if (!optimizedBlobUrl) return;
-
-    const a = document.createElement('a');
-    a.href = optimizedBlobUrl;
-
-    let baseName = document.getElementById('asset-name').textContent;
-    baseName = baseName.replace(/\.[^/.]+$/, ""); // Remove extension if exists
-    a.download = `optimized_${baseName}.glb`;
-
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-}
-
-// Add download listener (using onclick to prevent duplicate listeners on HMR)
-if (downloadBtn) {
-    downloadBtn.onclick = downloadAsset;
-}
-
-function stopScanEffect() {
-    if (scanPlane) {
-        scene.remove(scanPlane);
-        scanPlane = null;
-    }
-}
-
-function startScanEffect() {
-    const geometry = new THREE.PlaneGeometry(5, 5);
-    const material = new THREE.MeshBasicMaterial({
-        color: 0x00ffaa,
-        transparent: true,
-        opacity: 0.5,
-        side: THREE.DoubleSide,
-        blending: THREE.AdditiveBlending
-    });
-    scanPlane = new THREE.Mesh(geometry, material);
-    scanPlane.rotation.x = Math.PI / 2;
-    scanPlane.position.y = -2;
-    scene.add(scanPlane);
-
-    gsap.to(scanPlane.position, {
-        y: 2,
-        duration: 2,
-        repeat: -1,
-        yoyo: true,
-        ease: "power1.inOut"
-    });
-}
+// File handling (drag-drop) + showcase asset optimization pipeline
+// extracted to ../optim/showcaseOptimizer.js. Factory instantiated below.
 
 // --- Controls ---
 document.getElementById('toggle-wireframe')?.addEventListener('click', () => {

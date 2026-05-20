@@ -10,3 +10,4 @@ export { PhysicsComponent } from './PhysicsComponent.js';
 export { TransformComponent } from './TransformComponent.js';
 export { DDGIVolumeComponent } from './DDGIVolumeComponent.js';
 export { MeshRendererComponent } from './MeshRendererComponent.js';
+export { CircularPatrolComponent } from './CircularPatrolComponent.js';

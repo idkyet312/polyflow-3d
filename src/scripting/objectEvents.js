@@ -17,6 +17,7 @@ import {
 } from '../runtime/sceneRuntime.js';
 import { assetRegistry } from '../runtime/assets/AssetRegistry.js';
 import { detectsUeLifecycle, buildUeContext } from '../scripting/ueApi.js';
+import { engineApi } from '../runtime/engineApi.js';
 
 // ─── Module-scope deps populated by setupObjectEvents ─────────────────────
 let ObjectEventFunction;
@@ -687,6 +688,14 @@ export function buildObjectEventApi(prop, eventType, { deltaTime = 0, collision 
         actor: prop,
         spawnDynamicPrimitive,
         spawnImportedProp,
+        // engineApi surface for prefab user-scripts. Replaces window.*
+        // FX/sound/HUD calls; the api object is what scripts receive as
+        // their `api` parameter (see compileObjectEventScript), so
+        // `api.spawnImpactBurst(...)` resolves directly.
+        ...engineApi.fx,
+        ...engineApi.sound,
+        ...engineApi.hud,
+        ...engineApi.weapons,
     };
 
     return buildUeContext(

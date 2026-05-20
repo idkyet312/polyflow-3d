@@ -170,22 +170,24 @@ const TELEPORTER_USER_SCRIPT = `function OnTrigger(subject) {
 const DOOM_SHOTGUN_USER_SCRIPT = `// ===== DOOM SHOTGUN — all weapon logic lives here. Edit freely. =====
 // OnTrigger: walk over the pickup -> equip (+ pickup chime).
 // Tick: runs every frame while equipped -> firing, ammo, reload, HUD, recoil.
-// Engine primitives:
-//   window.spawnDoomPellet({ spreadX, spreadY, speed, damage, ... }) -> 1 pellet
-//   window.flashDoomShotgun(ms)            -> muzzle flash
-//   window.playDoomShotgunSound(volume)    -> blast sfx
-//   window.playDoomPickupSound(volume)     -> pickup chime
-//   window.applyCameraRecoil(pitch, yaw)   -> camera kick (radians)
-//   window.setWeaponHud(text)              -> bottom-right text ('' hides)
-//   window.equipDoomShotgun(Self)          -> equip
-//   window.spawnMuzzleSmoke()              -> smoke puff + ejected shell
-//   window.spawnImpactBurst(x,y,z,opts)    -> spark/puff at point
-//   window.playImpactSound(v,x,y,z)        -> bullet-on-wall thud (3D if xyz)
-//   window.spawnTracer(ox,oy,oz,dx,dy,dz,len,color) -> bullet streak
-//   window.spawnImpactDecal(x,y,z,nx,ny,nz,opts)    -> scorch on surface
-//   window.flashActorHit(actor,color)      -> brief emissive flash
-//   window.playEnemyHurtSound(v,x,y,z)     -> enemy grunt (3D if xyz)
-//   window.showDamageIndicator(angleRad)   -> directional red arc
+// Engine primitives (passed in as 'api' to every script; window.* still
+// works via legacy shims, but prefer api.* in new scripts):
+//   api.spawnImpactBurst(x,y,z,opts)    -> spark/puff at point
+//   api.spawnTracer(ox,oy,oz,dx,dy,dz,len,color) -> bullet streak
+//   api.spawnImpactDecal(x,y,z,nx,ny,nz,opts)    -> scorch on surface
+//   api.spawnMuzzleSmoke()              -> smoke puff + ejected shell
+//   api.flashActorHit(actor,color)      -> brief emissive flash
+//   api.flashDoomShotgun(ms)            -> muzzle flash
+//   api.playImpactSound(v,x,y,z)        -> bullet-on-wall thud (3D if xyz)
+//   api.playEnemyHurtSound(v,x,y,z)     -> enemy grunt (3D if xyz)
+//   api.playDoomShotgunSound(volume)    -> blast sfx
+//   api.playDoomPickupSound(volume)     -> pickup chime
+//   api.setWeaponHud(text)              -> bottom-right text ('' hides)
+//   api.showDamageIndicator(angleRad)   -> directional red arc
+//   api.spawnDoomPellet({ spreadX, spreadY, speed, damage, ... }) -> 1 pellet
+//   api.applyCameraRecoil(pitch, yaw)      -> camera kick (radians)
+//   api.equipDoomShotgun(Self)             -> equip
+//   api.equipStraightGun / api.equipSniperRifle / api.equipThrowingStar
 // Overridable engine hooks (set on window; defaults used if unset):
 //   window.onBulletImpact(x,y,z,proj,nx,ny,nz)   -> a bullet hit a wall
 //   window.onEnemyDamaged(actor,dmg,fatal,x,y,z) -> an enemy took damage
@@ -229,19 +231,19 @@ function ammo(ud) {
 // (defaults used if a hook is null). Edit these bodies to change the feel.
 function installHooks() {
     window.onBulletImpact = IMPACT_FX ? function (x, y, z, proj, nx, ny, nz) {
-        window.spawnImpactBurst?.(x, y, z, { color: 0xffd27a, count: 7 });
-        window.playImpactSound?.(0.8, x, y, z); // 3D positional
-        if (IMPACT_DECAL) window.spawnImpactDecal?.(x, y, z, nx, ny, nz, { dir: proj?.velocity });
+        api.spawnImpactBurst?.(x, y, z, { color: 0xffd27a, count: 7 });
+        api.playImpactSound?.(0.8, x, y, z); // 3D positional
+        if (IMPACT_DECAL) api.spawnImpactDecal?.(x, y, z, nx, ny, nz, { dir: proj?.velocity });
     } : null;
 
     window.onEnemyDamaged = ENEMY_HURT_FX ? function (actor, dmg, fatal, x, y, z) {
         if (fatal) return; // engine already played the death sound/effect
-        window.flashActorHit?.(actor, 0xff5555);
-        window.playEnemyHurtSound?.(0.7, x, y, z); // 3D positional
+        api.flashActorHit?.(actor, 0xff5555);
+        api.playEnemyHurtSound?.(0.7, x, y, z); // 3D positional
     } : null;
 
     window.onPlayerDamaged = DMG_INDICATOR ? function (angleRad) {
-        window.showDamageIndicator?.(angleRad);
+        api.showDamageIndicator?.(angleRad);
     } : null;
 }
 
@@ -254,8 +256,8 @@ function OnTrigger(subject) {
     mesh.visible = false;
     ammo(Self.userData);
     installHooks();
-    window.equipDoomShotgun?.(Self);
-    window.playDoomPickupSound?.(1, px, py, pz); // 3D positional
+    api.equipDoomShotgun?.(Self);
+    api.playDoomPickupSound?.(1, px, py, pz); // 3D positional
 }
 
 function fireOneShot() {
@@ -264,15 +266,15 @@ function fireOneShot() {
     const dmgMul = b.damage || 1;
     for (let i = 0; i < pelletCount; i++) {
         const p = PELLET_PATTERN[i % PELLET_PATTERN.length];
-        window.spawnDoomPellet?.({
+        api.spawnDoomPellet?.({
             spreadX: p[0] * SPREAD, spreadY: p[1] * SPREAD, tracer: TRACERS,
             damage: (window.DOOM_SHOTGUN_DEFAULTS?.damage ?? 0.2) * dmgMul,
         });
     }
-    window.flashDoomShotgun?.(85);
-    window.playDoomShotgunSound?.(VOLUME);
-    window.applyCameraRecoil?.(RECOIL_PITCH, (Math.random() - 0.5) * 2 * RECOIL_YAW);
-    if (MUZZLE_SMOKE) window.spawnMuzzleSmoke?.();
+    api.flashDoomShotgun?.(85);
+    api.playDoomShotgunSound?.(VOLUME);
+    api.applyCameraRecoil?.(RECOIL_PITCH, (Math.random() - 0.5) * 2 * RECOIL_YAW);
+    if (MUZZLE_SMOKE) api.spawnMuzzleSmoke?.();
 }
 
 function startReload(ud, now) {
@@ -301,7 +303,7 @@ function Tick(DeltaTime) {
             ud._reserve -= take;
             ud._reloadUntil = 0;
         } else {
-            window.setWeaponHud?.('RELOADING');
+            api.setWeaponHud?.('RELOADING');
             return; // can't fire mid-reload
         }
     }
@@ -330,7 +332,7 @@ function Tick(DeltaTime) {
         if (ud._mag <= 0) startReload(ud, now);
     }
 
-    window.setWeaponHud?.(ud._mag + ' / ' + ud._reserve);
+    api.setWeaponHud?.(ud._mag + ' / ' + ud._reserve);
 }`;
 
 const SHOOTER_AI_USER_SCRIPT = `function Tick(DeltaTime) {

@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "gh-pages -d dist",
-    "multiplayer:server": "node server/multiplayer-server.js"
+    "multiplayer:server": "node server/multiplayer-server.js",
+    "test": "node --test tests/smoke.test.js"
   },
   "devDependencies": {
     "gh-pages": "^6.3.0",
