@@ -16,6 +16,7 @@ export function createSpatialIndex({ cellSize = 4 } = {}) {
     const cells = new Map();
     const entries = new Map();
     const queryBounds = new THREE.Box3();
+    const querySeen = new Set();
 
     function cellCoord(value) {
         return Math.floor(value / resolvedCellSize);
@@ -89,23 +90,31 @@ export function createSpatialIndex({ cellSize = 4 } = {}) {
         return entries.get(actor) ?? null;
     }
 
-    function queryBox(bounds) {
-        if (!isValidBox(bounds)) return [];
+    function queryBox(bounds, out = null) {
+        if (!isValidBox(bounds)) {
+            if (out) out.length = 0;
+            return out || [];
+        }
 
-        const result = new Set();
+        const result = out || [];
+        if (out) result.length = 0;
+        const seen = out ? querySeen : new Set();
+        seen.clear();
         forEachCellKey(bounds, (key) => {
             const cell = cells.get(key);
             if (!cell) return;
 
             for (const actor of cell) {
+                if (seen.has(actor)) continue;
                 const entry = entries.get(actor);
                 if (entry?.bounds?.intersectsBox(bounds)) {
-                    result.add(actor);
+                    seen.add(actor);
+                    result.push(actor);
                 }
             }
         });
 
-        return [...result];
+        return result;
     }
 
     function queryBoxEntries(bounds) {
@@ -114,15 +123,23 @@ export function createSpatialIndex({ cellSize = 4 } = {}) {
             .filter(Boolean);
     }
 
-    function querySphere(center, radius) {
+    function querySphere(center, radius, out = null) {
         const safeRadius = Math.max(0, Number(radius) || 0);
         queryBounds.set(
             { x: center.x - safeRadius, y: center.y - safeRadius, z: center.z - safeRadius },
             { x: center.x + safeRadius, y: center.y + safeRadius, z: center.z + safeRadius }
         );
 
-        return queryBox(queryBounds)
-            .filter((actor) => entries.get(actor)?.bounds.distanceToPoint(center) <= safeRadius);
+        const result = queryBox(queryBounds, out);
+        let write = 0;
+        for (let read = 0; read < result.length; read++) {
+            const actor = result[read];
+            if (entries.get(actor)?.bounds.distanceToPoint(center) <= safeRadius) {
+                result[write++] = actor;
+            }
+        }
+        result.length = write;
+        return result;
     }
 
     function values() {

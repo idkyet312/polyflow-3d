@@ -35,6 +35,7 @@ export class TargetComponent extends ActorComponent {
     constructor({
         isScripted = () => false,
         getDynamicBodies = () => [],
+        getCandidateBodies = null,
         isPhysicsReady = () => true,
         getActorBody = () => null,
         getRenderObject = (actor) => actor?.mesh ?? null,
@@ -51,6 +52,7 @@ export class TargetComponent extends ActorComponent {
         super();
         this._isScripted = isScripted;
         this._getDynamicBodies = getDynamicBodies;
+        this._getCandidateBodies = typeof getCandidateBodies === 'function' ? getCandidateBodies : null;
         this._isPhysicsReady = isPhysicsReady;
         this._getActorBody = getActorBody;
         this._getRenderObject = getRenderObject;
@@ -58,6 +60,7 @@ export class TargetComponent extends ActorComponent {
         this._dispatchTriggerEvent = dispatchTriggerEvent;
         this._isGameplayActive = isGameplayActive;
         this._tmp = tmp ?? { a: null, b: null };
+        this._candidates = [];
         this.defaultRadius = defaultRadius;
         this.defaultScoreValue = defaultScoreValue;
         this.hitCooldownMs = hitCooldownMs;
@@ -70,6 +73,9 @@ export class TargetComponent extends ActorComponent {
     }
     _scratchB() {
         return this._tmp.b ?? (this._tmp.b = new this._THREE.Vector3());
+    }
+    _candidateBodies(center, radius) {
+        return this._getCandidateBodies?.(center, radius, this._candidates) || this._getDynamicBodies();
     }
 
     tick(/* deltaTime */) {
@@ -95,7 +101,7 @@ export class TargetComponent extends ActorComponent {
         const radiusSq = radius * radius;
         const yTol = this.yTolerance;
 
-        const bodies = this._getDynamicBodies();
+        const bodies = this._candidateBodies(tmpA, Math.max(radius, yTol));
         const ready = this._isPhysicsReady();
         for (let bi = 0; bi < bodies.length; bi++) {
             const candidate = bodies[bi];
@@ -128,7 +134,7 @@ export class TargetComponent extends ActorComponent {
         const yTol = this.yTolerance;
 
         let hitter = null;
-        const bodies = this._getDynamicBodies();
+        const bodies = this._candidateBodies(tmpA, Math.max(radius, yTol));
         for (let bi = 0; bi < bodies.length; bi++) {
             const candidate = bodies[bi];
             if (!candidate || candidate.userData?.gameplayPrefab) continue;

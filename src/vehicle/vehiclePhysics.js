@@ -14,7 +14,7 @@ export function createVehiclePhysics(deps) {
         clearActiveVehicle, copyJoltQuaternion, copyJoltVector,
         ensureVehicleVisualState, exitVehicle, getActiveVehicleProp,
         getActorRenderObject, getVehicleForward, positionVehicleCamera,
-        processGameplayPrefabs, respawnPlayer, sampleTerrainHeightAt,
+        respawnPlayer, sampleTerrainHeightAt,
         updateRaycasterDebugLine, updateVehicleEngineAudio,
     } = deps;
 
@@ -406,8 +406,6 @@ export function createVehiclePhysics(deps) {
             respawnPlayer(true);
             return;
         }
-
-        processGameplayPrefabs();
     }
 
     // Reused per-call hits buffer for getGroundHitAt; cleared on entry. Caller

@@ -12,9 +12,12 @@
 export function createEffectsSystem({ gameplayPrefabState }) {
     function disposeEffectParticles(effect) {
         for (const particle of effect.particles || []) {
-            particle.mesh?.parent?.remove(particle.mesh);
-            particle.mesh?.geometry?.dispose?.();
-            particle.mesh?.material?.dispose?.();
+            const mesh = particle.mesh;
+            if (!mesh) continue;
+            if (gameplayPrefabState.releaseFxMesh?.(mesh)) continue;
+            mesh.parent?.remove(mesh);
+            mesh.geometry?.dispose?.();
+            mesh.material?.dispose?.();
         }
     }
 

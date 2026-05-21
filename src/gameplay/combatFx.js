@@ -27,6 +27,48 @@ export function createCombatFx({
         return context && context.state === 'running' ? context : null;
     };
     const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+    const FX_POOL_LIMIT = 160;
+    const fxPool = gameplayPrefabState.fxMeshPool || (gameplayPrefabState.fxMeshPool = new Map());
+
+    function acquireFxMesh(key, create) {
+        const bucket = fxPool.get(key);
+        const mesh = bucket?.pop() || create();
+        mesh.userData.fxPoolKey = key;
+        mesh.visible = true;
+        if (mesh.material) {
+            mesh.material.opacity = mesh.userData.fxBaseOpacity ?? mesh.material.opacity ?? 1;
+            mesh.material.needsUpdate = true;
+        }
+        return mesh;
+    }
+
+    function releaseFxMesh(mesh) {
+        const key = mesh?.userData?.fxPoolKey;
+        if (!key) return false;
+        mesh.parent?.remove(mesh);
+        mesh.visible = false;
+        mesh.position.set(0, 0, 0);
+        mesh.rotation.set(0, 0, 0);
+        mesh.quaternion.identity();
+        mesh.scale.set(1, 1, 1);
+        if (mesh.material) {
+            mesh.material.opacity = mesh.userData.fxBaseOpacity ?? 1;
+        }
+        let bucket = fxPool.get(key);
+        if (!bucket) {
+            bucket = [];
+            fxPool.set(key, bucket);
+        }
+        if (bucket.length < FX_POOL_LIMIT) {
+            bucket.push(mesh);
+        } else {
+            mesh.geometry?.dispose?.();
+            mesh.material?.dispose?.();
+        }
+        return true;
+    }
+
+    gameplayPrefabState.releaseFxMesh = releaseFxMesh;
 
     // Build a PannerNode at world (x,y,z) so the sound is spatialized relative
     // to the camera-mounted listener. Returns the panner (connected to
@@ -226,10 +268,13 @@ export function createCombatFx({
         const spread = opts.spread ?? 2.6;
         const particles = [];
         for (let i = 0; i < count; i++) {
-            const p = new THREE.Mesh(
+            const p = acquireFxMesh('impactSphere', () => new THREE.Mesh(
                 new THREE.SphereGeometry(0.035, 6, 5),
                 new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 })
-            );
+            ));
+            p.userData.fxBaseOpacity = 1;
+            p.material.color.set(color);
+            p.material.opacity = 1;
             p.position.set(x, y, z);
             scene.add(p);
             particles.push({
@@ -254,14 +299,18 @@ export function createCombatFx({
         dir.normalize();
         const length = Math.max(0.5, Number(len) || 6);
         // Thin box, length along local +Z, then orient +Z to dir.
-        const mesh = new THREE.Mesh(
-            new THREE.BoxGeometry(0.03, 0.03, length),
+        const mesh = acquireFxMesh('tracerBox', () => new THREE.Mesh(
+            new THREE.BoxGeometry(0.03, 0.03, 1),
             new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85 })
-        );
+        ));
+        mesh.userData.fxBaseOpacity = 0.85;
+        mesh.material.color.set(color);
+        mesh.material.opacity = 0.85;
         mesh.material.toneMapped = false;
         // Center the streak so its tail is at the origin, head `length` ahead.
         mesh.position.set(ox + dir.x * length * 0.5, oy + dir.y * length * 0.5, oz + dir.z * length * 0.5);
         mesh.quaternion.setFromUnitVectors(tmp.e.set(0, 0, 1), dir);
+        mesh.scale.set(1, 1, length);
         scene.add(mesh);
         gameplayPrefabState.effects.push({
             type: 'tracer',
@@ -313,8 +362,8 @@ export function createCombatFx({
             }
         }
         const size = opts.size ?? 0.18;
-        const mesh = new THREE.Mesh(
-            new THREE.CircleGeometry(size, 12),
+        const mesh = acquireFxMesh('impactDecal', () => new THREE.Mesh(
+            new THREE.CircleGeometry(1, 12),
             new THREE.MeshBasicMaterial({
                 color: opts.color ?? 0x1a1206,
                 transparent: true,
@@ -324,7 +373,11 @@ export function createCombatFx({
                 polygonOffset: true,
                 polygonOffsetFactor: -1,
             })
-        );
+        ));
+        mesh.userData.fxBaseOpacity = 0.7;
+        mesh.material.color.set(opts.color ?? 0x1a1206);
+        mesh.material.opacity = 0.7;
+        mesh.scale.setScalar(size);
         // CircleGeometry faces +Z; align +Z to the (corrected) surface normal so
         // the disc lies flat on the wall/floor it hit.
         mesh.quaternion.setFromUnitVectors(tmp.e.set(0, 0, 1), n);
@@ -346,17 +399,20 @@ export function createCombatFx({
         const scene = getScene();
         const camera = getCamera();
         if (!scene || !camera) return;
-        const muzzle = camera.localToWorld(tmp.a.set(0.05, -0.05, -1.0)).clone();
+        const muzzle = camera.localToWorld(tmp.a.set(0.05, -0.05, -1.0));
         const right = tmp.d.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
         const fwd = tmp.c.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
         const particles = [];
 
         // Smoke: a few soft grey puffs drifting forward + up.
         for (let i = 0; i < 5; i++) {
-            const p = new THREE.Mesh(
-                new THREE.SphereGeometry(0.05 + Math.random() * 0.04, 6, 5),
+            const p = acquireFxMesh('muzzleSmoke', () => new THREE.Mesh(
+                new THREE.SphereGeometry(1, 6, 5),
                 new THREE.MeshBasicMaterial({ color: 0x9a9a9a, transparent: true, opacity: 0.55 })
-            );
+            ));
+            p.userData.fxBaseOpacity = 0.55;
+            p.material.opacity = 0.55;
+            p.scale.setScalar(0.05 + Math.random() * 0.04);
             p.position.copy(muzzle);
             scene.add(p);
             particles.push({
@@ -367,10 +423,11 @@ export function createCombatFx({
             });
         }
         // Shell: one brassy box flicked to the right.
-        const shell = new THREE.Mesh(
+        const shell = acquireFxMesh('muzzleShell', () => new THREE.Mesh(
             new THREE.BoxGeometry(0.05, 0.05, 0.11),
             new THREE.MeshBasicMaterial({ color: 0xd9a441 })
-        );
+        ));
+        shell.userData.fxBaseOpacity = 1;
         shell.position.copy(muzzle).addScaledVector(right, 0.1);
         scene.add(shell);
         particles.push({

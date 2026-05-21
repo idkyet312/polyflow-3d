@@ -99,6 +99,7 @@ test('registerGameplaySystems: produces expected topological order', async () =>
         updatePlayerHitFeedback: noop,
         getProjectileInstancer: () => ({ flush: noop }),
         snapshotGameplaySubject: noop,
+        updateGameplayTeleporters: noop,
         sceneSystem: { tickComponents: noop },
         updateSoccerGoalies: noop,
     });
@@ -111,7 +112,8 @@ test('registerGameplaySystems: produces expected topological order', async () =>
     assert.ok(idx('effects') < idx('playerHitFeedback'));
     assert.ok(idx('shooterAis') < idx('projectileFlush'));
     assert.ok(idx('playerHitFeedback') < idx('subjectSnapshot'));
-    assert.ok(idx('subjectSnapshot') < idx('componentTick'));
+    assert.ok(idx('subjectSnapshot') < idx('teleporters'));
+    assert.ok(idx('teleporters') < idx('componentTick'));
     assert.ok(idx('componentTick') < idx('soccerGoalies'));
 });
 
@@ -866,6 +868,39 @@ test('TargetComponent: ignores prefab-tagged dynamic bodies', async () => {
     assert.equal(score, 0);
 });
 
+test('TargetComponent: uses spatial candidate provider when supplied', async () => {
+    const { TargetComponent } = await import('../src/runtime/components/TargetComponent.js');
+    const { Actor } = await import('../src/runtime/sceneRuntime.js');
+    const THREE = await import('three');
+
+    let score = 0;
+    let fullScanCalls = 0;
+    let spatialCalls = 0;
+    const targetMesh = new THREE.Mesh(new THREE.CylinderGeometry(), new THREE.MeshBasicMaterial());
+    targetMesh.visible = true;
+    const target = new Actor({ mesh: targetMesh, userData: { scoreValue: 30, triggerRadius: 2 } });
+
+    const bodyMesh = new THREE.Mesh(new THREE.BoxGeometry(), new THREE.MeshBasicMaterial());
+    bodyMesh.visible = true;
+    bodyMesh.position.set(0.5, 0, 0.5);
+    const body = { userData: {}, mesh: bodyMesh };
+
+    const comp = new TargetComponent({
+        getDynamicBodies: () => { fullScanCalls++; return []; },
+        getCandidateBodies: () => { spatialCalls++; return [body]; },
+        isPhysicsReady: () => true,
+        getActorBody: () => ({}),
+        getRenderObject: (a) => a.mesh,
+        addScore: (n) => { score += n; },
+        THREE,
+    });
+    target.addComponent(comp);
+    comp.tick(0);
+    assert.equal(spatialCalls, 1);
+    assert.equal(fullScanCalls, 0);
+    assert.equal(score, 30);
+});
+
 test('TargetComponent: scripted variant emits OnTrigger on enter edge only', async () => {
     const { TargetComponent } = await import('../src/runtime/components/TargetComponent.js');
     const { Actor } = await import('../src/runtime/sceneRuntime.js');
@@ -1091,6 +1126,67 @@ test('systemRegistry: getOrder reflects resolved order', async () => {
     assert.deepEqual(reg.getOrder(), ['b', 'a']);
 });
 
+test('systemRegistry: tickPhase only runs selected phase and records timings', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    let clock = 0;
+    const reg = createSystemRegistry({
+        now: () => clock,
+        slowThresholdMs: 2,
+    });
+    const log = [];
+    reg.register({
+        name: 'input-a',
+        phase: 'input',
+        update: () => {
+            log.push('input-a');
+            clock += 1;
+        },
+    });
+    reg.register({
+        name: 'gameplay-a',
+        phase: 'gameplay',
+        update: () => {
+            log.push('gameplay-a');
+            clock += 3;
+        },
+    });
+
+    const metrics = reg.tickPhase('gameplay', 0.016, {});
+    assert.deepEqual(log, ['gameplay-a']);
+    assert.equal(metrics.systems.length, 1);
+    assert.equal(metrics.systems[0].name, 'gameplay-a');
+    assert.equal(metrics.phases.gameplay.total, 3);
+    assert.equal(metrics.slow.length, 1);
+});
+
+test('effectsSystem: returns expired meshes to FX pool hook', async () => {
+    const { createEffectsSystem } = await import('../src/gameplay/effectsSystem.js');
+    let released = 0;
+    let disposed = 0;
+    const mesh = {
+        position: { addScaledVector() {} },
+        parent: { remove() {} },
+        geometry: { dispose() { disposed++; } },
+        material: { opacity: 1, dispose() { disposed++; } },
+    };
+    const state = {
+        effects: [{
+            ttl: 0.01,
+            maxTtl: 0.01,
+            particles: [{ mesh, velocity: { y: 0 } }],
+        }],
+        releaseFxMesh: () => {
+            released++;
+            return true;
+        },
+    };
+    const fx = createEffectsSystem({ gameplayPrefabState: state });
+    fx.updateGameplayEffects(1);
+    assert.equal(released, 1);
+    assert.equal(disposed, 0);
+    assert.equal(state.effects.length, 0);
+});
+
 // ───────────────────────── ActorComponent ─────────────────────────
 
 test('ActorComponent: lifecycle defaults + active flag', async () => {
@@ -1126,6 +1222,23 @@ test('spatialIndex: add/remove/query roundtrip', async () => {
     // Sanity: factory exposes the canonical names rather than crashing
     // — exact API surface check happens in integration, not smoke.
     assert.equal(typeof idx, 'object');
+});
+
+test('spatialIndex: querySphere can reuse caller output array', async () => {
+    const { createSpatialIndex } = await import('../src/runtime/spatialIndex.js');
+    const THREE = await import('three');
+
+    const idx = createSpatialIndex({ cellSize: 4 });
+    const actor = { id: 'a' };
+    const bounds = new THREE.Box3(
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(1, 1, 1),
+    );
+    idx.set(actor, bounds);
+    const out = ['stale'];
+    const result = idx.querySphere(new THREE.Vector3(0.5, 0.5, 0.5), 2, out);
+    assert.equal(result, out);
+    assert.deepEqual(result, [actor]);
 });
 
 // ───────────────────────── engineApi ─────────────────────────

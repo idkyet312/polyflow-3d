@@ -29,7 +29,6 @@ export function createFrameLoop(deps) {
         clearActiveVehicle,
         updateDoomMiniLevelState, updateDoomArenaLevelState,
         updateRogueXpOrbs,
-        processGameplayPrefabs,
         updateGameplayUI,
         resetDoomMiniLevelState, resetDoomArenaLevelState,
     } = deps;
@@ -237,8 +236,6 @@ export function createFrameLoop(deps) {
         if (mesh?.userData?.sampleType === 'doomArena') {
             updateRogueXpOrbs(characterPosition, delta);
         }
-        processGameplayPrefabs();
-
         if (wasGrounded !== gameplay.grounded) updateGameplayUI();
     }
 

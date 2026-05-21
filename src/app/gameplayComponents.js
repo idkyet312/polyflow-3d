@@ -11,7 +11,7 @@ export function createGameplayComponents(deps) {
         ShooterSpawnerComponent, WeaponPickupComponent, CoinComponent,
         TargetComponent, HealthPickupComponent,
         SHOOTER_SPAWNER_PREFAB, SHOOTER_AI_PREFAB, HEALTH_PICKUP_PREFAB,
-        gameplay, physics,
+        gameplay, physics, dynamicBodySpatial,
         _scratchPrefab2, _emptyArray, _gameplaySubjectScratch,
         getGameplayPrefabActors, getActorRenderObject, getActorBody,
         spawnShooterAiAt,
@@ -112,6 +112,7 @@ export function createGameplayComponents(deps) {
         comp = new TargetComponent({
             isScripted: (a) => hasScriptedTriggerHandler(a),
             getDynamicBodies: () => physics.dynamicBodies || _emptyArray,
+            getCandidateBodies: (center, radius, out) => dynamicBodySpatial?.querySphere?.(center, radius, out),
             isPhysicsReady: () => !!physics.ready,
             getActorBody: (a) => getActorBody(a),
             getRenderObject: (a) => getActorRenderObject(a),

@@ -167,6 +167,10 @@ export function createDebugStatRow(label) {
     return { row, value };
 }
 
+function setTextIfChanged(el, text) {
+    if (el && el.textContent !== text) el.textContent = text;
+}
+
 export function createDebugStatPanel(name) {
     if (!debugStatsOverlay) return null;
 
@@ -188,6 +192,8 @@ export function createDebugStatPanel(name) {
                 ? 'Stat Raytracing'
             : name === 'ddgi'
                 ? 'Stat DDGI'
+            : name === 'systems'
+                ? 'Stat Systems'
                 : 'Stat GPU';
 
     const meta = document.createElement('div');
@@ -216,6 +222,8 @@ export function createDebugStatPanel(name) {
                 ? ['BVH Build']
             : name === 'ddgi'
                 ? ['Enabled', 'Volume', 'Probes', 'Ready', 'Bake N', 'Intensity', 'Invalidate', 'DDGI']
+                : name === 'systems'
+                    ? ['Total', 'Slow', 'Top', 'Gameplay', 'Count']
                 : ['GPU', 'Render', 'Frame', 'FPS'];
 
     labels.forEach((label) => {
@@ -414,6 +422,23 @@ export function updateDebugStatPanels() {
             return;
         }
 
+        if (name === 'systems') {
+            const sys = debugConsoleState.latest.systems || {};
+            const sorted = (sys.systems || []).slice().sort((a, b) => b.duration - a.duration);
+            const top = sorted[0];
+            const slow = sys.slow || [];
+            const gameplayTotal = sys.phases?.gameplay?.total || 0;
+            ref.meta.textContent = slow.length
+                ? `Slow: ${slow.map((entry) => `${entry.name} ${entry.duration.toFixed(1)}ms`).join(', ')}`
+                : 'No slow systems in latest frame';
+            setTextIfChanged(ref.rows.total, formatTimingMs(sys.total || 0));
+            setTextIfChanged(ref.rows.slow, `${slow.length}`);
+            setTextIfChanged(ref.rows.top, top ? `${top.name} ${top.duration.toFixed(2)}ms` : '--');
+            setTextIfChanged(ref.rows.gameplay, formatTimingMs(gameplayTotal));
+            setTextIfChanged(ref.rows.count, `${(sys.systems || []).length}`);
+            return;
+        }
+
         if (name === 'raytracing') {
             const ddgi = getDDGIManager?.();
             const snap = ddgi?.getSnapshot?.() || {};
@@ -430,12 +455,12 @@ export function updateDebugStatPanels() {
         if (ref.badge) {
             ref.badge.textContent = debugConsoleState.gpuTimingMode === 'approximate' ? 'Approx' : 'GPU';
         }
-        ref.rows.gpu.textContent = debugConsoleState.gpuTimingMode === 'gpu'
+        setTextIfChanged(ref.rows.gpu, debugConsoleState.gpuTimingMode === 'gpu'
             ? (averageGpu > 0 ? formatTimingMs(averageGpu) : '--')
-            : formatTimingMs(averageRender);
-        ref.rows.render.textContent = formatTimingMs(averageRender);
-        ref.rows.frame.textContent = formatTimingMs(averageFrame);
-        ref.rows.fps.textContent = `${averageFps.toFixed(1)} fps`;
+            : formatTimingMs(averageRender));
+        setTextIfChanged(ref.rows.render, formatTimingMs(averageRender));
+        setTextIfChanged(ref.rows.frame, formatTimingMs(averageFrame));
+        setTextIfChanged(ref.rows.fps, `${averageFps.toFixed(1)} fps`);
     });
 }
 
@@ -453,7 +478,7 @@ export function setDebugStatPanel(name, isEnabled) {
 
 export function runStatCommand(args) {
     if (!args.length) {
-        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, ddgi, raytracing, none.', 'warn');
+        pushDebugConsoleLine('Available stat commands: gpu, physics, unit, systems, ddgi, raytracing, none.', 'warn');
         return;
     }
 
@@ -468,7 +493,7 @@ export function runStatCommand(args) {
         return;
     }
 
-    if (!['gpu', 'physics', 'unit', 'ddgi', 'raytracing'].includes(panel)) {
+    if (!['gpu', 'physics', 'unit', 'systems', 'ddgi', 'raytracing'].includes(panel)) {
         pushDebugConsoleLine(`Unknown stat target: ${panel}.`, 'error');
         return;
     }
@@ -714,6 +739,7 @@ export function recordDebugFrameMetrics(metrics) {
     debugConsoleState.latest.gpu = metrics.gpu ?? 0;
     debugConsoleState.latest.render = metrics.render;
     debugConsoleState.latest.ddgi = metrics.ddgi ?? 0;
+    debugConsoleState.latest.systems = metrics.systems ?? null;
     debugConsoleState.latest.fps = metrics.frame > 0 ? 1000 / metrics.frame : 0;
     debugConsoleState.latest.delta = metrics.delta;
 

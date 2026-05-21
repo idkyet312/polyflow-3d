@@ -1,30 +1,65 @@
-// Typed system registry with declared ordering. Systems are pure functions
-// of (deltaTime, ctx) — they don't return values, side effects via shared
-// state / event bus. The registry sorts systems by their declared
-// `before`/`after` dependencies (topological sort) so the run order is
-// explicit and stable across registrations.
-//
-//   const sys = createSystemRegistry();
-//   sys.register({
-//       name: 'shooterAi',
-//       update: (delta, ctx) => updateShooterAis(delta),
-//       after: ['physics'],
-//       before: ['projectiles'],
-//   });
-//   sys.tick(delta, ctx);
-//
-// Each system can be temporarily disabled with `setEnabled(name, false)`.
-// `getOrder()` returns the resolved run order for diagnostics.
-//
-// Cycle detection: if A wants to run before B AND after B (directly or
-// transitively), registration order falls through and a warning prints.
-// Unknown deps are tolerated (a system referencing 'foo' when 'foo' is
-// never registered is treated as "no constraint" — useful for optional
-// systems that may not be installed in every build).
-export function createSystemRegistry() {
-    /** @type {Map<string, { name, update, before, after, enabled }>} */
+export const SYSTEM_PHASES = Object.freeze(['input', 'gameplay', 'physics', 'render', 'editor']);
+
+function defaultNow() {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+        return performance.now();
+    }
+    return Date.now();
+}
+
+function emptyPhaseMetrics() {
+    const phases = {};
+    for (const phase of SYSTEM_PHASES) {
+        phases[phase] = { total: 0, systems: [] };
+    }
+    return phases;
+}
+
+function cloneMetrics(metrics) {
+    return {
+        total: metrics.total,
+        phases: Object.fromEntries(
+            Object.entries(metrics.phases).map(([phase, value]) => [
+                phase,
+                {
+                    total: value.total,
+                    systems: value.systems.map((entry) => ({ ...entry })),
+                },
+            ]),
+        ),
+        systems: metrics.systems.map((entry) => ({ ...entry })),
+        slow: metrics.slow.map((entry) => ({ ...entry })),
+    };
+}
+
+// Phased, timed system registry with declared ordering. Systems are pure
+// functions of (deltaTime, ctx). `before`/`after` dependencies are topologically
+// sorted inside the active phase; unknown deps are tolerated for optional
+// systems. `tick()` runs all systems, `tickPhase()` runs one of:
+// input/gameplay/physics/render/editor.
+export function createSystemRegistry({
+    phases = SYSTEM_PHASES,
+    slowThresholdMs = 2,
+    now = defaultNow,
+    timing = true,
+} = {}) {
+    const phaseSet = new Set(phases);
     const systems = new Map();
-    let orderCache = null;
+    const orderCache = new Map();
+    let metrics = {
+        total: 0,
+        phases: emptyPhaseMetrics(),
+        systems: [],
+        slow: [],
+    };
+
+    function invalidateOrder() {
+        orderCache.clear();
+    }
+
+    function normalizePhase(phase) {
+        return phaseSet.has(phase) ? phase : 'gameplay';
+    }
 
     function register(spec) {
         if (!spec || typeof spec.name !== 'string' || typeof spec.update !== 'function') {
@@ -35,16 +70,17 @@ export function createSystemRegistry() {
         }
         systems.set(spec.name, {
             name: spec.name,
+            phase: normalizePhase(spec.phase),
             update: spec.update,
             before: Array.isArray(spec.before) ? spec.before.slice() : [],
             after: Array.isArray(spec.after) ? spec.after.slice() : [],
             enabled: spec.enabled !== false,
         });
-        orderCache = null;
+        invalidateOrder();
     }
 
     function unregister(name) {
-        if (systems.delete(name)) orderCache = null;
+        if (systems.delete(name)) invalidateOrder();
     }
 
     function setEnabled(name, enabled) {
@@ -56,21 +92,18 @@ export function createSystemRegistry() {
         return systems.has(name);
     }
 
-    /** Topologically sort systems into a stable run order.
-     * Builds a "must run before" DAG: A's `before: ['B']` adds edge A→B,
-     * B's `after: ['A']` adds the same edge. Then Kahn's algorithm with
-     * insertion order as tie-breaker so registration order is preserved
-     * when there's no constraint. */
-    function computeOrder() {
-        // Insertion order from Map iteration.
-        const allNames = Array.from(systems.keys());
+    function computeOrder(phase = null) {
+        const allNames = Array.from(systems.keys()).filter((name) => {
+            const sys = systems.get(name);
+            return !phase || sys.phase === phase;
+        });
+        const selected = new Set(allNames);
         const indexOf = new Map(allNames.map((n, i) => [n, i]));
-        // edges[a] = set of names that must run AFTER a.
         const edges = new Map(allNames.map((n) => [n, new Set()]));
         const inDegree = new Map(allNames.map((n) => [n, 0]));
 
         function addEdge(from, to) {
-            if (!systems.has(from) || !systems.has(to)) return; // tolerate unknown
+            if (!selected.has(from) || !selected.has(to)) return;
             if (from === to) return;
             if (!edges.get(from).has(to)) {
                 edges.get(from).add(to);
@@ -79,11 +112,11 @@ export function createSystemRegistry() {
         }
 
         for (const sys of systems.values()) {
+            if (phase && sys.phase !== phase) continue;
             for (const target of sys.before) addEdge(sys.name, target);
             for (const source of sys.after) addEdge(source, sys.name);
         }
 
-        // Kahn's algorithm with stable tie-break (lowest insertion index first).
         const ready = allNames
             .filter((n) => inDegree.get(n) === 0)
             .sort((a, b) => indexOf.get(a) - indexOf.get(b));
@@ -91,7 +124,6 @@ export function createSystemRegistry() {
         while (ready.length) {
             const n = ready.shift();
             order.push(n);
-            // Sort newly-ready by insertion order for stability.
             const newlyReady = [];
             for (const next of edges.get(n)) {
                 const d = inDegree.get(next) - 1;
@@ -99,9 +131,6 @@ export function createSystemRegistry() {
                 if (d === 0) newlyReady.push(next);
             }
             newlyReady.sort((a, b) => indexOf.get(a) - indexOf.get(b));
-            // Merge into ready preserving order; simple push works because we
-            // re-sort ready when needed (here, we just append since the merge
-            // happens at the end of each iter).
             for (const r of newlyReady) ready.push(r);
             ready.sort((a, b) => indexOf.get(a) - indexOf.get(b));
         }
@@ -115,23 +144,83 @@ export function createSystemRegistry() {
         return order;
     }
 
-    function getOrder() {
-        if (!orderCache) orderCache = computeOrder();
-        return orderCache.slice();
+    function getOrder(phase = null) {
+        const cacheKey = phase || '*';
+        if (!orderCache.has(cacheKey)) {
+            orderCache.set(cacheKey, computeOrder(phase));
+        }
+        return orderCache.get(cacheKey).slice();
     }
 
-    function tick(delta, ctx) {
-        if (!orderCache) orderCache = computeOrder();
-        for (const name of orderCache) {
+    function resetMetrics() {
+        metrics = {
+            total: 0,
+            phases: emptyPhaseMetrics(),
+            systems: [],
+            slow: [],
+        };
+    }
+
+    function runOrder(order, delta, ctx) {
+        for (const name of order) {
             const sys = systems.get(name);
             if (!sys || !sys.enabled) continue;
+
+            const t0 = timing ? now() : 0;
             try {
                 sys.update(delta, ctx);
             } catch (err) {
                 console.error(`[systemRegistry] system "${name}" threw:`, err);
+            } finally {
+                if (timing) {
+                    const duration = Math.max(0, now() - t0);
+                    const entry = { name, phase: sys.phase, duration };
+                    metrics.total += duration;
+                    metrics.systems.push(entry);
+                    if (!metrics.phases[sys.phase]) {
+                        metrics.phases[sys.phase] = { total: 0, systems: [] };
+                    }
+                    metrics.phases[sys.phase].total += duration;
+                    metrics.phases[sys.phase].systems.push(entry);
+                    if (duration >= slowThresholdMs) metrics.slow.push(entry);
+                }
             }
         }
     }
 
-    return { register, unregister, setEnabled, has, getOrder, tick };
+    function tick(delta, ctx) {
+        resetMetrics();
+        runOrder(getOrder(null), delta, ctx);
+        return getLastMetrics();
+    }
+
+    function tickPhase(phase, delta, ctx) {
+        resetMetrics();
+        runOrder(getOrder(normalizePhase(phase)), delta, ctx);
+        return getLastMetrics();
+    }
+
+    function getLastMetrics() {
+        return cloneMetrics(metrics);
+    }
+
+    function getSlowSystems(limit = 5) {
+        return metrics.slow
+            .slice()
+            .sort((a, b) => b.duration - a.duration)
+            .slice(0, limit)
+            .map((entry) => ({ ...entry }));
+    }
+
+    return {
+        register,
+        unregister,
+        setEnabled,
+        has,
+        getOrder,
+        tick,
+        tickPhase,
+        getLastMetrics,
+        getSlowSystems,
+    };
 }

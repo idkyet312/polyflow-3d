@@ -47,8 +47,8 @@ export function createDynamicBodySpatialIndex({
         return index;
     }
 
-    function querySphere(center, radius) {
-        return getIndex().querySphere(center, radius);
+    function querySphere(center, radius, out = null) {
+        return getIndex().querySphere(center, radius, out);
     }
 
     return {
