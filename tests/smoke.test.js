@@ -1189,6 +1189,41 @@ test('effectsSystem: returns expired meshes to FX pool hook', async () => {
 
 // ───────────────────────── ActorComponent ─────────────────────────
 
+test('projectileSystem: reuses projectile records and instanced handles', async () => {
+    const { createProjectileSystem } = await import('../src/gameplay/projectileSystem.js');
+    const THREE = await import('three');
+    const scene = new THREE.Scene();
+    const state = { shooterProjectiles: [] };
+    const system = createProjectileSystem({
+        getScene: () => scene,
+        gameplayPrefabState: state,
+        SHOOTER_AI_PREFAB: {
+            projectilePoolSize: 8,
+            projectileSpeed: 10,
+            projectileLife: 1,
+            damage: 0.1,
+            hitRadius: 0.2,
+        },
+    });
+
+    const origin = new THREE.Vector3(0, 0, 0);
+    const target = new THREE.Vector3(1, 0, 0);
+    system.spawnShooterProjectile(origin, target);
+    const first = state.shooterProjectiles[0];
+    const firstHandle = first.mesh;
+    const firstVelocity = first.velocity;
+
+    system.releaseProjectile(first);
+    state.shooterProjectiles.length = 0;
+
+    system.spawnShooterProjectile(origin, target);
+    const second = state.shooterProjectiles[0];
+    assert.equal(second, first);
+    assert.equal(second.mesh, firstHandle);
+    assert.equal(second.velocity, firstVelocity);
+    assert.equal(second._pooled, false);
+});
+
 test('ActorComponent: lifecycle defaults + active flag', async () => {
     const { ActorComponent } = await import('../src/runtime/components/ActorComponent.js');
 

@@ -1,4 +1,5 @@
 import { createProjectileInstancer } from './projectileInstancer.js';
+import * as THREE from 'three';
 
 // Shooter-AI/player projectile spawn + clear. Wraps the instancer so callers
 // just say spawnShooterProjectile(origin, target, opts). State lives in
@@ -15,6 +16,9 @@ export function createProjectileSystem({
     SHOOTER_AI_PREFAB,
 }) {
     let _projectileInstancer = null;
+    const _directionScratch = new THREE.Vector3();
+    const _projectilePool = [];
+    const MAX_PROJECTILE_RECORD_POOL = 2048;
 
     function getProjectileInstancer() {
         const scene = getScene();
@@ -29,9 +33,15 @@ export function createProjectileSystem({
     }
 
     function releaseProjectile(projectile) {
+        if (!projectile || projectile._pooled) return;
         const handle = projectile?.mesh;
-        if (!handle) return;
-        _projectileInstancer?.release(handle);
+        if (handle) _projectileInstancer?.release(handle);
+        projectile.mesh = null;
+        projectile.ttl = 0;
+        projectile._pooled = true;
+        if (_projectilePool.length < MAX_PROJECTILE_RECORD_POOL) {
+            _projectilePool.push(projectile);
+        }
     }
 
     function spawnShooterProjectile(origin, target, options = {}) {
@@ -39,8 +49,8 @@ export function createProjectileSystem({
         if (!scene || !origin || (!target && !options.velocity)) return;
 
         const direction = options.velocity
-            ? options.velocity.clone()
-            : target.clone().sub(origin);
+            ? _directionScratch.copy(options.velocity)
+            : _directionScratch.subVectors(target, origin);
         if (direction.lengthSq() < 1e-6) return;
         direction.normalize();
 
@@ -60,20 +70,21 @@ export function createProjectileSystem({
         mesh.name = options.name || 'Shooter AI Projectile';
         mesh.position.copy(origin);
 
-        gameplayPrefabState.shooterProjectiles.push({
-            mesh,
-            poolKey: options.poolKey ?? 'shooterAiBullets',
-            maxPoolSize: options.maxPoolSize ?? SHOOTER_AI_PREFAB.projectilePoolSize,
-            velocity: direction.multiplyScalar(options.speed ?? SHOOTER_AI_PREFAB.projectileSpeed),
-            ttl: options.life ?? SHOOTER_AI_PREFAB.projectileLife,
-            damage: options.damage ?? SHOOTER_AI_PREFAB.damage,
-            hitRadius: options.hitRadius ?? SHOOTER_AI_PREFAB.hitRadius,
-            hitsPlayer: options.hitsPlayer !== false,
-            damagesShooters: options.damagesShooters === true,
-            bounces: options.bounces ?? 0,
-            bounceDamping: options.bounceDamping ?? 0.86,
-            gravity: options.gravity ?? 0,
-        });
+        const projectile = _projectilePool.pop() || { velocity: new THREE.Vector3() };
+        projectile._pooled = false;
+        projectile.mesh = mesh;
+        projectile.poolKey = options.poolKey ?? 'shooterAiBullets';
+        projectile.maxPoolSize = options.maxPoolSize ?? SHOOTER_AI_PREFAB.projectilePoolSize;
+        projectile.velocity.copy(direction).multiplyScalar(options.speed ?? SHOOTER_AI_PREFAB.projectileSpeed);
+        projectile.ttl = options.life ?? SHOOTER_AI_PREFAB.projectileLife;
+        projectile.damage = options.damage ?? SHOOTER_AI_PREFAB.damage;
+        projectile.hitRadius = options.hitRadius ?? SHOOTER_AI_PREFAB.hitRadius;
+        projectile.hitsPlayer = options.hitsPlayer !== false;
+        projectile.damagesShooters = options.damagesShooters === true;
+        projectile.bounces = options.bounces ?? 0;
+        projectile.bounceDamping = options.bounceDamping ?? 0.86;
+        projectile.gravity = options.gravity ?? 0;
+        gameplayPrefabState.shooterProjectiles.push(projectile);
     }
 
     function clearShooterProjectiles() {

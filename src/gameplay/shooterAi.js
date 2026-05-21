@@ -17,7 +17,7 @@ export function createShooterAi(deps) {
         // call-site deps caught by unresolved-calls cross-check (all hoisted
         // fns or const aliases declared before splice site — safe to inject):
         damagePlayer, damageShooterAi, getActorBody, getActorRenderObject,
-        getGameplayPrefabActors,
+        getGameplayPrefabActors, queryDynamicBodies = null,
         // additional call-site deps (caught by simple call-scan against
         // runtime.js — the regex-based audit missed these as call-site
         // identifiers in nested expressions):
@@ -143,21 +143,27 @@ export function createShooterAi(deps) {
                 }
             }
             if (projectile.ttl <= 0 || hitPlayer || hitShooter || hitWall) {
+                if (hitPlayer) {
+                    damagePlayer(projectile.damage, projectile.mesh?.position || null);
+                }
                 releaseProjectile(projectile);
                 gameplayPrefabState.shooterProjectiles.splice(i, 1);
-                if (hitPlayer) {
-                    damagePlayer(projectile.damage, projectile.mesh.position);
-                    if (!gameplayPrefabState.shooterProjectiles.length) break;
-                }
+                if (hitPlayer && !gameplayPrefabState.shooterProjectiles.length) break;
             }
         }
     }
+
+    const _physicsHitCandidates = [];
+    const _coverCandidates = [];
 
     function updateShooterAiPhysicsHits() {
         if (!gameplay.active || !physics.ready || !physics.dynamicBodies?.length) return;
 
         const now = performance.now?.() || Date.now();
         const shooters = getGameplayPrefabActors('shooterAi', _scratchPrefab1);
+        const hitScanRadius = Number.isFinite(SHOOTER_AI_PREFAB.hitScanRadius)
+            ? SHOOTER_AI_PREFAB.hitScanRadius
+            : 4;
         for (let si = 0; si < shooters.length; si++) {
             const actor = shooters[si];
             const mesh = getActorRenderObject(actor);
@@ -170,7 +176,10 @@ export function createShooterAi(deps) {
             tempVectorC.y += 0.6;
             tempVectorA.y += 1.2;
 
-            for (const prop of physics.dynamicBodies) {
+            const candidates = queryDynamicBodies
+                ? queryDynamicBodies(tempVectorC, hitScanRadius, _physicsHitCandidates)
+                : physics.dynamicBodies;
+            for (const prop of candidates) {
                 if (!prop || prop.userData?.gameplayPrefab) continue;
                 const body = getActorBody(prop);
                 const propMesh = getActorRenderObject(prop);
@@ -244,7 +253,9 @@ export function createShooterAi(deps) {
         let bestScore = Infinity;
         let found = false;
 
-        const bodies = physics.dynamicBodies;
+        const bodies = queryDynamicBodies
+            ? queryDynamicBodies(shooterPosition, 18, _coverCandidates)
+            : physics.dynamicBodies;
         for (let i = 0; i < bodies.length; i++) {
             const prop = bodies[i];
             if (!prop || prop.userData?.gameplayPrefab) continue;

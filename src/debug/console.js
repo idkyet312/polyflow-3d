@@ -385,39 +385,39 @@ export function updateDebugStatPanels() {
 
     debugConsoleState.panelRefs.forEach((ref, name) => {
         if (name === 'unit') {
-            ref.meta.textContent = gameplay.active ? 'Play mode frame timings' : 'Showcase frame timings';
-            ref.rows.frame.textContent = formatTimingMs(averageFrame);
-            ref.rows.fps.textContent = `${averageFps.toFixed(1)} fps`;
-            ref.rows.update.textContent = formatTimingMs(averageUpdate);
-            ref.rows.physics.textContent = formatTimingMs(averagePhysics);
-            ref.rows.render.textContent = formatTimingMs(averageRender);
-            ref.rows.scripts.textContent = formatTimingMs(averageScripts);
+            setTextIfChanged(ref.meta, gameplay.active ? 'Play mode frame timings' : 'Showcase frame timings');
+            setTextIfChanged(ref.rows.frame, formatTimingMs(averageFrame));
+            setTextIfChanged(ref.rows.fps, `${averageFps.toFixed(1)} fps`);
+            setTextIfChanged(ref.rows.update, formatTimingMs(averageUpdate));
+            setTextIfChanged(ref.rows.physics, formatTimingMs(averagePhysics));
+            setTextIfChanged(ref.rows.render, formatTimingMs(averageRender));
+            setTextIfChanged(ref.rows.scripts, formatTimingMs(averageScripts));
             return;
         }
 
         if (name === 'physics') {
-            ref.meta.textContent = physics.ready ? 'Jolt step vs. post-step overhead' : 'Physics still initializing';
-            ref.rows.step.textContent = formatTimingMs(averagePhysicsStep);
-            ref.rows.sync.textContent = formatTimingMs(averagePhysicsSync);
-            ref.rows.collisions.textContent = formatTimingMs(averagePhysicsCollisions);
-            ref.rows.bodies.textContent = `${physics.dynamicBodies.length}`;
-            ref.rows.passes.textContent = `${debugConsoleState.latest.collisionSteps}`;
-            ref.rows.delta.textContent = `${(debugConsoleState.latest.delta * 1000).toFixed(1)} ms`;
+            setTextIfChanged(ref.meta, physics.ready ? 'Jolt step vs. post-step overhead' : 'Physics still initializing');
+            setTextIfChanged(ref.rows.step, formatTimingMs(averagePhysicsStep));
+            setTextIfChanged(ref.rows.sync, formatTimingMs(averagePhysicsSync));
+            setTextIfChanged(ref.rows.collisions, formatTimingMs(averagePhysicsCollisions));
+            setTextIfChanged(ref.rows.bodies, `${physics.dynamicBodies.length}`);
+            setTextIfChanged(ref.rows.passes, `${debugConsoleState.latest.collisionSteps}`);
+            setTextIfChanged(ref.rows.delta, `${(debugConsoleState.latest.delta * 1000).toFixed(1)} ms`);
             return;
         }
 
         if (name === 'ddgi') {
             const ddgi = getDDGIManager?.();
             const snap = ddgi?.getSnapshot?.() || {};
-            ref.meta.textContent = snap.contributionView ? 'Contribution view active' : 'Probe atlas status';
-            ref.rows.enabled.textContent = snap.enabled ? 'On' : 'Off';
-            ref.rows.volume.textContent = snap.activeVolumeType || '--';
-            ref.rows.probes.textContent = `${snap.probeCount ?? 0}`;
-            ref.rows.ready.textContent = `${snap.initializedProbes ?? 0}/${snap.probeCount ?? 0}`;
-            ref.rows['bake n'].textContent = `${snap.bakeEveryN ?? snap.probesPerFrame ?? 0}`;
-            ref.rows.intensity.textContent = Number(snap.intensity ?? 0).toFixed(2);
-            ref.rows.invalidate.textContent = snap.lastInvalidateReason || '--';
-            ref.rows.ddgi.textContent = formatTimingMs(averageDDGI || snap.lastCaptureMs || 0);
+            setTextIfChanged(ref.meta, snap.contributionView ? 'Contribution view active' : 'Probe atlas status');
+            setTextIfChanged(ref.rows.enabled, snap.enabled ? 'On' : 'Off');
+            setTextIfChanged(ref.rows.volume, snap.activeVolumeType || '--');
+            setTextIfChanged(ref.rows.probes, `${snap.probeCount ?? 0}`);
+            setTextIfChanged(ref.rows.ready, `${snap.initializedProbes ?? 0}/${snap.probeCount ?? 0}`);
+            setTextIfChanged(ref.rows['bake n'], `${snap.bakeEveryN ?? snap.probesPerFrame ?? 0}`);
+            setTextIfChanged(ref.rows.intensity, Number(snap.intensity ?? 0).toFixed(2));
+            setTextIfChanged(ref.rows.invalidate, snap.lastInvalidateReason || '--');
+            setTextIfChanged(ref.rows.ddgi, formatTimingMs(averageDDGI || snap.lastCaptureMs || 0));
             updateDDGIAtlasPreview(ref, ddgi?.getIrradianceAtlas?.());
             return;
         }
@@ -428,9 +428,9 @@ export function updateDebugStatPanels() {
             const top = sorted[0];
             const slow = sys.slow || [];
             const gameplayTotal = sys.phases?.gameplay?.total || 0;
-            ref.meta.textContent = slow.length
+            setTextIfChanged(ref.meta, slow.length
                 ? `Slow: ${slow.map((entry) => `${entry.name} ${entry.duration.toFixed(1)}ms`).join(', ')}`
-                : 'No slow systems in latest frame';
+                : 'No slow systems in latest frame');
             setTextIfChanged(ref.rows.total, formatTimingMs(sys.total || 0));
             setTextIfChanged(ref.rows.slow, `${slow.length}`);
             setTextIfChanged(ref.rows.top, top ? `${top.name} ${top.duration.toFixed(2)}ms` : '--');
@@ -442,18 +442,18 @@ export function updateDebugStatPanels() {
         if (name === 'raytracing') {
             const ddgi = getDDGIManager?.();
             const snap = ddgi?.getSnapshot?.() || {};
-            ref.meta.textContent = snap.bvhDirty
+            setTextIfChanged(ref.meta, snap.bvhDirty
                 ? `BVH dirty${snap.lastInvalidateReason ? `: ${snap.lastInvalidateReason}` : ''}`
-                : 'DDGI BVH build timing';
-            ref.rows['bvh build'].textContent = formatTimingMs(snap.lastBVHBuildMs || 0);
+                : 'DDGI BVH build timing');
+            setTextIfChanged(ref.rows['bvh build'], formatTimingMs(snap.lastBVHBuildMs || 0));
             return;
         }
 
-        ref.meta.textContent = debugConsoleState.gpuTimingMode === 'gpu'
+        setTextIfChanged(ref.meta, debugConsoleState.gpuTimingMode === 'gpu'
             ? 'CPU render submit vs. GPU timestamp'
-            : 'GPU timestamp unsupported; showing CPU approximation';
+            : 'GPU timestamp unsupported; showing CPU approximation');
         if (ref.badge) {
-            ref.badge.textContent = debugConsoleState.gpuTimingMode === 'approximate' ? 'Approx' : 'GPU';
+            setTextIfChanged(ref.badge, debugConsoleState.gpuTimingMode === 'approximate' ? 'Approx' : 'GPU');
         }
         setTextIfChanged(ref.rows.gpu, debugConsoleState.gpuTimingMode === 'gpu'
             ? (averageGpu > 0 ? formatTimingMs(averageGpu) : '--')

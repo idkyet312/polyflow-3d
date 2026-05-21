@@ -53,25 +53,30 @@ class ProjectileBatch {
 
         // Slot bookkeeping. handles[slot] is the live handle or null.
         this.handles = new Array(CAPACITY_PER_KEY).fill(null);
+        this.handlePool = new Array(CAPACITY_PER_KEY);
         this.free = [];
-        for (let i = CAPACITY_PER_KEY - 1; i >= 0; i--) this.free.push(i);
+        for (let i = CAPACITY_PER_KEY - 1; i >= 0; i--) {
+            this.handlePool[i] = {
+                position: new THREE.Vector3(),
+                name: 'Projectile',
+                visible: false,
+                _batch: this,
+                _slot: undefined,
+                _light: null,
+            };
+            this.free.push(i);
+        }
         this.dirty = false;
     }
 
     acquire(name) {
         const slot = this.free.pop();
         if (slot === undefined) return null; // batch full → caller drops the shot
-        const handle = {
-            // The fields runtime.js's projectile code reads/writes:
-            position: new THREE.Vector3(),
-            name: name || 'Projectile',
-            visible: true,
-            // internal:
-            _batch: this,
-            _slot: slot,
-            // Optional muzzle light, attached lazily (rare path).
-            _light: null,
-        };
+        const handle = this.handlePool[slot];
+        handle.position.set(0, 0, 0);
+        handle.name = name || 'Projectile';
+        handle.visible = true;
+        handle._slot = slot;
         this.handles[slot] = handle;
         return handle;
     }
@@ -87,6 +92,9 @@ class ProjectileBatch {
         this.handles[slot] = null;
         this.free.push(slot);
         handle._slot = undefined;
+        handle.visible = false;
+        handle.name = 'Projectile';
+        handle.position.set(0, 0, 0);
         this.dirty = true;
     }
 

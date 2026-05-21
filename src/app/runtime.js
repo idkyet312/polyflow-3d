@@ -1888,6 +1888,7 @@ const _shooterAi = createShooterAi({
     releaseProjectile,
     damagePlayer, getActorBody, getActorRenderObject,
     getGameplayPrefabActors,
+    queryDynamicBodies: (...a) => dynamicBodySpatial.querySphere(...a),
     // hoisted-function deps (safe by-ref even though textually after site):
     ensureGameplayPrefabScript,
     getShooterGroundIgnoreActors, getShooterTargetPosition,
@@ -1907,6 +1908,60 @@ const updateShooterMovement = _shooterAi.updateShooterMovement;
 const updateShooterAiActor = _shooterAi.updateShooterAiActor;
 const updateShooterAis = _shooterAi.updateShooterAis;
 
+const _shooterAiPoolScratch = [];
+
+function getShooterAiPoolKey(options = {}) {
+    if (options.poolKey) return options.poolKey;
+    if (options.rogueVariant) return `rogue:${options.rogueVariant}`;
+    if (options.doomEnemy) return 'doomEnemy';
+    if (options.spawnedBy) return 'spawnedShooterAi';
+    return '';
+}
+
+function findPooledShooterAi(poolKey) {
+    if (!poolKey) return null;
+    const actors = getGameplayPrefabActors('shooterAi', _shooterAiPoolScratch);
+    for (let i = 0; i < actors.length; i++) {
+        const actor = actors[i];
+        const shooter = actor?.userData?.shooterAi;
+        const mesh = getActorRenderObject(actor);
+        if (shooter?.poolable
+            && shooter.poolKey === poolKey
+            && shooter.defeated
+            && mesh
+            && mesh.visible === false) {
+            return actor;
+        }
+    }
+    return null;
+}
+
+function configureShooterAiState(actor, options, health, maxHealth, poolKey) {
+    const previous = actor.userData?.shooterAi || {};
+    const healthBar = previous.healthBar;
+    const aimWarning = previous.aimWarning;
+    actor.userData = actor.userData || {};
+    actor.userData.label = options.label || 'Shooter AI';
+    delete actor.userData.rogueXp;
+    actor.userData.shooterAi = {
+        healthBar,
+        aimWarning,
+        range: Number.isFinite(options.range) ? options.range : SHOOTER_AI_PREFAB.range,
+        cooldownMs: Number.isFinite(options.cooldownMs) ? options.cooldownMs : SHOOTER_AI_PREFAB.cooldownMs,
+        speedMul: Number.isFinite(options.speedMul) ? options.speedMul : 1,
+        nextShotAt: 0,
+        windupUntil: 0,
+        health,
+        maxHealth,
+        defeated: false,
+        spawnedBy: options.spawnedBy || '',
+        scoreValue: options.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue,
+        rogueVariant: options.rogueVariant || '',
+        poolKey,
+        poolable: !!poolKey,
+    };
+}
+
 function spawnShooterAiAt(position, options = {}) {
     if (!position) return null;
     const ignoreGroundActors = [];
@@ -1922,6 +1977,23 @@ function spawnShooterAiAt(position, options = {}) {
             ? options.health
             : SHOOTER_AI_PREFAB.health;
     const health = Number.isFinite(options.health) ? options.health : maxHealth;
+    const poolKey = getShooterAiPoolKey(options);
+    const pooledActor = findPooledShooterAi(poolKey);
+    if (pooledActor) {
+        configureShooterAiState(pooledActor, options, health, maxHealth, poolKey);
+        const mesh = getActorRenderObject(pooledActor);
+        mesh.position.set(position.x, groundY + 1.18, position.z);
+        mesh.scale.setScalar(SHOOTER_AI_PREFAB.scale);
+        mesh.visible = true;
+        mesh.updateMatrixWorld(true);
+        tagGameplayPrefabActor(pooledActor, 'shooterAi', { triggerRadius: 0.8, groundOffset: 1.18, ignoreGroundActors: shooterGroundIgnoreActors });
+        tintGameplayPrefabActor(pooledActor, '#dc2626', '#7f1d1d', 0.9);
+        if (!mesh.getObjectByName?.('Shooter Barrel')) addShooterAiVisual(pooledActor);
+        resetShooterAiState(pooledActor);
+        setShooterHealth(pooledActor, health);
+        ensureGameplayPrefabScript(pooledActor, SHOOTER_AI_USER_SCRIPT);
+        return pooledActor;
+    }
     const actor = spawnDynamicPrimitive('capsule', new THREE.Vector3(position.x, groundY + 1.18, position.z), SHOOTER_AI_PREFAB.scale, {
         local: false,
         includeCollisionBody: false,
@@ -1939,6 +2011,8 @@ function spawnShooterAiAt(position, options = {}) {
                 spawnedBy: options.spawnedBy || '',
                 scoreValue: options.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue,
                 rogueVariant: options.rogueVariant || '',
+                poolKey,
+                poolable: !!poolKey,
             },
         },
         returnActor: true,
@@ -1959,12 +2033,13 @@ function spawnDoomEnemyAt(position, options = {}) {
             : DOOM_ENEMY_PREFAB.health;
     const actor = spawnShooterAiAt(position, {
         ...options,
+        doomEnemy: true,
         label: options.label || 'Doom Enemy',
         health: Number.isFinite(options.health) ? options.health : maxHealth,
         maxHealth,
     });
     if (!actor) return null;
-    applyDoomEnemySpriteSkin(actor);
+    if (!actor.userData?.doomEnemy?.sprite?.parent) applyDoomEnemySpriteSkin(actor);
     return actor;
 }
 
