@@ -40,6 +40,7 @@ export class TargetComponent extends ActorComponent {
         getRenderObject = (actor) => actor?.mesh ?? null,
         addScore = () => {},
         dispatchTriggerEvent = () => {},
+        isGameplayActive = () => true,
         tmp = null,
         defaultRadius = 1.55,
         defaultScoreValue = 25,
@@ -55,6 +56,7 @@ export class TargetComponent extends ActorComponent {
         this._getRenderObject = getRenderObject;
         this._addScore = addScore;
         this._dispatchTriggerEvent = dispatchTriggerEvent;
+        this._isGameplayActive = isGameplayActive;
         this._tmp = tmp ?? { a: null, b: null };
         this.defaultRadius = defaultRadius;
         this.defaultScoreValue = defaultScoreValue;
@@ -73,6 +75,7 @@ export class TargetComponent extends ActorComponent {
     tick(/* deltaTime */) {
         const actor = this.owner;
         if (!actor) return;
+        if (!this._isGameplayActive()) return;
         const userData = actor.userData ?? {};
 
         if (this._isScripted(actor)) {

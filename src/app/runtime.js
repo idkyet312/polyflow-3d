@@ -123,6 +123,30 @@ import { createProjectileSystem } from '../gameplay/projectileSystem.js';
 import { createWeaponHud } from '../gameplay/weaponHud.js';
 import { createPlayerCombat } from '../gameplay/playerCombat.js';
 import { createTeleporterSystem } from '../gameplay/teleporterSystem.js';
+import { createGameplayPrefabSystem } from '../gameplay/gameplayPrefabSystem.js';
+import { createEffectsSystem } from '../gameplay/effectsSystem.js';
+import { createTerrainBrushSystem } from '../world/terrainBrushSystem.js';
+import { createObjectScriptStore } from '../scripting/objectScriptStore.js';
+import { createInputReset, isEditableElement as _isEditableElement } from '../gameplay/inputReset.js';
+import { createEventBus } from '../runtime/eventBus.js';
+import { createSystemRegistry } from '../runtime/systemRegistry.js';
+import { createLevelStateSystem } from '../gameplay/levelStateSystem.js';
+import { createWorldEnvSystem } from '../world/worldEnvSystem.js';
+
+// Single process-wide event bus. Topics use namespace:event format:
+//   player:damaged    { amount, damageAngle, sourcePos }
+//   player:died       { sampleType, autoRespawn }
+// Subscribers are wired in this file near the system that owns the response.
+const eventBus = createEventBus();
+if (typeof window !== 'undefined') window.__eventBus = eventBus;
+
+// System registry for the gameplay update phase. Each system is a pure
+// (delta, ctx) function that mutates shared state. Declared `before`/`after`
+// edges fix the run order even when registration order varies. Registry is
+// populated near the bottom of this file (search for `gameplaySystems.register`).
+// Frame loop calls gameplaySystems.tick(delta, ctx) once per frame.
+const gameplaySystems = createSystemRegistry();
+if (typeof window !== 'undefined') window.__gameplaySystems = gameplaySystems;
 import { createRogueWaves } from '../gameplay/rogueWaves.js';
 import {
     AHUD,
@@ -410,7 +434,6 @@ function getRuntimeHud() {
     }
     return runtimeHud;
 }
-
 window.UnrealWidgetAPI = {
     AHUD,
     UUserWidget,
@@ -492,7 +515,6 @@ function createExampleWidgets() {
         console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
     }
 }
-
 const LIGHT_ACTOR_KINDS = new Set(['pointLight', 'spotLight']);
 
 function isLightActorKind(kind = '') {
@@ -586,29 +608,33 @@ let perfModeUiRefs = null;
 // comment on PERF_MODE_DEFAULT_ENABLED above for the broader fix context.
 // Bumped v4 -> v5 for RT DDGI live-bake controls.
 const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v5';
-const WORLD_ENV_DEFAULTS = Object.freeze({
-    sky: { enabled: true, preset: 'sunny-sky', blurriness: 0.05 },
-    ambient: { enabled: true, intensity: 1.0 },
-    hemi: { enabled: true, intensity: 1.5 },
-    sun: { enabled: true, castShadow: true, intensity: 2.5 },
-    tonemap: { exposure: 1.0 },
-    bloom: { enabled: true, strength: 0.6, radius: 0.95, threshold: 0.9 },
-    ssgi: { enabled: false, giIntensity: 2.0, aoIntensity: 1.0, radius: 8.0, thickness: 0.6, sliceCount: 1, stepCount: 8 },
-    fog: { enabled: true, density: 0.012, opacity: 0.055 },
-    ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
-    // Shadow tuning is global across point/spot/directional lights so the
-    // user has one knob to fight self-shadow seams scene-wide instead of
-    // hunting per-light. Defaults were tuned in-engine against the test scene
-    // — zero bias + zero normal-bias relies on PCF Radius alone to soften
-    // the seams, which produced the cleanest result for point-light room
-    // shadows without peter-panning.
-    shadows: { enabled: true, bias: 0.0, normalBias: 0.0, radius: 7.9, mapSize: 512 },
-    // Parallax Occlusion Mapping defaults. enabled=false globally means no
-    // material runs the POM march even if heightMap is assigned. Quality
-    // strings map to POM_QUALITY presets in src/world/materials/pomNode.js.
-    pom: { enabled: false, intensity: 0.04, quality: 'medium' },
+// World environment state + apply/save/load extracted to
+// ../world/worldEnvSystem.js. The module owns the mutable state object;
+// the local `worldEnvState` alias below is the SAME ref the module holds
+// (resetWorldEnvDefaults mutates it in place), so existing reads
+// `worldEnvState.foo` keep working unchanged.
+const _worldEnvSystem = createWorldEnvSystem({
+    storageKey: WORLD_ENV_STORAGE_KEY,
+    getRenderer: () => renderer,
+    getAmbientLight: () => ambientLight,
+    getHemiLight: () => hemiLight,
+    getMainDirectionalLight: () => mainDirectionalLight,
+    getEnvironmentController: () => environmentController,
+    getVolumetricFogController: () => volumetricFogController,
+    getPostProcessVolumeManager: () => postProcessVolumeManager,
+    getPostProcessing: () => postProcessing,
+    getPostProcessNodes: () => postProcessNodes,
+    globalPostProcessUniforms,
+    getDDGIManager: () => getDDGIManager(),
+    getCornellPanelLight: () => cornellPanelLight,
+    isPerfModeEnabled: () => perfModeEnabled,
+    applyShadowTuningToScene: (...a) => applyShadowTuningToScene(...a),
+    applyPomTuningToScene: (...a) => applyPomTuningToScene(...a),
+    applyCornellTestPreset: (...a) => applyCornellTestPreset(...a),
+    getWorldEnvUiRefs: () => worldEnvUiRefs,
 });
-let worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
+const WORLD_ENV_DEFAULTS = _worldEnvSystem.WORLD_ENV_DEFAULTS;
+const worldEnvState = _worldEnvSystem.getWorldEnvState();
 let worldEnvUiRefs = null;
 let ddgiTestVolumeActor = null;
 let ddgiTestRigActor = null;
@@ -2485,6 +2511,7 @@ const _playerCombat = createPlayerCombat({
     clearActiveVehicle,
     resetMovementInputState: (...a) => resetMovementInputState(...a),
     respawnPlayer: (...a) => respawnPlayer(...a),
+    bus: eventBus,
 });
 const setPlayerHealth = _playerCombat.setPlayerHealth;
 const damagePlayer = _playerCombat.damagePlayer;
@@ -2496,6 +2523,24 @@ const queuePlayerDeathRespawn = _playerCombat.queuePlayerDeathRespawn;
 if (typeof window !== 'undefined') {
     queueMicrotask(() => { window.setPlayerHealth = setPlayerHealth; });
 }
+
+// 'player:damaged' subscribers — each runs independently. Order doesn't
+// matter (no inter-handler reads). Hit feedback (flash + shake + sound)
+// runs first because the user expects the visceral cue before the
+// directional indicator. Direction indicator only when sourcePos known.
+// User scripts can install window.onPlayerDamaged to override the engine
+// indicator entirely (legacy hook preserved).
+eventBus.on('player:damaged', () => {
+    triggerPlayerHitFeedback();
+});
+eventBus.on('player:damaged', ({ amount, damageAngle }) => {
+    if (damageAngle == null) return;
+    if (typeof window !== 'undefined' && window.onPlayerDamaged) {
+        try { window.onPlayerDamaged(damageAngle, amount); } catch (e) { /* script error */ }
+    } else {
+        showDamageIndicator(damageAngle);
+    }
+});
 
 function getPointSegmentDistanceSq(point, start, end) {
     tempVectorD.subVectors(end, start);
@@ -2854,43 +2899,10 @@ function emitShooterDeathEffect(actor) {
     gameplayPrefabState.effects.push({ type: 'shooterDeath', particles, ttl: 0.72, maxTtl: 0.72 });
 }
 
-function updateGameplayEffects(delta = 0) {
-    if (!gameplayPrefabState.effects.length) return;
-    for (let i = gameplayPrefabState.effects.length - 1; i >= 0; i--) {
-        const effect = gameplayPrefabState.effects[i];
-        effect.ttl -= delta;
-        const alpha = Math.max(0, effect.ttl / (effect.maxTtl || 1));
-        for (const particle of effect.particles || []) {
-            // staticFx effects (tracers, decals) don't move or fall — just fade.
-            if (!effect.staticFx) {
-                particle.velocity.y -= 7.5 * delta;
-                particle.mesh.position.addScaledVector(particle.velocity, delta);
-            }
-            if (particle.mesh.material) {
-                particle.mesh.material.opacity = (particle.baseOpacity ?? 1) * alpha;
-            }
-        }
-        if (effect.ttl <= 0) {
-            for (const particle of effect.particles || []) {
-                particle.mesh?.parent?.remove(particle.mesh);
-                particle.mesh?.geometry?.dispose?.();
-                particle.mesh?.material?.dispose?.();
-            }
-            gameplayPrefabState.effects.splice(i, 1);
-        }
-    }
-}
-
-function clearGameplayEffects() {
-    for (const effect of gameplayPrefabState.effects) {
-        for (const particle of effect.particles || []) {
-            particle.mesh?.parent?.remove(particle.mesh);
-            particle.mesh?.geometry?.dispose?.();
-            particle.mesh?.material?.dispose?.();
-        }
-    }
-    gameplayPrefabState.effects.length = 0;
-}
+// FX pool lifecycle extracted to ../gameplay/effectsSystem.js
+const _effectsSystem = createEffectsSystem({ gameplayPrefabState });
+const updateGameplayEffects = _effectsSystem.updateGameplayEffects;
+const clearGameplayEffects = _effectsSystem.clearGameplayEffects;
 
 // Projectile spawn/clear extracted to ../gameplay/projectileSystem.js.
 // Instancer is lazily created on first spawn (scene must exist by then).
@@ -3053,103 +3065,37 @@ function setActorWorldPositionExact(actor, position, { visible } = {}) {
     return true;
 }
 
-function isDoomMiniWaveCleared(actors = []) {
-    if (!Array.isArray(actors) || actors.length === 0) return false;
-    return actors.every((actor) => {
-        const shooter = actor?.userData?.shooterAi;
-        const mesh = getActorRenderObject(actor);
-        return !actor || shooter?.defeated || mesh?.visible === false;
-    });
-}
-
-function spawnDoomMiniWave(spots = [], label = 'Doom Enemy') {
-    const actors = [];
-    for (const spot of spots) {
-        if (!Array.isArray(spot) || spot.length < 3) continue;
-        const actor = spawnDoomEnemyAt(new THREE.Vector3(spot[0], spot[1], spot[2]), {
-            label,
-            groundY: spot[1],
-            health: DOOM_ENEMY_PREFAB.health,
-            maxHealth: DOOM_ENEMY_PREFAB.health,
-        });
-        if (actor) actors.push(actor);
-    }
-    return actors;
-}
-
-function createDoomMiniBarrierEntries(anchor = null) {
-    if (!Array.isArray(anchor) || anchor.length < 3) return [];
-    const entries = [];
-    const spacing = 1.6;
-    const cubeScale = 0.8;
-    const startX = anchor[0] - spacing;
-    for (let row = 0; row < 3; row += 1) {
-        for (let col = 0; col < 3; col += 1) {
-            const activePosition = [startX + col * spacing, anchor[1] + row * spacing, anchor[2]];
-            const inactivePosition = [activePosition[0], -48 - row * 4, activePosition[2]];
-            const actor = spawnDynamicPrimitive('cube', new THREE.Vector3(...activePosition), cubeScale, {
-                local: false,
-                simulatePhysics: false,
-                skipImpulse: true,
-                includeScripts: false,
-                castShadow: false,
-                receiveShadow: true,
-                userData: { label: 'Arena Gate' },
-                returnActor: true,
-            });
-            if (!actor) continue;
-            tintGameplayPrefabActor(actor, '#5b0f0f', '#ff3030', 1.6);
-            setActorWorldPositionExact(actor, inactivePosition, { visible: false });
-            entries.push({ actor, activePosition, inactivePosition });
-        }
-    }
-    return entries;
-}
-
-function setDoomMiniBarrierActive(entries = [], active = false) {
-    for (const entry of entries) {
-        if (!entry?.actor) continue;
-        setActorWorldPositionExact(
-            entry.actor,
-            active ? entry.activePosition : entry.inactivePosition,
-            { visible: active },
-        );
-    }
-}
-
-function updateDoomMiniLevelState(subjectPosition = null) {
-    const layout = currentMesh?.userData?.doomMiniLevel;
-    const state = currentMesh?.userData?.doomMiniLevelState;
-    if (!layout || !state || !subjectPosition) return;
-
-    if (!state.hallTriggered && subjectPosition.z <= layout.hallTriggerZ) {
-        state.hallTriggered = true;
-        state.hallWaveActors = spawnDoomMiniWave(layout.hallWave, 'Doom Ambush');
-    }
-
-    if (!state.arenaTriggered && subjectPosition.z <= layout.arenaTriggerZ) {
-        state.arenaTriggered = true;
-        setDoomMiniBarrierActive(state.arenaBarrier, true);
-        state.arenaWaveActors = spawnDoomMiniWave(layout.arenaWave, 'Doom Arena Enemy');
-    }
-
-    if (
-        state.hallTriggered
-        && state.arenaTriggered
-        && !state.finalTriggered
-        && isDoomMiniWaveCleared(state.hallWaveActors)
-        && isDoomMiniWaveCleared(state.arenaWaveActors)
-    ) {
-        state.finalTriggered = true;
-        setDoomMiniBarrierActive(state.arenaBarrier, false);
-        state.finalWaveActors = spawnDoomMiniWave(layout.finalWave, 'Doom Exit Guard');
-    }
-
-    if (state.finalTriggered && !state.exitUnlocked && isDoomMiniWaveCleared(state.finalWaveActors)) {
-        state.exitUnlocked = true;
-        setActorWorldPositionExact(state.exitActor, layout.exitTeleporter, { visible: true });
-    }
-}
+// Doom mini + soccer level state machines extracted to
+// ../gameplay/levelStateSystem.js. Lazy-resolved deps (spawnDoomEnemyAt,
+// spawnGameplayPrefab, resetGameplayPrefabs, etc. are hoisted function
+// decls later in this file — captured by reference via factory closure).
+const _levelStateSystem = createLevelStateSystem({
+    DOOM_ENEMY_PREFAB,
+    getCurrentMesh: () => currentMesh,
+    getActorRenderObject: (a) => getActorRenderObject(a),
+    spawnDoomEnemyAt: (...a) => spawnDoomEnemyAt(...a),
+    spawnDynamicPrimitive: (...a) => spawnDynamicPrimitive(...a),
+    tintGameplayPrefabActor: (...a) => tintGameplayPrefabActor(...a),
+    setActorWorldPositionExact: (...a) => setActorWorldPositionExact(...a),
+    getGameplayPrefabActors: (...a) => getGameplayPrefabActors(...a),
+    hideShooterAimWarning: (...a) => hideShooterAimWarning(...a),
+    destroyDynamicPhysicsProp: (...a) => destroyDynamicPhysicsProp(...a),
+    getSceneSystem: () => sceneSystem,
+    resetGameplayPrefabs: (...a) => resetGameplayPrefabs(...a),
+    spawnGameplayPrefab: (...a) => spawnGameplayPrefab(...a),
+    applyPlayerSpawnFromActor: (...a) => applyPlayerSpawnFromActor(...a),
+    syncGameplaySpawnFromPlayerSpawnActor: (...a) => syncGameplaySpawnFromPlayerSpawnActor(...a),
+    resetRogueState: (...a) => resetRogueState(...a),
+    clearHeldWeapon: (...a) => clearHeldWeapon(...a),
+    resetActorToStoredTransform: (...a) => resetActorToStoredTransform(...a),
+    getSoccerGoalieActors: (...a) => getSoccerGoalieActors(...a),
+    soccerGoalieState,
+});
+const isDoomMiniWaveCleared = _levelStateSystem.isDoomMiniWaveCleared;
+const spawnDoomMiniWave = _levelStateSystem.spawnDoomMiniWave;
+const createDoomMiniBarrierEntries = _levelStateSystem.createDoomMiniBarrierEntries;
+const setDoomMiniBarrierActive = _levelStateSystem.setDoomMiniBarrierActive;
+const updateDoomMiniLevelState = _levelStateSystem.updateDoomMiniLevelState;
 
 // ===== ROGUE WAVES =====
 // Moved to src/gameplay/rogueWaves.js (createRogueWaves factory). The API is
@@ -3244,11 +3190,9 @@ function attachWeaponPickupComponent(actor, variant) {
         getSubject: () => _gameplaySubjectScratch,
         getRenderObject: (a) => getActorRenderObject(a),
         playPickupSound: isDoom ? () => playDoomPickupSound?.() : null,
+        isGameplayActive: () => !!gameplay.active,
     });
     actor.addComponent(comp);
-    // Same staged migration as HealthPickup: inactive in ECS auto-tick;
-    // legacy loop drives via comp.tick(0) so behavior is identical.
-    comp.setActive(false);
     return comp;
 }
 
@@ -3259,13 +3203,15 @@ function attachCoinComponent(actor) {
     if (comp) return comp;
     comp = new CoinComponent({
         isScripted: (a) => hasScriptedTriggerHandler(a),
+        dispatchTrigger: (a, pos, subj) => dispatchTriggerForActor(a, pos, subj),
         isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
         getSubjectPosition: () => _gameplaySubjectScratch.position,
+        getSubject: () => _gameplaySubjectScratch,
         addScore: (amount) => addGameScore(amount),
         getRenderObject: (a) => getActorRenderObject(a),
+        isGameplayActive: () => !!gameplay.active,
     });
     actor.addComponent(comp);
-    comp.setActive(false);
     return comp;
 }
 
@@ -3284,11 +3230,11 @@ function attachTargetComponent(actor) {
         getRenderObject: (a) => getActorRenderObject(a),
         addScore: (amount) => addGameScore(amount),
         dispatchTriggerEvent: (a, payload, inside) => dispatchTriggerEvent(a, payload, inside),
+        isGameplayActive: () => !!gameplay.active,
         tmp: _targetTmp,
         THREE,
     });
     actor.addComponent(comp);
-    comp.setActive(false);
     return comp;
 }
 
@@ -3299,20 +3245,19 @@ function attachHealthPickupComponent(actor) {
     comp = new HealthPickupComponent({
         tuning: HEALTH_PICKUP_PREFAB,
         isScripted: (a) => hasScriptedTriggerHandler(a),
+        dispatchTrigger: (a, pos, subj) => dispatchTriggerForActor(a, pos, subj),
         isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
-        // processGameplayPrefabs writes the live subject position into
-        // _gameplaySubjectScratch.position once per frame before iterating
-        // pickups; we read it from there so the component stays alloc-free.
+        // snapshotSubject() in gameplayPrefabSystem populates this scratch
+        // each frame before sceneSystem.tickComponents runs, so the component
+        // reads the live subject position without re-allocating.
         getSubjectPosition: () => _gameplaySubjectScratch.position,
+        getSubject: () => _gameplaySubjectScratch,
         getCurrentHealth: () => gameplay.health ?? 1,
         applyHeal: (newHealth) => setPlayerHealth(newHealth),
         getRenderObject: (a) => getActorRenderObject(a),
+        isGameplayActive: () => !!gameplay.active,
     });
     actor.addComponent(comp);
-    // Driven by the legacy processGameplayPrefabs loop (it calls comp.tick(0)
-    // each frame so we keep behavior parity + script-handler precedence).
-    // Flip _active=true once the legacy loop block is removed entirely.
-    comp.setActive(false);
     return comp;
 }
 
@@ -4031,203 +3976,12 @@ function resetActorToStoredTransform(actor) {
 // stale *WaveActors, an exitActor pointing at a destroyed actor) — the level
 // reads as "already beaten": enemies don't respawn, barriers/exit stay wrong.
 // Mirrors resetSoccerLevelState(); called from both Stop paths.
-function resetDoomMiniLevelState() {
-    if (currentMesh?.userData?.sampleType !== 'doomTest') return false;
-
-    const layout = currentMesh.userData.doomMiniLevel || {};
-    const prevState = currentMesh.userData.doomMiniLevelState || null;
-
-    // Destroy everything spawned DURING play: wave enemies (tracked in the
-    // old state arrays + any other live shooterAi) and the old barrier
-    // actors (createDoomMiniBarrierEntries makes fresh ones below).
-    const toDestroy = new Set();
-    if (prevState) {
-        for (const key of ['hallWaveActors', 'arenaWaveActors', 'finalWaveActors']) {
-            for (const actor of prevState[key] || []) toDestroy.add(actor);
-        }
-        for (const entry of prevState.arenaBarrier || []) {
-            if (entry?.actor) toDestroy.add(entry.actor);
-        }
-    }
-    for (const actor of getGameplayPrefabActors('shooterAi')) toDestroy.add(actor);
-    for (const actor of toDestroy) {
-        if (!actor) continue;
-        hideShooterAimWarning?.(actor);
-        destroyDynamicPhysicsProp(actor);
-        sceneSystem?.removeActor?.(actor);
-    }
-
-    // Restore the surviving (restored-from-snapshot) prefabs: gun pickup
-    // visible/uncollected at its layout spot, exit teleporter hidden,
-    // player-spawn re-applied. resetGameplayPrefabs() handles the generic
-    // collected/visibility/cooldown flags for all gameplay prefabs.
-    resetGameplayPrefabs();
-
-    const _allPrefabs = getGameplayPrefabActors();
-    console.log('[DOOM] reset: prefab actors =', _allPrefabs.length,
-        _allPrefabs.map((a) => a?.userData?.gameplayPrefab),
-        '| prevState triggers =', prevState
-            ? [prevState.hallTriggered, prevState.arenaTriggered, prevState.finalTriggered]
-            : 'none',
-        '| layout keys =', Object.keys(layout));
-    let exitActor = null;
-    let gunActor = null;
-    for (const actor of getGameplayPrefabActors()) {
-        const type = actor?.userData?.gameplayPrefab;
-        const mesh = getActorRenderObject(actor);
-        if (type === 'doomShotgunSprite' && mesh && Array.isArray(layout.shotgunPickup)) {
-            gunActor = actor;
-            actor.userData.collected = false;
-            actor.userData._bobBaseY = null;
-            actor.userData._mag = null; // forces ammo() to re-init on next pickup
-            actor.userData._reloadUntil = 0;
-            actor.userData._burstLeft = 0;
-            actor.userData._cooldownUntil = 0;
-            setActorWorldPositionExact(actor, layout.shotgunPickup, { visible: true });
-        } else if (type === 'teleporter') {
-            exitActor = actor;
-            setActorWorldPositionExact(
-                actor,
-                Array.isArray(layout.exitTeleporterHidden)
-                    ? layout.exitTeleporterHidden : layout.exitTeleporter,
-                { visible: false },
-            );
-        } else if (type === 'playerSpawn' && mesh && Array.isArray(layout.playerSpawn)) {
-            mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
-            mesh.updateMatrixWorld(true);
-            applyPlayerSpawnFromActor(actor);
-        }
-    }
-
-    // The shotgun pickup is a THREE.Sprite (kind 'sprite'); serializeActorData
-    // serializes it but loadWorldFromJSON has no 'sprite' spawn case, so the
-    // snapshot restore on Stop drops it entirely. Re-spawn like afterLoad does.
-    if (!gunActor && Array.isArray(layout.shotgunPickup)) {
-        gunActor = spawnGameplayPrefab('doomShotgunSprite');
-        if (gunActor) {
-            gunActor.userData.collected = false;
-            setActorWorldPositionExact(gunActor, layout.shotgunPickup, { visible: true });
-        }
-    }
-
-    // Fresh state machine — identical shape to the doomTest afterLoad init.
-    currentMesh.userData.doomMiniLevelState = {
-        exitActor,
-        arenaBarrier: createDoomMiniBarrierEntries(layout.arenaBarrier),
-        hallWaveActors: [],
-        arenaWaveActors: [],
-        finalWaveActors: [],
-        hallTriggered: false,
-        arenaTriggered: false,
-        finalTriggered: false,
-        exitUnlocked: false,
-    };
-
-    syncGameplaySpawnFromPlayerSpawnActor();
-    return true;
-}
-
-// Same rationale as resetDoomMiniLevelState, for the rogue arena: rebuild the
-// wave state, destroy live enemies, restore gun/exit/spawn prefabs (the gun
-// sprite is dropped by the snapshot restore — re-spawn it).
-function resetDoomArenaLevelState() {
-    if (currentMesh?.userData?.sampleType !== 'doomArena') return false;
-
-    const layout = currentMesh.userData.doomArenaLevel || {};
-    const prevState = currentMesh.userData.doomArenaState || null;
-
-    const toDestroy = new Set();
-    if (prevState) {
-        for (const actor of prevState.waveActors || []) toDestroy.add(actor);
-    }
-    for (const actor of getGameplayPrefabActors('shooterAi')) toDestroy.add(actor);
-    for (const actor of toDestroy) {
-        if (!actor) continue;
-        hideShooterAimWarning?.(actor);
-        destroyDynamicPhysicsProp(actor);
-        sceneSystem?.removeActor?.(actor);
-    }
-
-    resetGameplayPrefabs();
-
-    let exitActor = null;
-    let gunActor = null;
-    for (const actor of getGameplayPrefabActors()) {
-        const type = actor?.userData?.gameplayPrefab;
-        const mesh = getActorRenderObject(actor);
-        if (type === 'doomShotgunSprite' && mesh && Array.isArray(layout.shotgunPickup)) {
-            gunActor = actor;
-            actor.userData.collected = false;
-            actor.userData._bobBaseY = null;
-            actor.userData._mag = null;
-            actor.userData._reloadUntil = 0;
-            actor.userData._burstLeft = 0;
-            actor.userData._cooldownUntil = 0;
-            setActorWorldPositionExact(actor, layout.shotgunPickup, { visible: true });
-        } else if (type === 'teleporter') {
-            exitActor = actor;
-            setActorWorldPositionExact(
-                actor,
-                Array.isArray(layout.exitTeleporterHidden)
-                    ? layout.exitTeleporterHidden : layout.exitTeleporter,
-                { visible: false },
-            );
-        } else if (type === 'playerSpawn' && mesh && Array.isArray(layout.playerSpawn)) {
-            mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
-            mesh.updateMatrixWorld(true);
-            applyPlayerSpawnFromActor(actor);
-        }
-    }
-
-    // Rogue Waves: weapon comes from the start-of-run card, not a world
-    // pickup — don't re-spawn the shotgun sprite on reset.
-
-    resetRogueState();
-    clearHeldWeapon();
-
-    // Rebuild the game-mode actor so its script state (phase/wave) restarts
-    // cleanly via a fresh BeginPlay.
-    for (const actor of getGameplayPrefabActors('rogueGameMode')) {
-        destroyDynamicPhysicsProp(actor);
-        sceneSystem?.removeActor?.(actor);
-    }
-    const gm = spawnGameplayPrefab('rogueGameMode');
-    if (gm) gm.userData.label = 'Rogue Game Mode';
-    currentMesh.userData.rogueGameModeActorId = gm?.id || '';
-
-    currentMesh.userData.doomArenaState = {
-        exitActor,
-        started: false,
-        weaponPromptShown: false,
-    };
-
-    syncGameplaySpawnFromPlayerSpawnActor();
-    return true;
-}
-
-function resetSoccerLevelState() {
-    if (currentMesh?.userData?.sampleType !== 'soccerTargetField') return false;
-
-    soccerGoalieState.elapsed = 0;
-    resetGameplayPrefabs();
-    for (const actor of Array.from(sceneSystem?.actors || [])) {
-        resetActorToStoredTransform(actor);
-    }
-    updateSoccerGoalies(0);
-    syncGameplaySpawnFromPlayerSpawnActor();
-    return true;
-}
-
-// Soccer goalies are now driven per-actor by SoccerGoalieComponent (attached
-// in world/levels.js spawnSoccerGoalieWall). This wrapper only advances the
-// shared sin-clock that all goalies' components read, so they stay phase-
-// locked across resets. The component tick pass runs in sceneSystem.tickComponents.
-function updateSoccerGoalies(delta = 0) {
-    if (currentMesh?.userData?.sampleType !== 'soccerTargetField') return;
-    const goalies = getSoccerGoalieActors();
-    if (!goalies.length) return;
-    soccerGoalieState.elapsed = Math.max(0, soccerGoalieState.elapsed + Math.max(0, delta));
-}
+// resetDoomMiniLevelState / resetDoomArenaLevelState / resetSoccerLevelState /
+// updateSoccerGoalies all live in levelStateSystem.js (aliased below).
+const resetDoomMiniLevelState = _levelStateSystem.resetDoomMiniLevelState;
+const resetDoomArenaLevelState = _levelStateSystem.resetDoomArenaLevelState;
+const resetSoccerLevelState = _levelStateSystem.resetSoccerLevelState;
+const updateSoccerGoalies = _levelStateSystem.updateSoccerGoalies;
 
 function syncGameplayPrefabVisibility() {
     for (const actor of getGameplayPrefabActors('playerSpawn')) {
@@ -4362,71 +4116,21 @@ function hasScriptedTickHandler(prop) {
     return /\bfunction\s+Tick\s*\(/.test(tick.source || '');
 }
 
-// Reused per-frame subject descriptor for processGameplayPrefabs to avoid
-// allocating a fresh object + Vector3 every frame.
+// Reused per-frame subject descriptor for the gameplay-prefab system to
+// avoid allocating a fresh object + Vector3 every frame.
 const _gameplaySubjectScratch = { position: new THREE.Vector3(), health: 0 };
-function processGameplayPrefabs() {
-    if (!gameplay.active) return;
-    const subjectPosition = getGameplaySubjectPosition(tempVectorC);
-    if (!subjectPosition) return;
-    _gameplaySubjectScratch.position.copy(subjectPosition);
-    _gameplaySubjectScratch.health = gameplay.health;
-    const subject = _gameplaySubjectScratch;
-
-    // Coin logic lives in CoinComponent. Scripted variant still routes through
-    // the trigger dispatcher here (matches the other pickup loops).
-    let actors = getGameplayPrefabActors('coin', _scratchPrefab1);
-    for (let i = 0; i < actors.length; i++) {
-        const coin = actors[i];
-        if (hasScriptedTriggerHandler(coin)) {
-            dispatchTriggerForActor(coin, subjectPosition, subject);
-            continue;
-        }
-        const comp = coin.getComponentByClass?.(CoinComponent) || attachCoinComponent(coin);
-        comp?.tick(0);
-    }
-
-    const now = performance.now?.() || Date.now();
-    // Health pickup logic now lives in HealthPickupComponent. The script-trigger
-    // dispatch stays here because it's gameplay sequencing, not pickup state.
-    actors = getGameplayPrefabActors('healthPickup', _scratchPrefab1);
-    for (let i = 0; i < actors.length; i++) {
-        const pickup = actors[i];
-        if (hasScriptedTriggerHandler(pickup)) {
-            dispatchTriggerForActor(pickup, subjectPosition, subject);
-            continue;
-        }
-        const comp = pickup.getComponentByClass?.(HealthPickupComponent)
-            || attachHealthPickupComponent(pickup);
-        comp?.tick(0);
-    }
-
-    // Weapon pickups (smg/sniperRifle/doomShotgunSprite) all live on
-    // WeaponPickupComponent now. The component owns idle-bob, collect-on-
-    // trigger, equip, and (for doomShotgun) script-handler precedence + sound.
-    for (const variant of ['smg', 'sniperRifle', 'doomShotgunSprite']) {
-        actors = getGameplayPrefabActors(variant, _scratchPrefab1);
-        for (let i = 0; i < actors.length; i++) {
-            const weapon = actors[i];
-            const variantKey = variant === 'doomShotgunSprite' ? 'doomShotgun' : variant;
-            const comp = weapon.getComponentByClass?.(WeaponPickupComponent)
-                || attachWeaponPickupComponent(weapon, variantKey);
-            comp?.tick(0);
-        }
-    }
-
-    // Target hit detection (scripted + engine paths) lives in TargetComponent.
-    actors = getGameplayPrefabActors('target', _scratchPrefab1);
-    for (let i = 0; i < actors.length; i++) {
-        const target = actors[i];
-        const comp = target.getComponentByClass?.(TargetComponent) || attachTargetComponent(target);
-        comp?.tick(0);
-    }
-
-    // Teleporter logic (scripted dispatch + engine pair-swap + drag-along +
-    // cooldown gate) lives in gameplay/teleporterSystem.js.
-    processTeleporters({ subjectPosition, subject, now });
-}
+// All per-prefab logic moved into ECS components (CoinComponent,
+// HealthPickupComponent, WeaponPickupComponent, TargetComponent) +
+// teleporterSystem. The orchestrator lives in gameplay/gameplayPrefabSystem.
+const _gameplayPrefabSystem = createGameplayPrefabSystem({
+    gameplay,
+    getGameplaySubjectPosition: (...a) => getGameplaySubjectPosition(...a),
+    processTeleporters: (...a) => processTeleporters(...a),
+    subjectScratch: _gameplaySubjectScratch,
+    tmp: { subject: tempVectorC },
+});
+const snapshotGameplaySubject = _gameplayPrefabSystem.snapshotSubject;
+const processGameplayPrefabs = _gameplayPrefabSystem.processGameplayPrefabs;
 
 function syncDynamicPhysicsBodies() {
     physicsRuntime?.syncDynamicPhysicsBodies();
@@ -4568,19 +4272,18 @@ if (typeof window !== 'undefined') {
     window.createLiteBoxPool = createLiteBoxPool;
 }
 
-function createDefaultObjectEventState(eventName) {
-    return {
-        source: '',
-        compiled: null,
-        error: '',
-        enabled: false,
-        running: false,
-        eventName,
-        // UE lifecycle bookkeeping — populated lazily on first run.
-        handles: null,
-        beganPlay: false,
-    };
-}
+// Pure object-script state helpers extracted to ../scripting/objectScriptStore.js
+const _objectScriptStore = createObjectScriptStore({
+    storageKey: OBJECT_SCRIPT_STORAGE_KEY,
+    getObjectScriptState: () => objectScriptState,
+});
+const createDefaultObjectEventState = _objectScriptStore.createDefaultObjectEventState;
+const createObjectScriptState = _objectScriptStore.createObjectScriptState;
+const sanitizeObjectScriptDrafts = _objectScriptStore.sanitizeObjectScriptDrafts;
+const readObjectScriptDrafts = _objectScriptStore.readObjectScriptDrafts;
+const saveObjectScriptDrafts = _objectScriptStore.saveObjectScriptDrafts;
+const ensureObjectScriptDraftEntry = _objectScriptStore.ensureObjectScriptDraftEntry;
+const syncRuntimePropIdCounter = _objectScriptStore.syncRuntimePropIdCounter;
 
 function markDDGISkipCapture(object) {
     object?.traverse?.((node) => {
@@ -4598,82 +4301,6 @@ function invalidateDDGI(reason, fastWarmupFrames = 2) {
     }
 }
 
-function createObjectScriptState(propId = '') {
-    return {
-        propId,
-        tick: createDefaultObjectEventState('tick'),
-        collision: createDefaultObjectEventState('collision'),
-        activeCollisions: new Set(),
-    };
-}
-
-function sanitizeObjectScriptDrafts(rawValue) {
-    if (!rawValue || typeof rawValue !== 'object') {
-        return {};
-    }
-
-    const drafts = {};
-
-    Object.entries(rawValue).forEach(([propId, value]) => {
-        if (!value || typeof value !== 'object') return;
-
-        drafts[propId] = {
-            tick: typeof value.tick === 'string' ? value.tick : '',
-            tickEnabled: value.tickEnabled === true,
-            collision: typeof value.collision === 'string' ? value.collision : '',
-        };
-    });
-
-    return drafts;
-}
-
-function readObjectScriptDrafts() {
-    try {
-        const rawValue = window.localStorage.getItem(OBJECT_SCRIPT_STORAGE_KEY);
-        if (!rawValue) return {};
-
-        return sanitizeObjectScriptDrafts(JSON.parse(rawValue));
-    } catch (error) {
-        console.warn('Failed to load object script drafts.', error);
-        return {};
-    }
-}
-
-function saveObjectScriptDrafts() {
-    try {
-        window.localStorage.setItem(OBJECT_SCRIPT_STORAGE_KEY, JSON.stringify(objectScriptState.drafts));
-    } catch (error) {
-        console.warn('Failed to save object script drafts.', error);
-    }
-}
-
-function ensureObjectScriptDraftEntry(propId) {
-    if (!propId) {
-        return { tick: '', tickEnabled: false, collision: '' };
-    }
-
-    if (!objectScriptState.drafts[propId]) {
-        objectScriptState.drafts[propId] = {
-            tick: '',
-            tickEnabled: false,
-            collision: '',
-        };
-    }
-
-    return objectScriptState.drafts[propId];
-}
-
-function syncRuntimePropIdCounter(propId) {
-    if (typeof propId !== 'string') return;
-
-    const match = /^prop-(\d+)$/.exec(propId);
-    if (!match) return;
-
-    const nextId = Number.parseInt(match[1], 10) + 1;
-    if (Number.isFinite(nextId)) {
-        objectScriptState.nextPropId = Math.max(objectScriptState.nextPropId, nextId);
-    }
-}
 
 function createRuntimePropId() {
     let propId = '';
@@ -6476,76 +6103,18 @@ function setPerfModeEnabled(isEnabled) {
 //  World Environment panel — Godot-style global graphics inspector
 // ──────────────────────────────────────────────────────────
 
-function loadWorldEnvFromStorage() {
-    try {
-        const raw = localStorage.getItem(WORLD_ENV_STORAGE_KEY);
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        // Shallow-merge each section so we don't lose newly-added defaults
-        // when an older saved blob is read.
-        for (const key of Object.keys(WORLD_ENV_DEFAULTS)) {
-            if (parsed[key] && typeof parsed[key] === 'object') {
-                worldEnvState[key] = { ...WORLD_ENV_DEFAULTS[key], ...parsed[key] };
-            }
-        }
-        // Debug views are session tools. Always boot into lit render.
-        worldEnvState.ddgi.debugProbes = false;
-        worldEnvState.ddgi.contributionView = false;
-        worldEnvState.ddgi.intensity = Math.min(worldEnvState.ddgi.intensity, WORLD_ENV_DEFAULTS.ddgi.intensity);
-        worldEnvState.ddgi.liveBake = worldEnvState.ddgi.liveBake !== false;
-        worldEnvState.ddgi.bakeEveryN = Math.max(1, Math.min(120,
-            worldEnvState.ddgi.bakeEveryN ?? worldEnvState.ddgi.probesPerFrame ?? WORLD_ENV_DEFAULTS.ddgi.bakeEveryN));
-        worldEnvState.ddgi.probesPerFrame = worldEnvState.ddgi.bakeEveryN;
-    } catch (e) {
-        // Corrupt storage — fall back to defaults silently.
-    }
-}
+// World env load/save/apply/UI all live in _worldEnvSystem (aliased below).
+const loadWorldEnvFromStorage = _worldEnvSystem.loadWorldEnvFromStorage;
+const saveWorldEnvToStorage = _worldEnvSystem.saveWorldEnvToStorage;
+const shouldUsePostProcessingPipeline = _worldEnvSystem.shouldUsePostProcessingPipeline;
+const rebuildPostProcessingOutputNode = _worldEnvSystem.rebuildPostProcessingOutputNode;
+const applySSGISettings = _worldEnvSystem.applySSGISettings;
+const applyWorldEnvState = _worldEnvSystem.applyWorldEnvState;
+const updateWorldEnvUi = _worldEnvSystem.updateWorldEnvUi;
+const setWorldEnvMaster = _worldEnvSystem.setWorldEnvMaster;
+const resetWorldEnvDefaults = _worldEnvSystem.resetWorldEnvDefaults;
 
-function saveWorldEnvToStorage() {
-    try {
-        localStorage.setItem(WORLD_ENV_STORAGE_KEY, JSON.stringify(worldEnvState));
-    } catch (e) { /* private mode / quota — ignore */ }
-}
-
-function shouldUsePostProcessingPipeline() {
-    return !!((worldEnvState.bloom?.enabled && !perfModeEnabled)
-        || (worldEnvState.ssgi?.enabled && !perfModeEnabled));
-}
-
-function rebuildPostProcessingOutputNode() {
-    if (!postProcessing || !postProcessNodes) return;
-    const { sceneColor, bloomNode, ssgiOutput } = postProcessNodes;
-    if (!shouldUsePostProcessingPipeline()) {
-        postProcessing.outputNode = sceneColor;
-        return;
-    }
-
-    let outputNode = sceneColor;
-    if (worldEnvState.bloom?.enabled && !perfModeEnabled) {
-        outputNode = outputNode.add(bloomNode);
-    }
-    if (worldEnvState.ssgi?.enabled && !perfModeEnabled && ssgiOutput) {
-        outputNode = sceneColor
-            .mul(vec4(vec3(ssgiOutput.a), 1))
-            .add(vec4(ssgiOutput.rgb, 0))
-            .add(worldEnvState.bloom?.enabled && !perfModeEnabled ? bloomNode : vec4(0, 0, 0, 0));
-    }
-    postProcessing.outputNode = outputNode;
-}
-
-function applySSGISettings() {
-    const node = postProcessNodes?.ssgiNode;
-    const s = worldEnvState.ssgi || WORLD_ENV_DEFAULTS.ssgi;
-    if (!node) return;
-    node.giIntensity.value = s.giIntensity;
-    node.aoIntensity.value = s.aoIntensity;
-    node.radius.value = s.radius;
-    node.thickness.value = s.thickness;
-    node.sliceCount.value = Math.max(1, Math.min(4, Math.round(s.sliceCount)));
-    node.stepCount.value = Math.max(1, Math.min(32, Math.round(s.stepCount)));
-}
-
-function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
+function _DELETE_ME_unused_applyWorldEnvState_legacy({ persist = true, switchSky = true } = {}) {
     const s = worldEnvState;
     const runtimeBloomEnabled = s.bloom.enabled && !perfModeEnabled;
     const runtimeFogEnabled = s.fog.enabled && !perfModeEnabled;
@@ -6640,7 +6209,7 @@ function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
     updateWorldEnvUi();
 }
 
-function updateWorldEnvUi() {
+function _DELETE_ME_unused_updateWorldEnvUi_legacy() {
     if (!worldEnvUiRefs) return;
     const s = worldEnvState;
     const setToggle = (offBtn, onBtn, on) => {
@@ -6743,7 +6312,7 @@ function updateWorldEnvUi() {
     }
 }
 
-function setWorldEnvMaster(mode) {
+function _DELETE_ME_unused_setWorldEnvMaster_legacy(mode) {
     const s = worldEnvState;
     if (mode === 'on') {
         s.sky.enabled = true;
@@ -6778,10 +6347,7 @@ function setWorldEnvMaster(mode) {
     applyWorldEnvState();
 }
 
-function resetWorldEnvDefaults() {
-    worldEnvState = JSON.parse(JSON.stringify(WORLD_ENV_DEFAULTS));
-    applyWorldEnvState();
-}
+// (resetWorldEnvDefaults now exposed by _worldEnvSystem — alias above.)
 
 function tickForceAllSceneMeshShadows() {
     if (!shadowDebugState.forceAllMeshes) return;
@@ -6904,35 +6470,15 @@ function updateCameraModeButtons() {
     }
 }
 
-function resetMobileInputState() {
-    resetMovementInputState();
-    resetMobileMovePad();
-    resetMobileLookPad();
-}
-
-function resetMovementInputState() {
-    showcase.input.forward = false;
-    showcase.input.back = false;
-    showcase.input.left = false;
-    showcase.input.right = false;
-    showcase.input.up = false;
-    showcase.input.down = false;
-    showcase.input.boost = false;
-    gameplay.input.forward = false;
-    gameplay.input.back = false;
-    gameplay.input.left = false;
-    gameplay.input.right = false;
-    gameplay.input.sprint = false;
-    gameplay.input.fire = false;
-    gameplay.input.firePressed = false;
-    physics.jumpQueued = false;
-}
-
-function isEditableElement(target) {
-    if (!(target instanceof HTMLElement)) return false;
-    if (target.isContentEditable) return true;
-    return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
-}
+// Input-reset helpers extracted to ../gameplay/inputReset.js
+const _inputReset = createInputReset({
+    showcase, gameplay, physics,
+    resetMobileMovePad: (...a) => resetMobileMovePad?.(...a),
+    resetMobileLookPad: (...a) => resetMobileLookPad?.(...a),
+});
+const resetMovementInputState = _inputReset.resetMovementInputState;
+const resetMobileInputState = _inputReset.resetMobileInputState;
+const isEditableElement = _isEditableElement;
 
 // === extracted: debugConsole (was lines 5985-6468 of original main.js) ===
 // === extracted: mobileControls (was lines 6469-6741 of original main.js) ===
@@ -8185,9 +7731,15 @@ async function init() {
         console.warn('[Renderer] initial compile warmup failed', e);
     }
 
+    // Reused per-frame context object passed to every registered system.
+    // Properties are overwritten each tick so the object identity stays
+    // stable and we don't allocate per frame.
+    const frameCtx = { now: 0, timestamp: 0 };
     renderer.setAnimationLoop((timestamp) => {
         frameTimer.update(timestamp);
         const delta = Math.min(frameTimer.getDelta(), 0.05);
+        frameCtx.timestamp = timestamp;
+        frameCtx.now = performance.now?.() || Date.now();
 
         const updateStart = performance.now();
         if (gameplay.active && !gameplay.roguePaused) {
@@ -8203,24 +7755,11 @@ async function init() {
         updateGameplayDebugRay();
         const updateDuration = performance.now() - updateStart;
 
-        updateSoccerGoalies(delta);
-        // Circular patrol AI: now driven by CircularPatrolComponent on each
-        // navmeshCircleAi actor, ticked by sceneSystem.tickComponents below.
-        updateShooterSpawners(delta);
-        updateStraightGuns();
-        updateShooterAis(delta);
-        updateGameplayEffects(delta);
-        updatePlayerHitFeedback(delta);
-        // Phase A: pack all live bullet positions into their InstancedMesh
-        // once per frame, after every system that moves/spawns/releases a
-        // projectile this frame has run (updateShooterAis →
-        // updateShooterProjectiles advances positions; spawners add/remove).
-        getProjectileInstancer()?.flush();
-
-        // Entity bridge (Phase 1): central component System pass. Purely
-        // additive — ticks actor ActorComponents once per frame; existing
-        // ad-hoc subsystem ticks are untouched and retire individually later.
-        sceneSystem?.tickComponents?.(delta);
+        // All gameplay-phase systems (spawners, AIs, effects, hit feedback,
+        // projectile flush, subject snapshot, component tick, goalies) are
+        // registered with explicit `before`/`after` deps in
+        // wireExtractedModules(); the registry runs them in topological order.
+        gameplaySystems.tick(delta, frameCtx);
 
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
         if (gameplay.active) {
@@ -8477,162 +8016,36 @@ function refreshGameplayWorld({ resetCamera = true } = {}) {
     updateGameplayUI();
 }
 
-function ensureTerrainBrushHelper() {
-    if (terrainBrushState.helper) return terrainBrushState.helper;
-    const geometry = new THREE.RingGeometry(0.96, 1, 96);
-    const material = new THREE.MeshBasicMaterial({
-        color: 0x00ffaa,
-        transparent: true,
-        opacity: 0.85,
-        depthTest: false,
-        depthWrite: false,
-        side: THREE.DoubleSide,
-    });
-    const helper = new THREE.Mesh(geometry, material);
-    helper.name = 'TerrainBrushPreview';
-    helper.renderOrder = 999;
-    helper.visible = false;
-    terrainBrushState.helper = helper;
-    worldFloor?.add(helper);
-    return helper;
-}
-
-function isTerrainBrushTargetActor(actor) {
-    const mesh = getActorRenderObject(actor);
-    return !!(actor && (actor.userData?.terrainBrushTarget || mesh?.userData?.terrainBrushTarget));
-}
-
-function getSelectedTerrainBrushActor() {
-    const actor = getSelectedSceneActor();
-    return isTerrainBrushTargetActor(actor) ? actor : null;
-}
-
-function sceneHasActorTerrainBrushTarget() {
-    if (!sceneSystem?.actors?.size || !currentMesh) return false;
-    for (const actor of sceneSystem.actors) {
-        if (!actorBelongsToCurrentMesh(actor)) continue;
-        if (isTerrainBrushTargetActor(actor)) return true;
-    }
-    return false;
-}
-
-function getTerrainBrushTargetObject() {
-    const selectedActor = getSelectedTerrainBrushActor();
-    if (selectedActor) {
-        return getActorRenderObject(selectedActor);
-    }
-
-    if (sceneHasActorTerrainBrushTarget()) {
-        return null;
-    }
-
-    return worldFloor || null;
-}
-
-function getTerrainHitFromEvent(event) {
-    const target = getTerrainBrushTargetObject();
-    if (!renderer || !target) return null;
-    const rect = renderer.domElement.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return null;
-    pointerNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointerNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(pointerNdc, camera);
-    const hit = raycaster.intersectObject(target, true)[0];
-    if (!hit) return null;
-    const local = target.worldToLocal(hit.point.clone());
-    return { hit, local, target };
-}
-
-function updateTerrainBrushPreview(event) {
-    const helper = ensureTerrainBrushHelper();
-    if (!terrainBrushState.enabled || gameplay.active || blueprintState.active) {
-        helper.visible = false;
-        return null;
-    }
-    const terrainHit = getTerrainHitFromEvent(event);
-    if (!terrainHit) {
-        helper.visible = false;
-        return null;
-    }
-    if (helper.parent !== terrainHit.target) {
-        terrainHit.target.add(helper);
-    }
-    terrainBrushState.targetObject = terrainHit.target;
-    helper.visible = true;
-    helper.position.set(terrainHit.local.x, terrainHit.local.y, terrainHit.local.z + 0.035);
-    helper.scale.setScalar(terrainBrushState.radius);
-    const foliagePreviewColor = terrainBrushState.foliageType === 'tree'
-        ? 0x2f7d32
-        : terrainBrushState.foliageType === 'bush'
-            ? 0x55a545
-            : 0xa8d96b;
-    helper.material.color.set(terrainBrushState.tool.includes('foliage') ? foliagePreviewColor : terrainBrushState.tool === 'paint' ? terrainBrushState.paintColor : 0x00ffaa);
-    return terrainHit;
-}
-
-function applyTerrainBrushFromEvent(event) {
-    const terrainHit = updateTerrainBrushPreview(event);
-    if (!terrainHit) return false;
-
-    const { local, target } = terrainHit;
-    const tool = terrainBrushState.tool;
-    if (tool === 'foliage' || tool === 'erase-foliage') {
-        if (target !== worldFloor) return false;
-        grassField?.paintFoliage?.({
-            terrain: worldFloor,
-            localX: local.x,
-            localY: local.y,
-            radius: terrainBrushState.radius,
-            density: terrainBrushState.foliageDensity,
-            mode: event.shiftKey || tool === 'erase-foliage' ? 'erase' : 'add',
-            type: terrainBrushState.foliageType,
-        });
-        return true;
-    }
-
-    const changed = applyTerrainSculptBrush(target, {
-        localX: local.x,
-        localY: local.y,
-        radius: terrainBrushState.radius,
-        strength: terrainBrushState.strength,
-        mode: tool,
-        targetHeight: terrainBrushState.flattenHeight,
-        paintColor: terrainBrushState.paintColor,
-        invert: event.shiftKey,
-    });
-    if (changed) {
-        if (target === worldFloor) {
-            grassField?.syncToTerrain?.(worldFloor, {
-                localX: local.x,
-                localY: local.y,
-                radius: terrainBrushState.radius + 2,
-            });
-        }
-        terrainBrushState.dirtyPhysics = true;
-        terrainBrushState.targetObject = target;
-    }
-    return changed;
-}
-
-function serializeWorldTerrainState() {
-    return {
-        terrain: serializeTerrainState(worldFloor),
-        foliage: grassField?.serializeFoliage?.() ?? null,
-    };
-}
-
-function applyWorldTerrainState(data = {}) {
-    applySerializedTerrainState(worldFloor, data.terrain);
-    rebuildTerrainPhysicsBody();
-    grassField?.applySerializedFoliage?.(data.foliage ?? {}, worldFloor);
-    grassField?.syncToTerrain?.(worldFloor);
-    if (physics.ready) {
-        ensurePlayerCharacter();
-        gameplay.canPlay = true;
-        updateWorldPresentation();
-        updateGameplayUI();
-    }
-}
+// Terrain brush + foliage paint extracted to ../world/terrainBrushSystem.js
+const _terrainBrushSystem = createTerrainBrushSystem({
+    getWorldFloor: () => worldFloor,
+    getRenderer: () => renderer,
+    getCamera: () => camera,
+    getCurrentMesh: () => currentMesh,
+    pointerNdc, raycaster,
+    terrainBrushState, gameplay, blueprintState, physics, grassField,
+    getSelectedSceneActor,
+    getActorRenderObject: (...a) => getActorRenderObject(...a),
+    getSceneSystem: () => sceneSystem,
+    actorBelongsToCurrentMesh,
+    applyTerrainSculptBrush,
+    serializeTerrainState,
+    applySerializedTerrainState,
+    rebuildTerrainPhysicsBody: (...a) => rebuildTerrainPhysicsBody(...a),
+    ensurePlayerCharacter: (...a) => ensurePlayerCharacter(...a),
+    updateWorldPresentation: (...a) => updateWorldPresentation(...a),
+    updateGameplayUI: (...a) => updateGameplayUI(...a),
+});
+const ensureTerrainBrushHelper = _terrainBrushSystem.ensureTerrainBrushHelper;
+const isTerrainBrushTargetActor = _terrainBrushSystem.isTerrainBrushTargetActor;
+const getSelectedTerrainBrushActor = _terrainBrushSystem.getSelectedTerrainBrushActor;
+const sceneHasActorTerrainBrushTarget = _terrainBrushSystem.sceneHasActorTerrainBrushTarget;
+const getTerrainBrushTargetObject = _terrainBrushSystem.getTerrainBrushTargetObject;
+const getTerrainHitFromEvent = _terrainBrushSystem.getTerrainHitFromEvent;
+const updateTerrainBrushPreview = _terrainBrushSystem.updateTerrainBrushPreview;
+const applyTerrainBrushFromEvent = _terrainBrushSystem.applyTerrainBrushFromEvent;
+const serializeWorldTerrainState = _terrainBrushSystem.serializeWorldTerrainState;
+const applyWorldTerrainState = _terrainBrushSystem.applyWorldTerrainState;
 
 // Terrain panel + gameplay events + showcase input extracted to
 // ../ui/inputPanels.js. Eager wiring: init() calls setupTerrainPanel/
@@ -9957,5 +9370,54 @@ function wireExtractedModules() {
         serializeWorldTerrainState, applyWorldTerrainState, refreshGameplayWorld,
         forceExitGameplayForWorldLoad, updateGameplayUI, updateWorldPresentation,
     });
+
+    // Gameplay system registry. Each .register() entry corresponds to one
+    // per-frame function the main loop used to call inline. Ordering is
+    // explicit: shooterSpawners → straightGuns → shooterAis → effects →
+    // hitFeedback → subjectSnapshot → componentTick → goalies. The frame
+    // loop now calls gameplaySystems.tick(delta) instead of N inline calls.
+    gameplaySystems.register({
+        name: 'shooterSpawners',
+        update: (delta) => updateShooterSpawners(delta),
+    });
+    gameplaySystems.register({
+        name: 'straightGuns',
+        update: () => updateStraightGuns(),
+        after: ['shooterSpawners'],
+    });
+    gameplaySystems.register({
+        name: 'shooterAis',
+        update: (delta) => updateShooterAis(delta),
+        after: ['straightGuns'],
+    });
+    gameplaySystems.register({
+        name: 'effects',
+        update: (delta) => updateGameplayEffects(delta),
+        after: ['shooterAis'],
+    });
+    gameplaySystems.register({
+        name: 'playerHitFeedback',
+        update: (delta) => updatePlayerHitFeedback(delta),
+        after: ['effects'],
+    });
+    gameplaySystems.register({
+        name: 'projectileFlush',
+        update: () => getProjectileInstancer()?.flush(),
+        after: ['shooterAis'],
+    });
+    gameplaySystems.register({
+        name: 'subjectSnapshot',
+        update: () => snapshotGameplaySubject(),
+        after: ['playerHitFeedback'],
+    });
+    gameplaySystems.register({
+        name: 'componentTick',
+        update: (delta) => sceneSystem?.tickComponents?.(delta),
+        after: ['subjectSnapshot'],
+    });
+    gameplaySystems.register({
+        name: 'soccerGoalies',
+        update: (delta) => updateSoccerGoalies(delta),
+        after: ['componentTick'],
+    });
 }
-  

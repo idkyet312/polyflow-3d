@@ -41,6 +41,7 @@ export class WeaponPickupComponent extends ActorComponent {
         getRenderObject = (actor) => actor?.mesh ?? null,
         playPickupSound = null,
         bob = false,
+        isGameplayActive = () => true,
     } = {}) {
         super();
         this._equip = equip;
@@ -52,6 +53,7 @@ export class WeaponPickupComponent extends ActorComponent {
         this._getRenderObject = getRenderObject;
         this._playPickupSound = typeof playPickupSound === 'function' ? playPickupSound : null;
         this.bob = !!bob;
+        this._isGameplayActive = isGameplayActive;
     }
 
     reset() {
@@ -71,13 +73,15 @@ export class WeaponPickupComponent extends ActorComponent {
 
         const userData = actor.userData ?? {};
 
-        // Idle bob+spin while sitting uncollected (used by doom-shotgun sprite).
+        // Idle bob+spin works while paused too (visual polish).
         if (this.bob && mesh.visible && !userData.collected) {
             if (userData._bobBaseY == null) userData._bobBaseY = mesh.position.y;
             const tphase = (performance.now?.() || Date.now()) * 0.004;
             mesh.position.y = userData._bobBaseY + Math.sin(tphase) * 0.12;
             if (mesh.material) mesh.material.rotation = Math.sin(tphase * 0.5) * 0.18;
         }
+
+        if (!this._isGameplayActive()) return;
 
         // Script-owned variants (doom shotgun): dispatch trigger event and bail.
         if (this._isScripted(actor)) {

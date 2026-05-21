@@ -19,6 +19,10 @@ import * as THREE from 'three';
 //   clearActiveVehicle  - () => void
 //   resetMovementInputState - () => void
 //   respawnPlayer       - (useStoredView=true) => void  (frame-loop respawn)
+// `bus` is optional. If provided, damagePlayer emits 'player:damaged' with
+// { amount, damageAngle (rad relative to facing), sourcePos } so HUD/audio/
+// respawn subscribers can react independently. If absent, falls back to the
+// inline chain (back-compat for boot order before the bus exists).
 export function createPlayerCombat({
     gameplay,
     physics,
@@ -32,6 +36,7 @@ export function createPlayerCombat({
     clearActiveVehicle,
     resetMovementInputState,
     respawnPlayer,
+    bus = null,
 }) {
     function setPlayerHealth(value = 1) {
         const numericValue = Number(value);
@@ -75,18 +80,31 @@ export function createPlayerCombat({
         const damageAmount = THREE.MathUtils.clamp(Number(amount) || 0, 0, SHOOTER_AI_PREFAB.damage)
             * (rogueBuffs?.damageTaken ?? 1);
         setPlayerHealth((gameplay.health ?? 1) - damageAmount);
-        triggerPlayerHitFeedback();
 
+        // Compute directional angle (0 = front, +PI/2 = right, PI = behind)
+        // up-front so all subscribers get a normalized payload.
+        let damageAngle = null;
         const camera = getCamera();
         if (sourcePos && camera) {
             const dx = sourcePos.x - camera.position.x;
             const dz = sourcePos.z - camera.position.z;
             const worldAngle = Math.atan2(dx, -dz);
-            const rel = worldAngle - (gameplay.yaw || 0);
-            if (typeof window !== 'undefined' && window.onPlayerDamaged) {
-                try { window.onPlayerDamaged(rel, damageAmount); } catch (e) { /* script error */ }
-            } else {
-                showDamageIndicator(rel);
+            damageAngle = worldAngle - (gameplay.yaw || 0);
+        }
+
+        if (bus) {
+            // Decoupled path: HUD flash/shake, hit sound, damage indicator,
+            // and user script all subscribe independently in runtime.js.
+            bus.emit('player:damaged', { amount: damageAmount, damageAngle, sourcePos });
+        } else {
+            // Fallback chain (no bus wired): preserve legacy behavior.
+            triggerPlayerHitFeedback();
+            if (damageAngle != null) {
+                if (typeof window !== 'undefined' && window.onPlayerDamaged) {
+                    try { window.onPlayerDamaged(damageAngle, damageAmount); } catch (e) { /* script error */ }
+                } else {
+                    showDamageIndicator(damageAngle);
+                }
             }
         }
     }
@@ -163,9 +181,17 @@ export function createPlayerCombat({
         gameplay.velocity.set(0, 0, 0);
         if (isDrivingVehicle()) clearActiveVehicle();
 
+        const sampleType = getCurrentMesh()?.userData?.sampleType || '';
+        const autoRespawn = sampleType !== 'doomArena';
+
+        if (bus) {
+            // Game-mode scripts (rogue waves death screen) listen for this.
+            bus.emit('player:died', { sampleType, autoRespawn });
+        }
+
         // Rogue Waves: the game-mode script shows the death screen — don't
         // auto-respawn here.
-        if (getCurrentMesh()?.userData?.sampleType === 'doomArena') return;
+        if (!autoRespawn) return;
 
         if (gameplay.respawnTimer) clearTimeout(gameplay.respawnTimer);
         gameplay.respawnTimer = setTimeout(() => {

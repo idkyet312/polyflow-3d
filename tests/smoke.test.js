@@ -780,6 +780,190 @@ test('TargetComponent: scripted variant emits OnTrigger on enter edge only', asy
     ]);
 });
 
+// ───────────────────────── eventBus ─────────────────────────
+
+test('eventBus: on/emit fans out to all subscribers in order', async () => {
+    const { createEventBus } = await import('../src/runtime/eventBus.js');
+    const bus = createEventBus();
+    const log = [];
+    bus.on('topic', (p) => log.push(`a:${p}`));
+    bus.on('topic', (p) => log.push(`b:${p}`));
+    bus.emit('topic', 'x');
+    assert.deepEqual(log, ['a:x', 'b:x']);
+});
+
+test('eventBus: returned unsubscribe stops delivery', async () => {
+    const { createEventBus } = await import('../src/runtime/eventBus.js');
+    const bus = createEventBus();
+    let calls = 0;
+    const off = bus.on('topic', () => { calls++; });
+    bus.emit('topic');
+    off();
+    bus.emit('topic');
+    assert.equal(calls, 1);
+});
+
+test('eventBus: once auto-unsubscribes after first delivery', async () => {
+    const { createEventBus } = await import('../src/runtime/eventBus.js');
+    const bus = createEventBus();
+    let calls = 0;
+    bus.once('topic', () => { calls++; });
+    bus.emit('topic'); bus.emit('topic'); bus.emit('topic');
+    assert.equal(calls, 1);
+});
+
+test('eventBus: listener throw does not abort dispatch', async () => {
+    const { createEventBus } = await import('../src/runtime/eventBus.js');
+    const bus = createEventBus();
+    const log = [];
+    // Silence the expected error log so the test output is clean.
+    const origError = console.error;
+    console.error = () => {};
+    try {
+        bus.on('topic', () => { throw new Error('boom'); });
+        bus.on('topic', () => log.push('after'));
+        bus.emit('topic');
+    } finally {
+        console.error = origError;
+    }
+    assert.deepEqual(log, ['after']);
+});
+
+test('eventBus: subscribe during dispatch does not fire this round', async () => {
+    const { createEventBus } = await import('../src/runtime/eventBus.js');
+    const bus = createEventBus();
+    const log = [];
+    bus.on('topic', () => {
+        log.push('first');
+        bus.on('topic', () => log.push('second')); // must not fire this emit
+    });
+    bus.emit('topic');
+    assert.deepEqual(log, ['first']);
+    bus.emit('topic');
+    assert.deepEqual(log, ['first', 'first', 'second']);
+});
+
+test('eventBus: unsubscribe during dispatch does not skip subsequent listeners', async () => {
+    const { createEventBus } = await import('../src/runtime/eventBus.js');
+    const bus = createEventBus();
+    const log = [];
+    const offA = bus.on('topic', () => { log.push('a'); offA(); });
+    bus.on('topic', () => log.push('b'));
+    bus.on('topic', () => log.push('c'));
+    bus.emit('topic');
+    assert.deepEqual(log, ['a', 'b', 'c']);
+});
+
+test('eventBus: clear(topic) only clears one topic; clear() clears all', async () => {
+    const { createEventBus } = await import('../src/runtime/eventBus.js');
+    const bus = createEventBus();
+    bus.on('a', () => {}); bus.on('a', () => {});
+    bus.on('b', () => {});
+    assert.equal(bus.listenerCount('a'), 2);
+    bus.clear('a');
+    assert.equal(bus.listenerCount('a'), 0);
+    assert.equal(bus.listenerCount('b'), 1);
+    bus.clear();
+    assert.equal(bus.listenerCount('b'), 0);
+});
+
+// ───────────────────────── systemRegistry ─────────────────────────
+
+test('systemRegistry: tick runs systems in insertion order with no deps', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    const log = [];
+    reg.register({ name: 'a', update: () => log.push('a') });
+    reg.register({ name: 'b', update: () => log.push('b') });
+    reg.register({ name: 'c', update: () => log.push('c') });
+    reg.tick(0.016, {});
+    assert.deepEqual(log, ['a', 'b', 'c']);
+});
+
+test('systemRegistry: `before` constraint reorders run', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    const log = [];
+    reg.register({ name: 'render', update: () => log.push('render'), after: ['physics'] });
+    reg.register({ name: 'physics', update: () => log.push('physics') });
+    reg.tick(0.016, {});
+    assert.deepEqual(log, ['physics', 'render']);
+});
+
+test('systemRegistry: `before` is symmetric to `after`', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    const log = [];
+    reg.register({ name: 'physics', update: () => log.push('physics'), before: ['render'] });
+    reg.register({ name: 'render', update: () => log.push('render') });
+    reg.tick(0.016, {});
+    assert.deepEqual(log, ['physics', 'render']);
+});
+
+test('systemRegistry: setEnabled(false) skips a system', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    const log = [];
+    reg.register({ name: 'a', update: () => log.push('a') });
+    reg.register({ name: 'b', update: () => log.push('b') });
+    reg.setEnabled('a', false);
+    reg.tick(0.016, {});
+    assert.deepEqual(log, ['b']);
+});
+
+test('systemRegistry: passes (delta, ctx) through to each update', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    let seen = null;
+    reg.register({ name: 's', update: (delta, ctx) => { seen = { delta, ctx }; } });
+    reg.tick(0.0083, { tag: 'frame-7' });
+    assert.equal(seen.delta, 0.0083);
+    assert.deepEqual(seen.ctx, { tag: 'frame-7' });
+});
+
+test('systemRegistry: thrown system does not abort the rest', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    const log = [];
+    const origError = console.error;
+    console.error = () => {};
+    try {
+        reg.register({ name: 'a', update: () => log.push('a') });
+        reg.register({ name: 'bomb', update: () => { throw new Error('x'); } });
+        reg.register({ name: 'c', update: () => log.push('c') });
+        reg.tick(0, {});
+    } finally {
+        console.error = origError;
+    }
+    assert.deepEqual(log, ['a', 'c']);
+});
+
+test('systemRegistry: duplicate name throws on register', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    reg.register({ name: 'x', update: () => {} });
+    assert.throws(() => reg.register({ name: 'x', update: () => {} }));
+});
+
+test('systemRegistry: unknown deps tolerated (optional system absent)', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    const log = [];
+    reg.register({ name: 'a', update: () => log.push('a'), after: ['missing-optional'] });
+    reg.register({ name: 'b', update: () => log.push('b') });
+    reg.tick(0, {});
+    // No dep enforced because 'missing-optional' isn't registered → insertion order.
+    assert.deepEqual(log, ['a', 'b']);
+});
+
+test('systemRegistry: getOrder reflects resolved order', async () => {
+    const { createSystemRegistry } = await import('../src/runtime/systemRegistry.js');
+    const reg = createSystemRegistry();
+    reg.register({ name: 'a', update: () => {}, after: ['b'] });
+    reg.register({ name: 'b', update: () => {} });
+    assert.deepEqual(reg.getOrder(), ['b', 'a']);
+});
+
 // ───────────────────────── ActorComponent ─────────────────────────
 
 test('ActorComponent: lifecycle defaults + active flag', async () => {

@@ -28,20 +28,26 @@ export class HealthPickupComponent extends ActorComponent {
     constructor({
         tuning,
         isScripted = () => false,
+        dispatchTrigger = () => {},
         isSubjectInsideTrigger = () => false,
         getSubjectPosition = () => null,
+        getSubject = () => null,
         getCurrentHealth = () => 1,
         applyHeal = () => {},
         getRenderObject = (actor) => actor?.mesh ?? null,
+        isGameplayActive = () => true,
     } = {}) {
         super();
         this.tuning = tuning;
         this._isScripted = isScripted;
+        this._dispatchTrigger = dispatchTrigger;
         this._isSubjectInsideTrigger = isSubjectInsideTrigger;
         this._getSubjectPosition = getSubjectPosition;
+        this._getSubject = getSubject;
         this._getCurrentHealth = getCurrentHealth;
         this._applyHeal = applyHeal;
         this._getRenderObject = getRenderObject;
+        this._isGameplayActive = isGameplayActive;
     }
 
     /** Hydrate from snapshot/reset blob. */
@@ -57,7 +63,15 @@ export class HealthPickupComponent extends ActorComponent {
     tick(/* deltaTime */) {
         const actor = this.owner;
         if (!actor) return;
-        if (this._isScripted(actor)) return;
+        if (!this._isGameplayActive()) return;
+
+        const subjectPosition = this._getSubjectPosition();
+        if (!subjectPosition) return;
+
+        if (this._isScripted(actor)) {
+            this._dispatchTrigger(actor, subjectPosition, this._getSubject());
+            return;
+        }
 
         const mesh = this._getRenderObject(actor);
         if (!mesh) return;
@@ -75,8 +89,6 @@ export class HealthPickupComponent extends ActorComponent {
         const currentHealth = this._getCurrentHealth();
         if (currentHealth >= 1) return;
 
-        const subjectPosition = this._getSubjectPosition();
-        if (!subjectPosition) return;
         if (!this._isSubjectInsideTrigger(subjectPosition, actor)) return;
 
         userData.collected = true;
