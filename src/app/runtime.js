@@ -142,6 +142,10 @@ import { createPrimitiveMeshFactory } from './primitiveMeshes.js';
 import { createShowcaseCamera } from './showcaseCamera.js';
 import { createSpawnGameplayPrefab } from './spawnGameplayPrefab.js';
 import { createWeaponFire } from './weaponFire.js';
+import { createFrameLoop } from './frameLoop.js';
+import { createInputHandlers } from './inputHandlers.js';
+import { setupPostProcessing } from './postProcessingSetup.js';
+import { wirePanelHandlers } from './wirePanelHandlers.js';
 import { createLevelStateSystem } from '../gameplay/levelStateSystem.js';
 import { createWorldEnvSystem } from '../world/worldEnvSystem.js';
 
@@ -4956,277 +4960,22 @@ async function init() {
         bakeStatus: document.getElementById('we-bake-status'),
     };
 
-    if (worldEnvUiRefs.bakeRes && worldEnvUiRefs.bakeResValue) {
-        worldEnvUiRefs.bakeRes.addEventListener('input', () => {
-            worldEnvUiRefs.bakeResValue.textContent = worldEnvUiRefs.bakeRes.value;
-        });
-    }
-    if (worldEnvUiRefs.bakeSamples && worldEnvUiRefs.bakeSamplesValue) {
-        worldEnvUiRefs.bakeSamples.addEventListener('input', () => {
-            worldEnvUiRefs.bakeSamplesValue.textContent = worldEnvUiRefs.bakeSamples.value;
-        });
-    }
-    if (worldEnvUiRefs.bakeRun) {
-        worldEnvUiRefs.bakeRun.addEventListener('click', async () => {
-            if (!lightmapBaker) return;
-            const btn = worldEnvUiRefs.bakeRun;
-            const status = worldEnvUiRefs.bakeStatus;
-            const requestedResolution = parseInt(worldEnvUiRefs.bakeRes?.value || '16', 10);
-            const requestedSamples = parseInt(worldEnvUiRefs.bakeSamples?.value || '4', 10);
-            const resolution = THREE.MathUtils.clamp(Number.isFinite(requestedResolution) ? requestedResolution : 16, 16, 512);
-            const samples = THREE.MathUtils.clamp(Number.isFinite(requestedSamples) ? requestedSamples : 4, 1, 64);
-            if (lightmapBaker.isActive()) {
-                lightmapBaker.cancel();
-                btn.textContent = 'Cancelling...';
-                if (status) status.textContent = 'Cancelling bake...';
-                return;
-            }
-            btn.disabled = false;
-            btn.textContent = 'Cancel Bake';
-            if (status) {
-                const clamped = resolution !== requestedResolution || samples !== requestedSamples;
-                status.textContent = clamped
-                    ? `Preparing CPU bake (${resolution}px, ${samples} samples; clamped for safety)...`
-                    : 'Preparing CPU bake...';
-            }
-            try {
-                const result = await lightmapBaker.start({
-                    resolution,
-                    samples,
-                    maxBounces: 2,
-                    onProgress: (progress) => {
-                        if (!status) return;
-                        const meshIndex = (progress.index ?? 0) + 1;
-                        const meshTotal = progress.total ?? 0;
-                        const texel = Math.round((progress.texel ?? 0) * 100);
-                        status.textContent = `Baking ${meshIndex}/${meshTotal}: ${progress.name || 'mesh'} ${texel}%`;
-                    },
-                });
-                if (status) {
-                    if (result?.refused) {
-                        status.textContent = result.reason || 'Bake refused: scene too large.';
-                    } else {
-                        status.textContent = result?.cancelled
-                            ? 'Bake cancelled.'
-                            : `Baked ${result?.meshCount ?? 0} meshes at ${result?.resolution ?? resolution}px, ${result?.samples ?? samples} samples.`;
-                    }
-                }
-            } catch (e) {
-                console.error('[Lightmap] start failed', e);
-                if (status) status.textContent = `Bake failed: ${e.message}`;
-            } finally {
-                btn.disabled = false;
-                btn.textContent = 'Bake Lightmaps';
-            }
-        });
-    }
-    if (worldEnvUiRefs.bakeClear) {
-        worldEnvUiRefs.bakeClear.addEventListener('click', () => {
-            lightmapBaker?.clear();
-            if (worldEnvUiRefs.bakeStatus) worldEnvUiRefs.bakeStatus.textContent = 'Lightmaps cleared.';
-        });
-    }
-
-    renderDebugConsoleOutput();
-    debugConsoleInput?.addEventListener('keydown', handleDebugConsoleInputKeydown);
-
-    postProcessUiRefs?.targetGlobalBtn?.addEventListener('click', () => {
-        postProcessUiState.target = 'global';
-        syncPostProcessVolumeUi();
+    wirePanelHandlers({
+        THREE,
+        worldEnvUiRefs, worldEnvState,
+        postProcessUiRefs, postProcessUiState, shadowDebugUiRefs, perfModeUiRefs,
+        debugConsoleInput,
+        getLightmapBaker: () => lightmapBaker,
+        getPostProcessVolumeManager: () => postProcessVolumeManager,
+        loadWorldEnvFromStorage, applyWorldEnvState,
+        resetWorldEnvDefaults, setWorldEnvMaster,
+        syncPostProcessVolumeUi,
+        updatePostProcessSliderLabels, applyPostProcessSettingsFromUi,
+        setForceAllSceneMeshShadowsEnabled, forceAllSceneMeshShadows,
+        updateShadowDebugUi,
+        setPerfModeEnabled, updatePerfModeUi,
+        renderDebugConsoleOutput, handleDebugConsoleInputKeydown,
     });
-    postProcessUiRefs?.targetVolumeBtn?.addEventListener('click', () => {
-        postProcessUiState.target = 'volume';
-        syncPostProcessVolumeUi();
-    });
-
-    [
-        postProcessUiRefs?.exposureInput,
-        postProcessUiRefs?.bloomStrengthInput,
-        postProcessUiRefs?.bloomRadiusInput,
-        postProcessUiRefs?.bloomThresholdInput,
-        postProcessUiRefs?.blendSpeedInput,
-    ].forEach((input) => {
-        input?.addEventListener('input', () => {
-            updatePostProcessSliderLabels();
-            applyPostProcessSettingsFromUi({ reloadInputs: false });
-        });
-    });
-
-    [
-        postProcessUiRefs?.priorityInput,
-        postProcessUiRefs?.sizeXInput,
-        postProcessUiRefs?.sizeYInput,
-        postProcessUiRefs?.sizeZInput,
-    ].forEach((input) => {
-        input?.addEventListener('change', () => {
-            applyPostProcessSettingsFromUi({ reloadInputs: false });
-        });
-    });
-
-    postProcessUiRefs?.placeVolumeBtn?.addEventListener('click', () => {
-        postProcessUiState.target = 'volume';
-        applyPostProcessSettingsFromUi({ createVolumeIfNeeded: true, placeVolumeAtCamera: true, reloadInputs: true });
-    });
-    postProcessUiRefs?.removeVolumeBtn?.addEventListener('click', () => {
-        postProcessVolumeManager?.removeEditorVolume?.();
-        postProcessVolumeManager?.update?.(1);
-        syncPostProcessVolumeUi();
-    });
-    postProcessUiRefs?.toggleBoundsBtn?.addEventListener('click', () => {
-        const snapshot = postProcessVolumeManager?.getSnapshot?.();
-        postProcessVolumeManager?.setDebugVisible?.(!snapshot?.debugVisible);
-        syncPostProcessVolumeUi({ reloadInputs: false });
-    });
-    postProcessUiRefs?.applyBtn?.addEventListener('click', () => {
-        applyPostProcessSettingsFromUi({ createVolumeIfNeeded: postProcessUiState.target === 'volume', reloadInputs: true });
-    });
-    shadowDebugUiRefs?.forceOffBtn?.addEventListener('click', () => {
-        setForceAllSceneMeshShadowsEnabled(false);
-    });
-    shadowDebugUiRefs?.forceOnBtn?.addEventListener('click', () => {
-        setForceAllSceneMeshShadowsEnabled(true);
-    });
-    shadowDebugUiRefs?.applyBtn?.addEventListener('click', () => {
-        forceAllSceneMeshShadows();
-    });
-    updateShadowDebugUi();
-
-    perfModeUiRefs?.offBtn?.addEventListener('click', () => {
-        setPerfModeEnabled(false);
-    });
-    perfModeUiRefs?.onBtn?.addEventListener('click', () => {
-        setPerfModeEnabled(true);
-    });
-    updatePerfModeUi();
-
-    // World Environment panel: load saved state, wire all togglers + sliders,
-    // then call applyWorldEnvState once so the engine boots into the user's
-    // last-saved configuration. Each handler mutates the relevant slice of
-    // worldEnvState then re-applies — keeps the UI and runtime in sync without
-    // duplicating logic.
-    loadWorldEnvFromStorage();
-
-    const wireToggle = (offBtn, onBtn, getStateOff, getStateOn) => {
-        offBtn?.addEventListener('click', () => { getStateOff(); applyWorldEnvState(); });
-        onBtn?.addEventListener('click', () => { getStateOn(); applyWorldEnvState(); });
-    };
-    const wireSlider = (input, key, setter, parser = parseFloat) => {
-        input?.addEventListener('input', () => {
-            const v = parser(input.value);
-            if (Number.isFinite(v)) {
-                setter(v);
-                applyWorldEnvState({ switchSky: false });
-            }
-        });
-    };
-
-    worldEnvUiRefs?.masterOnBtn?.addEventListener('click', () => setWorldEnvMaster('on'));
-    worldEnvUiRefs?.masterOffBtn?.addEventListener('click', () => setWorldEnvMaster('off'));
-    worldEnvUiRefs?.masterPerfBtn?.addEventListener('click', () => setWorldEnvMaster('perf'));
-    worldEnvUiRefs?.masterCornellBtn?.addEventListener('click', () => setWorldEnvMaster('cornell'));
-    worldEnvUiRefs?.resetBtn?.addEventListener('click', () => resetWorldEnvDefaults());
-
-    wireToggle(worldEnvUiRefs?.skyOff, worldEnvUiRefs?.skyOn,
-        () => { worldEnvState.sky.enabled = false; },
-        () => { worldEnvState.sky.enabled = true; });
-    worldEnvUiRefs?.skyPreset?.addEventListener('change', () => {
-        worldEnvState.sky.preset = worldEnvUiRefs.skyPreset.value;
-        applyWorldEnvState();
-    });
-    wireSlider(worldEnvUiRefs?.skyBlurriness, 'sky.blurriness', (v) => { worldEnvState.sky.blurriness = v; });
-
-    wireToggle(worldEnvUiRefs?.ambientOff, worldEnvUiRefs?.ambientOn,
-        () => { worldEnvState.ambient.enabled = false; },
-        () => { worldEnvState.ambient.enabled = true; });
-    wireSlider(worldEnvUiRefs?.ambientIntensity, 'ambient.intensity', (v) => { worldEnvState.ambient.intensity = v; });
-
-    wireToggle(worldEnvUiRefs?.hemiOff, worldEnvUiRefs?.hemiOn,
-        () => { worldEnvState.hemi.enabled = false; },
-        () => { worldEnvState.hemi.enabled = true; });
-    wireSlider(worldEnvUiRefs?.hemiIntensity, 'hemi.intensity', (v) => { worldEnvState.hemi.intensity = v; });
-
-    wireToggle(worldEnvUiRefs?.sunOff, worldEnvUiRefs?.sunOn,
-        () => { worldEnvState.sun.enabled = false; },
-        () => { worldEnvState.sun.enabled = true; });
-    worldEnvUiRefs?.sunShadow?.addEventListener('change', () => {
-        worldEnvState.sun.castShadow = !!worldEnvUiRefs.sunShadow.checked;
-        applyWorldEnvState({ switchSky: false });
-    });
-    wireSlider(worldEnvUiRefs?.sunIntensity, 'sun.intensity', (v) => { worldEnvState.sun.intensity = v; });
-
-    wireSlider(worldEnvUiRefs?.exposure, 'tonemap.exposure', (v) => { worldEnvState.tonemap.exposure = v; });
-
-    wireToggle(worldEnvUiRefs?.bloomOff, worldEnvUiRefs?.bloomOn,
-        () => { worldEnvState.bloom.enabled = false; },
-        () => { worldEnvState.bloom.enabled = true; });
-    wireSlider(worldEnvUiRefs?.bloomStrength, 'bloom.strength', (v) => { worldEnvState.bloom.strength = v; });
-    wireSlider(worldEnvUiRefs?.bloomRadius, 'bloom.radius', (v) => { worldEnvState.bloom.radius = v; });
-    wireSlider(worldEnvUiRefs?.bloomThreshold, 'bloom.threshold', (v) => { worldEnvState.bloom.threshold = v; });
-
-    wireToggle(worldEnvUiRefs?.ssgiOff, worldEnvUiRefs?.ssgiOn,
-        () => { worldEnvState.ssgi.enabled = false; },
-        () => { worldEnvState.ssgi.enabled = true; });
-
-    wireToggle(worldEnvUiRefs?.fogOff, worldEnvUiRefs?.fogOn,
-        () => { worldEnvState.fog.enabled = false; },
-        () => { worldEnvState.fog.enabled = true; });
-    wireSlider(worldEnvUiRefs?.fogDensity, 'fog.density', (v) => { worldEnvState.fog.density = v; });
-    wireSlider(worldEnvUiRefs?.fogOpacity, 'fog.opacity', (v) => { worldEnvState.fog.opacity = v; });
-
-    wireToggle(worldEnvUiRefs?.ddgiOff, worldEnvUiRefs?.ddgiOn,
-        () => { worldEnvState.ddgi.enabled = false; },
-        () => { worldEnvState.ddgi.enabled = true; });
-    wireToggle(worldEnvUiRefs?.ddgiLiveBakeOff, worldEnvUiRefs?.ddgiLiveBakeOn,
-        () => { worldEnvState.ddgi.liveBake = false; },
-        () => { worldEnvState.ddgi.liveBake = true; });
-    wireSlider(worldEnvUiRefs?.ddgiBakeEveryN, 'ddgi.bakeEveryN',
-        (v) => {
-            worldEnvState.ddgi.bakeEveryN = Math.max(1, Math.round(v));
-            worldEnvState.ddgi.probesPerFrame = worldEnvState.ddgi.bakeEveryN;
-        }, (s) => parseInt(s, 10));
-    wireSlider(worldEnvUiRefs?.ddgiIntensity, 'ddgi.intensity', (v) => { worldEnvState.ddgi.intensity = v; });
-    wireSlider(worldEnvUiRefs?.ddgiLightIntensity, 'ddgi.lightIntensity', (v) => { worldEnvState.ddgi.lightIntensity = v; });
-    wireToggle(worldEnvUiRefs?.ddgiProbeDebugOff, worldEnvUiRefs?.ddgiProbeDebugOn,
-        () => { worldEnvState.ddgi.debugProbes = false; },
-        () => { worldEnvState.ddgi.debugProbes = true; });
-    wireToggle(worldEnvUiRefs?.ddgiRayDebugOff, worldEnvUiRefs?.ddgiRayDebugOn,
-        () => { worldEnvState.ddgi.rayDebug = false; },
-        () => { worldEnvState.ddgi.rayDebug = true; });
-    wireToggle(worldEnvUiRefs?.ddgiSolidTestOff, worldEnvUiRefs?.ddgiSolidTestOn,
-        () => { worldEnvState.ddgi.solidTest = false; },
-        () => { worldEnvState.ddgi.solidTest = true; });
-    wireToggle(worldEnvUiRefs?.ddgiViewLit, worldEnvUiRefs?.ddgiViewContribution,
-        () => { worldEnvState.ddgi.contributionView = false; },
-        () => { worldEnvState.ddgi.contributionView = true; });
-
-    wireToggle(worldEnvUiRefs?.shadowsOff, worldEnvUiRefs?.shadowsOn,
-        () => { worldEnvState.shadows.enabled = false; },
-        () => { worldEnvState.shadows.enabled = true; });
-    wireSlider(worldEnvUiRefs?.shadowsBias, 'shadows.bias', (v) => { worldEnvState.shadows.bias = v; });
-    wireSlider(worldEnvUiRefs?.shadowsNormalBias, 'shadows.normalBias', (v) => { worldEnvState.shadows.normalBias = v; });
-    wireSlider(worldEnvUiRefs?.shadowsRadius, 'shadows.radius', (v) => { worldEnvState.shadows.radius = v; });
-    wireSlider(worldEnvUiRefs?.shadowsMapSize, 'shadows.mapSize', (v) => { worldEnvState.shadows.mapSize = v | 0; });
-
-    wireToggle(worldEnvUiRefs?.pomOff, worldEnvUiRefs?.pomOn,
-        () => { worldEnvState.pom.enabled = false; },
-        () => { worldEnvState.pom.enabled = true; });
-    wireSlider(worldEnvUiRefs?.pomIntensity, 'pom.intensity', (v) => { worldEnvState.pom.intensity = v; });
-    // Quality is a 3-button mutually-exclusive group; clicking any one sets
-    // the matching string and re-applies. Wired manually because wireToggle
-    // only handles 2-state pairs.
-    const setPomQuality = (q) => {
-        worldEnvState.pom.quality = q;
-        applyWorldEnvState();
-    };
-    worldEnvUiRefs?.pomQualityLow?.addEventListener('click', () => setPomQuality('low'));
-    worldEnvUiRefs?.pomQualityMedium?.addEventListener('click', () => setPomQuality('medium'));
-    worldEnvUiRefs?.pomQualityHigh?.addEventListener('click', () => setPomQuality('high'));
-
-    // Apply once now that all controllers + UI are wired. This pushes the
-    // (possibly-restored-from-localStorage) state through every subsystem and
-    // syncs the panel display. Any controllers not yet ready are no-ops thanks
-    // to the optional-chaining inside applyWorldEnvState.
-    applyWorldEnvState({ persist: false });
 
     if (browseModelBtn) {
         browseModelBtn.addEventListener('click', () => {
@@ -5416,69 +5165,19 @@ async function init() {
     await renderer.init();
     debugConsoleState.gpuTimingMode = renderer.backend?.trackTimestamp ? 'gpu' : 'approximate';
 
-    // ── Post-processing: bloom over the scene's emissive output ─────────────
-    // Uses an MRT pass so bloom only picks up materials with non-zero emissive
-    // (lights, headlights/taillights, accent stripes) instead of every bright
-    // pixel — keeps the world from looking hazy.
-    const scenePass = pass(scene, camera);
-    scenePass.setMRT(mrt({
-        output: output,
-        emissive: emissive,
-        normal: normalView,
+    ({
+        postProcessing,
+        postProcessNodes,
+        postProcessVolumeManager,
+        lightmapBaker,
+    } = setupPostProcessing({
+        scene, camera, renderer, sceneSystem, mainDirectionalLight,
+        globalPostProcessUniforms,
+        applySSGISettings, rebuildPostProcessingOutputNode,
+        createPostProcessVolumeManager, syncPostProcessVolumeUi,
+        getDDGIManager, createLightmapBaker,
+        registerDebug,
     }));
-    const sceneColor = scenePass.getTextureNode('output');
-    const sceneEmissive = scenePass.getTextureNode('emissive');
-    const sceneNormal = scenePass.getTextureNode('normal');
-    const sceneDepth = scenePass.getTextureNode('depth');
-    const bloomNode = bloom(sceneEmissive, globalPostProcessUniforms.bloomStrength, globalPostProcessUniforms.bloomRadius, globalPostProcessUniforms.bloomThreshold);
-    // BloomNode names its internal render-target textures "UnrealBloomPass.*".
-    // The WebGPU backend uses texture.name as the GPU resource label, and
-    // Dawn rejects '.' in labels → uncaught validation errors on boot that
-    // break bloom. Drop the "Unreal" prefix and the '.' so the labels are
-    // valid (e.g. "BloomPass_bright"). Done in place (can't patch node_modules).
-    {
-        const sanitize = (rt) => {
-            const tex = rt?.texture;
-            if (tex?.name) {
-                tex.name = tex.name.replace(/^Unreal/, '').replace(/\./g, '_');
-            }
-        };
-        sanitize(bloomNode?._renderTargetBright);
-        (bloomNode?._renderTargetsHorizontal || []).forEach(sanitize);
-        (bloomNode?._renderTargetsVertical || []).forEach(sanitize);
-    }
-    const ssgiNode = ssgi(sceneColor, sceneDepth, sceneNormal, camera);
-    ssgiNode.useTemporalFiltering = false;
-    const ssgiOutput = ssgiNode.getTextureNode();
-    postProcessing = new RenderPipeline(renderer);
-    postProcessNodes = { sceneColor, bloomNode, ssgiNode, ssgiOutput };
-    applySSGISettings();
-    rebuildPostProcessingOutputNode();
-
-    postProcessVolumeManager = createPostProcessVolumeManager({
-        scene,
-        camera,
-        renderer,
-        globalUniforms: globalPostProcessUniforms
-    });
-    syncPostProcessVolumeUi();
-
-    getDDGIManager().init({
-        scene,
-        renderer,
-        camera,
-        getDirectionalLight: () => mainDirectionalLight,
-    });
-    lightmapBaker = createLightmapBaker({
-        scene,
-        getDirectionalLight: () => mainDirectionalLight,
-    });
-    registerDebug('ddgi', getDDGIManager());
-    registerDebug('lightmapBaker', lightmapBaker);
-    // Entity bridge debug handle (verification:
-    //   __POLYFLOW_DEBUG__.scene.getEntity(id),
-    //   __POLYFLOW_DEBUG__.scene.entityFromObject3D(obj)).
-    registerDebug('scene', sceneSystem);
 
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
@@ -6014,8 +5713,14 @@ const _inputPanels = createInputPanels({
     objectScriptState, physics, pointerNdc, raycaster, runtimeAudio,
     showcase, terrainBrushState, vehicleState,
     focusCurrentShowcaseSelection, focusShowcaseCameraOnObject,
-    handlePointerLockChange, handleShowcaseContextMenu,
-    handleShowcaseWheel, isEditableElement,
+    // Handlers come from createInputHandlers (wired below). inputPanels
+    // stores these refs in its closure and binds them inside setupGameplayEvents
+    // (run from init()). Lazy thunks defer binding lookup to addEventListener
+    // invocation time, by which point the const is initialized.
+    handlePointerLockChange: (...a) => handlePointerLockChange(...a),
+    handleShowcaseContextMenu: (...a) => handleShowcaseContextMenu(...a),
+    handleShowcaseWheel: (...a) => handleShowcaseWheel(...a),
+    isEditableElement,
     copySelectedToClipboard, deleteSelectedActor, duplicateSelected,
     editorHistory, getDynamicPropById, getDynamicPropHitFromEvent,
     handleDebugConsoleKeydown, isTransformControlSphereHit,
@@ -6025,7 +5730,9 @@ const _inputPanels = createInputPanels({
     setTerrainModeSolid, setTerrainRepeat, setTerrainRoughness,
     setTerrainTint, updateBlueprintTransformUI,
     enterVehicle, exitVehicle, getActiveVehicleProp, getActorRenderObject,
-    handleGameplayMouseMove, handleLightGridClick, handleShowcaseMouseButton,
+    handleGameplayMouseMove: (...a) => handleGameplayMouseMove(...a),
+    handleLightGridClick,
+    handleShowcaseMouseButton: (...a) => handleShowcaseMouseButton(...a),
     isDrivingVehicle, respawnPlayer, selectShowcaseActor,
     setCollisionDebugEnabled, updateGameplayUI,
 });
@@ -6035,202 +5742,40 @@ const adjustShowcaseSpeed = _inputPanels.adjustShowcaseSpeed;
 const updateShowcaseInput = _inputPanels.updateShowcaseInput;
 const handleGameplayKeyEvent = _inputPanels.handleGameplayKeyEvent;
 
-function handleGameplayMouseMove(event) {
-    if (!gameplay.pointerLocked) {
-        if (terrainBrushState.enabled && !showcase.looking && !blueprintState.active && !gameplay.active) {
-            if (terrainBrushState.active) {
-                applyTerrainBrushFromEvent(event);
-            } else {
-                updateTerrainBrushPreview(event);
-            }
-            return;
-        }
-        if (!showcase.looking || gameplay.active) return;
+const _inputHandlers = createInputHandlers({
+    THREE,
+    renderer: () => renderer,
+    camera: () => camera,
+    physics,
+    sceneSystem: () => sceneSystem,
+    gameplay, showcase, blueprintState, terrainBrushState, objectScriptState,
+    PLAYER_SETTINGS,
+    applyTerrainBrushFromEvent, updateTerrainBrushPreview,
+    applyShowcaseCameraRotation, applyGameplayCameraRotation,
+    runMouseAction,
+    isTransformControlSphereHit, getDynamicPropHitFromEvent,
+    selectShowcaseActor: (...a) => selectShowcaseActor(...a),
+    closeObjectScriptMenu, closeObjectScriptEditor,
+    rebuildModelPhysicsBody, rebuildTerrainPhysicsBody,
+    worldFloor: () => worldFloor,
+    syncTransformControlState,
+    updateWorldPresentation: (...a) => updateWorldPresentation(...a),
+    updateGameplayUI: (...a) => updateGameplayUI(...a),
+    resetMovementInputState,
+    clearShooterProjectiles, clearShooterAimWarnings,
+    clearGameplayEffects, clearHeldWeapon,
+    restoreSceneState,
+    repairSampleCollisionHierarchyAfterRestore: (...a) => repairSampleCollisionHierarchyAfterRestore(...a),
+    resetDoomMiniLevelState, resetDoomArenaLevelState,
+    resetShowcaseCamera: (...a) => resetShowcaseCamera(...a),
+    adjustShowcaseSpeed,
+});
+const handleGameplayMouseMove = _inputHandlers.handleGameplayMouseMove;
+const handleShowcaseMouseButton = _inputHandlers.handleShowcaseMouseButton;
+const handleShowcaseContextMenu = _inputHandlers.handleShowcaseContextMenu;
+const handleShowcaseWheel = _inputHandlers.handleShowcaseWheel;
+const handlePointerLockChange = _inputHandlers.handlePointerLockChange;
 
-        showcase.yaw -= event.movementX * 0.0022;
-        showcase.pitch -= event.movementY * 0.0018;
-        showcase.pitch = THREE.MathUtils.clamp(
-            showcase.pitch,
-            -PLAYER_SETTINGS.maxLookPitch,
-            PLAYER_SETTINGS.maxLookPitch
-        );
-
-        applyShowcaseCameraRotation();
-        return;
-    }
-
-    gameplay.yaw -= event.movementX * 0.0022;
-    gameplay.pitch -= event.movementY * 0.0018;
-    gameplay.pitch = THREE.MathUtils.clamp(
-        gameplay.pitch,
-        -PLAYER_SETTINGS.maxLookPitch,
-        PLAYER_SETTINGS.maxLookPitch
-    );
-
-    applyGameplayCameraRotation();
-}
-
-function handleShowcaseMouseButton(event) {
-    // In blueprint mode, don't let the normal actor selection logic
-    // intercept clicks — TransformControls needs those events for gizmo drag
-    if (blueprintState.active) {
-        if (event.type === 'mousedown' && event.button === 2) {
-            showcase.looking = true;
-            event.preventDefault();
-        } else if (event.type === 'mouseup' && event.button === 2) {
-            showcase.looking = false;
-        }
-        return;
-    }
-
-    if (gameplay.active) {
-        if (event.button === 0) {
-            gameplay.input.fire = event.type === 'mousedown';
-            if (event.type === 'mousedown') gameplay.input.firePressed = true;
-            event.preventDefault();
-        }
-        if (event.type === 'mousedown') {
-            const buttonName = event.button === 2 ? 'right' : event.button === 0 ? 'left' : null;
-            const heldWeaponUsesLeftMouse = buttonName === 'left' && !!gameplay.weapon.type;
-            if (buttonName && !heldWeaponUsesLeftMouse) {
-                runMouseAction(buttonName, event);
-            }
-        }
-        return;
-    }
-
-    if (gameplay.active || gameplay.pointerLocked || !renderer) return;
-
-    if (event.type === 'mousedown') {
-        renderer.domElement.focus();
-        if (terrainBrushState.enabled && event.button === 0) {
-            terrainBrushState.active = true;
-            applyTerrainBrushFromEvent(event);
-            event.preventDefault();
-            return;
-        }
-        if (event.button === 0 && objectScriptState.menuOpen) {
-            closeObjectScriptMenu();
-        }
-        // Left-click: select actor and attach gizmo
-        if (event.button === 0) {
-            if (isTransformControlSphereHit(event)) {
-                event.preventDefault();
-                return;
-            }
-            const propHit = getDynamicPropHitFromEvent(event);
-            if (propHit?.prop) {
-                selectShowcaseActor(propHit.prop.id, propHit.hit?.object ?? null);
-            } else {
-                // Clicked empty space — deselect
-                selectShowcaseActor(null);
-            }
-            return;
-        }
-        if (event.button !== 2) return;
-        closeObjectScriptMenu();
-        showcase.looking = true;
-        event.preventDefault();
-        return;
-    }
-
-    if (event.button === 0 && terrainBrushState.active) {
-        terrainBrushState.active = false;
-        if (terrainBrushState.dirtyPhysics) {
-            if (terrainBrushState.targetObject && terrainBrushState.targetObject !== worldFloor) {
-                rebuildModelPhysicsBody();
-            } else {
-                rebuildTerrainPhysicsBody();
-            }
-            terrainBrushState.dirtyPhysics = false;
-        }
-        event.preventDefault();
-        return;
-    }
-
-    if (event.button === 2) {
-        showcase.looking = false;
-    }
-}
-
-function handleShowcaseContextMenu(event) {
-    if (gameplay.active || gameplay.pointerLocked || !renderer) {
-        event.preventDefault();
-        return;
-    }
-
-    if (isTransformControlSphereHit(event)) {
-        event.preventDefault();
-        return;
-    }
-
-    event.preventDefault();
-    closeObjectScriptMenu();
-}
-
-function handleShowcaseWheel(event) {
-    if (gameplay.active || gameplay.pointerLocked) return;
-
-    event.preventDefault();
-    adjustShowcaseSpeed(event.deltaY < 0 ? 1 : -1);
-}
-
-function handlePointerLockChange() {
-    const isLocked = document.pointerLockElement === renderer.domElement;
-
-    if (isLocked) {
-        gameplay.pointerLocked = true;
-        gameplay.active = true;
-        showcase.looking = false;
-        syncTransformControlState();
-        closeObjectScriptMenu();
-        closeObjectScriptEditor();
-        updateWorldPresentation();
-        updateGameplayUI();
-        renderer.domElement.focus();
-        return;
-    }
-
-    if (!gameplay.pointerLocked && !gameplay.active) return;
-
-    // Rogue card picker released the lock on purpose to show the cursor.
-    // This is a PAUSE, not a Stop — don't tear down / restore the scene.
-    if (gameplay.roguePaused) {
-        gameplay.pointerLocked = false;
-        gameplay.velocity.set(0, 0, 0);
-        physics.desiredVelocity.set(0, 0, 0);
-        resetMovementInputState();
-        return;
-    }
-
-    gameplay.pointerLocked = false;
-    gameplay.active = false;
-    gameplay.velocity.set(0, 0, 0);
-    physics.desiredVelocity.set(0, 0, 0);
-    resetMovementInputState();
-    clearShooterProjectiles();
-    clearShooterAimWarnings();
-    clearGameplayEffects();
-    clearHeldWeapon();
-    // restoreSceneState() reloads the world ASYNchronously; actor-dependent
-    // cleanup must run AFTER it resolves or it operates on the old actors
-    // that the reload then wipes (→ doom waves never re-arm on Stop).
-    console.log('[STOP] handlePointerLockChange → restore; sampleType=',
-        currentMesh?.userData?.sampleType);
-    Promise.resolve(restoreSceneState()).then((restored) => {
-        console.log('[STOP] restore resolved =', restored,
-            'actors=', sceneSystem?.actors?.size);
-        repairSampleCollisionHierarchyAfterRestore();
-        const did = resetDoomMiniLevelState();
-        resetDoomArenaLevelState();
-        console.log('[STOP] resetDoomMiniLevelState ran =', did);
-        syncTransformControlState();
-    });
-
-    updateWorldPresentation();
-    resetShowcaseCamera(false);
-    updateGameplayUI();
-}
 
 function enterGameplay() {
     if (!gameplay.canPlay && physics.ready) {
@@ -6493,121 +6038,40 @@ function resetShowcaseCamera(animate = true) {
     });
 }
 
-function updateShowcaseCamera(delta) {
-    const moveRight = (showcase.input.right ? 1 : 0) - (showcase.input.left ? 1 : 0);
-    const moveForward = (showcase.input.forward ? 1 : 0) - (showcase.input.back ? 1 : 0);
-    const moveVertical = (showcase.input.up ? 1 : 0) - (showcase.input.down ? 1 : 0);
-
-    tempVectorA.set(0, 0, 0);
-    camera.getWorldDirection(tempVectorB);
-
-    if (tempVectorB.lengthSq() < 1e-6) {
-        tempVectorB.set(0, 0, -1);
-    } else {
-        tempVectorB.normalize();
-    }
-
-    tempVectorC.crossVectors(tempVectorB, upVector).normalize();
-
-    tempVectorA
-        .addScaledVector(tempVectorC, moveRight)
-        .addScaledVector(tempVectorB, moveForward)
-        .addScaledVector(upVector, moveVertical);
-
-    if (tempVectorA.lengthSq() > 0) {
-        tempVectorA.normalize();
-    }
-
-    const moveSpeed = showcase.moveSpeed * (showcase.input.boost ? showcase.boostMultiplier : 1);
-    showcase.velocity.lerp(tempVectorA.multiplyScalar(moveSpeed), tempVectorA.lengthSq() > 0 ? 0.35 : 0.18);
-
-    if (showcase.velocity.lengthSq() < 1e-5) {
-        showcase.velocity.set(0, 0, 0);
-        return;
-    }
-
-    camera.position.addScaledVector(showcase.velocity, delta);
-}
-
-function respawnPlayer(useStoredView = false) {
-    if (!gameplay.canPlay && physics.ready) {
-        gameplay.canPlay = true;
-    }
-    if (!gameplay.canPlay) return;
-
-    if (gameplay.respawnTimer) {
-        clearTimeout(gameplay.respawnTimer);
-        gameplay.respawnTimer = null;
-    }
-    gameplay.dead = false;
-    gameplay.lastDamageAt = 0;
-    resetGameplayPrefabs();
-    // Re-arm the Doom wave state machine so killed enemies return on
-    // respawn (no-op on every non-doomTest level via its own guard).
-    resetDoomMiniLevelState();
-    resetDoomArenaLevelState();
-
-    if (isDrivingVehicle()) {
-        clearActiveVehicle();
-    }
-
-    if (!physics.character) {
-        ensurePlayerCharacter();
-    }
-
-    if (!physics.character) return;
-
-    const spawnPosition = new physics.Jolt.RVec3(
-        gameplay.spawnPoint.x,
-        gameplay.spawnPoint.y,
-        gameplay.spawnPoint.z
-    );
-    physics.character.SetPosition(spawnPosition);
-    physics.Jolt.destroy(spawnPosition);
-    physics.character.SetLinearVelocity(physics.Jolt.Vec3.prototype.sZero());
-    gameplay.velocity.set(0, 0, 0);
-    gameplay.grounded = true;
-
-    if (useStoredView) {
-        gameplay.yaw = gameplay.spawnYaw;
-        gameplay.pitch = gameplay.spawnPitch;
-    }
-
-    syncCameraToCharacter();
-
-    if (!useStoredView) {
-        tempVectorA.copy(gameplayLookTarget).sub(camera.position);
-        const flatDistance = Math.max(0.001, Math.hypot(tempVectorA.x, tempVectorA.z));
-        gameplay.yaw = Math.atan2(tempVectorA.x, tempVectorA.z);
-        gameplay.pitch = THREE.MathUtils.clamp(
-            Math.atan2(-tempVectorA.y, flatDistance),
-            -PLAYER_SETTINGS.maxLookPitch,
-            PLAYER_SETTINGS.maxLookPitch
-        );
-        gameplay.spawnYaw = gameplay.yaw;
-        gameplay.spawnPitch = gameplay.pitch;
-    }
-
-    applyGameplayCameraRotation();
-    updateGameplayUI();
-}
-
-function applyGameplayCameraRotation() {
-    camera.rotation.order = 'YXZ';
-    // recoilPitch/recoilYaw are transient kick offsets (set by weapon scripts
-    // via api.applyCameraRecoil, decayed each frame in updatePlayerHitFeedback).
-    camera.rotation.x = gameplay.pitch + (gameplay.recoilPitch || 0);
-    camera.rotation.y = gameplay.yaw + (gameplay.recoilYaw || 0);
-    camera.rotation.z = 0;
-}
-
-// Kick the camera by `pitch`/`yaw` radians (recoil). Additive, decays back to
-// zero. Exposed for weapon user scripts. Positive pitch = muzzle climbs up.
-function applyCameraRecoil(pitch = 0, yaw = 0) {
-    gameplay.recoilPitch += Number(pitch) || 0;
-    gameplay.recoilYaw += Number(yaw) || 0;
-}
+const _frameLoop = createFrameLoop({
+    THREE,
+    camera: () => camera,
+    currentMesh: () => currentMesh,
+    worldFloor: () => worldFloor,
+    physics,
+    gameplay, gameplayLookTarget, showcase,
+    PLAYER_SETTINGS,
+    upVector,
+    tempVectorA, tempVectorB, tempVectorC, tempVectorD, tempVectorE, tempVectorF,
+    copyJoltVector,
+    isDrivingVehicle,
+    updateVehicleGameplay: (...a) => updateVehicleGameplay(...a),
+    silenceVehicleEngineAudio,
+    updateEngineAudioDebugOverlay,
+    syncCameraToCharacter: (...a) => syncCameraToCharacter(...a),
+    ensurePlayerCharacter: (...a) => ensurePlayerCharacter(...a),
+    resetGameplayPrefabs,
+    clearActiveVehicle,
+    updateDoomMiniLevelState: (...a) => updateDoomMiniLevelState(...a),
+    updateDoomArenaLevelState: (...a) => updateDoomArenaLevelState(...a),
+    updateRogueXpOrbs: (...a) => updateRogueXpOrbs(...a),
+    processGameplayPrefabs,
+    updateGameplayUI: (...a) => updateGameplayUI(...a),
+    resetDoomMiniLevelState,
+    resetDoomArenaLevelState,
+});
+const updateShowcaseCamera = _frameLoop.updateShowcaseCamera;
+const applyGameplayCameraRotation = _frameLoop.applyGameplayCameraRotation;
+const applyCameraRecoil = _frameLoop.applyCameraRecoil;
+const respawnPlayer = _frameLoop.respawnPlayer;
+const updateGameplay = _frameLoop.updateGameplay;
 registerEngineWeapons({ applyCameraRecoil });
+
 
 const HELI_SETTINGS = {
     maxLift: 14,
@@ -6651,115 +6115,6 @@ const getGroundHitAt = _vehiclePhysics.getGroundHitAt;
 const getGroundHeightAt = _vehiclePhysics.getGroundHeightAt;
 const resolveHorizontalMovement = _vehiclePhysics.resolveHorizontalMovement;
 
-function updateGameplay(delta) {
-    if (isDrivingVehicle()) {
-        updateVehicleGameplay(delta);
-        return;
-    }
-
-    silenceVehicleEngineAudio();
-    updateEngineAudioDebugOverlay('idle', null, null);
-
-    if (!physics.character) return;
-
-    const moveRight = (gameplay.input.right ? 1 : 0) - (gameplay.input.left ? 1 : 0);
-    const moveForward = (gameplay.input.forward ? 1 : 0) - (gameplay.input.back ? 1 : 0);
-    const moveSpeed = (gameplay.input.sprint ? PLAYER_SETTINGS.sprintSpeed : PLAYER_SETTINGS.walkSpeed)
-        * (window.rogueBuffs?.moveSpeed || 1);
-    const wasGrounded = gameplay.grounded;
-
-    tempVectorA.set(0, 0, 0);
-    if (moveRight !== 0 || moveForward !== 0) {
-        camera.getWorldDirection(tempVectorB);
-        tempVectorB.y = 0;
-
-        if (tempVectorB.lengthSq() < 1e-6) {
-            tempVectorB.set(0, 0, -1);
-        } else {
-            tempVectorB.normalize();
-        }
-
-        tempVectorC.crossVectors(tempVectorB, upVector).normalize();
-
-        tempVectorA
-            .addScaledVector(tempVectorC, moveRight)
-            .addScaledVector(tempVectorB, moveForward);
-
-        if (tempVectorA.lengthSq() > 0) {
-            tempVectorA.normalize().multiplyScalar(moveSpeed);
-        }
-    }
-
-    const desiredMovement = tempVectorE.copy(tempVectorA);
-
-    physics.character.UpdateGroundVelocity();
-
-    const linearVelocity = copyJoltVector(tempVectorB, physics.character.GetLinearVelocity());
-    const currentVerticalVelocity = tempVectorC.copy(upVector).multiplyScalar(linearVelocity.dot(upVector));
-    const currentHorizontalVelocity = tempVectorD.copy(linearVelocity).sub(currentVerticalVelocity);
-    const groundVelocity = copyJoltVector(tempVectorA, physics.character.GetGroundVelocity());
-
-    const onGround = physics.character.IsSupported();
-    const movingTowardsGround = currentVerticalVelocity.y - groundVelocity.y <= 0.1;
-    physics.allowSliding = desiredMovement.lengthSq() > 1e-8;
-
-    const nextVelocity = tempVectorF;
-    if (onGround && movingTowardsGround) {
-        nextVelocity.copy(groundVelocity);
-        if (physics.jumpQueued) {
-            nextVelocity.y += PLAYER_SETTINGS.jumpSpeed;
-        }
-    } else {
-        nextVelocity.copy(currentVerticalVelocity);
-    }
-
-    nextVelocity.addScaledVector(copyJoltVector(tempVectorC, physics.gravity), delta);
-
-    if (physics.allowSliding) {
-        physics.desiredVelocity.lerp(desiredMovement, onGround ? 0.32 : 0.12);
-        nextVelocity.add(physics.desiredVelocity);
-    } else if (!onGround) {
-        nextVelocity.add(currentHorizontalVelocity);
-        physics.desiredVelocity.multiplyScalar(0.92);
-    } else {
-        physics.desiredVelocity.multiplyScalar(0.2);
-    }
-
-    const nextVelocityJolt = new physics.Jolt.Vec3(nextVelocity.x, nextVelocity.y, nextVelocity.z);
-    physics.character.SetLinearVelocity(nextVelocityJolt);
-    physics.Jolt.destroy(nextVelocityJolt);
-    physics.character.ExtendedUpdate(
-        delta,
-        physics.gravity,
-        physics.updateSettings,
-        physics.movingBroadPhaseFilter,
-        physics.movingLayerFilter,
-        physics.bodyFilter,
-        physics.shapeFilter,
-        physics.jolt.GetTempAllocator()
-    );
-
-    syncCameraToCharacter();
-    applyGameplayCameraRotation();
-    gameplay.grounded = physics.character.IsSupported();
-    physics.jumpQueued = false;
-
-    const characterPosition = copyJoltVector(tempVectorA, physics.character.GetPosition());
-    if (characterPosition.y < worldFloor.position.y - 24) {
-        respawnPlayer();
-    }
-
-    updateDoomMiniLevelState(characterPosition);
-    updateDoomArenaLevelState(characterPosition);
-    if (currentMesh?.userData?.sampleType === 'doomArena') {
-        updateRogueXpOrbs(characterPosition, delta);
-    }
-    processGameplayPrefabs();
-
-    if (wasGrounded !== gameplay.grounded) {
-        updateGameplayUI();
-    }
-}
 
 // File handling (drag-drop) + showcase asset optimization pipeline
 // extracted to ../optim/showcaseOptimizer.js. Factory instantiated below.

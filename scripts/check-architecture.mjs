@@ -13,7 +13,7 @@ import process from 'node:process';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const RUNTIME_PATH = path.join(ROOT, 'src/app/runtime.js');
-const RUNTIME_MAX_LINES = 7400;          // current ≈7344; ratchet down each refactor pass
+const RUNTIME_MAX_LINES = 6750;          // current ≈6699; ratchet down each refactor pass
 const DEBUG_REGISTRY_PATH = path.join(ROOT, 'src/runtime/debugRegistry.js');
 
 const errors = [];
