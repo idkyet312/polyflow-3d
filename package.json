@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "deploy": "gh-pages -d dist",
     "multiplayer:server": "node server/multiplayer-server.js",
-    "test": "node --test tests/smoke.test.js"
+    "check:arch": "node scripts/check-architecture.mjs",
+    "test": "node scripts/check-architecture.mjs && node --test tests/smoke.test.js"
   },
   "devDependencies": {
     "gh-pages": "^6.3.0",

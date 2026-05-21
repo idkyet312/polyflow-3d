@@ -128,25 +128,52 @@ import { createEffectsSystem } from '../gameplay/effectsSystem.js';
 import { createTerrainBrushSystem } from '../world/terrainBrushSystem.js';
 import { createObjectScriptStore } from '../scripting/objectScriptStore.js';
 import { createInputReset, isEditableElement as _isEditableElement } from '../gameplay/inputReset.js';
-import { createEventBus } from '../runtime/eventBus.js';
-import { createSystemRegistry } from '../runtime/systemRegistry.js';
+import { createWorld } from '../runtime/World.js';
+import { Services } from '../runtime/services.js';
+import { registerDebug } from '../runtime/debugRegistry.js';
+import { registerGameplaySystems } from '../gameplay/registerSystems.js';
+import { createImportedPropsSystem } from './importedProps.js';
+import { createVehicleSystem } from './vehicleSystem.js';
+import { createShooterAiVisuals } from './shooterAiVisuals.js';
+import { createActorTransforms } from './actorTransforms.js';
+import { createGameplayComponents } from './gameplayComponents.js';
+import { createRebuildActorPhysics } from './rebuildActorPhysics.js';
+import { createPrimitiveMeshFactory } from './primitiveMeshes.js';
+import { createShowcaseCamera } from './showcaseCamera.js';
+import { createSpawnGameplayPrefab } from './spawnGameplayPrefab.js';
+import { createWeaponFire } from './weaponFire.js';
 import { createLevelStateSystem } from '../gameplay/levelStateSystem.js';
 import { createWorldEnvSystem } from '../world/worldEnvSystem.js';
 
-// Single process-wide event bus. Topics use namespace:event format:
+// Default World instance — owns the event bus and gameplay system registry.
+// Anything that today references `eventBus` / `gameplaySystems` at module
+// scope keeps working because we expose those bindings as the world's own.
+//
+// Event bus topics use namespace:event format:
 //   player:damaged    { amount, damageAngle, sourcePos }
 //   player:died       { sampleType, autoRespawn }
 // Subscribers are wired in this file near the system that owns the response.
-const eventBus = createEventBus();
-if (typeof window !== 'undefined') window.__eventBus = eventBus;
+//
+// System registry runs per-frame in topo-sorted order. Each system is a pure
+// (delta, ctx) function. Populated near the bottom of this file (search for
+// `gameplaySystems.register`). Frame loop calls gameplaySystems.tick(delta).
+const defaultWorld = createWorld({ id: 'main' });
+const eventBus = defaultWorld.eventBus;
+const gameplaySystems = defaultWorld.systems;
 
-// System registry for the gameplay update phase. Each system is a pure
-// (delta, ctx) function that mutates shared state. Declared `before`/`after`
-// edges fix the run order even when registration order varies. Registry is
-// populated near the bottom of this file (search for `gameplaySystems.register`).
-// Frame loop calls gameplaySystems.tick(delta, ctx) once per frame.
-const gameplaySystems = createSystemRegistry();
-if (typeof window !== 'undefined') window.__gameplaySystems = gameplaySystems;
+// Recommended DI container for new code (preferred over `appCore`'s Proxy).
+// Engine-wide singletons get registered here; subsystem factories can take a
+// `services` ref and pull what they need by name. Older modules still read
+// from appCore; both coexist intentionally.
+const services = new Services();
+services.register('world', () => defaultWorld);
+services.register('eventBus', () => eventBus);
+services.register('gameplaySystems', () => gameplaySystems);
+
+registerDebug('world', defaultWorld);
+registerDebug('eventBus', eventBus);
+registerDebug('gameplaySystems', gameplaySystems);
+registerDebug('services', services);
 import { createRogueWaves } from '../gameplay/rogueWaves.js';
 import {
     AHUD,
@@ -1479,469 +1506,57 @@ function createOwnedShape(settings) {
     return physicsCore?.createOwnedShape(settings) ?? null;
 }
 
-function updatePropImportStatus() {
-    if (!propImportDefaultStatus || !resetPropImportDefaultBtn) return;
-
-    if (importedPropState.futureCollisionMode) {
-        propImportDefaultStatus.textContent = `Create actor instances with render, collision, and script components. Future imported actor sources use ${IMPORTED_PROP_COLLISION_LABELS[importedPropState.futureCollisionMode]}.`;
-        resetPropImportDefaultBtn.hidden = false;
-        return;
-    }
-
-    propImportDefaultStatus.textContent = 'Create actor instances with render, collision, and script components. Imported actor sources ask for a collision mode.';
-    resetPropImportDefaultBtn.hidden = true;
-}
-
-function closePropCollisionPrompt() {
-    if (!propCollisionPrompt) return;
-
-    propCollisionPrompt.hidden = true;
-    if (propCollisionRemember) {
-        propCollisionRemember.checked = false;
-    }
-}
-
-function resolvePropCollisionPrompt(selection) {
-    if (!importedPropState.promptResolver) return;
-
-    const resolver = importedPropState.promptResolver;
-    importedPropState.promptResolver = null;
-    closePropCollisionPrompt();
-    resolver(selection);
-}
-
-function promptImportedPropCollision(fileName, triangleCount) {
-    if (importedPropState.futureCollisionMode) {
-        return Promise.resolve({
-            mode: importedPropState.futureCollisionMode,
-            remember: true,
-        });
-    }
-
-    if (!propCollisionPrompt || !propCollisionCopy) {
-        return Promise.resolve({ mode: 'complex', remember: false });
-    }
-
-    propCollisionCopy.textContent = `${formatImportedPropName(fileName)} has about ${triangleCount.toLocaleString()} triangles. Pick a simple box collision or a tighter convex collision for this imported prop.`;
-    propCollisionRemember.checked = false;
-    propCollisionPrompt.hidden = false;
-
-    return new Promise((resolve) => {
-        importedPropState.promptResolver = resolve;
-    });
-}
-
-function createImportedSimpleShape(root) {
-    const { Jolt } = physics;
-    root.updateWorldMatrix(true, true);
-
-    const box = new THREE.Box3().setFromObject(root);
-    const size = box.getSize(tempVectorA);
-    const halfExtentVector = new Jolt.Vec3(
-        Math.max(size.x * 0.5, 0.08),
-        Math.max(size.y * 0.5, 0.08),
-        Math.max(size.z * 0.5, 0.08)
-    );
-    const shape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtentVector, 0.03));
-    Jolt.destroy(halfExtentVector);
-    return shape;
-}
-
-function createExactMeshShape(root) {
-    if (!physics.ready || !root) return null;
-
-    const { Jolt } = physics;
-    root.updateWorldMatrix(true, true);
-
-    const totalTriangles = countTrianglesForObject(root);
-    if (!totalTriangles) {
-        throw new Error('Imported prop has no usable mesh geometry for exact collision.');
-    }
-
-    const triangles = new Jolt.TriangleList();
-    const materials = new Jolt.PhysicsMaterialList();
-    const rootInverse = new THREE.Matrix4().copy(root.matrixWorld).invert();
-    const childToRoot = new THREE.Matrix4();
-
-    triangles.resize(totalTriangles);
-    let triangleIndex = 0;
-
-    try {
-        root.traverse((child) => {
-            if (!child.isMesh || !child.geometry?.attributes?.position) return;
-
-            const position = child.geometry.getAttribute('position');
-            const index = child.geometry.getIndex();
-            const triangleCount = index ? index.count / 3 : position.count / 3;
-
-            childToRoot.multiplyMatrices(rootInverse, child.matrixWorld);
-
-            for (let triangleOffset = 0; triangleOffset < triangleCount; triangleOffset++) {
-                const i0 = index ? index.getX(triangleOffset * 3) : triangleOffset * 3;
-                const i1 = index ? index.getX(triangleOffset * 3 + 1) : triangleOffset * 3 + 1;
-                const i2 = index ? index.getX(triangleOffset * 3 + 2) : triangleOffset * 3 + 2;
-
-                tempVectorA.fromBufferAttribute(position, i0).applyMatrix4(childToRoot);
-                tempVectorB.fromBufferAttribute(position, i1).applyMatrix4(childToRoot);
-                tempVectorC.fromBufferAttribute(position, i2).applyMatrix4(childToRoot);
-
-                const triangle = triangles.at(triangleIndex++);
-                const v1 = triangle.get_mV(0);
-                const v2 = triangle.get_mV(1);
-                const v3 = triangle.get_mV(2);
-                v1.x = tempVectorA.x;
-                v1.y = tempVectorA.y;
-                v1.z = tempVectorA.z;
-                v2.x = tempVectorB.x;
-                v2.y = tempVectorB.y;
-                v2.z = tempVectorB.z;
-                v3.x = tempVectorC.x;
-                v3.y = tempVectorC.y;
-                v3.z = tempVectorC.z;
-            }
-        });
-
-        return createOwnedShape(new Jolt.MeshShapeSettings(triangles, materials));
-    } finally {
-        Jolt.destroy(triangles);
-        Jolt.destroy(materials);
-    }
-}
-
-function createImportedConvexHullShape(points) {
-    const { Jolt } = physics;
-    const settings = new Jolt.ConvexHullShapeSettings();
-    settings.mPoints = points;
-    settings.mMaxConvexRadius = IMPORTED_PROP_COMPLEX_HULL_RADIUS;
-    settings.mMaxErrorConvexRadius = IMPORTED_PROP_COMPLEX_HULL_RADIUS;
-    return createOwnedShape(settings);
-}
-
-function collectImportedComplexHullParts(root) {
-    const rootInverse = new THREE.Matrix4().copy(root.matrixWorld).invert();
-    const childToRoot = new THREE.Matrix4();
-    const hullParts = [];
-
-    root.traverse((child) => {
-        if (!child.isMesh || !child.geometry?.attributes?.position) return;
-
-        const position = child.geometry.getAttribute('position');
-        if (!position || position.count < 4) return;
-
-        const sampleStep = Math.max(1, Math.ceil(position.count / IMPORTED_PROP_MAX_HULL_POINTS));
-        const points = [];
-        childToRoot.multiplyMatrices(rootInverse, child.matrixWorld);
-
-        for (let i = 0; i < position.count; i += sampleStep) {
-            tempVectorA.fromBufferAttribute(position, i).applyMatrix4(childToRoot);
-            points.push({
-                x: tempVectorA.x,
-                y: tempVectorA.y,
-                z: tempVectorA.z,
-            });
-        }
-
-        if (points.length < 4) return;
-
-        hullParts.push({
-            points,
-            weight: points.length,
-        });
-    });
-
-    if (hullParts.length <= IMPORTED_PROP_MAX_HULL_PARTS) {
-        return hullParts;
-    }
-
-    return hullParts
-        .sort((left, right) => right.weight - left.weight)
-        .slice(0, IMPORTED_PROP_MAX_HULL_PARTS);
-}
-
-function createImportedComplexShape(root) {
-    return createExactMeshShape(root);
-}
-
-function createImportedCollisionShape(root, mode) {
-    if (mode === 'simple') {
-        return { shape: createImportedSimpleShape(root), mode: 'simple' };
-    }
-
-    try {
-        return { shape: createImportedComplexShape(root), mode: 'complex' };
-    } catch (error) {
-        console.warn('Falling back to simple imported collision shape.', error);
-        alert('Complex collision was not valid for this prop. Falling back to simple collision for this import.');
-        return { shape: createImportedSimpleShape(root), mode: 'simple' };
-    }
-}
-
-function renderImportedPropButtons() {
-    if (!importedPropList || !importedPropLibrary) return;
-
-    const templates = listImportedTemplates();
-    importedPropList.innerHTML = '';
-    importedPropLibrary.hidden = templates.length === 0;
-
-    templates.forEach((template) => {
-        const button = document.createElement('button');
-        button.className = 'btn viewer-menu-btn';
-        button.textContent = `${template.displayName} · ${template.collisionMode === 'simple' ? 'Simple' : 'Complex'}`;
-        button.title = `Open the actor editor for ${template.displayName} with ${IMPORTED_PROP_COLLISION_LABELS[template.collisionMode]}.`;
-        button.addEventListener('click', () => openActorEditor({ kind: 'imported', templateId: template.id, label: template.displayName }));
-        importedPropList.appendChild(button);
-    });
-
-    syncActorEditorTemplateOptions();
-}
-
-function registerImportedPropTemplate(fileName, root, collisionMode, shape, triangleCount) {
-    const displayName = formatImportedPropName(fileName);
-    const template = {
-        id: `imported-prop-${importedPropState.nextId++}`,
-        fileName,
-        displayName,
-        root,
-        shape,
-        collisionMode,
-        triangleCount,
-    };
-
-    importedPropState.templates.push(template);
-    assetRegistry.registerImportedTemplate(template);
-    renderImportedPropButtons();
-    updatePropImportStatus();
-    return template;
-}
-
-async function registerImportedPropTemplateFromSerializedData(templateData, { fileMap = null } = {}) {
-    if (!templateData) return null;
-
-    const templateId = templateData.id || assetRegistry.importedTemplateIdFromAssetId(templateData.assetId);
-    const existingTemplate = getImportedTemplate(templateId);
-    if (existingTemplate) {
-        assetRegistry.registerImportedTemplate(existingTemplate);
-        return existingTemplate;
-    }
-
-    let root = null;
-
-    // Folder-bundle path: the .umap stores assetPath instead of rootJson and
-    // the raw OBJ/GLB lives next to it. Resolve via the loaded fileMap and
-    // run the same importer the fresh-import flow uses — much faster than
-    // re-hydrating a THREE.ObjectLoader JSON blob.
-    if (templateData.assetPath && fileMap) {
-        const entry = lookupBundleAsset(fileMap, templateData.assetPath, templateData.fileName);
-        if (entry?.file) {
-            root = await loadObjectFromFile(entry.file, fileMap);
-            if (templateData.assetType !== 'glb') {
-                normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
-            }
-        } else {
-            console.warn(`[scene] Asset "${templateData.assetPath}" missing from bundle; template will be skipped.`);
-            return null;
-        }
-    } else if (templateData.rootJson) {
-        const objectLoader = new THREE.ObjectLoader();
-        root = objectLoader.parse(templateData.rootJson);
-        convertLoadedObjectMaterials(root);
-        // Legacy serialized templates already carried the normalized transform
-        // applied at import time. Re-normalizing here mutates the source asset
-        // before any actor transform is restored.
-        if (templateData.normalized === false) {
-            normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
-        }
-    } else {
-        return null;
-    }
-
-    const triangleCount = Number.isFinite(templateData.triangleCount)
-        ? templateData.triangleCount
-        : Math.round(countTrianglesForObject(root));
-    const collision = createImportedCollisionShape(root, templateData.collisionMode || 'simple');
-    const template = {
-        id: templateId || `imported-prop-${importedPropState.nextId++}`,
-        fileName: templateData.fileName || 'Imported Prop',
-        displayName: templateData.displayName || formatImportedPropName(templateData.fileName || 'Imported Prop'),
-        root,
-        shape: collision.shape,
-        collisionMode: collision.mode,
-        triangleCount,
-    };
-
-    importedPropState.templates.push(template);
-    assetRegistry.registerImportedTemplate(template);
-
-    // If we loaded from a folder bundle, retain the original File so the user
-    // can re-save the scene as a folder without re-inlining the geometry.
-    if (templateData.assetPath && fileMap) {
-        const entry = lookupBundleAsset(fileMap, templateData.assetPath, templateData.fileName);
-        if (entry?.file) {
-            importedPropState.sourceFiles[template.id] = entry.file;
-        }
-    }
-
-    const matchedId = /imported-prop-(\d+)$/.exec(template.id || '');
-    if (matchedId) {
-        importedPropState.nextId = Math.max(importedPropState.nextId, Number(matchedId[1]) + 1);
-    }
-
-    renderImportedPropButtons();
-    updatePropImportStatus();
-    return template;
-}
-
-function lookupBundleAsset(fileMap, assetPath, fileName) {
-    if (!fileMap) return null;
-    // fileMap is the same shape used by setupDropHandlers / createLoadingManager:
-    // { 'relative/path.ext': { file, url } } and/or { 'basename.ext': { file, url } }.
-    return fileMap[assetPath]
-        || (fileName ? fileMap[fileName] : null)
-        || (fileName ? fileMap[fileName.toLowerCase()] : null)
-        || null;
-}
-
-function serializeImportedPropTemplate(template, { preferAssetPath = false } = {}) {
-    if (!template?.root) return null;
-
-    const base = {
-        id: template.id,
-        assetId: assetRegistry.getImportedTemplateAssetId(template.id),
-        fileName: template.fileName,
-        displayName: template.displayName,
-        normalized: true,
-        collisionMode: template.collisionMode,
-        triangleCount: template.triangleCount,
-    };
-
-    // When a scene is being saved as a folder bundle and we still have the
-    // original imported File, point at it via assetPath. Bundle loading then
-    // re-runs the OBJ/GLB importer on the raw file (fast) instead of parsing
-    // a serialized THREE.ObjectLoader blob (slow). Inline rootJson stays as
-    // the fallback for templates whose source file isn't available.
-    const sourceFile = importedPropState.sourceFiles?.[template.id];
-    if (preferAssetPath && sourceFile) {
-        return { ...base, assetPath: `assets/${template.fileName}` };
-    }
-
-    return { ...base, rootJson: template.root.toJSON() };
-}
-
-function spawnImportedProp(templateId, options = {}) {
-    if (!physics.ready || !scene || !camera) {
-        console.warn('Jolt physics is not ready yet.');
-        return null;
-    }
-
-    const template = getImportedTemplate(templateId);
-    if (!template?.root) return null;
-
-    const spawnPosition = tempVectorD;
-    const launchImpulse = tempVectorE;
-    getDynamicPropSpawn(spawnPosition, launchImpulse);
-
-    const visual = cloneDisposableObject(template.root);
-    let body = null;
-    const includeCollisionBody = options.includeCollisionBody !== false;
-    const requestedSimulatePhysics = includeCollisionBody && options.simulatePhysics !== false;
-    const useExactMeshCollision = template.collisionMode === 'complex';
-    const simulatePhysics = requestedSimulatePhysics && !useExactMeshCollision;
-
-    if (includeCollisionBody && useExactMeshCollision && requestedSimulatePhysics) {
-        console.warn('Exact triangle mesh collision is static-only; spawning imported prop without simulated physics.');
-    }
-
-    visual.position.copy(spawnPosition);
-
-    if (includeCollisionBody) {
-        if (useExactMeshCollision) {
-            body = createStaticMeshBody(visual);
-        } else {
-            template.shape.AddRef();
-
-            body = createDynamicPrimitiveBody(
-                template.shape,
-                spawnPosition,
-                launchImpulse,
-                {
-                    ...(template.collisionMode === 'simple'
-                        ? { restitution: 0.12, friction: 0.84 }
-                        : { restitution: 0.08, friction: 0.76 }),
-                    simulatePhysics,
-                }
-            );
-        }
-
-        if (!body) {
-            disposeRenderableObject(visual);
-            return null;
-        }
-    }
-
-    const actor = createDynamicPropActor({
-        body,
-        mesh: visual,
-        kind: 'imported',
-        templateId,
-        userData: options.userData,
-        includeScripts: options.includeScripts !== false,
-    });
-    setActorComponentFlags(actor, {
-        collision: !!body,
-        physics: !!body && simulatePhysics,
-        scripts: options.includeScripts !== false,
-    });
-    if (body) {
-        if (simulatePhysics) {
-            physics.dynamicBodies.push(actor);
-            dynamicBodySpatial.updateEntry(actor);
-        } else {
-            physics.staticBodies.push(actor);
-        }
-    }
-    playObjectAnimation(visual);
-    invalidateDDGI('imported prop spawned');
-    return actor;
-}
-
-async function importPhysicsProp(file, fileMap = {}) {
-    if (!file) return;
-
-    try {
-        const root = await loadObjectFromFile(file, fileMap);
-        normalizeObjectToDimension(root, PROP_TARGET_MAX_DIMENSION, false);
-        const triangleCount = Math.round(countTrianglesForObject(root));
-
-        if (!triangleCount) {
-            disposeRenderableObject(root);
-            alert('Imported prop has no usable mesh geometry.');
-            return;
-        }
-
-        const collisionPreference = await promptImportedPropCollision(file.name, triangleCount);
-        if (!collisionPreference) {
-            disposeRenderableObject(root);
-            return;
-        }
-
-        if (collisionPreference.remember) {
-            importedPropState.futureCollisionMode = collisionPreference.mode;
-        }
-
-        const collision = createImportedCollisionShape(root, collisionPreference.mode);
-        const template = registerImportedPropTemplate(file.name, root, collision.mode, collision.shape, triangleCount);
-        if (template?.id && file instanceof File) {
-            importedPropState.sourceFiles[template.id] = file;
-        }
-        updatePropImportStatus();
-        return template;
-    } catch (error) {
-        console.error('Failed to import physics prop.', error);
-        alert(error?.message === 'Unsupported file format'
-            ? 'Unsupported file format for physics prop import.'
-            : 'Failed to import the selected prop. Check the console for details.');
-    }
-}
+const _importedProps = createImportedPropsSystem({
+    THREE,
+    physics: () => physics,
+    physicsCore: () => physicsCore,
+    scene: () => scene,
+    camera: () => camera,
+    getDomElements: () => ({
+        propCollisionPrompt, propCollisionCopy, propCollisionRemember,
+        propImportDefaultStatus, resetPropImportDefaultBtn,
+        importedPropList, importedPropLibrary,
+    }),
+    importedPropState, listImportedTemplates, getImportedTemplate,
+    assetRegistry,
+    dynamicBodySpatial,
+    getDynamicPropSpawn: (...args) => getDynamicPropSpawn(...args),
+    openActorEditor: (...args) => openActorEditor(...args),
+    syncActorEditorTemplateOptions: (...args) => syncActorEditorTemplateOptions(...args),
+    createStaticMeshBody: (...args) => createStaticMeshBody(...args),
+    createDynamicPrimitiveBody: (...args) => createDynamicPrimitiveBody(...args),
+    createDynamicPropActor, setActorComponentFlags,
+    cloneDisposableObject, disposeRenderableObject,
+    countTrianglesForObject: (...args) => countTrianglesForObject(...args),
+    formatImportedPropName,
+    normalizeObjectToDimension, loadObjectFromFile,
+    convertLoadedObjectMaterials,
+    PROP_TARGET_MAX_DIMENSION,
+    IMPORTED_PROP_COLLISION_LABELS,
+    IMPORTED_PROP_MAX_HULL_POINTS,
+    IMPORTED_PROP_MAX_HULL_PARTS,
+    IMPORTED_PROP_COMPLEX_HULL_RADIUS,
+    tempVectorA, tempVectorB, tempVectorC, tempVectorD, tempVectorE,
+    playObjectAnimation,
+    invalidateDDGI: (...args) => invalidateDDGI(...args),
+});
+const updatePropImportStatus = _importedProps.updatePropImportStatus;
+const closePropCollisionPrompt = _importedProps.closePropCollisionPrompt;
+const resolvePropCollisionPrompt = _importedProps.resolvePropCollisionPrompt;
+const promptImportedPropCollision = _importedProps.promptImportedPropCollision;
+const createImportedSimpleShape = _importedProps.createImportedSimpleShape;
+const createExactMeshShape = _importedProps.createExactMeshShape;
+const createImportedConvexHullShape = _importedProps.createImportedConvexHullShape;
+const collectImportedComplexHullParts = _importedProps.collectImportedComplexHullParts;
+const createImportedComplexShape = _importedProps.createImportedComplexShape;
+const createImportedCollisionShape = _importedProps.createImportedCollisionShape;
+const renderImportedPropButtons = _importedProps.renderImportedPropButtons;
+const registerImportedPropTemplate = _importedProps.registerImportedPropTemplate;
+const registerImportedPropTemplateFromSerializedData = _importedProps.registerImportedPropTemplateFromSerializedData;
+const lookupBundleAsset = _importedProps.lookupBundleAsset;
+const serializeImportedPropTemplate = _importedProps.serializeImportedPropTemplate;
+const spawnImportedProp = _importedProps.spawnImportedProp;
+const importPhysicsProp = _importedProps.importPhysicsProp;
 
 async function initPhysics() {
     return physicsCore?.initPhysics();
@@ -2051,407 +1666,41 @@ function getDynamicPropSpawn(positionTarget, impulseTarget) {
         .addScaledVector(upVector, 5.5);
 }
 
-function isDrivingVehicle() {
-    return gameplay.active && !!vehicleState.activePropId;
-}
-
-function getActiveVehicleProp() {
-    if (!vehicleState.activePropId) return null;
-
-    return physics.dynamicBodies.find((prop) => (
-        prop?.id === vehicleState.activePropId
-        && (prop.kind === 'vehicle' || prop.userData?.prefabId === 'helicopter')
-    )) ?? null;
-}
-
-function clearActiveVehicle({ updateUi = false } = {}) {
-    const wasDriving = !!vehicleState.activePropId;
-    const priorProp = wasDriving ? getActiveVehicleProp() : null;
-    if (wasDriving) {
-        silenceVehicleEngineAudio();
-    }
-    vehicleState.activePropId = '';
-    gameplay.activeVehicleId = '';
-    vehicleState.brakeHeld = false;
-    vehicleState.tailWhipLastFrame = false;
-
-    if (!wasDriving) return;
-
-    if (priorProp) {
-        try { dispatchPossessionEvent(priorProp, false); } catch (_) {}
-    }
-
-    physics.jumpQueued = false;
-    if (updateUi) {
-        updateGameplayUI();
-    }
-}
-
-function getVehicleForward(target, quaternion, flatten = true) {
-    target.set(0, 0, -1).applyQuaternion(quaternion);
-    if (flatten) {
-        target.y = 0;
-        if (target.lengthSq() < 1e-6) {
-            target.set(0, 0, -1);
-        } else {
-            target.normalize();
-        }
-    }
-
-    return target;
-}
-
-function resolveVehicleCameraCollision(lookTarget, desiredPosition) {
-    if (!currentMesh) return desiredPosition;
-
-    const direction = tempVectorE.copy(desiredPosition).sub(lookTarget);
-    const distance = direction.length();
-    if (distance <= 0.001) return desiredPosition;
-
-    direction.multiplyScalar(1 / distance);
-    raycaster.set(lookTarget, direction);
-    raycaster.near = 0.08;
-    raycaster.far = distance;
-
-    const hit = raycaster.intersectObject(currentMesh, true)
-        .find((entry) => entry.distance > raycaster.near && entry.distance < distance);
-
-    raycaster.near = 0;
-    raycaster.far = Infinity;
-
-    if (!hit?.point) return desiredPosition;
-
-    return desiredPosition.copy(hit.point)
-        .addScaledVector(direction, -VEHICLE_SETTINGS.cameraCollisionPadding);
-}
-
-function positionVehicleCamera(vehiclePosition, vehicleRotation, delta) {
-    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
-    const chasePosition = tempVectorC
-        .copy(vehiclePosition)
-        .addScaledVector(upVector, VEHICLE_SETTINGS.followHeight)
-        .addScaledVector(flatForward, -VEHICLE_SETTINGS.followDistance);
-
-    const lookTarget = tempVectorD
-        .copy(vehiclePosition)
-        .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
-        .addScaledVector(flatForward, VEHICLE_SETTINGS.lookAhead);
-    resolveVehicleCameraCollision(lookTarget, chasePosition);
-    const cameraLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraHorizontalSmoothing);
-    const cameraVerticalLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraVerticalSmoothing);
-    const lookLerp = 1 - Math.exp(-delta * VEHICLE_SETTINGS.cameraLookSmoothing);
-
-    camera.position.x = THREE.MathUtils.lerp(camera.position.x, chasePosition.x, cameraLerp);
-    camera.position.z = THREE.MathUtils.lerp(camera.position.z, chasePosition.z, cameraLerp);
-    camera.position.y = THREE.MathUtils.lerp(camera.position.y, chasePosition.y, cameraVerticalLerp);
-
-    gameplayLookTarget.lerp(lookTarget, lookLerp);
-    camera.lookAt(gameplayLookTarget);
-
-    tempVectorE.copy(gameplayLookTarget).sub(camera.position);
-    const flatDistance = Math.max(0.001, Math.hypot(tempVectorE.x, tempVectorE.z));
-    gameplay.yaw = Math.atan2(tempVectorE.x, tempVectorE.z);
-    gameplay.pitch = THREE.MathUtils.clamp(
-        Math.atan2(-tempVectorE.y, flatDistance),
-        -PLAYER_SETTINGS.maxLookPitch,
-        PLAYER_SETTINGS.maxLookPitch
-    );
-}
-
-function getNearbyVehicle() {
-    const origin = gameplay.active && physics.character
-        ? copyJoltVector(tempVectorA, physics.character.GetPosition())
-        : tempVectorA.copy(camera.position);
-    let closestVehicle = null;
-    let closestDistanceSq = VEHICLE_SETTINGS.interactionRadius * VEHICLE_SETTINGS.interactionRadius;
-
-    const nearbyActors = dynamicBodySpatial.querySphere(origin, VEHICLE_SETTINGS.interactionRadius);
-    for (const prop of nearbyActors) {
-        const body = getActorBody(prop);
-        if (!body) continue;
-        const isFlyable = prop.userData?.prefabId === 'helicopter';
-        if (prop.kind !== 'vehicle' && !isFlyable) continue;
-
-        const bodyPosition = copyJoltVector(tempVectorB, physics.bodyInterface.GetPosition(body.GetID()));
-        const distanceSq = origin.distanceToSquared(bodyPosition);
-        if (distanceSq < closestDistanceSq) {
-            closestDistanceSq = distanceSq;
-            closestVehicle = prop;
-        }
-    }
-
-    return closestVehicle;
-}
-
-function enterVehicle(prop = getNearbyVehicle()) {
-    const propBody = getActorBody(prop);
-    if (!gameplay.active || !propBody) return false;
-    const isFlyableProp = prop.userData?.prefabId === 'helicopter';
-    if (prop.kind !== 'vehicle' && !isFlyableProp) return false;
-
-    vehicleState.activePropId = prop.id;
-    gameplay.activeVehicleId = prop.id;
-    vehicleState.brakeHeld = false;
-    physics.jumpQueued = false;
-    gameplay.grounded = true;
-
-    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(propBody.GetID())).clone();
-    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(propBody.GetID())).clone();
-    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
-    gameplayLookTarget
-        .copy(vehiclePosition)
-        .addScaledVector(upVector, VEHICLE_SETTINGS.seatHeight)
-        .addScaledVector(flatForward, VEHICLE_SETTINGS.lookAhead);
-    positionVehicleCamera(vehiclePosition, vehicleRotation, 1 / 60);
-
-    updateGameplayUI();
-    try { dispatchPossessionEvent(prop, true); } catch (_) {}
-    return true;
-}
-
-function exitVehicle() {
-    const vehicle = getActiveVehicleProp();
-    const vehicleBody = getActorBody(vehicle);
-    if (!vehicleBody) {
-        clearActiveVehicle({ updateUi: true });
-        return false;
-    }
-
-    const vehiclePosition = copyJoltVector(tempVectorA, physics.bodyInterface.GetPosition(vehicleBody.GetID()));
-    const vehicleRotation = copyJoltQuaternion(tempQuaternionA, physics.bodyInterface.GetRotation(vehicleBody.GetID()));
-    const flatForward = getVehicleForward(tempVectorB, vehicleRotation, true);
-    const exitRight = tempVectorC.set(1, 0, 0).applyQuaternion(vehicleRotation);
-    exitRight.y = 0;
-    if (exitRight.lengthSq() < 1e-6) {
-        exitRight.set(1, 0, 0);
-    } else {
-        exitRight.normalize();
-    }
-
-    const isHeli = vehicle?.userData?.prefabId === 'helicopter';
-    gameplay.spawnPoint.copy(vehiclePosition)
-        .addScaledVector(exitRight, VEHICLE_SETTINGS.width * 0.95)
-        .addScaledVector(flatForward, -0.45);
-
-    if (isHeli) {
-        gameplay.spawnPoint.y = vehiclePosition.y + 0.2;
-    } else {
-        const groundHit = getGroundHitAt(gameplay.spawnPoint.x, gameplay.spawnPoint.z, true);
-        if (groundHit?.point) {
-            gameplay.spawnPoint.y = groundHit.point.y + PLAYER_SETTINGS.floorOffset;
-        }
-    }
-
-    if (isHeli && camera) {
-        const camEuler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ');
-        gameplay.spawnYaw = camEuler.y;
-        gameplay.spawnPitch = camEuler.x;
-    } else {
-        gameplay.spawnYaw = Math.atan2(flatForward.x, flatForward.z);
-        gameplay.spawnPitch = -0.08;
-    }
-    const exitSpawn = gameplay.spawnPoint.clone();
-    const exitYaw = gameplay.spawnYaw;
-    const exitPitch = gameplay.spawnPitch;
-    clearActiveVehicle();
-    respawnPlayer(true);
-    // respawnPlayer -> resetGameplayPrefabs -> syncGameplaySpawnFromPlayerSpawnActor
-    // can stomp spawnPoint with a placed playerSpawn actor. Re-apply and teleport.
-    gameplay.spawnPoint.copy(exitSpawn);
-    gameplay.spawnYaw = exitYaw;
-    gameplay.spawnPitch = exitPitch;
-    if (physics.character && physics.Jolt) {
-        const pos = new physics.Jolt.RVec3(exitSpawn.x, exitSpawn.y, exitSpawn.z);
-        physics.character.SetPosition(pos);
-        physics.Jolt.destroy(pos);
-        physics.character.SetLinearVelocity(physics.Jolt.Vec3.prototype.sZero());
-        gameplay.velocity.set(0, 0, 0);
-        gameplay.yaw = exitYaw;
-        gameplay.pitch = exitPitch;
-        syncCameraToCharacter();
-        applyGameplayCameraRotation();
-    }
-    return true;
-}
-
-
-function ensureVehicleVisualState(root) {
-    if (!root) return null;
-
-    const state = root.userData?.vehicleVisual ?? null;
-    const refsValid =
-        state?.lastWorldPosition instanceof THREE.Vector3
-        && Array.isArray(state.steeringPivots)
-        && state.steeringPivots.every((p) => p?.isObject3D)
-        && Array.isArray(state.spinGroups)
-        && state.spinGroups.every((g) => g?.isObject3D);
-    if (refsValid) return state;
-
-    const steeringPivots = [];
-    const spinGroups = [];
-    root.traverse((object) => {
-        const isSteeringPivot = object.userData?.vehicleSteeringPivot === true
-            || typeof object.userData?.steerable === 'boolean';
-        if (!isSteeringPivot) return;
-
-        const spinGroup = object.children.find((child) => child.userData?.vehicleSpinGroup === true)
-            ?? object.children.find((child) => child.isGroup || child.type === 'Group');
-        if (!spinGroup) return;
-
-        steeringPivots.push(object);
-        spinGroups.push(spinGroup);
-    });
-
-    if (!steeringPivots.length || steeringPivots.length !== spinGroups.length) return null;
-
-    const nextState = {
-        steeringPivots,
-        spinGroups,
-        wheelRadius: Number.isFinite(state?.wheelRadius) ? state.wheelRadius : VEHICLE_SETTINGS.height * 0.36,
-        maxSteerAngle: Number.isFinite(state?.maxSteerAngle) ? state.maxSteerAngle : 1.0,
-        steerAngle: Number.isFinite(state?.steerAngle) ? state.steerAngle : 0,
-        spinAngle: Number.isFinite(state?.spinAngle) ? state.spinAngle : 0,
-        lastWorldPosition: new THREE.Vector3(),
-        lastPositionInitialized: false,
-    };
-    root.userData.vehicleVisual = nextState;
-    return nextState;
-}
-
-
-function updateVehicleVisuals(delta) {
-    if (!physics.dynamicBodies?.length) return;
-
-    const { bodyInterface } = physics;
-    for (const prop of physics.dynamicBodies) {
-        const renderObject = getActorRenderObject(prop);
-        if (prop?.kind !== 'vehicle' || !renderObject) continue;
-
-        const visualState = ensureVehicleVisualState(renderObject);
-        if (!visualState) continue;
-
-        // If userData was JSON-roundtripped (e.g. via three.js Object3D.clone
-        // on a serialized template), every live reference inside vehicleVisual
-        // is now a plain object: Vector3 has no .copy, steeringPivots / spinGroups
-        // entries have no .rotation/.userData. Rather than crash every frame,
-        // skip the broken state — the wheels won't animate but the editor stays
-        // usable.
-        const refsValid =
-            visualState.lastWorldPosition instanceof THREE.Vector3
-            && Array.isArray(visualState.steeringPivots)
-            && visualState.steeringPivots.every((p) => p?.isObject3D)
-            && Array.isArray(visualState.spinGroups)
-            && visualState.spinGroups.every((g) => g?.isObject3D);
-        if (!refsValid) continue;
-
-        const flatForward = tempVectorA.set(0, 0, -1).applyQuaternion(renderObject.quaternion);
-        flatForward.y = 0;
-        if (flatForward.lengthSq() < 1e-6) {
-            flatForward.set(0, 0, -1);
-        } else {
-            flatForward.normalize();
-        }
-
-        // Prefer Jolt's authoritative velocity while physics is stepping; in
-        // edit/showcase mode physics is paused, so fall back to a frame-to-frame
-        // world-position delta so the wheels still spin when the user drags
-        // or scripts move the chassis.
-        const body = bodyInterface ? getActorBody(prop) : null;
-        let forwardSpeed = 0;
-        if (body && physics.ready && gameplay.active) {
-            const linearVelocity = copyJoltVector(tempVectorB, bodyInterface.GetLinearVelocity(body.GetID()));
-            forwardSpeed = linearVelocity.dot(flatForward);
-        } else {
-            const currentPos = renderObject.getWorldPosition(tempVectorB);
-            if (visualState.lastPositionInitialized && delta > 1e-5) {
-                const move = tempVectorC.subVectors(currentPos, visualState.lastWorldPosition);
-                forwardSpeed = move.dot(flatForward) / delta;
-            }
-            visualState.lastWorldPosition.copy(currentPos);
-            visualState.lastPositionInitialized = true;
-        }
-
-        visualState.spinAngle += (forwardSpeed / visualState.wheelRadius) * delta;
-        const isActiveVehicle = gameplay.active && vehicleState.activePropId === prop.id;
-        const inputSteer = isActiveVehicle
-            ? ((gameplay.input.left ? 1 : 0) - (gameplay.input.right ? 1 : 0))
-            : 0;
-        const speedRatio = THREE.MathUtils.clamp(Math.abs(forwardSpeed) / VEHICLE_SETTINGS.maxDriveSpeed, 0, 1);
-        const targetSteerAngle = inputSteer * visualState.maxSteerAngle * THREE.MathUtils.lerp(1, 0.58, speedRatio);
-        visualState.steerAngle = THREE.MathUtils.damp(visualState.steerAngle, targetSteerAngle, 10, delta);
-
-        visualState.steeringPivots.forEach((pivot) => {
-            pivot.rotation.y = pivot.userData.steerable ? visualState.steerAngle : 0;
-        });
-        visualState.spinGroups.forEach((group) => {
-            group.rotation.x = visualState.spinAngle;
-        });
-    }
-}
-
-function getVehicleVisualBounds(chassis) {
-    const bounds = new THREE.Box3();
-    const rootInverse = new THREE.Matrix4();
-    const localMatrix = new THREE.Matrix4();
-    const meshBounds = new THREE.Box3();
-
-    chassis.updateWorldMatrix(true, true);
-    rootInverse.copy(chassis.matrixWorld).invert();
-    chassis.traverse((node) => {
-        if (!node.isMesh || !node.geometry) return;
-        node.geometry.computeBoundingBox?.();
-        if (!node.geometry.boundingBox) return;
-        localMatrix.multiplyMatrices(rootInverse, node.matrixWorld);
-        meshBounds.copy(node.geometry.boundingBox).applyMatrix4(localMatrix);
-        bounds.union(meshBounds);
-    });
-
-    if (bounds.isEmpty()) {
-        const halfSize = new THREE.Vector3(
-            VEHICLE_SETTINGS.width * 0.5,
-            VEHICLE_SETTINGS.height * 0.5,
-            VEHICLE_SETTINGS.length * 0.5
-        );
-        return {
-            min: halfSize.clone().multiplyScalar(-1),
-            max: halfSize.clone(),
-            center: new THREE.Vector3(),
-            size: halfSize.multiplyScalar(2),
-        };
-    }
-
-    return {
-        min: bounds.min.clone(),
-        max: bounds.max.clone(),
-        center: bounds.getCenter(new THREE.Vector3()),
-        size: bounds.getSize(new THREE.Vector3()),
-    };
-}
-
-function createVehicleCollisionShapeFromBounds(bounds) {
-    const { Jolt } = physics;
-    const size = bounds?.size || new THREE.Vector3(
-        VEHICLE_SETTINGS.width,
-        VEHICLE_SETTINGS.height,
-        VEHICLE_SETTINGS.length
-    );
-    const center = bounds?.center || new THREE.Vector3();
-    const halfExtent = new Jolt.Vec3(
-        Math.max(size.x * 0.5, 0.05),
-        Math.max(size.y * 0.5, 0.05),
-        Math.max(size.z * 0.5, 0.05)
-    );
-    const boxShape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtent, 0.05));
-    Jolt.destroy(halfExtent);
-
-    const compound = new Jolt.MutableCompoundShapeSettings();
-    const offset = new Jolt.Vec3(center.x, center.y, center.z);
-    const rotation = new Jolt.Quat(0, 0, 0, 1);
-    compound.AddShapeShape(offset, rotation, boxShape, 0);
-    Jolt.destroy(offset);
-    Jolt.destroy(rotation);
-    return createOwnedShape(compound);
-}
+const _vehicleSystem = createVehicleSystem({
+    THREE,
+    camera: () => camera,
+    currentMesh: () => currentMesh,
+    physics, dynamicBodySpatial,
+    gameplay, gameplayLookTarget, vehicleState,
+    VEHICLE_SETTINGS, PLAYER_SETTINGS,
+    raycaster, upVector,
+    tempVectorA, tempVectorB, tempVectorC, tempVectorD, tempVectorE,
+    tempQuaternionA,
+    copyJoltVector, copyJoltQuaternion,
+    getActorBody: (...a) => getActorBody(...a),
+    getActorRenderObject: (...a) => getActorRenderObject(...a),
+    silenceVehicleEngineAudio,
+    updateGameplayUI: (...a) => updateGameplayUI(...a),
+    dispatchPossessionEvent,
+    getGroundHitAt: (...a) => getGroundHitAt(...a),
+    respawnPlayer: (...a) => respawnPlayer(...a),
+    syncCameraToCharacter: (...a) => syncCameraToCharacter(...a),
+    applyGameplayCameraRotation: (...a) => applyGameplayCameraRotation(...a),
+    createOwnedShape,
+});
+const isDrivingVehicle = _vehicleSystem.isDrivingVehicle;
+const getActiveVehicleProp = _vehicleSystem.getActiveVehicleProp;
+const clearActiveVehicle = _vehicleSystem.clearActiveVehicle;
+const getVehicleForward = _vehicleSystem.getVehicleForward;
+const resolveVehicleCameraCollision = _vehicleSystem.resolveVehicleCameraCollision;
+const positionVehicleCamera = _vehicleSystem.positionVehicleCamera;
+const getNearbyVehicle = _vehicleSystem.getNearbyVehicle;
+const enterVehicle = _vehicleSystem.enterVehicle;
+const exitVehicle = _vehicleSystem.exitVehicle;
+const ensureVehicleVisualState = _vehicleSystem.ensureVehicleVisualState;
+const updateVehicleVisuals = _vehicleSystem.updateVehicleVisuals;
+const getVehicleVisualBounds = _vehicleSystem.getVehicleVisualBounds;
+const createVehicleCollisionShapeFromBounds = _vehicleSystem.createVehicleCollisionShapeFromBounds;
 
 // Actor spawn primitives extracted to ../actors/actorSpawn.js.
 // Instantiated eagerly at module scope (heavy cross-module use, called
@@ -2462,7 +1711,10 @@ const _actorSpawn = createActorSpawn({
     VEHICLE_SETTINGS, dynamicBodySpatial, gameplay, importedPropState,
     objectScriptState, physics, tempQuaternionA, tempVectorA, tempVectorD,
     tempVectorE, upVector,
-    buildPrimitiveActorMesh, createOwnedShape,
+    // buildPrimitiveActorMesh is `const` defined later (line ~3240); wrap in
+    // a lazy thunk so the binding is read at call time, not now.
+    buildPrimitiveActorMesh: (...a) => buildPrimitiveActorMesh(...a),
+    createOwnedShape,
     createVehicleCollisionShapeFromBounds, ensureActorIdentity,
     getActorRenderObject, getDynamicPropSpawn,
     // getGroundHeightAt/getGroundHitAt are now const aliases bound later in
@@ -2568,337 +1820,6 @@ function getShooterTargetPosition(target = new THREE.Vector3()) {
     return subjectPosition;
 }
 
-// Persistent scratch points reused by getShooterHitPoints — callers must
-// consume the returned array synchronously before calling again.
-const _shooterHitPointBuf = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
-const _shooterHitPointsOut = [];
-function getShooterHitPoints() {
-    const out = _shooterHitPointsOut;
-    out.length = 0;
-    if (camera) out.push(camera.position);
-
-    const subjectPosition = getGameplaySubjectPosition(_shooterHitPointBuf[0]);
-    if (subjectPosition) {
-        if (!isDrivingVehicle()) {
-            out.push(_shooterHitPointBuf[1].copy(subjectPosition).addScaledVector(upVector, PLAYER_SETTINGS.eyeHeight * 0.35));
-            out.push(_shooterHitPointBuf[2].copy(subjectPosition).addScaledVector(upVector, PLAYER_SETTINGS.eyeHeight * 0.85));
-        } else {
-            out.push(_shooterHitPointBuf[1].copy(subjectPosition).addScaledVector(upVector, 0.9));
-        }
-    }
-
-    return out;
-}
-
-function addCircularNavmeshVisual(navmeshActor) {
-    const mesh = getActorRenderObject(navmeshActor);
-    if (!mesh) return;
-
-    const ring = new THREE.Mesh(
-        new THREE.RingGeometry(0.94, 1, 96),
-        new THREE.MeshBasicMaterial({
-            color: 0x22d3ee,
-            transparent: true,
-            opacity: 0.36,
-            side: THREE.DoubleSide,
-            depthWrite: false,
-        })
-    );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.09;
-    ring.renderOrder = 3;
-    ring.name = 'Circular Navmesh Path';
-    mesh.add(ring);
-
-    const center = new THREE.Mesh(
-        new THREE.CircleGeometry(0.9, 64),
-        new THREE.MeshBasicMaterial({
-            color: 0x0891b2,
-            transparent: true,
-            opacity: 0.12,
-            side: THREE.DoubleSide,
-            depthWrite: false,
-        })
-    );
-    center.rotation.x = -Math.PI / 2;
-    center.position.y = 0.085;
-    center.renderOrder = 2;
-    center.name = 'Circular Navmesh Area';
-    mesh.add(center);
-}
-
-function addShooterAiVisual(actor) {
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return;
-
-    const barrel = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.12, 0.12, 1.15, 16),
-        new THREE.MeshStandardMaterial({
-            color: 0x111827,
-            metalness: 0.35,
-            roughness: 0.3,
-            emissive: 0x450a0a,
-            emissiveIntensity: 0.45,
-        })
-    );
-    barrel.name = 'Shooter Barrel';
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.set(0, SHOOTER_AI_PREFAB.muzzleHeight, -0.5);
-    mesh.add(barrel);
-
-    ensureShooterHealthBar(actor);
-    ensureShooterAimWarning(actor);
-    setShooterHealth(actor, actor.userData?.shooterAi?.health ?? SHOOTER_AI_PREFAB.health);
-}
-
-function ensureShooterAimWarning(actor) {
-    const shooter = actor?.userData?.shooterAi;
-    if (!scene || !shooter) return null;
-    if (shooter.aimWarning?.line?.parent) return shooter.aimWarning;
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
-    const material = new THREE.LineBasicMaterial({
-        color: 0xff3333,
-        transparent: true,
-        opacity: 0.0,
-        depthWrite: false,
-        depthTest: false,
-    });
-    const line = new THREE.Line(geometry, material);
-    line.name = 'Shooter Aim Warning';
-    line.frustumCulled = false;
-    line.renderOrder = 20;
-    line.visible = false;
-    scene.add(line);
-    shooter.aimWarning = { line, geometry, material };
-    return shooter.aimWarning;
-}
-
-function updateShooterAimWarning(actor, origin, target, charge = 0, visible = true) {
-    const warning = ensureShooterAimWarning(actor);
-    if (!warning?.line || !origin || !target) return;
-
-    const positions = warning.geometry.attributes.position.array;
-    positions[0] = origin.x;
-    positions[1] = origin.y;
-    positions[2] = origin.z;
-    positions[3] = target.x;
-    positions[4] = target.y;
-    positions[5] = target.z;
-    warning.geometry.attributes.position.needsUpdate = true;
-    warning.material.opacity = THREE.MathUtils.clamp(charge, 0, 1) * 0.72;
-    warning.line.visible = !!visible && warning.material.opacity > 0.02;
-}
-
-function hideShooterAimWarning(actor) {
-    const warning = actor?.userData?.shooterAi?.aimWarning;
-    if (warning?.line) warning.line.visible = false;
-}
-
-function clearShooterAimWarnings() {
-    for (const actor of getGameplayPrefabActors('shooterAi')) {
-        const shooter = actor?.userData?.shooterAi;
-        const warning = shooter?.aimWarning;
-        if (!warning) continue;
-        warning.line?.parent?.remove(warning.line);
-        warning.geometry?.dispose?.();
-        warning.material?.dispose?.();
-        delete shooter.aimWarning;
-    }
-}
-
-function ensureShooterHealthBar(actor) {
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return null;
-
-    const shooter = actor.userData?.shooterAi;
-    if (!shooter) return null;
-    if (shooter.healthBar?.group?.parent) return shooter.healthBar;
-
-    const width = 1.28;
-    const height = 0.13;
-    const group = new THREE.Group();
-    group.name = 'Shooter AI Health';
-    group.position.set(0, 2.15, 0);
-    group.renderOrder = 8;
-    // Exclude the bar from actor recolor/tint traversals so the variant
-    // tint can't override its green fill.
-    group.userData.skipTint = true;
-
-    const background = new THREE.Mesh(
-        new THREE.PlaneGeometry(width, height),
-        new THREE.MeshBasicMaterial({
-            color: 0x1f2937,
-            transparent: true,
-            opacity: 0.9,
-            side: THREE.DoubleSide,
-            depthTest: false,
-            depthWrite: false,
-        })
-    );
-    background.name = 'Shooter AI Health Back';
-    background.renderOrder = 8;
-    group.add(background);
-
-    const fill = new THREE.Mesh(
-        new THREE.PlaneGeometry(width, height * 0.72),
-        new THREE.MeshBasicMaterial({
-            color: 0x22c55e,
-            transparent: true,
-            opacity: 0.96,
-            side: THREE.DoubleSide,
-            depthTest: false,
-            depthWrite: false,
-        })
-    );
-    fill.name = 'Shooter AI Health Fill';
-    fill.position.z = 0.002;
-    fill.renderOrder = 9;
-    group.add(fill);
-
-    mesh.add(group);
-    shooter.healthBar = { group, fill, width };
-    return shooter.healthBar;
-}
-
-function setShooterHealth(actor, value = SHOOTER_AI_PREFAB.health) {
-    const shooter = actor?.userData?.shooterAi;
-    if (!shooter) return;
-
-    const maxHealth = Number.isFinite(shooter.maxHealth) ? shooter.maxHealth : SHOOTER_AI_PREFAB.health;
-    const wasDefeated = !!shooter.defeated;
-    shooter.health = THREE.MathUtils.clamp(Number(value) || 0, 0, maxHealth);
-    const percent = maxHealth > 0 ? shooter.health / maxHealth : 0;
-    const healthBar = ensureShooterHealthBar(actor);
-    if (healthBar?.fill) {
-        // Bar length is normalised to maxHealth (percent = health / maxHealth).
-        healthBar.fill.scale.x = Math.max(0.001, percent);
-        healthBar.fill.position.x = -healthBar.width * 0.5 + (healthBar.width * percent * 0.5);
-        healthBar.fill.material.color.set(0x22c55e); // always green
-        healthBar.group.visible = percent > 0;
-    }
-
-    if (percent <= 0) {
-        shooter.defeated = true;
-        hideShooterAimWarning(actor);
-        const mesh = getActorRenderObject(actor);
-        if (!wasDefeated) {
-            emitShooterDeathEffect(actor);
-            if (mesh) {
-                mesh.getWorldPosition(tempVectorA);
-                playEnemyDeathSound(1, tempVectorA.x, tempVectorA.y + 0.9, tempVectorA.z);
-            } else {
-                playEnemyDeathSound(1);
-            }
-            addGameScore(shooter.scoreValue ?? SHOOTER_AI_PREFAB.scoreValue);
-            if (currentMesh?.userData?.sampleType === 'doomArena') {
-                let ex = 0, ey = 0, ez = 0;
-                if (mesh) { mesh.getWorldPosition(tempVectorA); ex = tempVectorA.x; ey = tempVectorA.y; ez = tempVectorA.z; }
-                // Decoupled from the rogueWaves module via its window surface so
-                // the shooter-AI code carries no direct dependency on it.
-                const rw = window.rogueWaves;
-                if (rw) {
-                    // Variant XP weight: tanks/bosses drop more orbs.
-                    const orbCount = Math.max(1, Math.round(actor?.userData?.rogueXp || 1));
-                    for (let o = 0; o < orbCount; o++) {
-                        rw.spawnRogueXpOrb(ex + (Math.random() - 0.5) * 0.6, ey + 0.9, ez + (Math.random() - 0.5) * 0.6);
-                    }
-                    rw.onRogueEnemyKilled?.(ex, ey, ez, actor);
-                }
-                if (window.rogueBuffs && (window.rogueBuffs.lifesteal || 0) > 0) {
-                    setPlayerHealth((gameplay.health ?? 1) + window.rogueBuffs.lifesteal);
-                }
-            }
-            if (mesh) {
-                mesh.traverse?.((node) => {
-                    const mats = node?.material ? (Array.isArray(node.material) ? node.material : [node.material]) : [];
-                    mats.forEach((mat) => {
-                        if (mat?.emissive) {
-                            mat.emissive.set(0xff0000);
-                            mat.emissiveIntensity = 2.8;
-                        }
-                    });
-                });
-            }
-        }
-        if (mesh) mesh.visible = false;
-    }
-}
-
-function resetShooterAiState(actor) {
-    const shooter = actor?.userData?.shooterAi;
-    const mesh = getActorRenderObject(actor);
-    if (!shooter || !mesh) return;
-
-    shooter.defeated = false;
-    shooter.nextShotAt = 0;
-    shooter.windupUntil = 0;
-    hideShooterAimWarning(actor);
-    mesh.visible = true;
-    ensureShooterHealthBar(actor);
-    ensureShooterAimWarning(actor);
-    setShooterHealth(actor, Number.isFinite(shooter.maxHealth) ? shooter.maxHealth : SHOOTER_AI_PREFAB.health);
-}
-
-function damageShooterAi(actor, amount = SHOOTER_AI_PREFAB.hitDamage) {
-    const shooter = actor?.userData?.shooterAi;
-    if (!shooter || shooter.defeated) return;
-
-    const health = shooter.health ?? shooter.maxHealth ?? SHOOTER_AI_PREFAB.health;
-    const dmg = Math.max(0, Number(amount) || 0);
-    const fatal = health - dmg <= 0;
-    setShooterHealth(actor, health - dmg);
-    // Overridable hook: weapon scripts decide hurt FX. setShooterHealth already
-    // plays the death sound on a fatal hit, so default only handles non-fatal.
-    // x,y,z = enemy world position (for spatial audio in the hook).
-    if (typeof window !== 'undefined' && window.onEnemyDamaged) {
-        const hm = getActorRenderObject(actor);
-        let hx, hy, hz;
-        if (hm) { hm.getWorldPosition(tempVectorA); hx = tempVectorA.x; hy = tempVectorA.y + 0.9; hz = tempVectorA.z; }
-        try { window.onEnemyDamaged(actor, dmg, fatal, hx, hy, hz); } catch (e) { /* script error */ }
-    } else if (!fatal) {
-        flashActorHit(actor, 0xff5555);
-        const m = getActorRenderObject(actor);
-        if (m) {
-            m.getWorldPosition(tempVectorA);
-            playEnemyHurtSound(0.7, tempVectorA.x, tempVectorA.y + 0.9, tempVectorA.z);
-        } else {
-            playEnemyHurtSound(0.7);
-        }
-    }
-}
-
-function emitShooterDeathEffect(actor) {
-    const mesh = getActorRenderObject(actor);
-    if (!scene || !mesh) return;
-
-    const origin = mesh.getWorldPosition(new THREE.Vector3());
-    origin.y += 0.9;
-    const particles = [];
-    for (let i = 0; i < 14; i++) {
-        const particle = new THREE.Mesh(
-            new THREE.SphereGeometry(0.055, 8, 6),
-            new THREE.MeshBasicMaterial({
-                color: i % 2 ? 0xff3333 : 0xffcc66,
-                transparent: true,
-                opacity: 1,
-            })
-        );
-        particle.position.copy(origin);
-        scene.add(particle);
-        particles.push({
-            mesh: particle,
-            velocity: new THREE.Vector3(
-                (Math.random() - 0.5) * 4.2,
-                Math.random() * 3.4 + 1.0,
-                (Math.random() - 0.5) * 4.2
-            ),
-        });
-    }
-    gameplayPrefabState.effects.push({ type: 'shooterDeath', particles, ttl: 0.72, maxTtl: 0.72 });
-}
-
 // FX pool lifecycle extracted to ../gameplay/effectsSystem.js
 const _effectsSystem = createEffectsSystem({ gameplayPrefabState });
 const updateGameplayEffects = _effectsSystem.updateGameplayEffects;
@@ -2950,16 +1871,23 @@ const _shooterAi = createShooterAi({
     playImpactSound: (...a) => playImpactSound(...a),
     spawnImpactBurst: (...a) => spawnImpactBurst(...a),
     spawnImpactDecal: (...a) => spawnImpactDecal(...a),
-    copyJoltVector, getPointSegmentDistanceSq, getShooterHitPoints,
+    copyJoltVector, getPointSegmentDistanceSq,
+    // shooterAiVisuals aliases are `const` defined further down (line ~2222);
+    // wrap in lazy thunks so their bindings are looked up at call time.
+    getShooterHitPoints: (...a) => getShooterHitPoints(...a),
+    damageShooterAi: (...a) => damageShooterAi(...a),
+    setShooterHealth: (...a) => setShooterHealth(...a),
+    hideShooterAimWarning: (...a) => hideShooterAimWarning(...a),
+    updateShooterAimWarning: (...a) => updateShooterAimWarning(...a),
+    ensureShooterHealthBar: (...a) => ensureShooterHealthBar(...a),
     releaseProjectile,
-    damagePlayer, damageShooterAi, getActorBody, getActorRenderObject,
+    damagePlayer, getActorBody, getActorRenderObject,
     getGameplayPrefabActors,
     // hoisted-function deps (safe by-ref even though textually after site):
-    ensureGameplayPrefabScript, ensureShooterHealthBar,
+    ensureGameplayPrefabScript,
     getShooterGroundIgnoreActors, getShooterTargetPosition,
-    hideShooterAimWarning, isDoomRoofSurfaceHit, raycastWorld,
-    runObjectEventScript, setShooterHealth, spawnShooterProjectile,
-    updateShooterAimWarning,
+    isDoomRoofSurfaceHit, raycastWorld,
+    runObjectEventScript, spawnShooterProjectile,
     // lazy wrappers for `const` aliases / `let` placeholders defined later
     // (TDZ avoidance, same pattern as the combatFx aliases above):
     getGroundHeightAt: (...a) => getGroundHeightAt(...a),
@@ -3128,138 +2056,40 @@ let RogueAPI = null;
 // from its own Tick. We delegate to the component's tick() so behavior stays
 // identical and the SceneSystem's central pass would also drive it.
 const _shooterSpawnerTmp = { v: new THREE.Vector3() };
-function attachShooterSpawnerComponent(actor) {
-    if (!actor) return null;
-    let comp = actor.getComponentByClass?.(ShooterSpawnerComponent);
-    if (comp) {
-        comp.syncFromUserData();
-        return comp;
-    }
-    comp = new ShooterSpawnerComponent({
-        tuning: SHOOTER_SPAWNER_PREFAB,
-        baseScoreValue: SHOOTER_AI_PREFAB.scoreValue,
-        isGameplayActive: () => !!gameplay.active,
-        getMinions: () => getGameplayPrefabActors('shooterAi', _scratchPrefab2),
-        spawnMinion: (pos, opts) => spawnShooterAiAt(pos, opts),
-        getRenderObject: (a) => getActorRenderObject(a),
-        THREE,
-        tmp: _shooterSpawnerTmp,
-    });
-    actor.addComponent(comp);
-    // Driven by the prefab user-script Tick → window.updateShooterSpawnerActor.
-    // Deactivate from the SceneSystem auto-tick pass to avoid a double-tick;
-    // flip _active=true once the user script is retired in favor of ECS.
-    comp.setActive(false);
-    comp.syncFromUserData();
-    return comp;
-}
-
-function updateShooterSpawnerActor(spawner) {
-    if (!spawner) return;
-    const comp = spawner.getComponentByClass?.(ShooterSpawnerComponent)
-        || attachShooterSpawnerComponent(spawner);
-    comp?.tick(0);
-}
-
-// ECS: per-pickup respawn + trigger-eat state lives on HealthPickupComponent.
-// The component is auto-ticked by sceneSystem.tickComponents each frame; the
-// imperative `for (healthPickup) {...}` block inside processGameplayPrefabs
-// shrinks to "just dispatch the script trigger when scripted" (component
-// handles the engine fallback path).
-// ECS: WeaponPickupComponent covers smg/sniperRifle/doomShotgunSprite. The
-// variant differences (equip strategy, idle bob, pickup sound, script
-// precedence) are wired through the factory options.
-function attachWeaponPickupComponent(actor, variant) {
-    if (!actor) return null;
-    let comp = actor.getComponentByClass?.(WeaponPickupComponent);
-    if (comp) return comp;
-    const isDoom = variant === 'doomShotgun';
-    let equip;
-    if (variant === 'smg') equip = (a) => equipStraightGun(a);
-    else if (variant === 'sniperRifle') equip = (a) => equipSniperRifle(a);
-    else if (variant === 'doomShotgun') equip = (a) => equipDoomShotgun(a);
-    else return null;
-
-    comp = new WeaponPickupComponent({
-        equip,
-        bob: isDoom,
-        isScripted: isDoom ? (a) => hasScriptedTriggerHandler(a) : () => false,
-        dispatchTrigger: (a, pos, subj) => dispatchTriggerForActor(a, pos, subj),
-        isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
-        getSubjectPosition: () => _gameplaySubjectScratch.position,
-        getSubject: () => _gameplaySubjectScratch,
-        getRenderObject: (a) => getActorRenderObject(a),
-        playPickupSound: isDoom ? () => playDoomPickupSound?.() : null,
-        isGameplayActive: () => !!gameplay.active,
-    });
-    actor.addComponent(comp);
-    return comp;
-}
-
-// ECS: CoinComponent owns the coin collect-on-trigger logic.
-function attachCoinComponent(actor) {
-    if (!actor) return null;
-    let comp = actor.getComponentByClass?.(CoinComponent);
-    if (comp) return comp;
-    comp = new CoinComponent({
-        isScripted: (a) => hasScriptedTriggerHandler(a),
-        dispatchTrigger: (a, pos, subj) => dispatchTriggerForActor(a, pos, subj),
-        isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
-        getSubjectPosition: () => _gameplaySubjectScratch.position,
-        getSubject: () => _gameplaySubjectScratch,
-        addScore: (amount) => addGameScore(amount),
-        getRenderObject: (a) => getActorRenderObject(a),
-        isGameplayActive: () => !!gameplay.active,
-    });
-    actor.addComponent(comp);
-    return comp;
-}
-
-// ECS: TargetComponent owns the score-on-hit + script trigger edge for
-// "target" actors. Shared scratch reused across all targets each frame.
-const _targetTmp = { a: null, b: null };
-function attachTargetComponent(actor) {
-    if (!actor) return null;
-    let comp = actor.getComponentByClass?.(TargetComponent);
-    if (comp) return comp;
-    comp = new TargetComponent({
-        isScripted: (a) => hasScriptedTriggerHandler(a),
-        getDynamicBodies: () => physics.dynamicBodies || _emptyArray,
-        isPhysicsReady: () => !!physics.ready,
-        getActorBody: (a) => getActorBody(a),
-        getRenderObject: (a) => getActorRenderObject(a),
-        addScore: (amount) => addGameScore(amount),
-        dispatchTriggerEvent: (a, payload, inside) => dispatchTriggerEvent(a, payload, inside),
-        isGameplayActive: () => !!gameplay.active,
-        tmp: _targetTmp,
-        THREE,
-    });
-    actor.addComponent(comp);
-    return comp;
-}
-
-function attachHealthPickupComponent(actor) {
-    if (!actor) return null;
-    let comp = actor.getComponentByClass?.(HealthPickupComponent);
-    if (comp) return comp;
-    comp = new HealthPickupComponent({
-        tuning: HEALTH_PICKUP_PREFAB,
-        isScripted: (a) => hasScriptedTriggerHandler(a),
-        dispatchTrigger: (a, pos, subj) => dispatchTriggerForActor(a, pos, subj),
-        isSubjectInsideTrigger: (pos, a) => isSubjectInsideTrigger(pos, a),
-        // snapshotSubject() in gameplayPrefabSystem populates this scratch
-        // each frame before sceneSystem.tickComponents runs, so the component
-        // reads the live subject position without re-allocating.
-        getSubjectPosition: () => _gameplaySubjectScratch.position,
-        getSubject: () => _gameplaySubjectScratch,
-        getCurrentHealth: () => gameplay.health ?? 1,
-        applyHeal: (newHealth) => setPlayerHealth(newHealth),
-        getRenderObject: (a) => getActorRenderObject(a),
-        isGameplayActive: () => !!gameplay.active,
-    });
-    actor.addComponent(comp);
-    return comp;
-}
+const _gameplayComponents = createGameplayComponents({
+    THREE,
+    ShooterSpawnerComponent, WeaponPickupComponent, CoinComponent,
+    TargetComponent, HealthPickupComponent,
+    SHOOTER_SPAWNER_PREFAB, SHOOTER_AI_PREFAB, HEALTH_PICKUP_PREFAB,
+    gameplay, physics,
+    _scratchPrefab2, _emptyArray,
+    // _gameplaySubjectScratch is defined later in the file; pass a getter so
+    // the component closures read the bound array at call time, not now.
+    _gameplaySubjectScratch: new Proxy({}, {
+        get(_, key) { return _gameplaySubjectScratch[key]; },
+    }),
+    getGameplayPrefabActors,
+    getActorRenderObject: (a) => getActorRenderObject(a),
+    getActorBody: (a) => getActorBody(a),
+    spawnShooterAiAt: (...a) => spawnShooterAiAt(...a),
+    // TDZ-late aliases — wrap in arrow thunks.
+    equipStraightGun: (...a) => equipStraightGun(...a),
+    equipSniperRifle: (...a) => equipSniperRifle(...a),
+    equipDoomShotgun: (...a) => equipDoomShotgun(...a),
+    playDoomPickupSound: (...a) => playDoomPickupSound?.(...a),
+    hasScriptedTriggerHandler,
+    dispatchTriggerForActor,
+    isSubjectInsideTrigger,
+    dispatchTriggerEvent,
+    addGameScore: (...a) => addGameScore(...a),
+    setPlayerHealth: (...a) => setPlayerHealth(...a),
+});
+const attachShooterSpawnerComponent = _gameplayComponents.attachShooterSpawnerComponent;
+const updateShooterSpawnerActor = _gameplayComponents.updateShooterSpawnerActor;
+const attachWeaponPickupComponent = _gameplayComponents.attachWeaponPickupComponent;
+const attachCoinComponent = _gameplayComponents.attachCoinComponent;
+const attachTargetComponent = _gameplayComponents.attachTargetComponent;
+const attachHealthPickupComponent = _gameplayComponents.attachHealthPickupComponent;
 
 function updateShooterSpawners(delta = 0) {
     if (!gameplay.active) return;
@@ -3277,8 +2107,9 @@ if (typeof window !== 'undefined') {
     window.updateShooterSpawnerActor = updateShooterSpawnerActor;
     window.spawnShooterAiAt = spawnShooterAiAt;
     window.spawnShooterProjectile = spawnShooterProjectile;
-    window.damageShooterAi = damageShooterAi;
-    window.setShooterHealth = setShooterHealth;
+    // damageShooterAi / setShooterHealth assignments moved below the
+    // _shooterAiVisuals factory because those bindings are now `const`
+    // initialized from that factory and would TDZ here.
 }
 
 // Procedural shotgun blast: a short filtered noise burst + a low thump.
@@ -3302,6 +2133,40 @@ const spawnTracer = combatFx.spawnTracer;
 const spawnImpactDecal = combatFx.spawnImpactDecal;
 const spawnMuzzleSmoke = combatFx.spawnMuzzleSmoke;
 const flashActorHit = combatFx.flashActorHit;
+
+const _shooterAiVisuals = createShooterAiVisuals({
+    THREE,
+    scene: () => scene,
+    camera: () => camera,
+    currentMesh: () => currentMesh,
+    gameplay, gameplayPrefabState,
+    SHOOTER_AI_PREFAB, PLAYER_SETTINGS,
+    upVector, tempVectorA,
+    getActorRenderObject: (a) => getActorRenderObject(a),
+    getGameplaySubjectPosition: (t) => getGameplaySubjectPosition(t),
+    getGameplayPrefabActors,
+    isDrivingVehicle,
+    playEnemyDeathSound, playEnemyHurtSound,
+    flashActorHit,
+    addGameScore: (...a) => addGameScore(...a),
+    setPlayerHealth: (...a) => setPlayerHealth(...a),
+});
+const getShooterHitPoints = _shooterAiVisuals.getShooterHitPoints;
+const addCircularNavmeshVisual = _shooterAiVisuals.addCircularNavmeshVisual;
+const addShooterAiVisual = _shooterAiVisuals.addShooterAiVisual;
+const ensureShooterAimWarning = _shooterAiVisuals.ensureShooterAimWarning;
+const updateShooterAimWarning = _shooterAiVisuals.updateShooterAimWarning;
+const hideShooterAimWarning = _shooterAiVisuals.hideShooterAimWarning;
+const clearShooterAimWarnings = _shooterAiVisuals.clearShooterAimWarnings;
+const ensureShooterHealthBar = _shooterAiVisuals.ensureShooterHealthBar;
+const setShooterHealth = _shooterAiVisuals.setShooterHealth;
+const resetShooterAiState = _shooterAiVisuals.resetShooterAiState;
+const damageShooterAi = _shooterAiVisuals.damageShooterAi;
+const emitShooterDeathEffect = _shooterAiVisuals.emitShooterDeathEffect;
+if (typeof window !== 'undefined') {
+    window.damageShooterAi = damageShooterAi;
+    window.setShooterHealth = setShooterHealth;
+}
 // Publish combat FX + 3D sound surface via engineApi (typed) rather
 // than window.*. Eval'd prefab scripts read these from their `api`
 // parameter (see buildObjectEventApi). installLegacyWindowShims at the
@@ -3377,481 +2242,65 @@ if (typeof window !== 'undefined') {
 // remaining global call sites.
 installLegacyWindowShims();
 
-function updateStraightGuns() {
-    if (!gameplay.active) return;
-    if (!gameplay.weapon.type || isDrivingVehicle()) return;
+const updateStraightGuns = createWeaponFire({
+    THREE,
+    camera: () => camera,
+    physics,
+    gameplay,
+    DOOM_SHOTGUN_PREFAB, DOOM_SHOTGUN_PELLET_PATTERN,
+    STRAIGHT_GUN_PREFAB, SNIPER_RIFLE_PREFAB, THROWING_STAR_PREFAB,
+    _scratchPrefab1,
+    tempVectorA, tempVectorC,
+    isDrivingVehicle,
+    getGameplayPrefabActors,
+    hasScriptedTickHandler,
+    runObjectEventScript,
+    updateDoomShotgunHud,
+    spawnDoomPellet, flashDoomShotgun,
+    playDoomShotgunSound,
+    applyCameraRecoil: (...a) => applyCameraRecoil(...a),
+    spawnDynamicPrimitive,
+    getActorBody: (a) => getActorBody(a),
+    getActorRenderObject: (a) => getActorRenderObject(a),
+    destroyDynamicPhysicsProp,
+    spawnShooterProjectile,
+});
 
-    const now = performance.now?.() || Date.now();
-    if (gameplay.weapon.type === 'doomShotgun') {
-        updateDoomShotgunHud(now);
-        // ALL weapon behavior (pellet count, spread, burst, cooldown) lives in
-        // the pickup prefab's user script. Drive that actor's Tick every frame
-        // while equipped. Only if the user cleared the script do we run a
-        // minimal built-in blast so the gun still works.
-        const srcId = gameplay.weapon.sourceActorId;
-        let srcActor = null;
-        if (srcId) {
-            const guns = getGameplayPrefabActors('doomShotgunSprite', _scratchPrefab1);
-            for (let i = 0; i < guns.length; i++) {
-                if (guns[i]?.id === srcId) { srcActor = guns[i]; break; }
-            }
-        }
-        if (srcActor && hasScriptedTickHandler(srcActor)) {
-            runObjectEventScript(srcActor, 'tick', { deltaTime: 0 });
-        } else if (gameplay.input.firePressed && (gameplay.weapon.nextShotAt || 0) <= now) {
-            gameplay.input.firePressed = false;
-            const d = DOOM_SHOTGUN_PREFAB;
-            for (let i = 0; i < d.pellets; i++) {
-                const [sx, sy] = DOOM_SHOTGUN_PELLET_PATTERN[i % DOOM_SHOTGUN_PELLET_PATTERN.length];
-                spawnDoomPellet({ spreadX: sx * d.spread, spreadY: sy * d.spread });
-            }
-            gameplay.weapon.nextShotAt = now + d.cooldownMs;
-            flashDoomShotgun(d.flashMs, now);
-            playDoomShotgunSound(1);
-            applyCameraRecoil(0.045, (Math.random() - 0.5) * 0.012);
-        } else if (gameplay.input.firePressed) {
-            gameplay.input.firePressed = false;
-        }
-        return;
-    }
 
-    const b = window.rogueBuffs || {};
+const spawnGameplayPrefab = createSpawnGameplayPrefab({
+    THREE,
+    camera: () => camera,
+    sceneSystem: () => sceneSystem,
+    BASIC_NAVMESH_AI_PREFAB, SHOOTER_AI_PREFAB, HEALTH_PICKUP_PREFAB,
+    STRAIGHT_GUN_PREFAB, SNIPER_RIFLE_PREFAB, DOOM_SHOTGUN_PREFAB,
+    DOOM_ENEMY_PREFAB,
+    TELEPORTER_USER_SCRIPT, COIN_USER_SCRIPT, HEALTH_PICKUP_USER_SCRIPT,
+    TARGET_USER_SCRIPT, SHOOTER_SPAWNER_USER_SCRIPT,
+    DOOM_SHOTGUN_USER_SCRIPT, ROGUE_GAMEMODE_SCRIPT,
+    tempVectorA, tempVectorB, tempVectorC,
+    spawnDynamicPrimitive,
+    spawnDoomEnemyAt: (...a) => spawnDoomEnemyAt(...a),
+    spawnShooterAiAt: (...a) => spawnShooterAiAt(...a),
+    createActor,
+    tagGameplayPrefabActor, tintGameplayPrefabActor,
+    applyPlayerSpawnFromActor,
+    attachDefaultPrefabScript,
+    getActorRenderObject: (a) => getActorRenderObject(a),
+    // const aliases bound later in the file — wrap to defer the lookup.
+    getGroundHeightAt: (...a) => getGroundHeightAt(...a),
+    rebuildActorPhysics: (...a) => rebuildActorPhysics(...a),
+    attachCoinComponent, attachHealthPickupComponent, attachTargetComponent,
+    attachShooterSpawnerComponent, attachWeaponPickupComponent,
+    addCircularNavmeshVisual,
+    CircularPatrolComponent,
+    addStraightGunVisual,
+    makeDoomShotgunSpriteTexture: (...a) => makeDoomShotgunSpriteTexture(...a),
+    ensureActorIdentity: (...a) => ensureActorIdentity(...a),
+    setActorComponentFlags,
+    refreshSceneUI: (...a) => refreshSceneUI(...a),
+    selectShowcaseActor: (...a) => selectShowcaseActor(...a),
+});
 
-    if (gameplay.weapon.type === 'throwingStar') {
-        // Held blade always spins; throw on hold/press, cooldown-gated.
-        const spinner = gameplay.weapon.mesh?.userData?.spinner;
-        if (spinner) spinner.rotation.z -= 0.45;
-        if (!gameplay.input.fire && !gameplay.input.firePressed) return;
-        if ((gameplay.weapon.nextShotAt || 0) > now) {
-            if (!gameplay.input.fire) gameplay.input.firePressed = false;
-            return;
-        }
-        const s = THROWING_STAR_PREFAB;
-        // Real physics body: spawn a small bouncy sphere at the muzzle and
-        // launch it flat along the look direction. Jolt handles the wall
-        // ricochets (high restitution). updateShooterAiPhysicsHits already
-        // damages enemies hit by fast non-prefab dynamic props.
-        camera.getWorldDirection(tempVectorC).normalize();
-        const origin = camera.localToWorld(tempVectorA.set(0.16, -0.16, -0.7));
-        const dx = tempVectorC.x, dy = tempVectorC.y, dz = tempVectorC.z;
-        const star = spawnDynamicPrimitive('sphere', origin.clone(), 0.16, {
-            local: false,
-            skipImpulse: true,
-            restitution: 1.0,    // perfectly elastic — bounce never decays
-            friction: 0.0,
-            linearDamping: 0.0,  // no speed bleed between bounces
-            angularDamping: 0.0,
-            // Continuous collision (swept) so the fast sphere can't tunnel
-            // through walls or enemies at speed — tests collision every step.
-            motionQuality: physics.Jolt.EMotionQuality_LinearCast,
-            returnActor: true,
-            userData: { label: 'Throwing Star', isThrowingStar: true, starSpeed: s.projectileSpeed },
-        });
-        const body = star ? getActorBody(star) : null;
-        if (body && physics.Jolt) {
-            const speed = s.projectileSpeed;
-            const vel = new physics.Jolt.Vec3(dx * speed, dy * speed, dz * speed);
-            physics.bodyInterface.SetLinearVelocity(body.GetID(), vel);
-            physics.Jolt.destroy(vel);
-            // Zero gravity so it keeps a flat path and the bounce energy
-            // never resets/decays — ricochets at full speed until it dies.
-            try { physics.bodyInterface.SetGravityFactor?.(body.GetID(), 0.0); } catch (e) {}
-            // Swap the plain sphere look for a spinning 4-point shuriken:
-            // make the collision sphere invisible and hang a blade group off
-            // it. clampThrowingStarSpeed() spins this group every frame.
-            const mr = getActorRenderObject(star);
-            if (mr) {
-                if (mr.material) {
-                    mr.material.transparent = true;
-                    mr.material.opacity = 0;
-                    mr.material.depthWrite = false;
-                }
-                const blades = new THREE.Group();
-                blades.name = 'Throwing Star Blades';
-                const bmat = new THREE.MeshStandardMaterial({
-                    color: 0xcfe8ff, metalness: 0.85, roughness: 0.2,
-                    emissive: 0x2bd4ff, emissiveIntensity: 2.0,
-                });
-                // Geometry is in the sphere's LOCAL space (mesh is scaled to
-                // the 0.16 radius), so local 3 ≈ 0.5m blade across in world.
-                for (let i = 0; i < 2; i++) {
-                    const blade = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.18, 0.7), bmat);
-                    blade.rotation.y = i * Math.PI / 2;
-                    blades.add(blade);
-                }
-                const hub = new THREE.Mesh(
-                    new THREE.CylinderGeometry(0.5, 0.5, 0.28, 12),
-                    new THREE.MeshStandardMaterial({ color: 0x7fd0ff, metalness: 0.7, roughness: 0.3 }),
-                );
-                hub.rotation.x = Math.PI / 2;
-                blades.add(hub);
-                mr.add(blades);
-                star.userData.starBlades = blades;
-            }
-            // Auto-despawn so spheres don't pile up. "Ricochet+" cards
-            // (b.pellets) extend how long the star stays alive bouncing.
-            const lifeS = s.projectileLife + (b.pellets || 0) * 0.5;
-            setTimeout(() => { try { destroyDynamicPhysicsProp(star); } catch (e) {} },
-                Math.round(lifeS * 1000));
-        }
-        playDoomShotgunSound?.(0.35);
-        applyCameraRecoil?.(0.02, (Math.random() - 0.5) * 0.01);
-        gameplay.weapon.nextShotAt = now + s.cooldownMs / (b.fireRate || 1);
-        gameplay.input.firePressed = false;
-        return;
-    }
-
-    const isSniper = gameplay.weapon.type === 'sniperRifle';
-    if (isSniper) {
-        if (!gameplay.input.firePressed) return;
-        gameplay.input.firePressed = false;
-    } else if (gameplay.weapon.type !== 'smg' || (!gameplay.input.fire && !gameplay.input.firePressed)) {
-        return;
-    }
-
-    if ((gameplay.weapon.nextShotAt || 0) > now) {
-        if (!gameplay.input.fire) gameplay.input.firePressed = false;
-        return;
-    }
-
-    const config = isSniper ? SNIPER_RIFLE_PREFAB : STRAIGHT_GUN_PREFAB;
-    camera.getWorldDirection(tempVectorC).normalize();
-    const origin = camera.localToWorld(tempVectorA.set(isSniper ? 0.1 : 0.18, isSniper ? -0.1 : -0.14, isSniper ? -1.12 : -0.75));
-    spawnShooterProjectile(origin, null, {
-        velocity: tempVectorC,
-        name: isSniper ? 'Sniper Bullet' : 'SMG Bullet',
-        poolKey: isSniper ? 'sniperRifleBullets' : 'smgBullets',
-        maxPoolSize: config.bulletPoolSize,
-        radius: isSniper ? 0.04 : 0.055,
-        color: isSniper ? 0xbde7ff : 0xffd166,
-        speed: config.projectileSpeed,
-        life: config.projectileLife,
-        damage: config.damage * (isSniper ? 1 : (b.damage || 1)),
-        hitRadius: config.hitRadius,
-        hitsPlayer: false,
-        damagesShooters: true,
-        emissiveIntensity: isSniper ? 5.5 : 4.2,
-        light: false,
-    });
-    gameplay.weapon.nextShotAt = now + config.cooldownMs / (isSniper ? 1 : (b.fireRate || 1));
-    if (!isSniper) gameplay.input.firePressed = false;
-}
-
-function spawnGameplayPrefab(type) {
-    let actor = null;
-    if (type === 'playerSpawn') {
-        actor = spawnDynamicPrimitive('capsule', undefined, 0.45, {
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: { label: 'Player Spawn' },
-            returnActor: true,
-        });
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.8, groundOffset: 0.45 });
-        tintGameplayPrefabActor(actor, '#22c55e', '#22c55e', 1.8);
-        applyPlayerSpawnFromActor(actor);
-    } else if (type === 'teleporter') {
-        actor = spawnDynamicPrimitive('cylinder', undefined, 1, {
-            includeCollisionBody: true,
-            simulatePhysics: false,
-            includeScripts: false,
-            userData: { label: 'Teleporter' },
-            returnActor: true,
-        });
-        const mesh = getActorRenderObject(actor);
-        if (mesh) mesh.scale.set(1.4, 0.45, 1.4);
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 1.45, groundOffset: 0.42 });
-        tintGameplayPrefabActor(actor, '#22d3ee', '#22d3ee', 2.6);
-        rebuildActorPhysics(actor);
-        attachDefaultPrefabScript(actor, TELEPORTER_USER_SCRIPT);
-    } else if (type === 'coin') {
-        actor = spawnDynamicPrimitive('sphere', undefined, 0.35, {
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: { label: 'Coin +10' },
-            returnActor: true,
-        });
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.95, groundOffset: 1.0, scoreValue: 10 });
-        tintGameplayPrefabActor(actor, '#facc15', '#facc15', 2.8);
-        attachDefaultPrefabScript(actor, COIN_USER_SCRIPT);
-        attachCoinComponent(actor);
-    } else if (type === 'healthPickup') {
-        actor = spawnDynamicPrimitive('sphere', undefined, 0.38, {
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: {
-                label: 'Health +35%',
-                healValue: HEALTH_PICKUP_PREFAB.healValue,
-                respawnMs: HEALTH_PICKUP_PREFAB.respawnMs,
-            },
-            returnActor: true,
-        });
-        const mesh = getActorRenderObject(actor);
-        if (mesh) {
-            const ring = new THREE.Mesh(
-                new THREE.TorusGeometry(0.52, 0.045, 8, 28),
-                new THREE.MeshBasicMaterial({ color: 0x22ff88, transparent: true, opacity: 0.82 })
-            );
-            ring.rotation.x = Math.PI / 2;
-            ring.name = 'Health Pickup Ring';
-            mesh.add(ring);
-        }
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.95, groundOffset: 0.85 });
-        actor.userData.healValue = HEALTH_PICKUP_PREFAB.healValue;
-        actor.userData.respawnMs = HEALTH_PICKUP_PREFAB.respawnMs;
-        tintGameplayPrefabActor(actor, '#22c55e', '#22ff88', 2.2);
-        attachDefaultPrefabScript(actor, HEALTH_PICKUP_USER_SCRIPT);
-        attachHealthPickupComponent(actor);
-    } else if (type === 'target') {
-        actor = spawnDynamicPrimitive('cylinder', undefined, 0.6, {
-            includeCollisionBody: true,
-            simulatePhysics: false,
-            includeScripts: false,
-            userData: { label: 'Target +25' },
-            returnActor: true,
-        });
-        const mesh = getActorRenderObject(actor);
-        if (mesh) mesh.scale.set(0.6, 0.12, 0.6);
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.75, groundOffset: 1.1, scoreValue: 25 });
-        tintGameplayPrefabActor(actor, '#ef4444', '#ef4444', 1.2);
-        rebuildActorPhysics(actor);
-        attachDefaultPrefabScript(actor, TARGET_USER_SCRIPT);
-        attachTargetComponent(actor);
-    } else if (type === 'navmeshCircleAi') {
-        const spawnDirection = tempVectorB;
-        camera.getWorldDirection(spawnDirection);
-        spawnDirection.y = 0;
-        if (spawnDirection.lengthSq() < 1e-6) {
-            spawnDirection.set(0, 0, -1);
-        } else {
-            spawnDirection.normalize();
-        }
-        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 7);
-        const groundY = getGroundHeightAt(spawnPosition.x, spawnPosition.z, true) ?? spawnPosition.y;
-        const center = new THREE.Vector3(spawnPosition.x, groundY + 0.03, spawnPosition.z);
-        const radius = BASIC_NAVMESH_AI_PREFAB.radius;
-
-        const navmeshActor = spawnDynamicPrimitive('cylinder', center, 1, {
-            local: false,
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: { label: 'Basic Navmesh' },
-            returnActor: true,
-        });
-        const navmeshMesh = getActorRenderObject(navmeshActor);
-        if (navmeshMesh) {
-            navmeshMesh.scale.set(radius, 0.015, radius);
-        }
-        tagGameplayPrefabActor(navmeshActor, 'navmeshCircle', { triggerRadius: radius, groundOffset: 0.03 });
-        tintGameplayPrefabActor(navmeshActor, '#0891b2', '#083344', 0.2);
-        addCircularNavmeshVisual(navmeshActor);
-
-        actor = spawnDynamicPrimitive('capsule', new THREE.Vector3(center.x + radius, center.y + 1.05, center.z), BASIC_NAVMESH_AI_PREFAB.agentScale, {
-            local: false,
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: {
-                label: 'Circle Patrol AI',
-                // navmeshActorId retained on userData for the (separate)
-                // navmesh-circle visual lookup; patrol state itself now
-                // lives on the CircularPatrolComponent below.
-                navmeshActorId: navmeshActor?.id || '',
-            },
-            returnActor: true,
-        });
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.65, groundOffset: 1.05 });
-        tintGameplayPrefabActor(actor, '#a3e635', '#4d7c0f', 0.72);
-
-        // ECS: drive patrol motion via a CircularPatrolComponent instead of
-        // the legacy updateCircularNavmeshAis(delta) loop. The component is
-        // ticked by sceneSystem.tickComponents(delta) once per frame.
-        const patrolComp = new CircularPatrolComponent({
-            center: [center.x, center.y, center.z],
-            radius,
-            speed: BASIC_NAVMESH_AI_PREFAB.speed,
-            angle: 0,
-            yOffset: BASIC_NAVMESH_AI_PREFAB.agentScale * 2.55,
-        });
-        patrolComp.setGroundSampler((x, z, ignoreActor) =>
-            getGroundHeightAt(x, z, true, { ignoreActor }));
-        actor.addComponent(patrolComp);
-    } else if (type === 'shooterSpawner') {
-        const spawnDirection = tempVectorB;
-        camera.getWorldDirection(spawnDirection);
-        spawnDirection.y = 0;
-        if (spawnDirection.lengthSq() < 1e-6) {
-            spawnDirection.set(0, 0, -1);
-        } else {
-            spawnDirection.normalize();
-        }
-        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 10);
-        const groundY = getGroundHeightAt(spawnPosition.x, spawnPosition.z, true) ?? spawnPosition.y;
-        actor = spawnDynamicPrimitive('cylinder', new THREE.Vector3(spawnPosition.x, groundY + 0.25, spawnPosition.z), 1, {
-            local: false,
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: {
-                label: 'Shooter Spawner',
-                shooterSpawner: { wave: 0, nextWaveAt: 0 },
-            },
-            returnActor: true,
-        });
-        const mesh = getActorRenderObject(actor);
-        if (mesh) mesh.scale.set(1.45, 0.18, 1.45);
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 1.4, groundOffset: 0.25 });
-        tintGameplayPrefabActor(actor, '#7c3aed', '#a855f7', 1.9);
-        attachDefaultPrefabScript(actor, SHOOTER_SPAWNER_USER_SCRIPT);
-        attachShooterSpawnerComponent(actor);
-    } else if (type === 'smg') {
-        const spawnDirection = tempVectorB;
-        camera.getWorldDirection(spawnDirection);
-        spawnDirection.y = 0;
-        if (spawnDirection.lengthSq() < 1e-6) {
-            spawnDirection.set(0, 0, -1);
-        } else {
-            spawnDirection.normalize();
-        }
-        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 8);
-        const groundY = getGroundHeightAt(spawnPosition.x, spawnPosition.z, true) ?? spawnPosition.y;
-        actor = spawnDynamicPrimitive('cylinder', new THREE.Vector3(spawnPosition.x, groundY + 0.22, spawnPosition.z), 1, {
-            local: false,
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: {
-                label: 'SMG',
-                smg: { nextShotAt: 0, cooldownMs: STRAIGHT_GUN_PREFAB.cooldownMs },
-            },
-            returnActor: true,
-        });
-        const mesh = getActorRenderObject(actor);
-        if (mesh) {
-            mesh.scale.set(0.52, 0.18, 0.52);
-            tagGameplayPrefabActor(actor, type, { triggerRadius: 0.65, groundOffset: 0.22 });
-            mesh.lookAt(tempVectorC.copy(mesh.position).add(spawnDirection));
-        }
-        tintGameplayPrefabActor(actor, '#334155', '#f59e0b', 0.8);
-        addStraightGunVisual(actor);
-        attachWeaponPickupComponent(actor, 'smg');
-    } else if (type === 'sniperRifle') {
-        const spawnDirection = tempVectorB;
-        camera.getWorldDirection(spawnDirection);
-        spawnDirection.y = 0;
-        if (spawnDirection.lengthSq() < 1e-6) {
-            spawnDirection.set(0, 0, -1);
-        } else {
-            spawnDirection.normalize();
-        }
-        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 8);
-        const groundY = getGroundHeightAt(spawnPosition.x, spawnPosition.z, true) ?? spawnPosition.y;
-        actor = spawnDynamicPrimitive('cylinder', new THREE.Vector3(spawnPosition.x, groundY + 0.24, spawnPosition.z), 1, {
-            local: false,
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: {
-                label: 'Bolt Action Sniper Rifle',
-                sniperRifle: { nextShotAt: 0, cooldownMs: SNIPER_RIFLE_PREFAB.cooldownMs },
-            },
-            returnActor: true,
-        });
-        const mesh = getActorRenderObject(actor);
-        if (mesh) {
-            mesh.scale.set(0.42, 0.14, 1.15);
-            tagGameplayPrefabActor(actor, type, { triggerRadius: 0.75, groundOffset: 0.24 });
-            mesh.lookAt(tempVectorC.copy(mesh.position).add(spawnDirection));
-        }
-        tintGameplayPrefabActor(actor, '#475569', '#38bdf8', 0.5);
-        addStraightGunVisual(actor);
-        attachWeaponPickupComponent(actor, 'sniperRifle');
-    } else if (type === 'doomShotgunSprite') {
-        const spawnDirection = tempVectorB;
-        camera.getWorldDirection(spawnDirection);
-        spawnDirection.y = 0;
-        if (spawnDirection.lengthSq() < 1e-6) {
-            spawnDirection.set(0, 0, -1);
-        } else {
-            spawnDirection.normalize();
-        }
-        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 6);
-        const groundY = getGroundHeightAt(spawnPosition.x, spawnPosition.z, true) ?? spawnPosition.y;
-        const tex = makeDoomShotgunSpriteTexture();
-        const mat = new THREE.SpriteMaterial({
-            map: tex,
-            transparent: true,
-            alphaTest: 0.5,
-            depthWrite: true,
-            sizeAttenuation: true,
-        });
-        mat.toneMapped = false;
-        const sprite = new THREE.Sprite(mat);
-        sprite.name = 'doom-shotgun-sprite';
-        sprite.position.set(spawnPosition.x, groundY + 0.7, spawnPosition.z);
-        sprite.scale.set(2.0, 1.0, 1);
-        sprite.userData = {
-            label: 'Doom Shotgun Sprite',
-            ownedTextures: [tex],
-        };
-        actor = createActor({
-            name: 'Doom Shotgun Sprite',
-            kind: 'sprite',
-            mesh: sprite,
-            userData: {
-                label: 'Doom Shotgun Sprite',
-                doomShotgun: { nextShotAt: 0, cooldownMs: DOOM_SHOTGUN_PREFAB.cooldownMs },
-            },
-        });
-        sceneSystem?.addActor(actor);
-        ensureActorIdentity(actor);
-        setActorComponentFlags(actor, { collision: false, physics: false, scripts: false });
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 0.7, groundOffset: 0.7 });
-        attachDefaultPrefabScript(actor, DOOM_SHOTGUN_USER_SCRIPT);
-        attachWeaponPickupComponent(actor, 'doomShotgun');
-    } else if (type === 'doomEnemy') {
-        const spawnDirection = tempVectorB;
-        camera.getWorldDirection(spawnDirection);
-        spawnDirection.y = 0;
-        if (spawnDirection.lengthSq() < 1e-6) {
-            spawnDirection.set(0, 0, -1);
-        } else {
-            spawnDirection.normalize();
-        }
-        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 9);
-        actor = spawnDoomEnemyAt(spawnPosition, {
-            label: 'Doom Enemy',
-            health: DOOM_ENEMY_PREFAB.health,
-            maxHealth: DOOM_ENEMY_PREFAB.health,
-        });
-    } else if (type === 'shooterAi') {
-        const spawnDirection = tempVectorB;
-        camera.getWorldDirection(spawnDirection);
-        spawnDirection.y = 0;
-        if (spawnDirection.lengthSq() < 1e-6) {
-            spawnDirection.set(0, 0, -1);
-        } else {
-            spawnDirection.normalize();
-        }
-        const spawnPosition = tempVectorA.copy(camera.position).addScaledVector(spawnDirection, 9);
-        actor = spawnShooterAiAt(spawnPosition);
-    } else if (type === 'rogueGameMode') {
-        // Invisible logic actor that carries the level-blueprint / game-mode
-        // script. No collision, no physics, hidden mesh — pure script host.
-        actor = spawnDynamicPrimitive('sphere', new THREE.Vector3(0, -50, 0), 0.2, {
-            local: false,
-            includeCollisionBody: false,
-            includeScripts: false,
-            userData: { label: 'Rogue Game Mode' },
-            returnActor: true,
-        });
-        const mesh = getActorRenderObject(actor);
-        if (mesh) mesh.visible = false;
-        tagGameplayPrefabActor(actor, type, { triggerRadius: 0, groundOffset: 0 });
-        attachDefaultPrefabScript(actor, ROGUE_GAMEMODE_SCRIPT);
-    }
-
-    if (actor) {
-        refreshSceneUI();
-        selectShowcaseActor(actor.id);
-    }
-    return actor;
-}
 
 function addGameScore(amount) {
     const value = Number(amount) || 0;
@@ -3913,61 +2362,28 @@ function resetGameplayPrefabs() {
     syncGameplaySpawnFromPlayerSpawnActor();
 }
 
-function setActorResetTransform(actor, position, quaternion = null) {
-    if (!actor || !Array.isArray(position)) return actor;
-    actor.userData = {
-        ...(actor.userData || {}),
-        resetTransform: {
-            position: [...position],
-            quaternion: quaternion
-                ? [quaternion.x, quaternion.y, quaternion.z, quaternion.w]
-                : null,
-        },
-    };
-    return actor;
-}
-
-function syncActorBodyToRenderTransform(actor, activation = null) {
-    const mesh = getActorRenderObject(actor);
-    const body = getActorBody(actor);
-    if (!mesh || !body || !physics.ready) return false;
-
-    const pos = new physics.Jolt.RVec3(mesh.position.x, mesh.position.y, mesh.position.z);
-    const rot = new physics.Jolt.Quat(mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w);
-    physics.bodyInterface.SetPositionAndRotation(
-        body.GetID(),
-        pos,
-        rot,
-        activation ?? physics.Jolt.EActivation_DontActivate
-    );
-    physics.Jolt.destroy(pos);
-    physics.Jolt.destroy(rot);
-    return true;
-}
-
-function resetActorToStoredTransform(actor) {
-    const reset = actor?.userData?.resetTransform;
-    const mesh = getActorRenderObject(actor);
-    if (!reset || !mesh) return false;
-
-    mesh.position.fromArray(reset.position);
-    if (Array.isArray(reset.quaternion)) {
-        mesh.quaternion.fromArray(reset.quaternion);
-    }
-    mesh.visible = actor.userData?.gameplayPrefab !== 'playerSpawn' || !gameplay.active;
-    mesh.updateMatrixWorld(true);
-
-    const body = getActorBody(actor);
-    if (body && physics.ready) {
-        syncActorBodyToRenderTransform(actor, physics.Jolt.EActivation_Activate);
-        if (physics.dynamicBodies.includes(actor)) {
-            physics.bodyInterface.SetLinearVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
-            physics.bodyInterface.SetAngularVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
-            dynamicBodySpatial.updateEntry(actor);
-        }
-    }
-    return true;
-}
+const _actorTransforms = createActorTransforms({
+    physics, dynamicBodySpatial, gameplay,
+    PLAYER_SETTINGS,
+    tempVectorA, tempVectorB,
+    copyJoltVector,
+    getActorRenderObject: (a) => getActorRenderObject(a),
+    getActorBody: (a) => getActorBody(a),
+    isDrivingVehicle,
+    getActiveVehicleProp,
+    syncCameraToCharacter: (...a) => syncCameraToCharacter(...a),
+    dispatchTriggerEvent,
+});
+const setActorResetTransform = _actorTransforms.setActorResetTransform;
+const syncActorBodyToRenderTransform = _actorTransforms.syncActorBodyToRenderTransform;
+const resetActorToStoredTransform = _actorTransforms.resetActorToStoredTransform;
+const teleportActiveGameplaySubject = _actorTransforms.teleportActiveGameplaySubject;
+const teleportActorTo = _actorTransforms.teleportActorTo;
+const getGameplaySubjectPosition = _actorTransforms.getGameplaySubjectPosition;
+const isSubjectInsideTrigger = _actorTransforms.isSubjectInsideTrigger;
+const dispatchTriggerForActor = _actorTransforms.dispatchTriggerForActor;
+const hasScriptedTriggerHandler = _actorTransforms.hasScriptedTriggerHandler;
+const hasScriptedTickHandler = _actorTransforms.hasScriptedTickHandler;
 
 // Rebuild the Doom mini-level's wave state machine to its pre-Play state.
 // restoreSceneState() reloads serialized actors (the gun/exit/spawn prefabs
@@ -3990,130 +2406,12 @@ function syncGameplayPrefabVisibility() {
     }
 }
 
-function teleportActiveGameplaySubject(destination) {
-    if (!destination) return false;
-    if (isDrivingVehicle()) {
-        const vehicle = getActiveVehicleProp();
-        const body = getActorBody(vehicle);
-        if (!vehicle || !body || !physics.ready) return false;
-        const pos = new physics.Jolt.RVec3(destination.x, destination.y + 0.75, destination.z);
-        const rot = physics.bodyInterface.GetRotation(body.GetID());
-        physics.bodyInterface.SetPositionAndRotation(body.GetID(), pos, rot, physics.Jolt.EActivation_Activate);
-        physics.bodyInterface.SetLinearVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
-        physics.bodyInterface.SetAngularVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
-        physics.Jolt.destroy(pos);
-        const mesh = getActorRenderObject(vehicle);
-        if (mesh) mesh.position.set(destination.x, destination.y + 0.75, destination.z);
-        return true;
-    }
-
-    if (!physics.character) return false;
-    const pos = new physics.Jolt.RVec3(destination.x, destination.y + PLAYER_SETTINGS.floorOffset, destination.z);
-    physics.character.SetPosition(pos);
-    physics.character.SetLinearVelocity(physics.Jolt.Vec3.prototype.sZero());
-    physics.Jolt.destroy(pos);
-    syncCameraToCharacter();
-    return true;
-}
-
 if (typeof window !== 'undefined') {
     queueMicrotask(() => {
         window.teleportActorTo = teleportActorTo;
+        window.teleportActiveGameplaySubject = teleportActiveGameplaySubject;
         window.getAllSceneActors = () => Array.from(sceneSystem?.actors || []);
     });
-}
-
-function teleportActorTo(actor, destination) {
-    if (!actor || !destination || actor.userData?.gameplayPrefab) return false;
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return false;
-
-    mesh.position.set(destination.x, destination.y + 0.75, destination.z);
-    mesh.updateMatrixWorld(true);
-
-    const body = getActorBody(actor);
-    if (body && physics.ready) {
-        const pos = new physics.Jolt.RVec3(mesh.position.x, mesh.position.y, mesh.position.z);
-        const rot = new physics.Jolt.Quat(mesh.quaternion.x, mesh.quaternion.y, mesh.quaternion.z, mesh.quaternion.w);
-        physics.bodyInterface.SetPositionAndRotation(body.GetID(), pos, rot, physics.Jolt.EActivation_Activate);
-        physics.bodyInterface.SetLinearVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
-        physics.bodyInterface.SetAngularVelocity(body.GetID(), physics.Jolt.Vec3.prototype.sZero());
-        physics.Jolt.destroy(pos);
-        physics.Jolt.destroy(rot);
-        dynamicBodySpatial.updateEntry(actor);
-    }
-
-    return true;
-}
-if (typeof window !== 'undefined') {
-    queueMicrotask(() => { window.teleportActiveGameplaySubject = teleportActiveGameplaySubject; });
-}
-
-function getGameplaySubjectPosition(target = tempVectorA) {
-    if (isDrivingVehicle()) {
-        const vehicle = getActiveVehicleProp();
-        const body = getActorBody(vehicle);
-        if (!body || !physics.ready) return null;
-        return copyJoltVector(target, physics.bodyInterface.GetPosition(body.GetID()));
-    }
-    if (!physics.character) return null;
-    return copyJoltVector(target, physics.character.GetPosition());
-}
-
-function isSubjectInsideTrigger(subjectPosition, actor) {
-    const mesh = getActorRenderObject(actor);
-    if (!mesh || actor?.userData?.collected) return false;
-    mesh.updateMatrixWorld(true);
-    mesh.getWorldPosition(tempVectorB);
-    const radius = Number(actor.userData?.triggerRadius ?? mesh.userData?.triggerRadius ?? 1.2);
-    const dx = subjectPosition.x - tempVectorB.x;
-    const dz = subjectPosition.z - tempVectorB.z;
-    const dy = Math.abs(subjectPosition.y - tempVectorB.y);
-    return dx * dx + dz * dz <= radius * radius && dy <= 2.25;
-}
-
-function dispatchTriggerForActor(prop, subjectPosition, subject) {
-    if (!prop) return false;
-    const mesh = getActorRenderObject(prop);
-    if (!mesh) return false;
-    const inside = isSubjectInsideTrigger(subjectPosition, prop);
-    const wasInside = !!prop.userData?._wasInsideTrigger;
-    if (inside !== wasInside) {
-        console.log('[trig]', prop.id, prop.userData?.gameplayPrefab,
-            'in=', inside, 'was=', wasInside,
-            'visible=', mesh.visible,
-            'handles=', Object.keys(prop.scripts?.tick?.handles || {}).length);
-    }
-    if (inside === wasInside) return inside;
-    const handles = prop.scripts?.tick?.handles;
-    const fnReady = typeof handles?.OnTrigger === 'function' || typeof handles?.OnTriggerExit === 'function';
-    if (inside && !fnReady) {
-        console.log('[trig]   defer', prop.userData?.gameplayPrefab);
-        return inside;
-    }
-    prop.userData._wasInsideTrigger = inside;
-    dispatchTriggerEvent(prop, subject, inside);
-    return inside;
-}
-
-function hasScriptedTriggerHandler(prop) {
-    const tick = prop?.scripts?.tick;
-    if (!tick?.enabled) return false;
-    const handles = tick.handles;
-    if (typeof handles?.OnTrigger === 'function' || typeof handles?.OnTriggerExit === 'function') return true;
-    // Handles populate asynchronously after first run — fall back to source check
-    // so the engine doesn't run its default behavior before the script is ready.
-    const source = tick.source || '';
-    return /\bfunction\s+OnTrigger(Exit)?\s*\(/.test(source);
-}
-
-function hasScriptedTickHandler(prop) {
-    const tick = prop?.scripts?.tick;
-    if (!tick?.enabled) return false;
-    if (typeof tick.handles?.Tick === 'function') return true;
-    // Handles populate asynchronously — fall back to a source check so the
-    // engine doesn't run its default fire before the script is ready.
-    return /\bfunction\s+Tick\s*\(/.test(tick.source || '');
 }
 
 // Reused per-frame subject descriptor for the gameplay-prefab system to
@@ -4173,27 +2471,24 @@ function syncGameplaySpawnToCamera() {
     );
 }
 
-function syncShowcaseAnglesFromTarget(target) {
-    syncShowcaseAnglesToFaceTarget(target);
-}
-
-function syncShowcaseAnglesToFaceTarget(target) {
-    tempVectorA.copy(target).sub(camera.position);
-    const flatDistance = Math.max(0.001, Math.hypot(tempVectorA.x, tempVectorA.z));
-    showcase.yaw = Math.atan2(-tempVectorA.x, -tempVectorA.z);
-    showcase.pitch = THREE.MathUtils.clamp(
-        Math.atan2(tempVectorA.y, flatDistance),
-        -PLAYER_SETTINGS.maxLookPitch,
-        PLAYER_SETTINGS.maxLookPitch
-    );
-}
-
-function applyShowcaseCameraRotation() {
-    camera.rotation.order = 'YXZ';
-    camera.rotation.x = showcase.pitch;
-    camera.rotation.y = showcase.yaw;
-    camera.rotation.z = 0;
-}
+const _showcaseCamera = createShowcaseCamera({
+    THREE, gsap,
+    camera: () => camera,
+    showcase,
+    gameplay, objectScriptState,
+    PLAYER_SETTINGS,
+    tempVectorA, tempBoxA,
+    getActorRenderObject: (a) => getActorRenderObject(a),
+    getActorSelectionObject: (a, p) => getActorSelectionObject(a, p),
+    getDynamicPropById,
+});
+const syncShowcaseAnglesFromTarget = _showcaseCamera.syncShowcaseAnglesFromTarget;
+const syncShowcaseAnglesToFaceTarget = _showcaseCamera.syncShowcaseAnglesToFaceTarget;
+const applyShowcaseCameraRotation = _showcaseCamera.applyShowcaseCameraRotation;
+const getObjectFocusFrame = _showcaseCamera.getObjectFocusFrame;
+const focusShowcaseCameraOnObject = _showcaseCamera.focusShowcaseCameraOnObject;
+const focusSceneActor = _showcaseCamera.focusSceneActor;
+const focusCurrentShowcaseSelection = _showcaseCamera.focusCurrentShowcaseSelection;
 
 function ensurePlayerCharacter() {
     physicsRuntime?.ensurePlayerCharacter();
@@ -4478,212 +2773,20 @@ function syncTransformToPhysics() {
     }
 }
 
-function rebuildActorPhysics(prop) {
-    if (!prop || !getActorRenderObject(prop) || !physics.ready) return;
-    
-    const { Jolt, bodyInterface } = physics;
-    const componentFlags = getActorComponentFlags(prop);
-    const currentBody = getActorBody(prop);
-    const bodyID = currentBody?.GetID();
-    const dynamicIndex = physics.dynamicBodies.indexOf(prop);
-    const staticIndex = physics.staticBodies.indexOf(prop);
-    
-    if (bodyID) {
-        bodyInterface.RemoveBody(bodyID);
-        bodyInterface.DestroyBody(bodyID);
-    }
-    prop.body = null;
-    const physicsBodyComponent = getPhysicsBodyComponent(prop);
-    if (physicsBodyComponent) {
-        physicsBodyComponent.body = null;
-    }
-    if (dynamicIndex >= 0) {
-        physics.dynamicBodies.splice(dynamicIndex, 1);
-        dynamicBodySpatial.remove(prop);
-    }
-    if (staticIndex >= 0) physics.staticBodies.splice(staticIndex, 1);
-
-    if (!componentFlags.collision) {
-        return;
-    }
-    
-    const importedTemplate = prop.kind === 'imported'
-        ? getImportedTemplate(prop.templateId)
-        : null;
-    const useExactMeshCollision = importedTemplate?.collisionMode === 'complex';
-
-    let bodyOptions = {
-        rotation: getActorRenderObject(prop).quaternion,
-        mass: prop.userData?.physicsMass,
-        friction: prop.userData?.physicsFriction ?? prop.userData?.friction ?? 0.5,
-        restitution: prop.userData?.physicsRestitution ?? prop.userData?.restitution ?? 0.3,
-        allowedDOFs: prop.userData?.allowedDOFs,
-        kinematic: prop.userData?.kinematic,
-        simulatePhysics: useExactMeshCollision ? false : componentFlags.physics,
-        activate: true
-    };
-    
-    const rootMesh = getActorRenderObject(prop);
-    rootMesh.updateMatrixWorld(true);
-
-    if (prop.userData?.staticMeshActorCollision) {
-        const previousSkipPhysicsCollision = !!rootMesh.userData?.skipPhysicsCollision;
-        let newBody = null;
-        try {
-            rootMesh.userData.skipPhysicsCollision = false;
-            newBody = createStaticMeshBody(rootMesh, bodyOptions);
-        } finally {
-            rootMesh.userData.skipPhysicsCollision = previousSkipPhysicsCollision;
-        }
-        prop.body = newBody;
-        if (physicsBodyComponent) physicsBodyComponent.body = newBody;
-        setActorComponentFlags(prop, {
-            ...componentFlags,
-            collision: !!newBody,
-            physics: false,
-        });
-        if (newBody) physics.staticBodies.push(prop);
-        if (actorPhysicsEditorState.previewActorId === prop.id) refreshActorPhysicsPreview();
-        return;
-    }
-
-    if (useExactMeshCollision) {
-        const newBody = createStaticMeshBody(rootMesh, bodyOptions);
-        prop.body = newBody;
-        if (physicsBodyComponent) physicsBodyComponent.body = newBody;
-        setActorComponentFlags(prop, {
-            ...componentFlags,
-            collision: !!newBody,
-            physics: false,
-        });
-        if (newBody) physics.staticBodies.push(prop);
-        if (actorPhysicsEditorState.previewActorId === prop.id) refreshActorPhysicsPreview();
-        return;
-    }
-
-    const subShapes = [];
-    const compoundSettings = new Jolt.MutableCompoundShapeSettings();
-    let hasCompound = false;
-    let hasExplicitCollisionShapes = false;
-    rootMesh.traverse((node) => {
-        if (node.userData?.isCollisionShape) hasExplicitCollisionShapes = true;
-    });
-
-    // A helper to traverse and collect collision shapes
-    function traverseAndBuildShapes(node, isRoot) {
-        const isCollisionShape = !!node.userData?.isCollisionShape;
-        if (!node.visible && !isCollisionShape) return; // Skip hidden visual components
-        if (hasExplicitCollisionShapes && !isCollisionShape) {
-            for (const child of node.children) {
-                traverseAndBuildShapes(child, false);
-            }
-            return;
-        }
-        
-        // Handle only meshes
-        if (node.isMesh) {
-            let shapeSetting = null;
-            const geo = node.geometry;
-            const scale = node.scale;
-            
-            // For primitive meshes created via UI
-            if (geo?.type === 'SphereGeometry') {
-                shapeSetting = new Jolt.SphereShapeSettings(scale.x);
-            } else if (geo?.type === 'BoxGeometry') {
-                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
-                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
-                Jolt.destroy(halfExtents);
-            } else if (geo?.type === 'CylinderGeometry') {
-                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
-                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
-                Jolt.destroy(halfExtents);
-            } else if (geo?.type === 'CapsuleGeometry') {
-                shapeSetting = new Jolt.CapsuleShapeSettings(scale.y, scale.x);
-            } else if (isRoot && prop.kind === 'sphere') {
-                shapeSetting = new Jolt.SphereShapeSettings(scale.x);
-            } else if (isRoot && prop.kind === 'cube') {
-                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
-                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
-                Jolt.destroy(halfExtents);
-            } else if (isRoot && prop.kind === 'cylinder') {
-                const halfExtents = new Jolt.Vec3(scale.x, scale.y, scale.z);
-                shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
-                Jolt.destroy(halfExtents);
-            } else if (isRoot && prop.kind === 'capsule') {
-                shapeSetting = new Jolt.CapsuleShapeSettings(scale.y, scale.x);
-            } else if (!isRoot) {
-                // Treat imported nested child geometries as boxes for simplicity if type is unknown
-                const bbox = new THREE.Box3().setFromObject(node, true);
-                if (!bbox.isEmpty()) {
-                    const size = new THREE.Vector3();
-                    bbox.getSize(size);
-                    const halfExtents = new Jolt.Vec3(Math.max(size.x/2, 0.05), Math.max(size.y/2, 0.05), Math.max(size.z/2, 0.05));
-                    shapeSetting = new Jolt.BoxShapeSettings(halfExtents, 0.05);
-                    Jolt.destroy(halfExtents);
-                }
-            }
-            
-            if (shapeSetting) {
-                const subShape = createOwnedShape(shapeSetting);
-                subShapes.push(subShape);
-                
-                // Calculate relative position/rotation to the root
-                const pos = isRoot
-                    ? new Jolt.Vec3(0, 0, 0)
-                    : new Jolt.Vec3(node.position.x, node.position.y, node.position.z);
-                const rot = isRoot
-                    ? new Jolt.Quat(0, 0, 0, 1)
-                    : new Jolt.Quat(node.quaternion.x, node.quaternion.y, node.quaternion.z, node.quaternion.w);
-                
-                compoundSettings.AddShapeShape(pos, rot, subShape, 0);
-                Jolt.destroy(pos);
-                Jolt.destroy(rot);
-                hasCompound = true;
-            }
-        }
-        
-        for (const child of node.children) {
-            traverseAndBuildShapes(child, false);
-        }
-    }
-    
-    traverseAndBuildShapes(rootMesh, true);
-    
-    let finalShape = null;
-    
-    if (hasCompound) {
-        if (subShapes.length === 1 && rootMesh.children.length === 0) {
-            // Optimization: if it's just the root shape and no children, use it directly
-            finalShape = subShapes[0];
-            Jolt.destroy(compoundSettings); // We don't need the compound wrapper
-        } else {
-            // We have multiple components or child transforms
-            finalShape = createOwnedShape(compoundSettings);
-        }
-    } else {
-        Jolt.destroy(compoundSettings);
-    }
-    
-    if (finalShape) {
-        const newBody = createDynamicPrimitiveBody(finalShape, rootMesh.position, null, bodyOptions);
-        prop.body = newBody;
-        if (physicsBodyComponent) physicsBodyComponent.body = newBody;
-        setActorComponentFlags(prop, {
-            ...componentFlags,
-            collision: !!newBody,
-            physics: !!newBody && componentFlags.physics,
-        });
-        if (newBody) {
-            if (componentFlags.physics) {
-                physics.dynamicBodies.push(prop);
-                dynamicBodySpatial.updateEntry(prop);
-            } else {
-                physics.staticBodies.push(prop);
-            }
-        }
-    }
-    if (actorPhysicsEditorState.previewActorId === prop.id) refreshActorPhysicsPreview();
-}
+const rebuildActorPhysics = createRebuildActorPhysics({
+    THREE,
+    physics, dynamicBodySpatial,
+    actorPhysicsEditorState,
+    getActorComponentFlags, setActorComponentFlags,
+    getActorRenderObject: (p) => getActorRenderObject(p),
+    getActorBody: (p) => getActorBody(p),
+    getPhysicsBodyComponent,
+    getImportedTemplate,
+    createStaticMeshBody: (...a) => createStaticMeshBody(...a),
+    createDynamicPrimitiveBody: (...a) => createDynamicPrimitiveBody(...a),
+    createOwnedShape,
+    refreshActorPhysicsPreview: (...a) => refreshActorPhysicsPreview(...a),
+});
 
 function getActorScriptState(prop) {
     return getScriptComponent(prop)?.state ?? prop?.scripts ?? null;
@@ -4722,56 +2825,7 @@ function ensureActorScriptState(prop) {
     return scriptState;
 }
 
-function buildPrimitiveActorMesh(kind) {
-    if (kind === 'sphere') {
-        return new THREE.Mesh(
-            new THREE.SphereGeometry(1, 28, 20),
-            new THREE.MeshStandardMaterial({
-                color: 0xf97316,
-                metalness: 0.14,
-                roughness: 0.34,
-                emissive: 0x331100,
-                emissiveIntensity: 0.28,
-            })
-        );
-    }
-    if (kind === 'cube') {
-    return new THREE.Mesh(
-        new THREE.BoxGeometry(2, 2, 2),
-        new THREE.MeshStandardMaterial({
-            color: 0x60a5fa,
-            metalness: 0.12,
-            roughness: 0.38,
-            emissive: 0x0b1220,
-            emissiveIntensity: 0.2,
-        })
-    );
-}
-    if (kind === 'cylinder') {
-        return new THREE.Mesh(
-            new THREE.CylinderGeometry(1, 1, 2, 32, 1, false),
-            new THREE.MeshStandardMaterial({
-                color: 0x94a3b8,
-                metalness: 0.1,
-                roughness: 0.46,
-                emissive: 0x0f172a,
-                emissiveIntensity: 0.16,
-            })
-        );
-    }
-    if (kind === 'capsule') {
-        return new THREE.Mesh(
-            new THREE.CapsuleGeometry(1, 2, 8, 16),
-            new THREE.MeshStandardMaterial({
-                color: 0x16a34a,
-                metalness: 0.1,
-                roughness: 0.4,
-                emissive: 0x052d12,
-                emissiveIntensity: 0.22,
-            })
-        );
-    }
-}
+const buildPrimitiveActorMesh = createPrimitiveMeshFactory(THREE);
 
 function syncActorEditorTemplateOptions(selectedTemplateId = '', selectedVehicleBodyTemplateId = '', selectedVehicleWheelTemplateId = '') {
     const templates = listImportedTemplates();
@@ -6576,98 +4630,6 @@ function syncActorCoreInstances() {
     }
 }
 
-function focusSceneActor(actor) {
-    const actorMesh = getActorRenderObject(actor);
-    if (gameplay.active || !actorMesh) return;
-
-    focusShowcaseCameraOnObject(actorMesh);
-}
-
-function focusCurrentShowcaseSelection() {
-    if (gameplay.active) return false;
-
-    const actor = getDynamicPropById(objectScriptState.targetPropId);
-    if (!actor) return false;
-
-    const focusObject = getActorSelectionObject(actor);
-    if (!focusObject) return false;
-
-    focusShowcaseCameraOnObject(focusObject, { duration: 0.55 });
-    return true;
-}
-
-function getObjectFocusFrame(object) {
-    if (!object) return null;
-
-    tempBoxA.makeEmpty();
-    tempBoxA.setFromObject(object, true);
-
-    const targetPos = new THREE.Vector3();
-    const size = new THREE.Vector3();
-
-    if (tempBoxA.isEmpty()) {
-        object.getWorldPosition(targetPos);
-        size.setScalar(0.7);
-    } else {
-        tempBoxA.getCenter(targetPos);
-        tempBoxA.getSize(size);
-    }
-
-    const radius = Math.max(size.length() * 0.5, 0.35);
-    const vFov = THREE.MathUtils.degToRad(camera.fov || 45);
-    const hFov = 2 * Math.atan(Math.tan(vFov * 0.5) * Math.max(camera.aspect || 1, 0.1));
-    const fitFov = Math.max(0.1, Math.min(vFov, hFov));
-    const distance = THREE.MathUtils.clamp(
-        (radius / Math.sin(fitFov * 0.5)) * 1.65,
-        Math.max(2.1, radius * 2.9),
-        90
-    );
-
-    const viewDir = new THREE.Vector3().subVectors(camera.position, targetPos);
-    if (viewDir.lengthSq() < 0.0001) {
-        viewDir.set(1, 0.45, 1);
-    }
-    viewDir.normalize();
-
-    if (viewDir.y < 0.24) {
-        viewDir.y = 0.34;
-        viewDir.normalize();
-    }
-
-    return {
-        target: targetPos,
-        cameraPosition: targetPos.clone().addScaledVector(viewDir, distance),
-    };
-}
-
-function focusShowcaseCameraOnObject(object, { duration = 0.6 } = {}) {
-    if (gameplay.active || !camera || !object) return;
-
-    const frame = getObjectFocusFrame(object);
-    if (!frame) return;
-
-    showcase.velocity.set(0, 0, 0);
-    gsap?.killTweensOf(camera.position);
-
-    if (gsap) {
-        gsap.to(camera.position, {
-            x: frame.cameraPosition.x,
-            y: frame.cameraPosition.y,
-            z: frame.cameraPosition.z,
-            duration,
-            overwrite: true,
-            ease: 'power2.out',
-            onUpdate: () => {
-                syncShowcaseAnglesToFaceTarget(frame.target);
-                applyShowcaseCameraRotation();
-            }
-        });
-    } else {
-        camera.position.copy(frame.cameraPosition);
-        syncShowcaseAnglesToFaceTarget(frame.target);
-        applyShowcaseCameraRotation();
-    }
-}
 
 // Scene-actor UI extracted to ../ui/sceneActorUi.js. Eager wiring (called
 // indirectly by many functions; const aliases at this site must exist
@@ -6716,10 +4678,8 @@ async function init() {
     assets.setImportedTemplatesProvider(() => importedPropState.templates);
     registerBuiltinPrefabs();
     await loadPrefabManifest();
-    if (typeof window !== 'undefined') {
-        window.__assets = assets;
-        window.__prefabs = prefabRegistry;
-    }
+    registerDebug('assets', assets);
+    registerDebug('prefabs', prefabRegistry);
 
     // Phase 0 dev gate: `?bench=cull` runs the throwaway cull benchmark in
     // full isolation (its own renderer/scene/camera) and skips the entire
@@ -7513,13 +5473,12 @@ async function init() {
         scene,
         getDirectionalLight: () => mainDirectionalLight,
     });
-    if (typeof window !== 'undefined') {
-        window.__ddgi = getDDGIManager();
-        window.__lightmapBaker = lightmapBaker;
-        // Entity bridge debug handle (verification: __scene.getEntity(id),
-        // __scene.entityFromObject3D(obj)).
-        window.__scene = sceneSystem;
-    }
+    registerDebug('ddgi', getDDGIManager());
+    registerDebug('lightmapBaker', lightmapBaker);
+    // Entity bridge debug handle (verification:
+    //   __POLYFLOW_DEBUG__.scene.getEntity(id),
+    //   __POLYFLOW_DEBUG__.scene.entityFromObject3D(obj)).
+    registerDebug('scene', sceneSystem);
 
     // Initialize TransformControls for gizmo manipulation
     transformControl = new TransformControls(camera, renderer.domElement);
@@ -9371,53 +7330,15 @@ function wireExtractedModules() {
         forceExitGameplayForWorldLoad, updateGameplayUI, updateWorldPresentation,
     });
 
-    // Gameplay system registry. Each .register() entry corresponds to one
-    // per-frame function the main loop used to call inline. Ordering is
-    // explicit: shooterSpawners → straightGuns → shooterAis → effects →
-    // hitFeedback → subjectSnapshot → componentTick → goalies. The frame
-    // loop now calls gameplaySystems.tick(delta) instead of N inline calls.
-    gameplaySystems.register({
-        name: 'shooterSpawners',
-        update: (delta) => updateShooterSpawners(delta),
-    });
-    gameplaySystems.register({
-        name: 'straightGuns',
-        update: () => updateStraightGuns(),
-        after: ['shooterSpawners'],
-    });
-    gameplaySystems.register({
-        name: 'shooterAis',
-        update: (delta) => updateShooterAis(delta),
-        after: ['straightGuns'],
-    });
-    gameplaySystems.register({
-        name: 'effects',
-        update: (delta) => updateGameplayEffects(delta),
-        after: ['shooterAis'],
-    });
-    gameplaySystems.register({
-        name: 'playerHitFeedback',
-        update: (delta) => updatePlayerHitFeedback(delta),
-        after: ['effects'],
-    });
-    gameplaySystems.register({
-        name: 'projectileFlush',
-        update: () => getProjectileInstancer()?.flush(),
-        after: ['shooterAis'],
-    });
-    gameplaySystems.register({
-        name: 'subjectSnapshot',
-        update: () => snapshotGameplaySubject(),
-        after: ['playerHitFeedback'],
-    });
-    gameplaySystems.register({
-        name: 'componentTick',
-        update: (delta) => sceneSystem?.tickComponents?.(delta),
-        after: ['subjectSnapshot'],
-    });
-    gameplaySystems.register({
-        name: 'soccerGoalies',
-        update: (delta) => updateSoccerGoalies(delta),
-        after: ['componentTick'],
+    registerGameplaySystems(gameplaySystems, {
+        updateShooterSpawners,
+        updateStraightGuns,
+        updateShooterAis,
+        updateGameplayEffects,
+        updatePlayerHitFeedback,
+        getProjectileInstancer,
+        snapshotGameplaySubject,
+        sceneSystem,
+        updateSoccerGoalies,
     });
 }

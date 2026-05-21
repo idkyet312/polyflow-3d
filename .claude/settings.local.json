@@ -54,7 +54,8 @@
       "Bash(node -e \"const s=require\\('fs'\\).readFileSync\\('src/app/runtime.js','utf8'\\); new \\(require\\('vm'\\).Script\\)\\(s.replace\\(/^import .*$/gm,''\\).replace\\(/^export /gm,''\\),{filename:'runtime.js'}\\); console.log\\('parse OK'\\)\")",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('scripts',{}\\),indent=1\\)\\); print\\('deps:', list\\(d.get\\('devDependencies',{}\\).keys\\(\\)\\)\\)\")",
       "Bash(node --check src/physics/core.js)",
-      "Bash(node --check \"e:/JOBS/polyflow-3d/src/physics/core.js\")"
+      "Bash(node --check \"e:/JOBS/polyflow-3d/src/physics/core.js\")",
+      "Bash(npm test *)"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"

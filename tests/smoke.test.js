@@ -47,6 +47,133 @@ test('appCore: getters reflect current value, setter dispatches', async () => {
     );
 });
 
+// ───────────────────────── Services DI ─────────────────────────
+
+test('Services: singleton memoizes, non-singleton re-evaluates', async () => {
+    const { Services } = await import('../src/runtime/services.js');
+    const s = new Services();
+    let calls = 0;
+    s.register('count', () => ++calls);
+    assert.equal(s.get('count'), 1);
+    assert.equal(s.get('count'), 1, 'singleton must cache');
+
+    let live = 0;
+    s.register('live', () => ++live, { singleton: false });
+    assert.equal(s.get('live'), 1);
+    assert.equal(s.get('live'), 2, 'non-singleton must re-eval');
+});
+
+test('Services: unknown key throws, duplicate throws, missing factory throws', async () => {
+    const { Services } = await import('../src/runtime/services.js');
+    const s = new Services();
+    assert.throws(() => s.get('nope'), /unknown service/);
+    s.register('x', () => 1);
+    assert.throws(() => s.register('x', () => 2), /duplicate/);
+    assert.throws(() => s.register('y'), /factory function/);
+});
+
+test('Services: invalidate forces re-eval of singleton', async () => {
+    const { Services } = await import('../src/runtime/services.js');
+    const s = new Services();
+    let n = 0;
+    s.register('n', () => ++n);
+    assert.equal(s.get('n'), 1);
+    assert.equal(s.get('n'), 1);
+    s.invalidate('n');
+    assert.equal(s.get('n'), 2);
+});
+
+// ───────────────────────── registerGameplaySystems ─────────────────────────
+
+test('registerGameplaySystems: produces expected topological order', async () => {
+    const { createWorld } = await import('../src/runtime/World.js');
+    const { registerGameplaySystems } = await import('../src/gameplay/registerSystems.js');
+
+    const noop = () => {};
+    const w = createWorld({ id: 'order-test' });
+    registerGameplaySystems(w.systems, {
+        updateShooterSpawners: noop,
+        updateStraightGuns: noop,
+        updateShooterAis: noop,
+        updateGameplayEffects: noop,
+        updatePlayerHitFeedback: noop,
+        getProjectileInstancer: () => ({ flush: noop }),
+        snapshotGameplaySubject: noop,
+        sceneSystem: { tickComponents: noop },
+        updateSoccerGoalies: noop,
+    });
+    const order = w.systems.getOrder();
+    const idx = (n) => order.indexOf(n);
+
+    assert.ok(idx('shooterSpawners') < idx('straightGuns'));
+    assert.ok(idx('straightGuns') < idx('shooterAis'));
+    assert.ok(idx('shooterAis') < idx('effects'));
+    assert.ok(idx('effects') < idx('playerHitFeedback'));
+    assert.ok(idx('shooterAis') < idx('projectileFlush'));
+    assert.ok(idx('playerHitFeedback') < idx('subjectSnapshot'));
+    assert.ok(idx('subjectSnapshot') < idx('componentTick'));
+    assert.ok(idx('componentTick') < idx('soccerGoalies'));
+});
+
+// ───────────────────────── World ─────────────────────────
+
+test('World: two instances do not share bus or systems', async () => {
+    const { createWorld } = await import('../src/runtime/World.js');
+    const a = createWorld({ id: 'a' });
+    const b = createWorld({ id: 'b' });
+
+    let seenA = 0; let seenB = 0;
+    a.eventBus.on('hit', () => seenA++);
+    b.eventBus.on('hit', () => seenB++);
+    a.eventBus.emit('hit');
+    assert.equal(seenA, 1);
+    assert.equal(seenB, 0, 'bus isolation: emit on A must not reach B');
+
+    let tickedA = 0; let tickedB = 0;
+    a.systems.register({ name: 's', update: () => tickedA++ });
+    b.systems.register({ name: 's', update: () => tickedB++ });
+    a.systems.tick(0);
+    assert.equal(tickedA, 1);
+    assert.equal(tickedB, 0, 'registry isolation: tick A must not run B');
+});
+
+test('World: dispose clears listeners and systems', async () => {
+    const { createWorld } = await import('../src/runtime/World.js');
+    const w = createWorld({ id: 'd' });
+    let seen = 0;
+    w.eventBus.on('x', () => seen++);
+    w.systems.register({ name: 's', update: () => {} });
+    w.dispose();
+    w.eventBus.emit('x');
+    assert.equal(seen, 0, 'dispose must clear listeners');
+    assert.equal(w.systems.getOrder().length, 0, 'dispose must unregister systems');
+});
+
+// ───────────────────────── debugRegistry ─────────────────────────
+
+test('debugRegistry: no leak unless POLYFLOW_DEBUG=1', async () => {
+    delete globalThis.__POLYFLOW_DEBUG__;
+    const prev = process.env.POLYFLOW_DEBUG;
+    delete process.env.POLYFLOW_DEBUG;
+    const mod = await import(`../src/runtime/debugRegistry.js?prod=${Date.now()}`);
+    mod.registerDebug('eventBus', { id: 'x' });
+    assert.equal(globalThis.__POLYFLOW_DEBUG__, undefined, 'must not attach without flag');
+    if (prev !== undefined) process.env.POLYFLOW_DEBUG = prev;
+});
+
+test('debugRegistry: registers under namespace when flag set', async () => {
+    delete globalThis.__POLYFLOW_DEBUG__;
+    process.env.POLYFLOW_DEBUG = '1';
+    const mod = await import(`../src/runtime/debugRegistry.js?dev=${Date.now()}`);
+    const bus = { id: 'bus' };
+    mod.registerDebug('eventBus', bus);
+    assert.equal(globalThis.__POLYFLOW_DEBUG__.eventBus, bus);
+    assert.equal(mod.getDebug('eventBus'), bus);
+    mod.clearDebug();
+    assert.equal(mod.getDebug('eventBus'), undefined);
+    delete process.env.POLYFLOW_DEBUG;
+});
+
 // ───────────────────────── sceneRuntime ─────────────────────────
 
 test('sceneRuntime: Entity component map', async () => {
