@@ -283,6 +283,12 @@ export function createShooterAiVisuals(deps) {
         const dmg = Math.max(0, Number(amount) || 0);
         const fatal = health - dmg <= 0;
         setShooterHealth(actor, health - dmg);
+        // Rogue Waves status-effect hook: lets the arena stamp burn/slow/freeze
+        // on the actor it just hit. Separate from window.onEnemyDamaged (which
+        // the weapon script owns for hurt FX) so neither clobbers the other.
+        if (typeof window !== 'undefined' && window.onRogueEnemyHit) {
+            try { window.onRogueEnemyHit(actor, dmg, fatal); } catch (e) { /* script error */ }
+        }
         // Overridable hook: weapon scripts decide hurt FX. setShooterHealth already
         // plays the death sound on a fatal hit, so default only handles non-fatal.
         // x,y,z = enemy world position (for spatial audio in the hook).

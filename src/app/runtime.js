@@ -4995,8 +4995,12 @@ async function init() {
     runtimeAudio.listener = new SoundGeneratorAudioListener();
     camera.add(runtimeAudio.listener);
 
-    renderer = new WebGPURenderer({ antialias: true, alpha: true, trackTimestamp: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    // PERF: pixel ratio capped at 2 — HiDPI 3x/4x devices were drawing 9-16x
+    // 1080p for no perceptible win.
+    // AA: cheap MSAA (2 samples) on the plain render path; FXAA node is added
+    // to the post-process output for the bloom/SSGI path (see worldEnvSystem).
+    renderer = new WebGPURenderer({ antialias: true, samples: 2, alpha: true, trackTimestamp: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.shadowMap.enabled = true;
@@ -5129,8 +5133,10 @@ async function init() {
 
     mainDirectionalLight = new THREE.DirectionalLight(0xffffff, 2.5);
     mainDirectionalLight.castShadow = true;
-    mainDirectionalLight.shadow.mapSize.width = 4096;
-    mainDirectionalLight.shadow.mapSize.height = 4096;
+    // PERF: 4096² shadow map → 2048². 4x less shadow fragment work; PCF radius
+    // 2.0 still hides the resolution drop on a single cascade-less dir light.
+    mainDirectionalLight.shadow.mapSize.width = 2048;
+    mainDirectionalLight.shadow.mapSize.height = 2048;
     mainDirectionalLight.shadow.camera.near = 0.5;
     mainDirectionalLight.shadow.camera.far = MAIN_SHADOW_FAR;
     mainDirectionalLight.shadow.camera.left = -MAIN_SHADOW_EXTENT;
@@ -6361,7 +6367,7 @@ function wireExtractedModules() {
             gameplay, mobileState, SHOOTER_AI_PREFAB,
             spawnDoomEnemyAt, getActorRenderObject, tintGameplayPrefabActor,
             setPlayerHealth, isDoomMiniWaveCleared, getGameplayPrefabActors,
-            ensureGameplayPrefabScript, runObjectEventScript,
+            ensureGameplayPrefabScript, runObjectEventScript, flashActorHit,
             scratchPrefab: () => _scratchPrefab1,
             getRogueGameModeScript: () => ROGUE_GAMEMODE_SCRIPT,
             getResetDoomArenaLevelState: () => resetDoomArenaLevelState,

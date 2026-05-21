@@ -8,8 +8,11 @@ import { TERRAIN_SIZE } from './terrain.js';
 
 const DEFAULT_INNER_RADIUS = TERRAIN_SIZE * 0.5 * 0.92; // matches grass extent
 const DEFAULT_OUTER_RADIUS = TERRAIN_SIZE * 4.0;
-const DEFAULT_RING_SEGMENTS = 256;
-const DEFAULT_RADIAL_SEGMENTS = 64;
+// PERF: 256×64 (16k tris) → 128×32 (4k tris). Waves are low-freq so the
+// extra tessellation was invisible; mesh is transparent + frustumCulled=false
+// so every vertex shaded every frame.
+const DEFAULT_RING_SEGMENTS = 128;
+const DEFAULT_RADIAL_SEGMENTS = 32;
 const DEFAULT_LEVEL = -0.55;
 const DEFAULT_DEEP_COLOR = new THREE.Color(0x0a2a3a);
 const DEFAULT_SHALLOW_COLOR = new THREE.Color(0x3da6c7);
@@ -86,7 +89,10 @@ export function createWater({
     mesh.position.y = level;
     mesh.receiveShadow = true;
     mesh.castShadow = false;
-    mesh.frustumCulled = false;
+    // PERF: was false. Ring is centered at origin; bounding sphere is correct
+    // for a RingGeometry and will keep the mesh drawn whenever any part is in
+    // view. Saves draw + vertex shader when player faces straight up/down.
+    mesh.frustumCulled = true;
     mesh.renderOrder = 2;
     mesh.userData.isWater = true;
 

@@ -19,8 +19,20 @@ export const ROGUE_ENEMY_VARIANTS = {
     rusher: { hpMul: 0.7, speedMul: 2.3,  cooldownMul: 1.3, scale: 0.85, tint: '#f59e0b', xp: 1, score: 18 },
     tank:   { hpMul: 4.5, speedMul: 0.55, cooldownMul: 1.1, scale: 1.55, tint: '#7c3aed', xp: 3, score: 45 },
     sniper: { hpMul: 0.8, speedMul: 0.8,  cooldownMul: 0.55, range: 60, scale: 0.95, tint: '#22d3ee', xp: 2, score: 30 },
+    // bomber: fast, fragile, detonates on death dealing AoE damage to other
+    // enemies (handled in onRogueEnemyKilled) and a burst of bonus XP orbs.
+    bomber: { hpMul: 0.9, speedMul: 1.6,  cooldownMul: 1.0, scale: 1.0, tint: '#84cc16', xp: 2, score: 28, bomber: true },
     boss:   { hpMul: 22,  speedMul: 0.8,  cooldownMul: 0.7, scale: 2.6, tint: '#ef4444', xp: 12, score: 250 },
 };
+
+// Elite modifier: rolled per non-boss spawn from wave 4+. Beefier, faster,
+// gold-tinted, and worth far more XP/score. Adds a build-defining "do I focus
+// it?" decision to a wave instead of every enemy being interchangeable.
+const ELITE_MOD = { hpMul: 2.6, speedMul: 1.15, scaleMul: 1.25, xpAdd: 3, scoreAdd: 60, tint: '#ffd23f' };
+function rollEliteChance(wave) {
+    if (wave < 4) return 0;
+    return Math.min(0.28, 0.05 + (wave - 4) * 0.025);
+}
 
 const ROGUE_CARDS_BY_WEAPON = {
     doomShotgun: [
@@ -56,37 +68,49 @@ export function createRogueWaves(deps) {
         gameplay, mobileState, SHOOTER_AI_PREFAB,
         spawnDoomEnemyAt, getActorRenderObject, tintGameplayPrefabActor,
         setPlayerHealth, isDoomMiniWaveCleared, getGameplayPrefabActors,
-        ensureGameplayPrefabScript, runObjectEventScript, scratchPrefab,
+        ensureGameplayPrefabScript, runObjectEventScript, scratchPrefab, flashActorHit,
         getRogueGameModeScript, getResetDoomArenaLevelState, respawnPlayer,
         equipDoomShotgun, equipStraightGun, equipThrowingStar,
     } = deps;
 
     // ---- enemy variants -------------------------------------------------
-    function spawnRogueEnemy(variant, position, wave = 1) {
+    function spawnRogueEnemy(variant, position, wave = 1, { elite = false } = {}) {
         const v = ROGUE_ENEMY_VARIANTS[variant] || ROGUE_ENEMY_VARIANTS.grunt;
         // Global HP scale for Rogue Waves enemies (2/3 = die a bit faster).
         const base = SHOOTER_AI_PREFAB.health * (2 / 3);
         const waveScale = 1 + Math.max(0, wave - 1) * 0.06;
-        const hp = base * v.hpMul * waveScale;
+        const eliteHp = elite ? ELITE_MOD.hpMul : 1;
+        const eliteSpeed = elite ? ELITE_MOD.speedMul : 1;
+        const eliteScale = elite ? ELITE_MOD.scaleMul : 1;
+        const hp = base * v.hpMul * waveScale * eliteHp;
         const actor = spawnDoomEnemyAt(position, {
-            label: `Arena ${variant} W${wave}`,
+            label: `Arena ${elite ? 'ELITE ' : ''}${variant} W${wave}`,
             groundY: position.y,
             health: hp,
             maxHealth: hp,
-            speedMul: v.speedMul,
+            speedMul: v.speedMul * eliteSpeed,
             cooldownMs: SHOOTER_AI_PREFAB.cooldownMs * v.cooldownMul,
             range: v.range,
             rogueVariant: variant,
-            scoreValue: SHOOTER_AI_PREFAB.scoreValue + v.score + wave * 4,
+            scoreValue: SHOOTER_AI_PREFAB.scoreValue + v.score + wave * 4 + (elite ? ELITE_MOD.scoreAdd : 0),
         });
         if (!actor) return null;
-        actor.userData.rogueXp = v.xp;
+        actor.userData.rogueXp = v.xp + (elite ? ELITE_MOD.xpAdd : 0);
+        actor.userData.rogueBomber = !!v.bomber;
+        actor.userData.rogueElite = !!elite;
+        actor.userData.rogueWave = wave;
+        // Clear any status carried over from a pooled/reused actor.
+        actor.userData.rogueStatus = null;
+        if (actor.userData.shooterAi) actor.userData.shooterAi._slowFactor = 1;
         const mesh = getActorRenderObject(actor);
-        if (mesh && v.scale !== 1) {
-            mesh.scale.multiplyScalar(v.scale);
+        const finalScale = v.scale * eliteScale;
+        if (mesh && finalScale !== 1) {
+            mesh.scale.multiplyScalar(finalScale);
             mesh.updateMatrixWorld(true);
         }
-        try { tintGameplayPrefabActor(actor, v.tint, v.tint, variant === 'boss' ? 1.8 : 1.0); } catch (e) {}
+        const tint = elite ? ELITE_MOD.tint : v.tint;
+        const glow = variant === 'boss' ? 1.8 : (elite ? 1.5 : 1.0);
+        try { tintGameplayPrefabActor(actor, tint, tint, glow); } catch (e) {}
         return actor;
     }
 
@@ -95,6 +119,11 @@ export function createRogueWaves(deps) {
         return {
             damage: 1, fireRate: 1, pellets: 0, magSize: 0, reloadSpeed: 1,
             moveSpeed: 1, maxHealth: 1, damageTaken: 1, lifesteal: 0, xpGain: 1,
+            // Status-effect upgrades (0 = inactive):
+            //   burn        - damage-per-second applied for BURN_DURATION on hit
+            //   slow        - 0..1 movement slow fraction applied on hit
+            //   freezeChance- 0..1 chance per hit to fully freeze for FREEZE_DURATION
+            burn: 0, slow: 0, freezeChance: 0,
         };
     }
 
@@ -125,7 +154,176 @@ export function createRogueWaves(deps) {
         closeRogueDeathScreen();
         closeRogueCardPicker();
         document.querySelectorAll('.rogue-overlay').forEach((n) => n.remove());
+        // Float-text layer + combo banner are .rogue-overlay nodes removed
+        // above; drop stale refs so they're rebuilt fresh next run.
+        _rogueFloatLayer = null;
+        _rogueBannerEl = null;
+        if (_rogueBannerTimer) { clearTimeout(_rogueBannerTimer); _rogueBannerTimer = null; }
         updateRogueXpBar();
+    }
+
+    // ---- juice: camera shake + floating combat text ---------------------
+    // Reuses the existing per-frame camera-shake driver in playerCombat
+    // (gameplay.hitFeedback.shake is decayed + applied to the camera every
+    // frame) so kills/explosions kick the view without new wiring.
+    function addRogueShake(amount) {
+        const fb = gameplay.hitFeedback;
+        if (!fb) return;
+        fb.shake = Math.min(2.2, Math.max(fb.shake || 0, amount));
+    }
+
+    let _rogueFloatLayer = null;
+    function rogueFloatLayer() {
+        if (_rogueFloatLayer?.parentNode) return _rogueFloatLayer;
+        const el = document.createElement('div');
+        el.className = 'rogue-overlay';
+        el.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:997;overflow:hidden;';
+        (document.getElementById('canvas-container') || document.body)?.appendChild(el);
+        _rogueFloatLayer = el;
+        return el;
+    }
+
+    // Project a world position to screen and pop a short-lived rising label.
+    function floatWorldText(text, worldPos, { color = '#ffd166', size = 18, big = false } = {}) {
+        const { camera, renderer } = core;
+        if (!camera || !renderer || !worldPos) return;
+        const v = _tmpProj.copy(worldPos).project(camera);
+        if (v.z > 1) return; // behind camera
+        const rect = renderer.domElement.getBoundingClientRect();
+        const host = (document.getElementById('canvas-container') || document.body).getBoundingClientRect();
+        const x = rect.left - host.left + (v.x * 0.5 + 0.5) * rect.width;
+        const y = rect.top - host.top + (-v.y * 0.5 + 0.5) * rect.height;
+        const node = document.createElement('div');
+        node.textContent = text;
+        node.style.cssText = `position:absolute;left:${x}px;top:${y}px;`
+            + `transform:translate(-50%,-50%);color:${color};`
+            + `font:${big ? 900 : 800} ${size}px/1 "Trebuchet MS",system-ui,sans-serif;`
+            + `text-shadow:0 2px 6px rgba(0,0,0,0.9);will-change:transform,opacity;`
+            + `transition:transform .7s cubic-bezier(.2,.7,.3,1),opacity .7s ease;opacity:1;`;
+        rogueFloatLayer().appendChild(node);
+        requestAnimationFrame(() => {
+            node.style.transform = `translate(-50%,-50%) translateY(${big ? -70 : -46}px) scale(${big ? 1.25 : 1})`;
+            node.style.opacity = '0';
+        });
+        setTimeout(() => node.remove(), 760);
+    }
+
+    // Center banner for combo milestones / boss alerts.
+    let _rogueBannerEl = null;
+    let _rogueBannerTimer = null;
+    function rogueBanner(text, color = '#ffd166') {
+        if (!_rogueBannerEl?.parentNode) {
+            const el = document.createElement('div');
+            el.className = 'rogue-overlay';
+            el.style.cssText = 'position:absolute;left:50%;top:34%;transform:translate(-50%,-50%);'
+                + 'pointer-events:none;z-index:998;text-align:center;'
+                + 'font:900 34px/1 "Trebuchet MS",system-ui,sans-serif;'
+                + 'text-shadow:0 0 22px rgba(0,0,0,0.8);transition:opacity .25s,transform .25s;opacity:0;';
+            (document.getElementById('canvas-container') || document.body)?.appendChild(el);
+            _rogueBannerEl = el;
+        }
+        const el = _rogueBannerEl;
+        el.style.color = color;
+        el.innerHTML = text;
+        el.style.opacity = '1';
+        el.style.transform = 'translate(-50%,-50%) scale(1.08)';
+        if (_rogueBannerTimer) clearTimeout(_rogueBannerTimer);
+        requestAnimationFrame(() => { el.style.transform = 'translate(-50%,-50%) scale(1)'; });
+        _rogueBannerTimer = setTimeout(() => { if (el) el.style.opacity = '0'; }, 900);
+    }
+
+    const _tmpProj = new THREE.Vector3();
+    const _tmpExplode = new THREE.Vector3();
+    const _tmpStatus = new THREE.Vector3();
+
+    // ---- status effects (burn / slow / freeze) --------------------------
+    // Status lives on actor.userData.rogueStatus and is driven by the arena's
+    // per-frame tick (tickRogueStatuses). Effects are stamped on hit via the
+    // window.onRogueEnemyHit engine hook installed in installRogueStatusHook().
+    const BURN_DURATION_MS = 3000;   // total burn lifetime per refresh
+    const BURN_TICK_MS = 500;        // DoT cadence
+    const SLOW_DURATION_MS = 1800;   // slow lingers then decays
+    const FREEZE_DURATION_MS = 1100; // hard stop
+    const STATUS_FLOAT_COOLDOWN_MS = 600; // throttle floating "Frozen!" text
+
+    function ensureRogueStatus(actor) {
+        if (!actor.userData.rogueStatus) {
+            actor.userData.rogueStatus = {
+                burnUntil: 0, burnDps: 0, burnTickAt: 0,
+                slowUntil: 0, slowMul: 1,
+                freezeUntil: 0, lastFloatAt: 0,
+            };
+        }
+        return actor.userData.rogueStatus;
+    }
+
+    function applyRogueStatusOnHit(actor) {
+        const buffs = window.rogueBuffs || {};
+        if (!actor?.userData?.shooterAi || actor.userData.shooterAi.defeated) return;
+        const hasAny = (buffs.burn || 0) > 0 || (buffs.slow || 0) > 0 || (buffs.freezeChance || 0) > 0;
+        if (!hasAny) return;
+        const st = ensureRogueStatus(actor);
+        const now = performance.now?.() || Date.now();
+
+        if ((buffs.burn || 0) > 0) {
+            st.burnDps = buffs.burn;
+            st.burnUntil = now + BURN_DURATION_MS;
+            if (!st.burnTickAt) st.burnTickAt = now + BURN_TICK_MS;
+        }
+        if ((buffs.slow || 0) > 0) {
+            st.slowMul = Math.max(0.15, 1 - buffs.slow);
+            st.slowUntil = now + SLOW_DURATION_MS;
+        }
+        if ((buffs.freezeChance || 0) > 0 && Math.random() < buffs.freezeChance) {
+            st.freezeUntil = now + FREEZE_DURATION_MS;
+            if (now - (st.lastFloatAt || 0) > STATUS_FLOAT_COOLDOWN_MS) {
+                st.lastFloatAt = now;
+                const m = getActorRenderObject(actor);
+                if (m) floatWorldText('FROZEN', m.getWorldPosition(_tmpStatus).clone(), { color: '#7dd3fc', size: 16 });
+            }
+        }
+    }
+
+    function installRogueStatusHook() {
+        if (typeof window === 'undefined' || window.__rogueStatusHookInstalled) return;
+        window.__rogueStatusHookInstalled = true;
+        window.onRogueEnemyHit = (actor, _dmg, fatal) => {
+            if (fatal) return;
+            applyRogueStatusOnHit(actor);
+        };
+    }
+
+    // Per-frame status driver: burn DoT, slow/freeze decay → shooter._slowFactor.
+    function tickRogueStatuses(delta = 0.016) {
+        const now = performance.now?.() || Date.now();
+        const damageFn = (typeof window !== 'undefined') ? window.damageShooterAi : null;
+        const actors = getGameplayPrefabActors('shooterAi', scratchPrefab());
+        for (const a of actors) {
+            const ai = a?.userData?.shooterAi;
+            if (!ai || ai.defeated) continue;
+            const st = a.userData.rogueStatus;
+            if (!st) { ai._slowFactor = 1; continue; }
+
+            // Burn DoT.
+            if (st.burnUntil > now && st.burnDps > 0) {
+                if (now >= st.burnTickAt) {
+                    st.burnTickAt = now + BURN_TICK_MS;
+                    if (damageFn) damageFn(a, st.burnDps * (BURN_TICK_MS / 1000));
+                    try { flashActorHit(a, 0xff8a3d); } catch (e) {}
+                }
+            } else {
+                st.burnDps = 0; st.burnTickAt = 0;
+            }
+
+            // Freeze takes priority, then slow, then full speed.
+            if (st.freezeUntil > now) {
+                ai._slowFactor = 0;
+            } else if (st.slowUntil > now) {
+                ai._slowFactor = st.slowMul;
+            } else {
+                ai._slowFactor = 1;
+            }
+        }
     }
 
     // ---- XP orbs --------------------------------------------------------
@@ -200,7 +398,9 @@ export function createRogueWaves(deps) {
         while (r.xp >= r.xpToNext) {
             r.xp -= r.xpToNext;
             r.level += 1;
-            r.xpToNext = Math.round(r.xpToNext * 1.35 + 2);
+            // Gentler curve (1.28 vs 1.35): keeps cards flowing into the
+            // mid-game so builds keep evolving instead of stalling out.
+            r.xpToNext = Math.round(r.xpToNext * 1.28 + 2);
             leveled = true;
         }
         updateRogueXpBar();
@@ -208,19 +408,78 @@ export function createRogueWaves(deps) {
     }
 
     // ---- kill combo + drops --------------------------------------------
-    const COMBO_WINDOW_MS = 3500;
+    // Longer window at higher combos so streaks are sustainable but still
+    // require pressure — rewards aggressive play without being free.
+    const COMBO_BASE_WINDOW_MS = 3200;
+    function comboWindowMs(combo) {
+        return COMBO_BASE_WINDOW_MS + Math.min(2000, combo * 60);
+    }
     function onRogueEnemyKilled(x, y, z, actor) {
         const r = ensureRogueState();
         const now = performance.now?.() || Date.now();
         if (now > (r.comboUntil || 0)) r.combo = 0;
         r.combo += 1;
         r.kills += 1;
-        r.comboUntil = now + COMBO_WINDOW_MS;
+        r.comboUntil = now + comboWindowMs(r.combo);
         if (r.combo > (r._bestCombo || 0)) r._bestCombo = r.combo;
-        if (r.combo > 0 && r.combo % 5 === 0) grantRogueXp(2);
-        const dropChance = 0.12 + Math.min(0.18, r.combo * 0.01);
+
+        const isBomber = !!actor?.userData?.rogueBomber;
+        const isElite = !!actor?.userData?.rogueElite;
+
+        // Kill juice: small shake, scaled up for elites; floating score pop.
+        addRogueShake(isElite ? 0.75 : 0.32);
+        const killPos = _tmpProj.set(x, y + 1.0, z).clone();
+        if (isElite) {
+            floatWorldText('ELITE DOWN', killPos, { color: '#ffd23f', size: 22, big: true });
+        }
+
+        // Combo milestone rewards + banner flair.
+        if (r.combo > 0 && r.combo % 5 === 0) {
+            grantRogueXp(2);
+            addRogueShake(0.5);
+            const tier = r.combo >= 20 ? '#ff4d6d' : r.combo >= 10 ? '#ffae00' : '#ffd166';
+            rogueBanner(`COMBO x${r.combo}`, tier);
+        }
+
+        // Health drop scales gently with combo; elites guarantee a drop.
+        const dropChance = (isElite ? 1 : 0) + 0.10 + Math.min(0.20, r.combo * 0.012);
         if (Math.random() < dropChance) spawnRogueHealthOrb(x, y + 0.9, z);
+
+        // Bomber detonation: damage nearby living enemies + spray bonus XP orbs.
+        if (isBomber) detonateBomber(x, y, z, actor);
+
         updateRogueXpBar();
+    }
+
+    // Bomber AoE: find other rogue enemies within radius, deal a chunk of
+    // damage, and shower the blast site with extra XP orbs. Self-contained —
+    // reads the live prefab-actor list and pokes shooterAi health directly.
+    function detonateBomber(x, y, z, selfActor) {
+        addRogueShake(0.9);
+        floatWorldText('BOOM', _tmpProj.set(x, y + 1.2, z).clone(), { color: '#84cc16', size: 24, big: true });
+        for (let i = 0; i < 4; i++) {
+            spawnRogueXpOrb(x + (Math.random() - 0.5) * 1.2, y + 0.9, z + (Math.random() - 0.5) * 1.2);
+        }
+        const RADIUS = 4.5;
+        const DAMAGE = 40;
+        const damageFn = (typeof window !== 'undefined') ? window.damageShooterAi : null;
+        // Snapshot first: damageShooterAi can defeat actors and mutate the
+        // shared prefab list mid-iteration.
+        const actors = getGameplayPrefabActors('shooterAi', scratchPrefab()).slice();
+        for (const a of actors) {
+            if (!a || a === selfActor) continue;
+            const ai = a.userData?.shooterAi;
+            if (!ai || ai.defeated) continue;
+            const m = getActorRenderObject(a);
+            if (!m) continue;
+            _tmpExplode.copy(m.position);
+            const dist = Math.hypot(_tmpExplode.x - x, _tmpExplode.y - y, _tmpExplode.z - z);
+            if (dist > RADIUS) continue;
+            const falloff = 1 - dist / RADIUS;
+            // Route through the real damage path so deaths trigger XP orbs,
+            // score, and death FX (chain reactions if a bomber is caught).
+            if (damageFn) damageFn(a, DAMAGE * falloff);
+        }
     }
 
     let _rogueHealthGeo = null;
@@ -316,14 +575,19 @@ export function createRogueWaves(deps) {
             const y = opts.y ?? layout.spawnY ?? 0;
             const actors = [];
             const jitter = Math.random() * Math.PI * 2;
+            const eliteChance = rollEliteChance(wave);
             for (let i = 0; i < count; i++) {
                 const ang = jitter + (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
                 const r = radius * (0.82 + Math.random() * 0.18);
                 const variant = RogueAPI.pickVariant(wave, i, count);
+                // Don't roll elites onto bombers (an elite suicide bomber is a
+                // free-XP feel-bad); keep elites on the bruiser archetypes.
+                const elite = variant !== 'bomber' && Math.random() < eliteChance;
                 const a = spawnRogueEnemy(
                     variant,
                     new THREE.Vector3(Math.cos(ang) * r, y, Math.sin(ang) * r),
                     wave,
+                    { elite },
                 );
                 if (a) actors.push(a);
             }
@@ -334,20 +598,24 @@ export function createRogueWaves(deps) {
             const layout = currentMesh?.userData?.doomArenaLevel || {};
             const y = layout.spawnY ?? 0;
             const a = spawnRogueEnemy('boss', new THREE.Vector3(0, y, -(layout.spawnRingRadius ?? 18) * 0.6), wave);
+            rogueBanner('⚠ BOSS WAVE ⚠', '#ff4d4d');
+            addRogueShake(1.4);
             return a ? [a] : [];
         },
         pickVariant(wave) {
             const roll = Math.random();
             if (wave <= 2) return roll < 0.85 ? 'grunt' : 'rusher';
             if (wave <= 5) {
-                if (roll < 0.55) return 'grunt';
-                if (roll < 0.78) return 'rusher';
-                if (roll < 0.92) return 'sniper';
+                if (roll < 0.50) return 'grunt';
+                if (roll < 0.70) return 'rusher';
+                if (roll < 0.82) return 'sniper';
+                if (roll < 0.92) return 'bomber';
                 return 'tank';
             }
-            if (roll < 0.4) return 'grunt';
-            if (roll < 0.65) return 'rusher';
-            if (roll < 0.82) return 'sniper';
+            if (roll < 0.34) return 'grunt';
+            if (roll < 0.56) return 'rusher';
+            if (roll < 0.72) return 'sniper';
+            if (roll < 0.86) return 'bomber';
             return 'tank';
         },
         waveCleared: (actors) => !Array.isArray(actors) || actors.length === 0
@@ -435,6 +703,11 @@ export function createRogueWaves(deps) {
         { t: 'Battle Trance', d: '+25% XP gain',             a: (b) => b.xpGain *= 1.25 },
         { t: 'Field Medic',   d: 'Heal to full now',         a: () => setPlayerHealth(1) },
         { t: 'Glass Cannon',  d: '+45% damage, +10% dmg taken', a: (b) => { b.damage *= 1.45; b.damageTaken *= 1.10; } },
+        // Status-effect line. Stacks add up so investing in one element scales.
+        { t: 'Incendiary',    d: 'Hits set enemies on fire (burn DoT)', a: (b) => b.burn += 14 },
+        { t: 'Wildfire',      d: '+18 burn damage / sec',    a: (b) => b.burn += 18 },
+        { t: 'Cryo Rounds',   d: 'Hits slow enemies by 35%', a: (b) => b.slow = Math.min(0.8, (b.slow || 0) + 0.35) },
+        { t: 'Permafrost',    d: '+18% chance to freeze on hit', a: (b) => b.freezeChance = Math.min(0.6, (b.freezeChance || 0) + 0.18) },
     ];
 
     // Shared card styling. On mobile the cards stay in ONE horizontal row
@@ -640,6 +913,8 @@ export function createRogueWaves(deps) {
             openRogueWeaponPicker();
         }
 
+        installRogueStatusHook();
+        if (!gameplay.roguePaused) tickRogueStatuses();
         updateRogueGameMode();
     }
 

@@ -1,4 +1,5 @@
 import { vec3, vec4 } from 'three/tsl';
+import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 
 // World Environment system — Godot-style global graphics inspector. Owns:
 //   - WORLD_ENV_DEFAULTS preset
@@ -160,7 +161,9 @@ export function createWorldEnvSystem({
                 .add(vec4(ssgiOutput.rgb, 0))
                 .add(worldEnvState.bloom?.enabled && !perf ? bloomNode : vec4(0, 0, 0, 0));
         }
-        postProcessing.outputNode = outputNode;
+        // Final FXAA pass — cheap edge AA so the post-FX path doesn't look
+        // jagged (the plain renderer.render path uses MSAA samples=2 instead).
+        postProcessing.outputNode = fxaa(outputNode);
     }
 
     function applySSGISettings() {

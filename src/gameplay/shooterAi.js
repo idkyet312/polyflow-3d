@@ -313,8 +313,12 @@ export function createShooterAi(deps) {
         if (move.lengthSq() < 1e-6) return false;
         // Per-actor speed multiplier lets wave variants move faster/slower
         // (rusher charges in, tank lumbers) without touching the shared prefab.
+        // Rogue status effects (slow/freeze) write shooter._slowFactor (1 = none,
+        // 0 = frozen); the arena status tick decays it back to 1 over time.
         const speedMul = Number.isFinite(shooter.speedMul) ? shooter.speedMul : 1;
-        move.normalize().multiplyScalar(SHOOTER_AI_PREFAB.strafeSpeed * speedMul * delta);
+        const slowFactor = Number.isFinite(shooter._slowFactor) ? shooter._slowFactor : 1;
+        if (slowFactor <= 0.001) return false; // frozen: no movement this frame
+        move.normalize().multiplyScalar(SHOOTER_AI_PREFAB.strafeSpeed * speedMul * slowFactor * delta);
         // Rushers bias hard toward the player instead of strafing around.
         if (speedMul > 1.4 && !coverPoint) {
             move.addScaledVector(toPlayer, SHOOTER_AI_PREFAB.strafeSpeed * speedMul * delta * 0.9);

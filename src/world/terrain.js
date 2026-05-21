@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 
 export const TERRAIN_SIZE = 180;
-export const TERRAIN_SEGMENTS = 180;
+// PERF: 180² (32k tris) → 120² (~14k tris). Plenty for the low-frequency
+// rolling/detail noise functions; sculpt resolution still ~1.5m per vertex.
+export const TERRAIN_SEGMENTS = 120;
 export const TERRAIN_Y_OFFSET = -0.28;
 const TERRAIN_TEXTURE_REPEAT = 28;
 const TERRAIN_BASIN_DEPTH = -0.34;

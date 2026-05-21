@@ -5,7 +5,10 @@ const DEFAULT_SETTINGS = {
     color: 0xd8dee6,
     sceneFogColor: 0x58616c,
     density: 0.012,
-    layerCount: 34,
+    // PERF: 34 → 18 layers. Each layer is a screen-filling transparent
+    // additive plane; halving overdraw is a big GPU win and the fog density
+    // is preserved by the per-layer opacity ramp.
+    layerCount: 18,
     radius: 92,
     height: 18,
     opacity: 0.055,
@@ -80,7 +83,9 @@ export function createVolumetricFog({ scene, camera, settings = {} }) {
         mesh.material.opacity = config.opacity * THREE.MathUtils.lerp(0.35, 1.0, 1 - Math.abs(t - 0.45));
         mesh.userData.fogPhase = Math.random() * Math.PI * 2;
         mesh.userData.fogDrift = new THREE.Vector2(Math.random() - 0.5, Math.random() - 0.5).normalize();
-        mesh.frustumCulled = false;
+        // PERF: was frustumCulled=false. Each layer is finite (radius*2 plane);
+        // when camera looks far above/below the slab, three can cull it.
+        mesh.frustumCulled = true;
         state.group.add(mesh);
         state.layers.push(mesh);
     }

@@ -55,7 +55,8 @@
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\(d.get\\('scripts',{}\\),indent=1\\)\\); print\\('deps:', list\\(d.get\\('devDependencies',{}\\).keys\\(\\)\\)\\)\")",
       "Bash(node --check src/physics/core.js)",
       "Bash(node --check \"e:/JOBS/polyflow-3d/src/physics/core.js\")",
-      "Bash(npm test *)"
+      "Bash(npm test *)",
+      "Bash(node --check src/gameplay/rogueWaves.js)"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"

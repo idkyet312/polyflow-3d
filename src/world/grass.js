@@ -8,7 +8,9 @@ import { TERRAIN_SIZE, sampleTerrainHeightAtLocal } from './terrain.js';
 // height function writes Z, so blade base sits on Z = height(x,y) and the
 // blade extends along +Z.
 
-const DEFAULT_BLADE_COUNT = 100000;
+// PERF: 100k → 50k blades. Visually near-identical at typical camera distance;
+// halves grass draw vertex work and instance attribute bandwidth.
+const DEFAULT_BLADE_COUNT = 50000;
 const DEFAULT_BLADE_HEIGHT = 0.5;
 const DEFAULT_BLADE_WIDTH = 0.07;
 const DEFAULT_PATCH_HALF_EXTENT = TERRAIN_SIZE * 0.5 * 0.92;
@@ -275,7 +277,10 @@ export function createGrassField({
 
     const material = new MeshBasicNodeMaterial();
     material.side = THREE.DoubleSide;
-    material.transparent = true;
+    // PERF: alphaTest=0.5 with transparent=true forces back-to-front sort +
+    // disables early-Z. Pure alpha-cutout (transparent=false) lets the depth
+    // buffer reject fragments and the renderer batch with opaques.
+    material.transparent = false;
     material.alphaTest = 0.5;
     material.positionNode = positionNode;
     material.colorNode = colorNode;
