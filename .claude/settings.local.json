@@ -56,7 +56,8 @@
       "Bash(node --check src/physics/core.js)",
       "Bash(node --check \"e:/JOBS/polyflow-3d/src/physics/core.js\")",
       "Bash(npm test *)",
-      "Bash(node --check src/gameplay/rogueWaves.js)"
+      "Bash(node --check src/gameplay/rogueWaves.js)",
+      "Bash(node --check e:/JOBS/polyflow-3d/src/gameplay/drugTycoon.js)"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"

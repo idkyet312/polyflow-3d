@@ -88,7 +88,12 @@ export function createInputHandlers(deps) {
             }
             if (event.type === 'mousedown') {
                 const buttonName = event.button === 2 ? 'right' : event.button === 0 ? 'left' : null;
-                const heldWeaponUsesLeftMouse = buttonName === 'left' && !!gameplay.weapon.type;
+                // Left mouse is consumed by a held weapon — the engine weapon
+                // (gameplay.weapon.type) OR the Drug Tycoon pistol — so the
+                // default left-click mouse action (e.g. throwing a ball) doesn't
+                // also fire while armed.
+                const tycoonGun = (typeof window !== 'undefined') && window.drugTycoon?.hasGun;
+                const heldWeaponUsesLeftMouse = buttonName === 'left' && (!!gameplay.weapon.type || tycoonGun);
                 if (buttonName && !heldWeaponUsesLeftMouse) runMouseAction(buttonName, event);
             }
             return;

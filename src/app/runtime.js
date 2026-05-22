@@ -179,6 +179,7 @@ registerDebug('eventBus', eventBus);
 registerDebug('gameplaySystems', gameplaySystems);
 registerDebug('services', services);
 import { createRogueWaves } from '../gameplay/rogueWaves.js';
+import { createDrugTycoon } from '../gameplay/drugTycoon.js';
 import {
     AHUD,
     installUePrototypeMethods,
@@ -594,6 +595,7 @@ bindAppCore(
         postProcessing: () => postProcessing,
         mainDirectionalLight: () => mainDirectionalLight,
         physicsCore: () => physicsCore,
+        physics: () => physicsCore,
         sceneSystem: () => sceneSystem,
         worldFloor: () => worldFloor,
         grassField: () => grassField,
@@ -2112,6 +2114,7 @@ const updateDoomMiniLevelState = _levelStateSystem.updateDoomMiniLevelState;
 let updateDoomArenaLevelState = () => {};
 let updateRogueGameMode = () => {};
 let updateRogueXpOrbs = () => {};
+let updateDrugTycoonState = () => {};
 let resetRogueState = () => {};
 let updateRogueXpBar = () => {};
 let openRogueWeaponPicker = () => {};
@@ -5910,6 +5913,7 @@ const _frameLoop = createFrameLoop({
     updateDoomMiniLevelState: (...a) => updateDoomMiniLevelState(...a),
     updateDoomArenaLevelState: (...a) => updateDoomArenaLevelState(...a),
     updateRogueXpOrbs: (...a) => updateRogueXpOrbs(...a),
+    updateDrugTycoonState: (...a) => updateDrugTycoonState(...a),
     updateGameplayUI: (...a) => updateGameplayUI(...a),
     resetDoomMiniLevelState,
     resetDoomArenaLevelState,
@@ -6392,6 +6396,17 @@ function wireExtractedModules() {
         updateDoomArenaLevelState = rw.updateDoomArenaLevelState;
         updateRogueGameMode = rw.updateRogueGameMode;
         RogueAPI = rw.RogueAPI;
+    }
+
+    // Drug Tycoon (self-contained tycoon mode, own level). Same factory pattern
+    // as rogueWaves; only the per-frame driver is wired into the frame loop.
+    {
+        const dt = createDrugTycoon({
+            gameplay,
+            physics,
+            setPlayerHealth,
+        });
+        updateDrugTycoonState = dt.updateDrugTycoonState;
     }
 
     // Built-in level builders (extracted to ../world/levels.js). Inject engine

@@ -1826,6 +1826,452 @@ export function createLevels(deps) {
         return root;
     }
 
+    // Rogue Pit: a second self-contained Rogue Waves arena with a distinct
+    // octagonal layout (vs. the square doomArena). It sets sampleType to
+    // 'doomArena' so the entire wave/status/HUD/death game mode applies with
+    // zero extra wiring — only the geometry + layout constants differ.
+    function createRoguePitLevel() {
+        const root = new THREE.Group();
+        root.name = 'PolyFlow_Rogue_Pit';
+        // Reuse the doomArena game-mode contract (wave loop reads this tag).
+        root.userData.sampleType = 'doomArena';
+        root.userData.hideTerrainPresentation = true;
+        root.userData.skipNormalization = true;
+
+        const T = 0.4;            // wall thickness
+        const ARENA = 50;         // octagon bounding box
+        const ARENA_H = 8.5;      // ceiling height
+        const HALF = ARENA * 0.5;
+        const WALL_COLOR = '#15202b';
+        const BLUE_LIGHT = 0x3da6ff;
+        const BLUE_EMISSIVE = '#3da6ff';
+
+        root.userData.preferredSpawn = {
+            position: [0, 0.3, 6.0],
+            yaw: Math.PI,
+            pitch: -0.05,
+        };
+        root.userData.preferredShowcase = {
+            position: [0, PLAYER_SETTINGS.eyeHeight + 0.6, 10.0],
+            target: [0, 1.4, -4.0],
+        };
+
+        const wallSet = getProceduralBrickSet('accent');
+        const floorSet = getProceduralBrickSet('white');
+        const accentSet = getProceduralBrickSet('accent');
+        const BRICK_TILE_M = 1.6;
+
+        const brickMat = (set, { color = '#ffffff', metal = 0.05 } = {}) => {
+            const albedo = set.albedo.clone();
+            const normal = set.normal.clone();
+            const height = set.height.clone();
+            const roughness = set.roughness.clone();
+            const ao = set.ao.clone();
+            registerBrickClone(set.albedo, albedo);
+            registerBrickClone(set.normal, normal);
+            registerBrickClone(set.height, height);
+            registerBrickClone(set.roughness, roughness);
+            registerBrickClone(set.ao, ao);
+            for (const t of [albedo, normal, height, roughness, ao]) {
+                t.wrapS = t.wrapT = THREE.RepeatWrapping;
+                t.needsUpdate = true;
+            }
+            const mat = new DDGIMeshStandardNodeMaterial({
+                color: new THREE.Color(color),
+                roughness: 1.0,
+                metalness: metal,
+            });
+            mat.map = albedo;
+            mat.normalMap = normal;
+            mat.normalScale = new THREE.Vector2(1.1, 1.1);
+            mat.roughnessMap = roughness;
+            mat.heightMap = height;
+            mat.pomAOMap = ao;
+            mat.aoMap = ao;
+            mat.aoMapIntensity = 1.0;
+            mat.pomEnabled = true;
+            mat.pomIntensity = 0.035;
+            mat.pomQuality = 'high';
+            mat.pomClipMode = 'solid';
+            mat.pomDepthWrite = true;
+            mat.untileMaps = false;
+            mat.rebuildPomGraph?.();
+            mat.userData.ownedMaps = [albedo, normal, height, roughness, ao];
+            mat.userData.silPom = true;
+            mat.userData.brickWorldScale = true;
+            return mat;
+        };
+
+        const applyBrickWorldScale = (material, size) => {
+            if (!material?.userData?.brickWorldScale) return;
+            const [sx, sy, sz] = size;
+            const isFloor = sy <= sx * 0.5 && sy <= sz * 0.5;
+            const tileM = material.userData.brickTileM || BRICK_TILE_M;
+            const repU = Math.max(Math.round(Math.max(sx, sz) / tileM), 1);
+            const repV = Math.max(Math.round((isFloor ? Math.min(sx, sz) : sy) / tileM), 1);
+            for (const t of material.userData.ownedMaps || []) {
+                t.wrapS = t.wrapT = THREE.RepeatWrapping;
+                t.repeat.set(repU, repV);
+                t.needsUpdate = true;
+            }
+        };
+
+        const flatMat = (color, { rough = 0.85, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
+            const mat = new DDGIMeshStandardNodeMaterial({
+                color: new THREE.Color(color),
+                roughness: rough,
+                metalness: metal,
+            });
+            if (emissive) {
+                mat.emissive = new THREE.Color(emissive);
+                mat.emissiveIntensity = emissiveIntensity;
+            }
+            return mat;
+        };
+
+        const addBox = (name, size, position, material, { actorSurface = '', rotY = 0 } = {}) => {
+            const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+            applyBrickWorldScale(material, size);
+            if (geometry.attributes.uv && !geometry.attributes.uv2) {
+                geometry.setAttribute('uv2', geometry.attributes.uv);
+            }
+            geometry.computeTangents();
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.name = name;
+            mesh.position.set(position[0], position[1], position[2]);
+            if (rotY) mesh.rotation.y = rotY;
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            if (actorSurface) mesh.userData.doomMapSurface = actorSurface;
+            root.add(mesh);
+            if (actorSurface) {
+                const actor = makeSampleLevelMeshActor(name, mesh, {
+                    kind: 'imported',
+                    castShadow: true,
+                    receiveShadow: true,
+                    skipPhysicsCollision: true,
+                    userData: { doomMapSurface: actorSurface },
+                });
+                if (actorSurface === 'floor' || actorSurface === 'roof') {
+                    enableStaticMeshActorCollision(actor);
+                }
+            }
+            return mesh;
+        };
+
+        // Floor + ceiling.
+        addBox('pit-floor', [ARENA, T, ARENA], [0, -T * 0.5, 0],
+            brickMat(floorSet, { color: '#4a5560' }), { actorSurface: 'floor' });
+        addBox('pit-ceiling', [ARENA, T, ARENA], [0, ARENA_H + T * 0.5, 0],
+            flatMat('#10161c', { rough: 0.95 }), { actorSurface: 'roof' });
+
+        // Octagonal wall ring: 8 angled wall segments forming the perimeter.
+        const SEGMENTS = 8;
+        const ringRadius = HALF - 1.0;
+        // Segment length so neighbours overlap slightly at the corners.
+        const segLen = (2 * Math.PI * ringRadius / SEGMENTS) * 1.12;
+        const wallMat = brickMat(wallSet, { color: WALL_COLOR });
+        for (let i = 0; i < SEGMENTS; i++) {
+            const ang = (i / SEGMENTS) * Math.PI * 2;
+            const wx = Math.cos(ang) * ringRadius;
+            const wz = Math.sin(ang) * ringRadius;
+            // Wall faces inward: rotate so its long axis is tangent to the ring.
+            addBox(`pit-wall-${i}`, [segLen, ARENA_H, T], [wx, ARENA_H * 0.5, wz],
+                wallMat, { rotY: -ang + Math.PI * 0.5 });
+        }
+
+        // Ring of cover pillars at a mid radius for line-of-sight breaks.
+        const pillar = brickMat(accentSet, { color: '#2f6f9a' });
+        const COVER_COUNT = 6;
+        const coverRadius = ringRadius * 0.5;
+        for (let i = 0; i < COVER_COUNT; i++) {
+            const ang = (i / COVER_COUNT) * Math.PI * 2 + Math.PI / COVER_COUNT;
+            const cx = Math.cos(ang) * coverRadius;
+            const cz = Math.sin(ang) * coverRadius;
+            addBox(`pit-cover-${i}`, [1.5, 3.4, 1.5], [cx, 1.7, cz], pillar);
+        }
+
+        // Center start pad.
+        addBox('pit-pad', [4.0, 0.22, 4.0], [0, 0.11, 4.0],
+            flatMat('#142028', { rough: 0.35, emissive: '#185a78', emissiveIntensity: 0.45 }));
+        // Exit dais opposite the spawn.
+        addBox('pit-exit-dais', [4.4, 0.4, 4.4], [0, 0.2, -ringRadius + 3.5],
+            flatMat('#122028', { rough: 0.3, emissive: BLUE_EMISSIVE, emissiveIntensity: 0.45 }));
+
+        // Same layout contract the doomArena game mode reads.
+        root.userData.doomArenaLevel = {
+            playerSpawn: [0, 0.85, 6.0],
+            exitTeleporter: [0, 0.42, -ringRadius + 3.5],
+            exitTeleporterHidden: [0, -48, -ringRadius + 3.5],
+            spawnRingRadius: ringRadius - 3.5,
+            spawnY: 0,
+            waveCount: 4,
+            baseWaveSize: 3,
+            wavePerStep: 2,
+        };
+
+        // Cool blue lighting to distinguish the pit from the red doomArena.
+        const keyLight = new THREE.PointLight(BLUE_LIGHT, 11, 52, 1.6);
+        keyLight.position.set(0, ARENA_H - 1.0, 0);
+        keyLight.castShadow = true;
+        configurePointLightShadow(keyLight);
+        keyLight.name = 'pit-key-light';
+        root.add(keyLight);
+
+        const RIM_LIGHTS = 4;
+        for (let i = 0; i < RIM_LIGHTS; i++) {
+            const ang = (i / RIM_LIGHTS) * Math.PI * 2 + Math.PI / RIM_LIGHTS;
+            const lx = Math.cos(ang) * (ringRadius - 4);
+            const lz = Math.sin(ang) * (ringRadius - 4);
+            const cl = new THREE.PointLight(BLUE_LIGHT, 3.4, 24, 2.0);
+            cl.position.set(lx, ARENA_H - 1.4, lz);
+            cl.castShadow = false;
+            cl.name = `pit-rim-light-${i}`;
+            root.add(cl);
+        }
+
+        applySilPomLighting(root, keyLight.position.clone());
+        return root;
+    }
+
+    // Drug Tycoon level: an open block with a central cook station, an upgrade
+    // pad, and a perimeter wall. NPC buyers + police wander the "street". The
+    // game loop lives in the self-contained drugTycoon module (driven per frame
+    // from the frame loop); this just builds geometry + the layout contract.
+    function createDrugTycoonLevel() {
+        const root = new THREE.Group();
+        root.name = 'PolyFlow_Drug_Tycoon';
+        root.userData.sampleType = 'drugTycoon';
+        root.userData.hideTerrainPresentation = true;
+        root.userData.skipNormalization = true;
+
+        const T = 0.4;
+        const BLOCK = 80;        // open neighbourhood block
+        const WALL_H = 4.0;
+        const HALF = BLOCK * 0.5;
+
+        root.userData.preferredSpawn = { position: [0, 0.3, 0], yaw: 0, pitch: -0.05 };
+        root.userData.preferredShowcase = {
+            position: [0, PLAYER_SETTINGS.eyeHeight + 0.6, 12.0],
+            target: [0, 1.2, 0],
+        };
+
+        const flatMat = (color, { rough = 0.9, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
+            const mat = new DDGIMeshStandardNodeMaterial({
+                color: new THREE.Color(color), roughness: rough, metalness: metal,
+            });
+            if (emissive) { mat.emissive = new THREE.Color(emissive); mat.emissiveIntensity = emissiveIntensity; }
+            return mat;
+        };
+
+        // `solid:true` gives the box player-blocking collision (used for house
+        // walls so you can't walk through buildings). `actorSurface` keeps the
+        // existing floor/roof walkable-collision behaviour.
+        const addBox = (name, size, position, material, { actorSurface = '', solid = false } = {}) => {
+            const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.name = name;
+            mesh.position.set(position[0], position[1], position[2]);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            if (actorSurface) mesh.userData.doomMapSurface = actorSurface;
+            root.add(mesh);
+            if (actorSurface || solid) {
+                const actor = makeSampleLevelMeshActor(name, mesh, {
+                    kind: 'imported', castShadow: true, receiveShadow: true,
+                    skipPhysicsCollision: true, userData: actorSurface ? { doomMapSurface: actorSurface } : {},
+                });
+                if (solid || actorSurface === 'floor' || actorSurface === 'roof') {
+                    enableStaticMeshActorCollision(actor);
+                }
+            }
+            return mesh;
+        };
+
+        // ---- materials -------------------------------------------------
+        const grassMat   = flatMat('#3f7d34', { rough: 0.97 });
+        const roadMat    = flatMat('#2b2e32', { rough: 0.95 });
+        const lineMat    = flatMat('#d8c45a', { rough: 0.7, emissive: '#d8c45a', emissiveIntensity: 0.15 });
+        const curbMat    = flatMat('#9aa0a6', { rough: 0.85 });
+        const sidewalkMat= flatMat('#7e8388', { rough: 0.9 });
+
+        // ---- ground -----------------------------------------------------
+        // ONE collision floor for the whole block (its top sits flush at y=0).
+        // Roads / sidewalks / lines are visual-only decals laid on top with NO
+        // collision, so the player walks a single seamless plane — stacking
+        // multiple thin coplanar colliders here snags the player capsule.
+        addBox('tycoon-grass', [BLOCK, T, BLOCK], [0, -T * 0.5, 0], grassMat, { actorSurface: 'floor' });
+
+        // Thin visual decal helper: a flat slab whose TOP face rests at y=0.
+        // Tiny per-layer y offset avoids z-fighting between overlapping decals.
+        const DECAL_T = 0.04;
+        const decal = (name, size, x, z, mat, lift = 0) =>
+            addBox(name, [size[0], DECAL_T, size[1]], [x, -DECAL_T * 0.5 + 0.005 + lift, z], mat);
+
+        const ROAD_W = 9;        // road width
+        // N-S and E-W roads forming a cross through the centre (visual only).
+        decal('tycoon-road-ns', [ROAD_W, BLOCK], 0, 0, roadMat, 0.001);
+        decal('tycoon-road-ew', [BLOCK, ROAD_W], 0, 0, roadMat, 0.001);
+        // Centre dashed lines (short segments per axis), above the asphalt.
+        for (let i = -HALF + 4; i < HALF; i += 6) {
+            decal(`tycoon-line-ns-${i}`, [0.35, 2.4], 0, i, lineMat, 0.004);
+            decal(`tycoon-line-ew-${i}`, [2.4, 0.35], i, 0, lineMat, 0.004);
+        }
+        // Sidewalks flanking each road + raised curbs at the grass edge.
+        const SW = 2.0, half = ROAD_W * 0.5;
+        [-1, 1].forEach((s) => {
+            decal(`tycoon-sw-ns-${s}`, [SW, BLOCK], s * (half + SW * 0.5), 0, sidewalkMat, 0.002);
+            decal(`tycoon-sw-ew-${s}`, [BLOCK, SW], 0, s * (half + SW * 0.5), sidewalkMat, 0.002);
+            // Curbs: thin raised visual lips at the lot edge (no collision, so
+            // the player crosses roads freely — a 0.2m curb would wall in a
+            // capsule character at every intersection).
+            addBox(`tycoon-curb-ns-${s}`, [0.2, 0.12, BLOCK], [s * (half + SW), 0.06, 0], curbMat);
+            addBox(`tycoon-curb-ew-${s}`, [BLOCK, 0.12, 0.2], [0, 0.06, s * (half + SW)], curbMat);
+        });
+
+        // ---- houses around the four corner lots ------------------------
+        const HOUSE_TONES = ['#b5654d', '#c9a26b', '#7d96a8', '#a8728c', '#6f9e6a', '#c2bba0'];
+        const ROOF_TONES  = ['#3b2a24', '#4a3b2e', '#2e3a44', '#402a36'];
+        const pick = (arr, i) => arr[i % arr.length];
+        let hIdx = 0;
+        // Houses are built as flat (non-nested) meshes parented straight to
+        // root. The engine's sample-collision restore pass reparents every
+        // collidable part to currentMesh, dropping any intermediate Group
+        // transform — so we bake the house's rotation into each child's own
+        // position/rotation instead of using a wrapper Group.
+        const addHouse = (cx, cz, w, d, h, faceY = 0) => {
+            const i = hIdx++;
+            const cos = Math.cos(faceY), sin = Math.sin(faceY);
+            // Local (x,y,z) → world, rotated about the house centre by faceY.
+            const place = (mesh, lx, ly, lz) => {
+                mesh.position.set(cx + lx * cos + lz * sin, ly, cz - lx * sin + lz * cos);
+                mesh.rotation.y = faceY;
+                mesh.castShadow = true; mesh.receiveShadow = true;
+                root.add(mesh);
+                return mesh;
+            };
+            const wallMat = flatMat(pick(HOUSE_TONES, i), { rough: 0.92 });
+            const roofMat = flatMat(pick(ROOF_TONES, i), { rough: 0.85 });
+            const doorMat = flatMat('#2a1d14', { rough: 0.7 });
+            const winMat  = flatMat('#bfe6ff', { rough: 0.2, metal: 0.1, emissive: '#9fd0ff', emissiveIntensity: 0.25 });
+
+            // Solid wall box — the only collidable part.
+            const body = place(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat), 0, h * 0.5, 0);
+            body.name = `tycoon-house-${i}`;
+            // Pitched roof (flattened 4-sided cone), centred on top.
+            const roof = place(new THREE.Mesh(new THREE.ConeGeometry(Math.max(w, d) * 0.78, h * 0.55, 4), roofMat), 0, h + h * 0.27, 0);
+            roof.rotation.set(0, faceY + Math.PI * 0.25, 0);
+            // Door + two windows on the front (+Z) face.
+            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.9, 0.12), doorMat), 0, 0.95, d * 0.5 + 0.02);
+            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.1), winMat), -w * 0.28, h * 0.6, d * 0.5 + 0.02);
+            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.1), winMat),  w * 0.28, h * 0.6, d * 0.5 + 0.02);
+
+            // Register only the wall as a solid static actor (collision baked
+            // from its already-correct world transform).
+            body.updateMatrixWorld(true);
+            const actor = makeSampleLevelMeshActor(`tycoon-house-${i}`, body, {
+                kind: 'imported', castShadow: true, receiveShadow: true,
+            });
+            enableStaticMeshActorCollision(actor);
+        };
+
+        // Place houses on the grass lots between the roads and the perimeter,
+        // facing the nearest road. Keep the centre (cook/upgrade/gun) clear.
+        const LOT = HALF - 9;
+        addHouse(-LOT, -LOT, 9, 7, 5, Math.PI * 0.75);
+        addHouse(-LOT,  LOT, 8, 7, 5, Math.PI * 0.25);
+        addHouse( LOT, -LOT, 9, 8, 6, Math.PI * 1.25);
+        addHouse( LOT,  LOT, 8, 7, 5, Math.PI * 1.75);
+        addHouse(-LOT,    0, 7, 9, 5, Math.PI * 0.5);   // west lot
+        addHouse( LOT,    0, 7, 9, 5, -Math.PI * 0.5);  // east lot
+
+        // Trees: a trunk + foliage sphere scattered on the grass.
+        const trunkMat = flatMat('#5b3a21', { rough: 0.95 });
+        const leafMat  = flatMat('#2f6d2c', { rough: 0.95 });
+        const TREES = [[-LOT + 6, -6], [LOT - 6, 6], [-6, LOT - 6], [6, -LOT + 6], [-LOT + 5, LOT - 5]];
+        TREES.forEach(([tx, tz], i) => {
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, 2.2, 6), trunkMat);
+            trunk.position.set(tx, 1.1, tz); trunk.castShadow = true; root.add(trunk);
+            const leaves = new THREE.Mesh(new THREE.IcosahedronGeometry(1.5, 0), leafMat);
+            leaves.position.set(tx, 3.0, tz); leaves.castShadow = true; root.add(leaves);
+        });
+
+        // Cook station (green lab bench) — in the SW grass lot.
+        const COOK = [-LOT + 2, -LOT + 5];
+        addBox('tycoon-cook', [3.0, 1.0, 2.0], [COOK[0], 0.5, COOK[1]],
+            flatMat('#0f3d22', { rough: 0.4, metal: 0.3, emissive: '#1f9c52', emissiveIntensity: 0.5 }), { solid: true });
+        // Upgrade pad (gold) — NE grass lot.
+        const UPG = [LOT - 2, LOT - 5];
+        addBox('tycoon-upgrade', [3.0, 0.3, 3.0], [UPG[0], 0.15, UPG[1]],
+            flatMat('#3a2f0a', { rough: 0.35, emissive: '#d4a017', emissiveIntensity: 0.5 }));
+        // Gun pickup pedestal — just off the centre intersection.
+        const GUN = [0, 10];
+        addBox('tycoon-gun-pedestal', [1.2, 0.6, 1.2], [GUN[0], 0.3, GUN[1]],
+            flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#444', emissiveIntensity: 0.2 }));
+
+        root.userData.drugTycoonLevel = {
+            playerSpawn: [0, 0.85, 0],
+            cookStation: [COOK[0], 1.0, COOK[1]],
+            upgradePad: [UPG[0], 0.3, UPG[1]],
+            gunPickup: [GUN[0], 1.0, GUN[1]],
+            streetRadius: HALF - 6,   // buyers/police wander the roads + lots
+            spawnY: 0,
+        };
+
+        // Daylight: a directional-style sun high above lighting the whole block.
+        const sun = new THREE.PointLight(0xfff0d0, 14, 160, 1.2);
+        sun.position.set(BLOCK * 0.25, WALL_H + 26, BLOCK * 0.2);
+        sun.castShadow = true;
+        configurePointLightShadow(sun);
+        sun.name = 'tycoon-sun';
+        root.add(sun);
+
+        applySilPomLighting(root, sun.position.clone());
+        return root;
+    }
+
+    // Shared afterLoad for any Rogue Waves arena (doomArena + roguePit). Spawns
+    // the player start, hidden exit teleporter, and the invisible game-mode actor
+    // that drives waves/HUD/death.
+    function rogueArenaAfterLoad() {
+        const layout = cm()?.userData?.doomArenaLevel || {};
+
+        const startActor = spawnGameplayPrefab('playerSpawn');
+        if (startActor) {
+            startActor.userData.label = 'Start';
+            const mesh = getActorRenderObject(startActor);
+            if (mesh && Array.isArray(layout.playerSpawn)) {
+                mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
+                mesh.updateMatrixWorld(true);
+            }
+            applyPlayerSpawnFromActor(startActor);
+        }
+
+        const endActor = spawnGameplayPrefab('teleporter');
+        if (endActor) {
+            endActor.userData.label = 'Level End';
+            tintGameplayPrefabActor(endActor, '#ef4444', '#ef4444', 2.8);
+            setActorWorldPositionExact(
+                endActor,
+                Array.isArray(layout.exitTeleporterHidden) ? layout.exitTeleporterHidden : layout.exitTeleporter,
+                { visible: false },
+            );
+        }
+
+        cm().userData.doomArenaState = {
+            exitActor: endActor || null,
+            started: false,
+            weaponPromptShown: false,
+        };
+        resetRogueState();
+
+        const gm = spawnGameplayPrefab('rogueGameMode');
+        if (gm) gm.userData.label = 'Rogue Game Mode';
+        cm().userData.rogueGameModeActorId = gm?.id || '';
+
+        return null;
+    }
+
     function getBuiltinLevelDefinition(levelId = 'soccerField') {
         if (levelId === 'fpsStarter') {
             return {
@@ -1908,9 +2354,31 @@ export function createLevels(deps) {
                 assetName: 'Rogue Waves',
                 fileSize: 300000,
                 create: createDoomArenaLevel,
-                afterLoad: () => {
-                    const layout = cm()?.userData?.doomArenaLevel || {};
+                // No auto gun pickup — the player picks a weapon from a card when
+                // they step off the start pad. Wave flow lives in the attached
+                // game-mode script; afterLoad just wires the shared actors.
+                afterLoad: rogueArenaAfterLoad,
+            };
+        }
 
+        if (levelId === 'roguePit') {
+            return {
+                id: 'roguePit',
+                assetName: 'Rogue Pit',
+                fileSize: 300000,
+                create: createRoguePitLevel,
+                afterLoad: rogueArenaAfterLoad,
+            };
+        }
+
+        if (levelId === 'drugTycoon') {
+            return {
+                id: 'drugTycoon',
+                assetName: 'Drug Tycoon',
+                fileSize: 280000,
+                create: createDrugTycoonLevel,
+                afterLoad: () => {
+                    const layout = cm()?.userData?.drugTycoonLevel || {};
                     const startActor = spawnGameplayPrefab('playerSpawn');
                     if (startActor) {
                         startActor.userData.label = 'Start';
@@ -1921,36 +2389,8 @@ export function createLevels(deps) {
                         }
                         applyPlayerSpawnFromActor(startActor);
                     }
-
-                    // No auto gun pickup in Rogue Waves — the player picks one of
-                    // three weapons from a card when they step off the start pad.
-
-                    const endActor = spawnGameplayPrefab('teleporter');
-                    if (endActor) {
-                        endActor.userData.label = 'Level End';
-                        tintGameplayPrefabActor(endActor, '#ef4444', '#ef4444', 2.8);
-                        setActorWorldPositionExact(
-                            endActor,
-                            Array.isArray(layout.exitTeleporterHidden) ? layout.exitTeleporterHidden : layout.exitTeleporter,
-                            { visible: false },
-                        );
-                    }
-
-                    cm().userData.doomArenaState = {
-                        exitActor: endActor || null,
-                        // Wave flow now lives in the attached game-mode script
-                        // (level blueprint). Engine only owns the weapon-pick gate.
-                        started: false,           // player stepped off the start pad
-                        weaponPromptShown: false, // weapon picker opened once
-                    };
-                    resetRogueState();
-
-                    // The level blueprint / game mode: an invisible scripted actor
-                    // that drives waves, bosses, HUD, and the death check.
-                    const gm = spawnGameplayPrefab('rogueGameMode');
-                    if (gm) gm.userData.label = 'Rogue Game Mode';
-                    cm().userData.rogueGameModeActorId = gm?.id || '';
-
+                    // Fresh economy each load. The module owns its own state.
+                    try { window.drugTycoonApi?.resetState?.(); } catch (e) {}
                     return null;
                 },
             };
@@ -1971,6 +2411,6 @@ export function createLevels(deps) {
         createBrickRoomLevel, setDoomEnemySpriteFrame, drawDoomEnemySpriteFrame,
         makeDoomEnemySpriteSheet, updateDoomEnemySpriteAnimation, applyDoomEnemySpriteSkin,
         makeDoomShotgunSpriteTexture, createDoomTestLevel, createDoomArenaLevel,
-        getBuiltinLevelDefinition,
+        createRoguePitLevel, createDrugTycoonLevel, getBuiltinLevelDefinition,
     };
 }

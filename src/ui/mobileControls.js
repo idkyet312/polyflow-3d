@@ -4,6 +4,11 @@
 // action button bindings, and initial DOM setup for mobile UI.
 
 import * as THREE from 'three';
+import { core } from '../runtime/appCore.js';
+
+function inDrugTycoon() {
+    return core.currentMesh?.userData?.sampleType === 'drugTycoon';
+}
 
 // ─── Module-scope deps populated by setupMobileControls ─────────────────────
 let mobileState, gameplay, showcase, vehicleState, physics;
@@ -90,7 +95,9 @@ export function setupMobileControls(deps) {
             mobileRightActionBtn.setPointerCapture?.(event.pointerId);
             return;
         }
-        if (gameplay.active && gameplay.weapon?.type) {
+        // Engine weapon OR the Drug Tycoon pistol: hold to fire, suppress the
+        // default right mouse action so no ball is thrown while armed.
+        if (gameplay.active && (gameplay.weapon?.type || (inDrugTycoon() && window.drugTycoon?.hasGun))) {
             event.preventDefault();
             gameplay.input.fire = true;
             gameplay.input.firePressed = true;
@@ -109,6 +116,12 @@ export function setupMobileControls(deps) {
 
     mobileAction2Btn?.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.pointerType === 'mouse') return;
+        // Drug Tycoon repurposes Action 2 as the interact (E) button.
+        if (inDrugTycoon()) {
+            event.preventDefault();
+            window.drugTycoonApi?.queueInteract?.();
+            return;
+        }
         if (isDrivingVehicle()) {
             exitVehicle();
         } else {
@@ -297,7 +310,7 @@ export function updateMobileButtons() {
     }
 
     if (mobileAction2Btn) {
-        mobileAction2Btn.textContent = isDrivingVehicle() ? 'Exit' : 'Enter';
+        mobileAction2Btn.textContent = inDrugTycoon() ? 'E' : isDrivingVehicle() ? 'Exit' : 'Enter';
     }
 
     syncMobileActionVisibility();
