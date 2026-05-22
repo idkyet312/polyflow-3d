@@ -10,13 +10,13 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
     <link rel="icon" href="/polyflow-3d/favicon.svg" type="image/svg+xml">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-BwHlY9PF.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-RKd-KU3K.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/rolldown-runtime-Dw2cE7zH.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-physics-BZxYQruA.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-realtime-CLQfEXVt.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-three-o_HWTQwa.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-ui-CFGgSnng.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-D6AjNHN0.css">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-CfTxAdKo.css">
 </head>
 
 <body>
@@ -756,18 +756,18 @@
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Strength</div>
-                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="1.25">
-                                        <div class="viewer-slider-value" id="we-bloom-strength-value">1.25</div>
+                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.28">
+                                        <div class="viewer-slider-value" id="we-bloom-strength-value">0.28</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Radius</div>
-                                        <input id="we-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.95">
-                                        <div class="viewer-slider-value" id="we-bloom-radius-value">0.95</div>
+                                        <input id="we-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.35">
+                                        <div class="viewer-slider-value" id="we-bloom-radius-value">0.35</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Threshold</div>
-                                        <input id="we-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
-                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">0.48</div>
+                                        <input id="we-bloom-threshold" type="range" min="0" max="2" step="0.01" value="1.10">
+                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">1.10</div>
                                     </div>
                                 </div>
                             </details>
@@ -1023,18 +1023,18 @@
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Bloom Strength</div>
-                                        <input id="post-process-bloom-strength" type="range" min="0" max="3" step="0.01" value="1.25">
-                                        <div class="viewer-slider-value" id="post-process-bloom-strength-value">1.25</div>
+                                        <input id="post-process-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.28">
+                                        <div class="viewer-slider-value" id="post-process-bloom-strength-value">0.28</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Bloom Radius</div>
-                                        <input id="post-process-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.95">
-                                        <div class="viewer-slider-value" id="post-process-bloom-radius-value">0.95</div>
+                                        <input id="post-process-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.35">
+                                        <div class="viewer-slider-value" id="post-process-bloom-radius-value">0.35</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Bloom Threshold</div>
-                                        <input id="post-process-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
-                                        <div class="viewer-slider-value" id="post-process-bloom-threshold-value">0.48</div>
+                                        <input id="post-process-bloom-threshold" type="range" min="0" max="2" step="0.01" value="1.10">
+                                        <div class="viewer-slider-value" id="post-process-bloom-threshold-value">1.10</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Blend Speed</div>
@@ -1309,6 +1309,11 @@
                     <div class="mobile-pause-card">
                         <div class="mobile-pause-title">Paused</div>
                         <button class="mobile-pause-btn" id="mobile-pause-continue" type="button">Continue</button>
+                        <button class="mobile-pause-btn mobile-pause-info-toggle" id="mobile-pause-info-toggle" type="button" aria-expanded="false">Info</button>
+                        <div class="mobile-pause-info" id="mobile-pause-info" hidden>
+                            <div class="mobile-pause-info-title" id="mobile-pause-info-title"></div>
+                            <div class="mobile-pause-info-lines" id="mobile-pause-info-lines"></div>
+                        </div>
                         <div class="mobile-pause-quality">
                             <div class="mobile-pause-quality-title">Quality</div>
                             <div class="mobile-pause-quality-row" aria-label="Quality">
