@@ -2113,9 +2113,12 @@ export function createLevels(deps) {
         decal('tycoon-road-ns', [ROAD_W, BLOCK], 0, 0, roadMat, 0.001);
         decal('tycoon-road-ew', [BLOCK, ROAD_W], 0, 0, roadMat, 0.001);
         // Centre dashed lines (short segments per axis), above the asphalt.
+        // Skip any dash that falls inside the central intersection so the two
+        // axes don't overlap into a big yellow "X" at the crossing.
+        const CLEAR = ROAD_W * 0.5 + 1.2;   // keep the junction box marking-free
         for (let i = -HALF + 4; i < HALF; i += 6) {
-            decal(`tycoon-line-ns-${i}`, [0.35, 2.4], 0, i, lineMat, 0.004);
-            decal(`tycoon-line-ew-${i}`, [2.4, 0.35], i, 0, lineMat, 0.004);
+            if (Math.abs(i) > CLEAR) decal(`tycoon-line-ns-${i}`, [0.35, 2.4], 0, i, lineMat, 0.004);
+            if (Math.abs(i) > CLEAR) decal(`tycoon-line-ew-${i}`, [2.4, 0.35], i, 0, lineMat, 0.004);
         }
         // Sidewalks flanking each road + raised curbs at the grass edge.
         const SW = 2.0, half = ROAD_W * 0.5;
@@ -2139,7 +2142,7 @@ export function createLevels(deps) {
         // collidable part to currentMesh, dropping any intermediate Group
         // transform — so we bake the house's rotation into each child's own
         // position/rotation instead of using a wrapper Group.
-        const addHouse = (cx, cz, w, d, h, faceY = 0) => {
+        const addHouse = (cx, cz, w, d, h, faceY = 0, { home = false } = {}) => {
             const i = hIdx++;
             const cos = Math.cos(faceY), sin = Math.sin(faceY);
             // Local (x,y,z) → world, rotated about the house centre by faceY.
@@ -2150,9 +2153,9 @@ export function createLevels(deps) {
                 root.add(mesh);
                 return mesh;
             };
-            const wallMat = flatMat(pick(HOUSE_TONES, i), { rough: 0.92 });
-            const roofMat = flatMat(pick(ROOF_TONES, i), { rough: 0.85 });
-            const doorMat = flatMat('#2a1d14', { rough: 0.7 });
+            // The home is always the green house with a prominent door.
+            const wallMat = flatMat(home ? '#4f8f4a' : pick(HOUSE_TONES, i), { rough: 0.92 });
+            const roofMat = flatMat(home ? '#274a2a' : pick(ROOF_TONES, i), { rough: 0.85 });
             const winMat  = flatMat('#bfe6ff', { rough: 0.2, metal: 0.1, emissive: '#9fd0ff', emissiveIntensity: 0.25 });
 
             // Solid wall box — the only collidable part.
@@ -2161,10 +2164,27 @@ export function createLevels(deps) {
             // Pitched roof (flattened 4-sided cone), centred on top.
             const roof = place(new THREE.Mesh(new THREE.ConeGeometry(Math.max(w, d) * 0.78, h * 0.55, 4), roofMat), 0, h + h * 0.27, 0);
             roof.rotation.set(0, faceY + Math.PI * 0.25, 0);
-            // Door + two windows on the front (+Z) face.
-            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.9, 0.12), doorMat), 0, 0.95, d * 0.5 + 0.02);
-            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.1), winMat), -w * 0.28, h * 0.6, d * 0.5 + 0.02);
-            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.1), winMat),  w * 0.28, h * 0.6, d * 0.5 + 0.02);
+
+            // Door on the front (+Z) face. The home gets a larger, framed,
+            // glowing door so it's obviously the one you can enter.
+            const frontZ = d * 0.5 + 0.02;
+            if (home) {
+                const frameMat = flatMat('#caa15a', { rough: 0.5, emissive: '#caa15a', emissiveIntensity: 0.2 });
+                const doorMat  = flatMat('#5b3a1c', { rough: 0.55, emissive: '#7a5224', emissiveIntensity: 0.35 });
+                const knobMat  = flatMat('#ffe08a', { rough: 0.3, metal: 0.6, emissive: '#ffd24a', emissiveIntensity: 0.6 });
+                place(new THREE.Mesh(new THREE.BoxGeometry(1.7, 2.7, 0.1), frameMat), 0, 1.35, frontZ);          // frame
+                place(new THREE.Mesh(new THREE.BoxGeometry(1.35, 2.4, 0.16), doorMat), 0, 1.2, frontZ + 0.04);   // door slab
+                place(new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), knobMat), 0.5, 1.15, frontZ + 0.14); // knob
+                // Porch light above the door so it reads as "home".
+                const light = new THREE.PointLight(0xffd9a0, 4, 8, 1.6);
+                place(light, 0, 2.9, frontZ + 0.3);
+                light.name = 'home-porch-light';
+            } else {
+                const doorMat = flatMat('#2a1d14', { rough: 0.7 });
+                place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.9, 0.12), doorMat), 0, 0.95, frontZ);
+            }
+            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.1), winMat), -w * 0.28, h * 0.6, frontZ);
+            place(new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.1), winMat),  w * 0.28, h * 0.6, frontZ);
 
             // Register only the wall as a solid static actor (collision baked
             // from its already-correct world transform).
@@ -2182,8 +2202,98 @@ export function createLevels(deps) {
         addHouse(-LOT,  LOT, 8, 7, 5, Math.PI * 0.25);
         addHouse( LOT, -LOT, 9, 8, 6, Math.PI * 1.25);
         addHouse( LOT,  LOT, 8, 7, 5, Math.PI * 1.75);
-        addHouse(-LOT,    0, 7, 9, 5, Math.PI * 0.5);   // west lot
+        // "Your house" — west lot, the green house with a prominent door.
+        // faceY = +PI/2 maps the local +Z front to world +X, so the door faces
+        // the centre road (east) where HOME_DOOR sits.
+        const HOME = [-LOT, 0];
+        addHouse(HOME[0], HOME[1], 8, 10, 5.5, Math.PI * 0.5, { home: true });
         addHouse( LOT,    0, 7, 9, 5, -Math.PI * 0.5);  // east lot
+
+        // Door interaction point: just outside the home's front face. With
+        // faceY +PI/2 the front (+Z) maps to world +X, so it's at HOME.x + d/2.
+        const HOME_DOOR = [HOME[0] + 10 * 0.5 + 0.6, HOME[1]];
+
+        // ---- interior grow room (built far off-map; same level) ---------
+        // The player is teleported here on entering the home. A small sealed
+        // room with weed plants to harvest and a packaging bench.
+        const ROOM_ORIGIN = [0, 0, 300];
+        // Bigger room. ROOM_W / ROOM_D drive the pot layout + anchors below.
+        const ROOM_W = 26, ROOM_D = 22;
+        // Packaging bench sits in the NE corner (away from the plant rows and
+        // the entrance, which is on the +Z / south wall).
+        const BENCH_LOCAL = [ROOM_W * 0.5 - 2.4, ROOM_D * 0.5 - 12];
+        const buildGrowRoom = (ox, oy, oz) => {
+            const W = ROOM_W, D = ROOM_D, H = 4.6, WT = 0.4;
+            const floorMat = flatMat('#5a4a3a', { rough: 0.95 });
+            const rWallMat = flatMat('#6b6f5e', { rough: 0.92 });
+            const ceilMat  = flatMat('#3a3d34', { rough: 0.95 });
+            // Floor (walkable) + ceiling.
+            addBox('grow-floor', [W, WT, D], [ox, oy - WT * 0.5, oz], floorMat, { actorSurface: 'floor' });
+            addBox('grow-ceil',  [W, WT, D], [ox, oy + H, oz], ceilMat);
+            // Four solid walls.
+            addBox('grow-wall-n', [W, H, WT], [ox, oy + H * 0.5, oz - D * 0.5], rWallMat, { solid: true });
+            addBox('grow-wall-s', [W, H, WT], [ox, oy + H * 0.5, oz + D * 0.5], rWallMat, { solid: true });
+            addBox('grow-wall-e', [WT, H, D], [ox + W * 0.5, oy + H * 0.5, oz], rWallMat, { solid: true });
+            addBox('grow-wall-w', [WT, H, D], [ox - W * 0.5, oy + H * 0.5, oz], rWallMat, { solid: true });
+            // Grow lamps over the plant rows (north half) + a couple fill lights.
+            const lampMat = flatMat('#fff0c0', { rough: 0.4, emissive: '#ffd27a', emissiveIntensity: 1.3 });
+            [-7, 0, 7].forEach((lx, k) => {
+                addBox(`grow-lamp-${k}`, [3.4, 0.18, 1.6], [ox + lx, oy + H - 0.4, oz - 4], lampMat);
+            });
+            [[-6, -3], [6, -3], [0, 5]].forEach(([lx, lz], k) => {
+                const rl = new THREE.PointLight(0xffe6b0, 6, 24, 1.4);
+                rl.position.set(ox + lx, oy + H - 0.8, oz + lz);
+                rl.name = `grow-light-${k}`;
+                root.add(rl);
+            });
+            // Packaging bench (steel) in the NE corner.
+            const benchMat = flatMat('#46505a', { rough: 0.5, metal: 0.4 });
+            addBox('grow-bench', [4, 1.0, 1.6], [ox + BENCH_LOCAL[0] - 1.0, oy + 0.5, oz + BENCH_LOCAL[1]], benchMat, { solid: true });
+            // A small "PACK" sign over the bench so it reads as the bagging spot.
+            const signMat = flatMat('#123022', { rough: 0.4, emissive: '#39d98a', emissiveIntensity: 0.7 });
+            addBox('grow-bench-sign', [2.4, 0.6, 0.12], [ox + BENCH_LOCAL[0] - 1.0, oy + 2.4, oz + BENCH_LOCAL[1] - 0.7], signMat);
+
+            // Exit door on the south (+Z) wall — framed + glowing so it reads as
+            // the way out. Non-solid so the player can walk into it to leave.
+            const doorFrameMat = flatMat('#caa15a', { rough: 0.5, emissive: '#caa15a', emissiveIntensity: 0.25 });
+            const doorSlabMat  = flatMat('#5b3a1c', { rough: 0.55, emissive: '#7a5224', emissiveIntensity: 0.4 });
+            const exitZ = oz + D * 0.5 - WT * 0.5 - 0.02;
+            addBox('grow-exit-frame', [2.0, 3.0, 0.12], [ox, oy + 1.5, exitZ], doorFrameMat);
+            addBox('grow-exit-door',  [1.6, 2.6, 0.18], [ox, oy + 1.3, exitZ - 0.05], doorSlabMat);
+            const exitKnob = flatMat('#ffe08a', { rough: 0.3, metal: 0.6, emissive: '#ffd24a', emissiveIntensity: 0.7 });
+            addBox('grow-exit-knob', [0.16, 0.16, 0.16], [ox + 0.55, oy + 1.25, exitZ - 0.14], exitKnob);
+            // "EXIT" glow strip above the door.
+            const exitSign = flatMat('#102a16', { rough: 0.4, emissive: '#39d98a', emissiveIntensity: 0.9 });
+            addBox('grow-exit-sign', [1.6, 0.35, 0.1], [ox, oy + 3.15, exitZ], exitSign);
+
+            // Bed in the SW corner — sleep here to skip to morning.
+            const bedFrameMat = flatMat('#3a2a1c', { rough: 0.9 });
+            const mattressMat = flatMat('#b8c4d0', { rough: 0.85 });
+            const pillowMat   = flatMat('#e8eef4', { rough: 0.8 });
+            const bx = ox - W * 0.5 + 1.6, bz = oz + D * 0.5 - 2.2;
+            addBox('grow-bed-frame', [2.2, 0.5, 3.4], [bx, oy + 0.25, bz], bedFrameMat, { solid: true });
+            addBox('grow-bed-mattress', [2.0, 0.3, 3.0], [bx, oy + 0.6, bz], mattressMat);
+            addBox('grow-bed-pillow', [1.7, 0.22, 0.7], [bx, oy + 0.82, bz - 1.05], pillowMat);
+
+            // Upgrade desk (gold) in the SE corner — open the upgrade shop here.
+            const upgMat = flatMat('#3a2f0a', { rough: 0.35, emissive: '#d4a017', emissiveIntensity: 0.55 });
+            const ux = ox + W * 0.5 - 2.4, uz = oz + D * 0.5 - 2.4;
+            addBox('grow-upgrade', [2.4, 1.0, 1.6], [ux, oy + 0.5, uz], upgMat, { solid: true });
+            const upgSignMat = flatMat('#2a2410', { rough: 0.4, emissive: '#ffd24a', emissiveIntensity: 0.8 });
+            addBox('grow-upgrade-sign', [2.0, 0.5, 0.12], [ux, oy + 2.3, uz - 0.7], upgSignMat);
+        };
+        buildGrowRoom(...ROOM_ORIGIN);
+
+        // Plant pots: two rows in the north half of the (now larger) room.
+        const POTS = [];
+        const potMat = flatMat('#2a1d12', { rough: 0.9 });
+        [-8, -4.6, -1.2, 2.2, 5.6].forEach((px) => {
+            [-6.5, -3.0].forEach((pz) => {
+                const wx = ROOM_ORIGIN[0] + px, wz = ROOM_ORIGIN[2] + pz;
+                addBox(`grow-pot-${POTS.length}`, [1.1, 0.5, 1.1], [wx, 0.25, wz], potMat, { solid: true });
+                POTS.push([wx, 0, wz]);
+            });
+        });
 
         // Trees: a trunk + foliage sphere scattered on the grass.
         const trunkMat = flatMat('#5b3a21', { rough: 0.95 });
@@ -2200,22 +2310,30 @@ export function createLevels(deps) {
         const COOK = [-LOT + 2, -LOT + 5];
         addBox('tycoon-cook', [3.0, 1.0, 2.0], [COOK[0], 0.5, COOK[1]],
             flatMat('#0f3d22', { rough: 0.4, metal: 0.3, emissive: '#1f9c52', emissiveIntensity: 0.5 }), { solid: true });
-        // Upgrade pad (gold) — NE grass lot.
-        const UPG = [LOT - 2, LOT - 5];
-        addBox('tycoon-upgrade', [3.0, 0.3, 3.0], [UPG[0], 0.15, UPG[1]],
-            flatMat('#3a2f0a', { rough: 0.35, emissive: '#d4a017', emissiveIntensity: 0.5 }));
-        // Gun pickup pedestal — just off the centre intersection.
-        const GUN = [0, 10];
+        // Upgrades now live INSIDE the grow room (SE corner desk). Anchor mirrors
+        // the grow-upgrade box built in buildGrowRoom.
+        const UPG = [ROOM_ORIGIN[0] + ROOM_W * 0.5 - 2.4, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 2.4];
+        // Gun pickup pedestal — on the player's front yard, beside the door.
+        const GUN = [HOME_DOOR[0] + 1.0, HOME_DOOR[1] - 3.0];
         addBox('tycoon-gun-pedestal', [1.2, 0.6, 1.2], [GUN[0], 0.3, GUN[1]],
             flatMat('#1a1a1a', { rough: 0.4, metal: 0.6, emissive: '#444', emissiveIntensity: 0.2 }));
 
         root.userData.drugTycoonLevel = {
             playerSpawn: [0, 0.85, 0],
             cookStation: [COOK[0], 1.0, COOK[1]],
-            upgradePad: [UPG[0], 0.3, UPG[1]],
+            upgradePad: [UPG[0], 1.0, UPG[1]],   // inside the grow room
             gunPickup: [GUN[0], 1.0, GUN[1]],
             streetRadius: HALF - 6,   // buyers/police wander the roads + lots
+            mapHalf: HALF,            // half block size; cops spawn at this edge
             spawnY: 0,
+            // Interior grow room (same level, off-map).
+            homeDoor: [HOME_DOOR[0], 0.85, HOME_DOOR[1]],   // outside, enters room
+            growRoomSpawn: [ROOM_ORIGIN[0], 0.85, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 2],  // just inside south wall
+            growExitDoor: [ROOM_ORIGIN[0], 0.85, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 1],   // at south wall, back to street
+            growPots: POTS,
+            packagingBench: [ROOM_ORIGIN[0] + BENCH_LOCAL[0] - 1.0, 1.0, ROOM_ORIGIN[2] + BENCH_LOCAL[1]],
+            // Bed (SW corner) — sleep to skip the night. Matches buildGrowRoom.
+            bed: [ROOM_ORIGIN[0] - ROOM_W * 0.5 + 1.6, 1.0, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 2.2],
         };
 
         // Daylight: a directional-style sun high above lighting the whole block.

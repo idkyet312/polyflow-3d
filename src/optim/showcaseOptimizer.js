@@ -138,6 +138,11 @@ export function createShowcaseOptimizer({
             e.preventDefault();
             container.classList.remove('drag-active');
 
+            // Ignore in-app drags (e.g. the grow-room bagging panel) that carry
+            // no files — only react to real file/folder drops from the OS.
+            const hasFiles = [...(e.dataTransfer?.types || [])].includes('Files');
+            if (!hasFiles) return;
+
             const items = [...e.dataTransfer.items];
             const firstEntry = items[0]?.webkitGetAsEntry?.();
 

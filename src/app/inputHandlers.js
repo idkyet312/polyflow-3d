@@ -9,6 +9,8 @@
 //   - handleShowcaseWheel: free-fly camera speed adjust
 //   - handlePointerLockChange: gameplay enter/exit on lock state
 
+import { core } from '../runtime/appCore.js';
+
 export function createInputHandlers(deps) {
     const {
         THREE,
@@ -34,6 +36,27 @@ export function createInputHandlers(deps) {
         resetShowcaseCamera,
         adjustShowcaseSpeed,
     } = deps;
+
+    // True when the current level is a self-contained game mode (Drug Tycoon,
+    // Rogue Waves arenas, etc) that owns its own input. Used to gate the
+    // default left/right-click mouse ACTIONS (e.g. throw-ball) so they don't
+    // fire inside a game mode. The gun's own fire flag is NOT gated by this.
+    const GAME_MODE_SAMPLE_TYPES = new Set([
+        'drugTycoon', 'doomArena', 'roguePit', 'doomTest',
+    ]);
+    function inGameMode() {
+        // sampleType lives on the loaded level mesh (core.currentMesh).
+        const sampleType = core.currentMesh?.userData?.sampleType;
+        if (sampleType && GAME_MODE_SAMPLE_TYPES.has(sampleType)) return true;
+        // Fallback: a game-mode logic actor (rogue/tycoon) is present.
+        const actors = sceneSystem()?.actors;
+        if (actors) {
+            for (const actor of actors) {
+                if (actor?.userData?.gameplayPrefab === 'rogueGameMode') return true;
+            }
+        }
+        return false;
+    }
 
     function handleGameplayMouseMove(event) {
         if (!gameplay.pointerLocked) {
@@ -88,13 +111,13 @@ export function createInputHandlers(deps) {
             }
             if (event.type === 'mousedown') {
                 const buttonName = event.button === 2 ? 'right' : event.button === 0 ? 'left' : null;
-                // Left mouse is consumed by a held weapon — the engine weapon
-                // (gameplay.weapon.type) OR the Drug Tycoon pistol — so the
-                // default left-click mouse action (e.g. throwing a ball) doesn't
-                // also fire while armed.
+                // Default left/right-click mouse actions only run in a free
+                // (non-game-mode) scene. Inside a game mode (Drug Tycoon, Rogue,
+                // etc) they're suppressed so they don't interfere — the gun's
+                // own `fire` flag above still works.
                 const tycoonGun = (typeof window !== 'undefined') && window.drugTycoon?.hasGun;
                 const heldWeaponUsesLeftMouse = buttonName === 'left' && (!!gameplay.weapon.type || tycoonGun);
-                if (buttonName && !heldWeaponUsesLeftMouse) runMouseAction(buttonName, event);
+                if (buttonName && !heldWeaponUsesLeftMouse && !inGameMode()) runMouseAction(buttonName, event);
             }
             return;
         }
@@ -221,6 +244,8 @@ export function createInputHandlers(deps) {
             repairSampleCollisionHierarchyAfterRestore();
             const did = resetDoomMiniLevelState();
             resetDoomArenaLevelState();
+            // Drug Tycoon restarts on exit so rejoining gives a fresh run.
+            try { window.drugTycoonApi?.resetState?.(); } catch (e) {}
             console.log('[STOP] resetDoomMiniLevelState ran =', did);
             syncTransformControlState();
         });

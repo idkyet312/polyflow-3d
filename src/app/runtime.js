@@ -5707,6 +5707,8 @@ function exitGameplay() {
         resetSoccerLevelState();
         const did = resetDoomMiniLevelState();
         resetDoomArenaLevelState();
+        // Drug Tycoon restarts on exit so rejoining gives a fresh economy/grow.
+        try { window.drugTycoonApi?.resetState?.(); } catch (e) {}
         console.log('[STOP] exitGameplay resetDoomMiniLevelState ran =', did);
     });
     gameplay.velocity.set(0, 0, 0);
@@ -5792,16 +5794,24 @@ function setTextIfChanged(element, value) {
     if (element.textContent !== value) element.textContent = value;
 }
 
+const GAME_MODE_TYPES = ['drugTycoon', 'doomArena', 'roguePit', 'doomTest'];
+
 function updateGameplayUI() {
     const hasAsset = !!currentMesh;
     const mobileActive = mobileState.enabled;
     const drivingVehicle = isDrivingVehicle();
+    // Game modes (Drug Tycoon, Rogue, etc) have their own HUD/prompts, so hide
+    // the generic status + controls hint while playing one — they just clutter
+    // behind the mode's overlay.
+    const inGameMode = gameplay.active
+        && GAME_MODE_TYPES.includes(currentMesh?.userData?.sampleType);
 
     setTextIfChanged(resetViewBtn, gameplay.active ? 'Respawn' : 'Reset View');
 
     updateCameraModeButtons();
 
-    if (gameplayStatus) {
+    if (gameplayStatus) gameplayStatus.style.display = inGameMode ? 'none' : '';
+    if (gameplayStatus && !inGameMode) {
         let statusText;
         if (mobileActive && drivingVehicle) statusText = 'Mobile driving active';
         else if (mobileActive && gameplay.active) statusText = 'Mobile play active';
@@ -5814,7 +5824,8 @@ function updateGameplayUI() {
         setTextIfChanged(gameplayStatus, statusText);
     }
 
-    if (playHint) {
+    if (playHint) playHint.style.display = inGameMode ? 'none' : '';
+    if (playHint && !inGameMode) {
         let hintText;
         if (mobileActive && drivingVehicle) hintText = 'Touch left pad to drive, right pad to look, hold Brake to slow down, tap the scene for play scripts, and tap E on keyboard to hop out.';
         else if (mobileActive && gameplay.active) hintText = 'Touch left pad to move, right pad to look, tap the scene to run play scripts, and use Jump to hop.';
@@ -6037,6 +6048,7 @@ const _prefabSystem = createPrefabSystem({
     selectShowcaseActor, spawnDynamicPrimitive, spawnGameplayPrefab,
     spawnLightActor, createDynamicPropActor, loadActorFromFile,
     setActorComponentFlags, syncPropScriptState,
+    spawnDDGIVolumeActor,
 });
 const registerBuiltinPrefabs = _prefabSystem.registerBuiltinPrefabs;
 const loadPrefabManifest = _prefabSystem.loadPrefabManifest;

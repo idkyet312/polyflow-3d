@@ -20,14 +20,16 @@ export function createPrefabSystem(deps) {
         selectShowcaseActor, spawnDynamicPrimitive, spawnGameplayPrefab,
         spawnLightActor, createDynamicPropActor, loadActorFromFile,
         setActorComponentFlags, syncPropScriptState,
+        spawnDDGIVolumeActor,
     } = deps;
 
     const PREFAB_MANIFEST_URL = assetRegistry.resolvePrefabManifest();
-    const PREFAB_CATEGORY_ORDER = ['Vehicles', 'Lights', 'Shapes', 'Gameplay', 'Weapons', 'AI'];
+    const PREFAB_CATEGORY_ORDER = ['Vehicles', 'Lights', 'GI', 'Shapes', 'Gameplay', 'Weapons', 'AI'];
     const BUILTIN_PREFAB_ITEMS = [
         { id: 'helicopter', name: 'Helicopter', category: 'Vehicles', modelPrefab: 'helicopter', image: 'helicopter.svg' },
         { id: 'point-light', name: 'Point Light', category: 'Lights', kind: 'pointLight', image: 'light-point.svg' },
         { id: 'spot-light', name: 'Spot Light', category: 'Lights', kind: 'spotLight', image: 'light-spot.svg' },
+        { id: 'ddgi-volume', name: 'DDGI Volume', category: 'GI', ddgiVolume: true, image: 'light-point.svg' },
         { id: 'sphere', name: 'Sphere', category: 'Shapes', kind: 'sphere', image: 'shape-sphere.svg' },
         { id: 'cube', name: 'Cube', category: 'Shapes', kind: 'cube', image: 'shape-cube.svg' },
         { id: 'cylinder', name: 'Cylinder', category: 'Shapes', kind: 'cylinder', image: 'shape-cylinder.svg' },
@@ -330,6 +332,22 @@ export function createPrefabSystem(deps) {
     }
 
     function spawnBuiltinPrefab(prefab) {
+        if (prefab?.ddgiVolume) {
+            const actor = typeof spawnDDGIVolumeActor === 'function'
+                ? spawnDDGIVolumeActor({ userData: { label: prefab.name || 'DDGI Volume' } })
+                : null;
+            if (!actor) {
+                const status = document.getElementById('prefab-browser-status');
+                if (status) status.textContent = 'Failed to spawn DDGI Volume.';
+                return;
+            }
+            refreshSceneUI();
+            tagPrefabInstance(actor, prefab);
+            selectShowcaseActor(actor.id);
+            closePrefabBrowser();
+            return;
+        }
+
         if (prefab?.gameplayPrefab) {
             const actor = spawnGameplayPrefab(prefab.gameplayPrefab);
             if (actor) {
