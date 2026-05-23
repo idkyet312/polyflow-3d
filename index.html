@@ -10,12 +10,12 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
     <link rel="icon" href="/polyflow-3d/favicon.svg" type="image/svg+xml">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-BoEdZYNL.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-8Oinh1KL.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/rolldown-runtime-Dw2cE7zH.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-physics-BZxYQruA.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-realtime-CLQfEXVt.js">
-  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-three-o_HWTQwa.js">
-  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-ui-CFGgSnng.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-three-Dsx19tqm.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-ui-DRKVRMQR.js">
   <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-Cp2vTu91.css">
 </head>
 
@@ -218,6 +218,7 @@
                                         <option value="cube">Cube Actor</option>
                                         <option value="pointLight">Point Light Actor</option>
                                         <option value="spotLight">Spot Light Actor</option>
+                                        <option value="rectLight">Rect Area Light Actor</option>
                                         <option value="vehicle">Vehicle Actor</option>
                                         <option value="imported">Imported Actor</option>
                                         <option value="capsule">Simple AI Actor</option>
@@ -748,6 +749,16 @@
                             </details>
 
                             <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Anti-Aliasing (FXAA)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-aa-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-aa-on">On</button>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Glow / Bloom</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
@@ -756,8 +767,8 @@
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Strength</div>
-                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.28">
-                                        <div class="viewer-slider-value" id="we-bloom-strength-value">0.28</div>
+                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.5">
+                                        <div class="viewer-slider-value" id="we-bloom-strength-value">0.50</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Radius</div>
@@ -766,8 +777,8 @@
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Threshold</div>
-                                        <input id="we-bloom-threshold" type="range" min="0" max="2" step="0.01" value="1.10">
-                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">1.10</div>
+                                        <input id="we-bloom-threshold" type="range" min="0" max="4" step="0.01" value="2.20">
+                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">2.20</div>
                                     </div>
                                 </div>
                             </details>
