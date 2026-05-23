@@ -260,6 +260,14 @@ export function wirePanelHandlers(opts) {
     wireSlider(worldEnvUiRefs?.ssaoIntensity, 'ssao.intensity', (v) => { worldEnvState.ssao.intensity = v; });
     wireSlider(worldEnvUiRefs?.ssaoRadius, 'ssao.radius', (v) => { worldEnvState.ssao.radius = v; });
 
+    wireToggle(worldEnvUiRefs?.ssrOff, worldEnvUiRefs?.ssrOn,
+        () => { worldEnvState.ssr.enabled = false; },
+        () => { worldEnvState.ssr.enabled = true; });
+    wireSlider(worldEnvUiRefs?.ssrIntensity, 'ssr.intensity', (v) => { worldEnvState.ssr.intensity = v; });
+    wireSlider(worldEnvUiRefs?.ssrMaxDistance, 'ssr.maxDistance', (v) => { worldEnvState.ssr.maxDistance = v; });
+    wireSlider(worldEnvUiRefs?.ssrThickness, 'ssr.thickness', (v) => { worldEnvState.ssr.thickness = v; });
+    wireSlider(worldEnvUiRefs?.ssrQuality, 'ssr.quality', (v) => { worldEnvState.ssr.quality = v; });
+
     wireToggle(worldEnvUiRefs?.ssgiOff, worldEnvUiRefs?.ssgiOn,
         () => { worldEnvState.ssgi.enabled = false; },
         () => { worldEnvState.ssgi.enabled = true; });

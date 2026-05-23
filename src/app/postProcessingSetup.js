@@ -5,9 +5,14 @@
 // Steps: scenePass → bloom node (with name-sanitization workaround for
 // WebGPU validation) → RenderPipeline → DDGI/lightmap init.
 
-import { pass } from 'three/tsl';
+import {
+    materialMetalness, materialRoughness,
+    mrt, normalView, pass, vec4, velocity,
+} from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
+import { traa } from 'three/addons/tsl/display/TRAANode.js';
+import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { RenderPipeline } from 'three/webgpu';
 
 export function setupPostProcessing(opts) {
@@ -20,16 +25,36 @@ export function setupPostProcessing(opts) {
         registerDebug,
     } = opts;
 
-    // NOTE: no scene-pass MRT. SSR/TAA need extra G-buffer targets (normal/
-    // metalness/roughness/velocity), but setting a multi-target MRT on the scene
-    // pass also applies to the shadow-map renders that three runs INSIDE the
-    // scene render (CSM cascades, spot depth) — their depth materials only write
-    // one target, so WebGPU rejects the pipeline ("targets[1] no fragment
-    // output"). That breaks all shadows. Bloom + GTAO work from color+depth only
-    // (depth is always available), so the post stack stays single-target + safe.
+    // NOTE: keep the main scene pass single-target. The forward lighting pass is
+    // the stable one that feeds shadows, bloom, and GTAO. Temporal AA gets its
+    // motion vectors from a dedicated auxiliary pass instead of forcing extra MRT
+    // attachments onto the main beauty pass.
     const scenePass = pass(scene, camera);
     const sceneColor = scenePass.getTextureNode('output');
     const sceneDepth = scenePass.getTextureNode('depth');
+
+    // Auxiliary SSR scene-data pass. Dormant until SSR consumes it, but keeps
+    // the forward beauty pass shadow-safe. RGB stores view normal; A carries
+    // roughness. A second target keeps roughness/metalness cheap to
+    // sample without unpacking normals.
+    const normalMaterialPass = pass(scene, camera);
+    normalMaterialPass.setMRT(mrt({
+        output: vec4(0, 0, 0, 1),
+        normalMaterial: vec4(normalView, materialRoughness),
+        materialData: vec4(materialRoughness, materialMetalness, 0, 1),
+    }));
+    const sceneNormalMaterial = normalMaterialPass.getTextureNode('normalMaterial');
+    const sceneMaterialData = normalMaterialPass.getTextureNode('materialData');
+
+    // Auxiliary motion-vector pass for temporal AA. It re-renders the scene with
+    // the original materials so alpha masking/discard stays correct, but only
+    // writes an inert color target plus velocity.
+    const velocityPass = pass(scene, camera);
+    velocityPass.setMRT(mrt({
+        output: vec4(0, 0, 0, 1),
+        velocity,
+    }));
+    const sceneVelocity = velocityPass.getTextureNode('velocity');
 
     // Ground Truth Ambient Occlusion (GTAO) — contact-shadow darkening in
     // creases/corners. Reconstructs normals from depth (null normalNode) → no
@@ -50,6 +75,21 @@ export function setupPostProcessing(opts) {
         globalPostProcessUniforms.bloomThreshold,
     );
 
+    const traaNode = traa(sceneColor, sceneDepth, sceneVelocity, camera);
+    const ssrNode = ssr(
+        sceneColor,
+        sceneDepth,
+        sceneNormalMaterial,
+        sceneMaterialData.g,
+        sceneNormalMaterial.a,
+        camera,
+    );
+    ssrNode.opacity.value = 0.95;
+    ssrNode.maxDistance.value = 16.0;
+    ssrNode.thickness.value = 0.65;
+    ssrNode.quality.value = 0.85;
+    ssrNode.resolutionScale = 1.0;
+
     // BloomNode names its internal render-target textures "UnrealBloomPass.*".
     // The WebGPU backend uses texture.name as the GPU resource label, and
     // Dawn rejects '.' in labels → uncaught validation errors on boot that
@@ -62,10 +102,47 @@ export function setupPostProcessing(opts) {
     sanitize(bloomNode?._renderTargetBright);
     (bloomNode?._renderTargetsHorizontal || []).forEach(sanitize);
     (bloomNode?._renderTargetsVertical || []).forEach(sanitize);
+    sanitize(traaNode?._historyRenderTarget);
+    sanitize(traaNode?._resolveRenderTarget);
+    sanitize(ssrNode?._ssrRenderTarget);
+    sanitize(ssrNode?._blurRenderTarget);
 
     const postProcessing = new RenderPipeline(renderer);
+    const postProcessRenderData = {
+        main: { pass: scenePass, color: sceneColor, depth: sceneDepth },
+        normalMaterial: {
+            pass: normalMaterialPass,
+            texture: sceneNormalMaterial,
+            materialTexture: sceneMaterialData,
+        },
+        velocity: { pass: velocityPass, texture: sceneVelocity },
+        history: {
+            colorA: traaNode?._historyRenderTarget?.texture ?? null,
+            colorB: traaNode?._resolveRenderTarget?.texture ?? null,
+            valid: false,
+        },
+        jitter: { frame: 0, x: 0, y: 0 },
+        taa: {
+            node: traaNode,
+            output: traaNode?.getTextureNode?.() ?? traaNode,
+            enabled: false,
+            resetHistory() {
+                if (postProcessRenderData.history) postProcessRenderData.history.valid = false;
+                if (traaNode && Number.isFinite(traaNode._jitterIndex)) traaNode._jitterIndex = 0;
+            },
+        },
+        ssr: {
+            node: ssrNode,
+            output: ssrNode?.getTextureNode?.() ?? ssrNode,
+            enabled: false,
+        },
+    };
     const postProcessNodes = {
-        sceneColor, sceneDepth, bloomNode, aoNode, aoOutput,
+        sceneColor, sceneDepth,
+        sceneNormalMaterial, sceneMaterialData, normalMaterialPass,
+        sceneVelocity, velocityPass,
+        bloomNode, aoNode, aoOutput, traaNode, ssrNode,
+        ssrOutput: ssrNode?.getTextureNode?.() ?? ssrNode,
         ssgiNode: null, ssgiOutput: null,
     };
     applySSGISettings();
@@ -89,10 +166,11 @@ export function setupPostProcessing(opts) {
 
     registerDebug('ddgi', getDDGIManager());
     registerDebug('lightmapBaker', lightmapBaker);
+    registerDebug('postProcessRenderData', postProcessRenderData);
     // Entity bridge debug handle:
     //   __POLYFLOW_DEBUG__.scene.getEntity(id),
     //   __POLYFLOW_DEBUG__.scene.entityFromObject3D(obj).
     registerDebug('scene', sceneSystem);
 
-    return { postProcessing, postProcessNodes, postProcessVolumeManager, lightmapBaker };
+    return { postProcessing, postProcessNodes, postProcessRenderData, postProcessVolumeManager, lightmapBaker };
 }

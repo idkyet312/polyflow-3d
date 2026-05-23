@@ -752,7 +752,7 @@
                             </details>
 
                             <details class="viewer-menu-section">
-                                <summary class="viewer-menu-section-summary">Anti-Aliasing (FXAA)</summary>
+                                <summary class="viewer-menu-section-summary">Anti-Aliasing (Temporal)</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
                                         <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-aa-off">Off</button>
@@ -843,6 +843,37 @@
                                         <div class="viewer-slider-value" id="we-ssao-radius-value">0.5</div>
                                     </div>
                                     <div class="viewer-inline-note">Contact-shadow darkening in creases. Performance mode pauses it.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Screen Space Reflections (SSR)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssr-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ssr-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input type="range" id="we-ssr-intensity" min="0" max="1.5" step="0.05" value="0.95">
+                                        <div class="viewer-slider-value" id="we-ssr-intensity-value">0.95</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Distance</div>
+                                        <input type="range" id="we-ssr-max-distance" min="1" max="24" step="0.5" value="16">
+                                        <div class="viewer-slider-value" id="we-ssr-max-distance-value">16.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Thickness</div>
+                                        <input type="range" id="we-ssr-thickness" min="0.05" max="1.5" step="0.05" value="0.65">
+                                        <div class="viewer-slider-value" id="we-ssr-thickness-value">0.65</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Quality</div>
+                                        <input type="range" id="we-ssr-quality" min="0.1" max="1" step="0.05" value="0.85">
+                                        <div class="viewer-slider-value" id="we-ssr-quality-value">0.85</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Reflects only visible screen pixels. Performance mode pauses it.</div>
                                 </div>
                             </details>
 
@@ -1415,6 +1446,7 @@
                         <button class="mobile-pause-btn mobile-pause-gfx-toggle" id="mobile-pause-gfx-toggle" type="button" aria-expanded="false">Graphics Settings</button>
                         <div class="mobile-pause-gfx" id="mobile-pause-gfx" hidden>
                             <div class="mobile-pause-gfx-row"><span>Bloom</span><button class="mobile-gfx-tog" id="gfx-bloom" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Ambient Light</span><button class="mobile-gfx-tog" id="gfx-ambient" type="button" data-on="0">Off</button></div>
                             <div class="mobile-pause-gfx-row"><span>Ambient Occlusion</span><button class="mobile-gfx-tog" id="gfx-ssao" type="button" data-on="1">On</button></div>
                             <div class="mobile-pause-gfx-row"><span>Reflections (SSR)</span><button class="mobile-gfx-tog" id="gfx-ssr" type="button" data-on="0">Off</button></div>
                             <div class="mobile-pause-gfx-row"><span>Temporal AA</span><button class="mobile-gfx-tog" id="gfx-taa" type="button" data-on="0">Off</button></div>

@@ -145,6 +145,7 @@ import { createWeaponFire } from './weaponFire.js';
 import { createFrameLoop } from './frameLoop.js';
 import { createInputHandlers } from './inputHandlers.js';
 import { setupPostProcessing } from './postProcessingSetup.js';
+import { createWorldEnvUiRefs } from './worldEnvUiRefs.js';
 import { wirePanelHandlers } from './wirePanelHandlers.js';
 import { createLevelStateSystem } from '../gameplay/levelStateSystem.js';
 import { createWorldEnvSystem } from '../world/worldEnvSystem.js';
@@ -625,6 +626,7 @@ const globalPostProcessUniforms = {
     bloomThreshold: uniform(1.1)
 };
 let postProcessNodes = null;
+let postProcessRenderData = null;
 
 // Performance toggle: when on, skips volumetric fog update and post-process
 // volume update. (DDGI no longer respects this on fix/ddgi-correctness — see
@@ -666,6 +668,7 @@ const _worldEnvSystem = createWorldEnvSystem({
     getPostProcessVolumeManager: () => postProcessVolumeManager,
     getPostProcessing: () => postProcessing,
     getPostProcessNodes: () => postProcessNodes,
+    getPostProcessRenderData: () => postProcessRenderData,
     globalPostProcessUniforms,
     getDDGIManager: () => getDDGIManager(),
     getCornellPanelLight: () => cornellPanelLight,
@@ -680,6 +683,7 @@ const _worldEnvSystem = createWorldEnvSystem({
 });
 const WORLD_ENV_DEFAULTS = _worldEnvSystem.WORLD_ENV_DEFAULTS;
 const worldEnvState = _worldEnvSystem.getWorldEnvState();
+const resetTaaHistory = _worldEnvSystem.resetTaaHistory;
 // Per-frame dynamic light culler (keeps only the N most important point/spot
 // lights lit). Driven from the frame loop; configured from worldEnvState.
 const lightCull = createLightCull();
@@ -2483,6 +2487,7 @@ const _actorTransforms = createActorTransforms({
     getActiveVehicleProp,
     syncCameraToCharacter: (...a) => syncCameraToCharacter(...a),
     dispatchTriggerEvent,
+    resetTaaHistory,
 });
 const setActorResetTransform = _actorTransforms.setActorResetTransform;
 const syncActorBodyToRenderTransform = _actorTransforms.syncActorBodyToRenderTransform;
@@ -4797,113 +4802,7 @@ async function init() {
     // value-display span. Lookups are tolerant: the panel may be absent in
     // older index.html copies; null refs short-circuit gracefully in the
     // updateWorldEnvUi / handler bodies.
-    worldEnvUiRefs = {
-        summaryValue: document.getElementById('we-summary-value'),
-        masterOnBtn: document.getElementById('we-master-on'),
-        masterOffBtn: document.getElementById('we-master-off'),
-        masterPerfBtn: document.getElementById('we-master-perf'),
-        masterCornellBtn: document.getElementById('we-master-cornell'),
-        masterStatus: document.getElementById('we-master-status'),
-        skyOff: document.getElementById('we-sky-off'),
-        skyOn: document.getElementById('we-sky-on'),
-        skyPreset: document.getElementById('we-sky-preset'),
-        skyBlurriness: document.getElementById('we-sky-blurriness'),
-        skyBlurrinessValue: document.getElementById('we-sky-blurriness-value'),
-        ambientOff: document.getElementById('we-ambient-off'),
-        ambientOn: document.getElementById('we-ambient-on'),
-        ambientIntensity: document.getElementById('we-ambient-intensity'),
-        ambientIntensityValue: document.getElementById('we-ambient-intensity-value'),
-        hemiOff: document.getElementById('we-hemi-off'),
-        hemiOn: document.getElementById('we-hemi-on'),
-        hemiIntensity: document.getElementById('we-hemi-intensity'),
-        hemiIntensityValue: document.getElementById('we-hemi-intensity-value'),
-        sunOff: document.getElementById('we-sun-off'),
-        sunOn: document.getElementById('we-sun-on'),
-        sunShadow: document.getElementById('we-sun-shadow'),
-        sunIntensity: document.getElementById('we-sun-intensity'),
-        sunIntensityValue: document.getElementById('we-sun-intensity-value'),
-        exposure: document.getElementById('we-tonemap-exposure'),
-        exposureValue: document.getElementById('we-tonemap-exposure-value'),
-        aaOff: document.getElementById('we-aa-off'),
-        aaOn: document.getElementById('we-aa-on'),
-        renderResolutionOff: document.getElementById('we-render-resolution-off'),
-        renderResolutionOn: document.getElementById('we-render-resolution-on'),
-        renderResolutionScale: document.getElementById('we-render-resolution-scale'),
-        renderResolutionScaleValue: document.getElementById('we-render-resolution-scale-value'),
-        renderResolutionMaxDpr: document.getElementById('we-render-resolution-max-dpr'),
-        renderResolutionMaxDprValue: document.getElementById('we-render-resolution-max-dpr-value'),
-        adaptiveOff: document.getElementById('we-adaptive-off'),
-        adaptiveOn: document.getElementById('we-adaptive-on'),
-        bloomOff: document.getElementById('we-bloom-off'),
-        bloomOn: document.getElementById('we-bloom-on'),
-        bloomStrength: document.getElementById('we-bloom-strength'),
-        bloomStrengthValue: document.getElementById('we-bloom-strength-value'),
-        bloomRadius: document.getElementById('we-bloom-radius'),
-        bloomRadiusValue: document.getElementById('we-bloom-radius-value'),
-        bloomThreshold: document.getElementById('we-bloom-threshold'),
-        bloomThresholdValue: document.getElementById('we-bloom-threshold-value'),
-        ssaoOff: document.getElementById('we-ssao-off'),
-        ssaoOn: document.getElementById('we-ssao-on'),
-        ssaoIntensity: document.getElementById('we-ssao-intensity'),
-        ssaoIntensityValue: document.getElementById('we-ssao-intensity-value'),
-        ssaoRadius: document.getElementById('we-ssao-radius'),
-        ssaoRadiusValue: document.getElementById('we-ssao-radius-value'),
-        ssgiOff: document.getElementById('we-ssgi-off'),
-        ssgiOn: document.getElementById('we-ssgi-on'),
-        fogOff: document.getElementById('we-fog-off'),
-        fogOn: document.getElementById('we-fog-on'),
-        fogDensity: document.getElementById('we-fog-density'),
-        fogDensityValue: document.getElementById('we-fog-density-value'),
-        fogOpacity: document.getElementById('we-fog-opacity'),
-        fogOpacityValue: document.getElementById('we-fog-opacity-value'),
-        ddgiOff: document.getElementById('we-ddgi-off'),
-        ddgiOn: document.getElementById('we-ddgi-on'),
-        ddgiLiveBakeOff: document.getElementById('we-ddgi-live-bake-off'),
-        ddgiLiveBakeOn: document.getElementById('we-ddgi-live-bake-on'),
-        ddgiBakeEveryN: document.getElementById('we-ddgi-bake-every-n'),
-        ddgiBakeEveryNValue: document.getElementById('we-ddgi-bake-every-n-value'),
-        ddgiIntensity: document.getElementById('we-ddgi-intensity'),
-        ddgiIntensityValue: document.getElementById('we-ddgi-intensity-value'),
-        ddgiLightIntensity: document.getElementById('we-ddgi-light-intensity'),
-        ddgiLightIntensityValue: document.getElementById('we-ddgi-light-intensity-value'),
-        ddgiProbeDebugOff: document.getElementById('we-ddgi-probe-debug-off'),
-        ddgiProbeDebugOn: document.getElementById('we-ddgi-probe-debug-on'),
-        ddgiRayDebugOff: document.getElementById('we-ddgi-ray-debug-off'),
-        ddgiRayDebugOn: document.getElementById('we-ddgi-ray-debug-on'),
-        ddgiSolidTestOff: document.getElementById('we-ddgi-solid-test-off'),
-        ddgiSolidTestOn: document.getElementById('we-ddgi-solid-test-on'),
-        ddgiViewLit: document.getElementById('we-ddgi-view-lit'),
-        ddgiViewContribution: document.getElementById('we-ddgi-view-contribution'),
-        shadowsOff: document.getElementById('we-shadows-off'),
-        shadowsOn: document.getElementById('we-shadows-on'),
-        shadowsBias: document.getElementById('we-shadows-bias'),
-        shadowsBiasValue: document.getElementById('we-shadows-bias-value'),
-        shadowsNormalBias: document.getElementById('we-shadows-normal-bias'),
-        shadowsNormalBiasValue: document.getElementById('we-shadows-normal-bias-value'),
-        shadowsRadius: document.getElementById('we-shadows-radius'),
-        shadowsRadiusValue: document.getElementById('we-shadows-radius-value'),
-        shadowsMapSize: document.getElementById('we-shadows-map-size'),
-        shadowsMapSizeValue: document.getElementById('we-shadows-map-size-value'),
-        lightCullOff: document.getElementById('we-lightcull-off'),
-        lightCullOn: document.getElementById('we-lightcull-on'),
-        lightCullMax: document.getElementById('we-lightcull-max'),
-        lightCullMaxValue: document.getElementById('we-lightcull-max-value'),
-        pomOff: document.getElementById('we-pom-off'),
-        pomOn: document.getElementById('we-pom-on'),
-        pomIntensity: document.getElementById('we-pom-intensity'),
-        pomIntensityValue: document.getElementById('we-pom-intensity-value'),
-        pomQualityLow: document.getElementById('we-pom-quality-low'),
-        pomQualityMedium: document.getElementById('we-pom-quality-medium'),
-        pomQualityHigh: document.getElementById('we-pom-quality-high'),
-        resetBtn: document.getElementById('we-reset-defaults'),
-        bakeRes: document.getElementById('we-bake-res'),
-        bakeResValue: document.getElementById('we-bake-res-value'),
-        bakeSamples: document.getElementById('we-bake-samples'),
-        bakeSamplesValue: document.getElementById('we-bake-samples-value'),
-        bakeRun: document.getElementById('we-bake-run'),
-        bakeClear: document.getElementById('we-bake-clear'),
-        bakeStatus: document.getElementById('we-bake-status'),
-    };
+    worldEnvUiRefs = createWorldEnvUiRefs(document);
 
     wirePanelHandlers({
         THREE,
@@ -5101,15 +5000,10 @@ async function init() {
     // PERF: pixel ratio capped at 2 — HiDPI 3x/4x devices were drawing 9-16x
     // 1080p for no perceptible win.
     // AA off by default (no MSAA). Edge AA is opt-in via the Anti-Aliasing
-    // toggle in the menu, which enables the FXAA node on the post path
-    // (see worldEnvSystem.rebuildPostProcessingOutputNode / worldEnvState.aa).
-    // requiredLimits: the post stack's G-buffer MRT (color+normal+metalness+
-    // roughness+velocity = 5 RGBA16F targets = 40 bytes/sample) exceeds the
-    // default 32-byte maxColorAttachmentBytesPerSample. Bump it — but three
-    // forwards requiredLimits straight to adapter.requestDevice(), which REJECTS
-    // if the adapter can't meet them, so clamp to what the adapter actually
-    // supports (querying it ourselves first). Weaker adapters that can't fit 5
-    // targets won't run SSR+TAA together, but they still boot.
+    // toggle in the menu, which enables temporal AA on the post path
+    // (with FXAA fallback if the temporal node is unavailable).
+    // requiredLimits: auxiliary post passes can need extra color-attachment
+    // budget. Clamp to the adapter's real limit so weaker GPUs still boot.
     const requiredLimits = {};
     try {
         const adapter = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
@@ -5141,6 +5035,7 @@ async function init() {
     ({
         postProcessing,
         postProcessNodes,
+        postProcessRenderData,
         postProcessVolumeManager,
         lightmapBaker,
     } = setupPostProcessing({
@@ -5549,6 +5444,7 @@ function loadSample(levelId = 'soccerField') {
         applyShowcaseCameraRotation();
         showcase.velocity.set(0, 0, 0);
     }
+    resetTaaHistory();
     const selectedActor = level.afterLoad?.() || null;
     if (selectedActor) {
         selectShowcaseActor(selectedActor.id);
@@ -6086,6 +5982,7 @@ function resetShowcaseCamera(animate = true) {
         syncShowcaseAnglesFromTarget(target);
         applyShowcaseCameraRotation();
         showcase.velocity.set(0, 0, 0);
+        resetTaaHistory();
         return;
     }
 
@@ -6144,6 +6041,7 @@ const _frameLoop = createFrameLoop({
     updateGameplayUI: (...a) => updateGameplayUI(...a),
     resetDoomMiniLevelState,
     resetDoomArenaLevelState,
+    resetTaaHistory,
 });
 const updateShowcaseCamera = _frameLoop.updateShowcaseCamera;
 const applyGameplayCameraRotation = _frameLoop.applyGameplayCameraRotation;
@@ -6665,9 +6563,22 @@ function wireExtractedModules() {
             // Showcase preset for graphics-demo levels (e.g. the shooting range):
             // turn on the post stack so it looks its best. Not persisted, so it
             // never overwrites the user's saved global graphics prefs.
-            applyShowcaseGraphics: () => {
+            applyShowcaseGraphics: ({ indoor = false } = {}) => {
                 try {
+                    setPerfModeEnabled(false);
                     const s = worldEnvState;
+                    if (indoor && s.sky) s.sky.enabled = false;
+                    if (s.adaptive) s.adaptive.enabled = false;
+                    if (s.aa) s.aa.enabled = true;
+                    if (s.ssr) Object.assign(s.ssr, {
+                        enabled: true,
+                        intensity: 1.2,
+                        maxDistance: 18.0,
+                        thickness: 0.75,
+                        quality: 0.95,
+                        resolutionScale: 1.0,
+                        blurQuality: 2,
+                    });
                     if (s.ssao) s.ssao.enabled = true;
                     if (s.bloom) s.bloom.enabled = true;
                     applyWorldEnvState({ persist: false, switchSky: false });

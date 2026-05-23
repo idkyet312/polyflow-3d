@@ -2385,9 +2385,10 @@ export function createLevels(deps) {
             target: [0, 1.4, -HALL_L * 0.3],
         };
 
-        const mat = (color, { rough = 0.9, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
+        const mat = (color, { rough = 0.9, metal = 0.0, emissive = null, emissiveIntensity = 0, envIntensity = 1.0 } = {}) => {
             const m = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color(color), roughness: rough, metalness: metal });
             if (emissive) { m.emissive = new THREE.Color(emissive); m.emissiveIntensity = emissiveIntensity; }
+            if ('envMapIntensity' in m) m.envMapIntensity = envIntensity;
             return m;
         };
         const addBox = (name, size, position, material, { actorSurface = '', solid = false, rotY = 0 } = {}) => {
@@ -2412,7 +2413,7 @@ export function createLevels(deps) {
         // floor that mirrors the lights/targets. SSAO rewards crevices → trims,
         // baseboards, coves. Bloom rewards HDR emissives → punchy strip lights +
         // neon accents (emissiveIntensity well above 1 so they cross threshold).
-        const floorMat = mat('#2a2f38', { rough: 0.12, metal: 0.35 });        // wet/polished — strong SSR
+        const floorMat = mat('#2a2f38', { rough: 0.12, metal: 0.35, envIntensity: 0.18 }); // wet/polished — strong SSR
         const wallMat  = mat('#262b33', { rough: 0.85 });
         const wallAccentMat = mat('#171a20', { rough: 0.7, metal: 0.15 });    // darker recessed panels
         const baseMat  = mat('#15181d', { rough: 0.6, metal: 0.25 });         // glossy baseboard (catches reflections)
@@ -2423,6 +2424,11 @@ export function createLevels(deps) {
         const lampMat  = mat('#ffffff', { rough: 0.3, emissive: '#fff4e6', emissiveIntensity: 1.5 });    // tubes — just over bloom threshold
         const neonCyan = mat('#9fefff', { rough: 0.3, emissive: '#3fd0ff', emissiveIntensity: 1.4 });
         const neonRed  = mat('#ff6b6b', { rough: 0.3, emissive: '#ff3a3a', emissiveIntensity: 1.6 });
+        const mirrorMat = mat('#dbeafe', { rough: 0.025, metal: 1.0, envIntensity: 0.03 });
+        const blackMirrorMat = mat('#080d16', { rough: 0.035, metal: 0.95, envIntensity: 0.02 });
+        const chromeMat = mat('#f1f5f9', { rough: 0.045, metal: 1.0, envIntensity: 0.03 });
+        const neonPink = mat('#ff9cf3', { rough: 0.25, emissive: '#ff35d4', emissiveIntensity: 1.8 });
+        const neonGreen = mat('#bbf7d0', { rough: 0.25, emissive: '#4cff9a', emissiveIntensity: 1.7 });
         const railMat  = mat('#3a4049', { rough: 0.3, metal: 0.6 });          // chrome-ish rails → SSR
 
         // ---- shell: floor, ceiling, four walls ----
@@ -2477,6 +2483,27 @@ export function createLevels(deps) {
         addBox('shootsim-bench', [HALL_W - 2, 1.0, 1.0], [0, 0.5, lineZ], benchMat, { solid: true });
         addBox('shootsim-bench-trim', [HALL_W - 2, 0.12, 1.06], [0, 1.03, lineZ], trimMat);
         addBox('shootsim-line', [HALL_W - 1, 0.04, 0.22], [0, 0.03, lineZ + 1.4], trimMat);   // glowing "do not cross" line
+
+        // ---- SSR calibration bay ---------------------------------------
+        // Keep reflectors and reflected objects on-screen together: this makes
+        // SSR limits, edge fading, and roughness blur obvious while testing.
+        const ssrZ = lineZ - 4.0;
+        const ssrX = HALL_W * 0.5 - 2.0;
+        addBox('shootsim-ssr-pad', [4.8, 0.05, 5.8], [ssrX, 0.055, ssrZ], blackMirrorMat);
+        addBox('shootsim-ssr-mirror', [0.08, 2.8, 5.4], [HALL_W * 0.5 - 0.26, 1.75, ssrZ], mirrorMat);
+        addBox('shootsim-ssr-neon-cyan', [0.12, 0.18, 4.6], [HALL_W * 0.5 - 0.72, 2.55, ssrZ], neonCyan);
+        addBox('shootsim-ssr-neon-pink', [0.12, 0.18, 4.6], [HALL_W * 0.5 - 0.72, 1.75, ssrZ], neonPink);
+        addBox('shootsim-ssr-neon-green', [0.12, 0.18, 4.6], [HALL_W * 0.5 - 0.72, 0.95, ssrZ], neonGreen);
+        for (let i = 0; i < 3; i++) {
+            const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.42 - i * 0.06, 32, 18), chromeMat);
+            sphere.name = `shootsim-ssr-chrome-sphere-${i}`;
+            sphere.position.set(ssrX - 1.25 + i * 1.15, 0.5 + i * 0.18, ssrZ + 1.25 - i * 1.15);
+            sphere.castShadow = true;
+            sphere.receiveShadow = true;
+            root.add(sphere);
+        }
+        addBox('shootsim-ssr-white-card', [1.25, 1.0, 0.06], [ssrX - 1.8, 1.0, ssrZ - 2.3], lampMat);
+        addBox('shootsim-ssr-dark-card', [1.25, 1.0, 0.06], [ssrX + 1.8, 1.0, ssrZ - 2.3], wallAccentMat);
 
         // ---- ceiling: recessed cove + bright tube lights (bloom + SSR) ----
         // A dark recessed channel so the bright tubes sit in shadow (AO/contrast),
@@ -2709,7 +2736,7 @@ export function createLevels(deps) {
                     try { window.shootingSimApi?.resetState?.(); } catch (e) {}
                     // Showcase scene: switch on the full post stack (SSR + TAA +
                     // SSAO + bloom) so the range shows the renderer at its best.
-                    try { applyShowcaseGraphics?.(); } catch (e) {}
+                    try { applyShowcaseGraphics?.({ indoor: true }); } catch (e) {}
                     return null;
                 },
             };

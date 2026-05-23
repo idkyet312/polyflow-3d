@@ -18,6 +18,7 @@ export function createActorTransforms(deps) {
         isDrivingVehicle, getActiveVehicleProp,
         syncCameraToCharacter,
         dispatchTriggerEvent,
+        resetTaaHistory,
     } = deps;
 
     function setActorResetTransform(actor, position, quaternion = null) {
@@ -86,6 +87,7 @@ export function createActorTransforms(deps) {
             physics.Jolt.destroy(pos);
             const mesh = getActorRenderObject(vehicle);
             if (mesh) mesh.position.set(destination.x, destination.y + 0.75, destination.z);
+            resetTaaHistory?.();
             return true;
         }
 
@@ -95,6 +97,7 @@ export function createActorTransforms(deps) {
         physics.character.SetLinearVelocity(physics.Jolt.Vec3.prototype.sZero());
         physics.Jolt.destroy(pos);
         syncCameraToCharacter();
+        resetTaaHistory?.();
         return true;
     }
 

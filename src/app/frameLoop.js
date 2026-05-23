@@ -31,6 +31,7 @@ export function createFrameLoop(deps) {
         updateRogueXpOrbs, updateDrugTycoonState, updateShootingSimState,
         updateGameplayUI,
         resetDoomMiniLevelState, resetDoomArenaLevelState,
+        resetTaaHistory,
     } = deps;
 
     function updateShowcaseCamera(delta) {
@@ -121,6 +122,7 @@ export function createFrameLoop(deps) {
         }
 
         syncCameraToCharacter();
+        resetTaaHistory?.();
 
         if (!useStoredView) {
             const cam = camera();

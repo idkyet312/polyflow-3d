@@ -110,6 +110,21 @@ export function createRogueWaves(deps) {
         requestAnimationFrame(tick);
     }
 
+    function tintRogueEnemySprite(actor, tint) {
+        const color = new THREE.Color(tint);
+        const sprite = actor?.userData?.doomEnemy?.sprite;
+        if (sprite?.material?.color) {
+            sprite.material.color.copy(color);
+            sprite.material.needsUpdate = true;
+        }
+        const mesh = getActorRenderObject(actor);
+        mesh?.traverse?.((child) => {
+            if (!child?.isSprite || child === sprite || !child.material?.color) return;
+            child.material.color.copy(color);
+            child.material.needsUpdate = true;
+        });
+    }
+
     // ---- enemy variants -------------------------------------------------
     function spawnRogueEnemy(variant, position, wave = 1, { elite = false } = {}) {
         const v = ROGUE_ENEMY_VARIANTS[variant] || ROGUE_ENEMY_VARIANTS.grunt;
@@ -149,6 +164,7 @@ export function createRogueWaves(deps) {
         const tint = elite ? ELITE_MOD.tint : v.tint;
         const glow = variant === 'boss' ? 1.8 : (elite ? 1.5 : 1.0);
         try { tintGameplayPrefabActor(actor, tint, tint, glow); } catch (e) {}
+        tintRogueEnemySprite(actor, tint);
         return actor;
     }
 

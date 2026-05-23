@@ -189,7 +189,10 @@ function setGfxToggle(btn, on) {
 function syncGraphicsSettings() {
     const s = worldEnvState;
     setGfxToggle(document.getElementById('gfx-bloom'), s.bloom?.enabled);
+    setGfxToggle(document.getElementById('gfx-ambient'), s.ambient?.enabled);
     setGfxToggle(document.getElementById('gfx-ssao'), s.ssao?.enabled);
+    setGfxToggle(document.getElementById('gfx-ssr'), s.ssr?.enabled);
+    setGfxToggle(document.getElementById('gfx-taa'), s.aa?.enabled);
     setGfxToggle(document.getElementById('gfx-shadows'), s.shadows?.enabled);
     setGfxToggle(document.getElementById('gfx-fog'), s.fog?.enabled);
     setGfxToggle(document.getElementById('gfx-adaptive'), s.adaptive?.enabled);
@@ -208,18 +211,22 @@ function wireGraphicsSettings() {
         gfxToggleBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
         if (show) syncGraphicsSettings();
     });
-    const bind = (id, getSec) => {
+    const bind = (id, getSec, { needsPostFx = false } = {}) => {
         const btn = document.getElementById(id);
         btn?.addEventListener('click', () => {
             const sec = getSec();
             if (!sec) return;
             sec.enabled = !sec.enabled;
+            if (sec.enabled && needsPostFx) setPerfModeEnabled(false);
             setGfxToggle(btn, sec.enabled);
             applyWorldEnvState({ persist: true, switchSky: false });
         });
     };
     bind('gfx-bloom', () => worldEnvState.bloom);
+    bind('gfx-ambient', () => worldEnvState.ambient);
     bind('gfx-ssao', () => worldEnvState.ssao);
+    bind('gfx-ssr', () => worldEnvState.ssr, { needsPostFx: true });
+    bind('gfx-taa', () => worldEnvState.aa, { needsPostFx: true });
     bind('gfx-shadows', () => worldEnvState.shadows);
     bind('gfx-fog', () => worldEnvState.fog);
     bind('gfx-adaptive', () => worldEnvState.adaptive);
@@ -285,6 +292,8 @@ export function applyMobileQualitySetting(quality = 'medium') {
     s.ddgi.rayDebug = false;
     s.ddgi.contributionView = false;
     s.ddgi.solidTest = false;
+    if (s.aa) s.aa.enabled = false;
+    if (s.ssr) s.ssr.enabled = false;
     if (s.renderResolution) s.renderResolution.enabled = false;
 
     const lowMode = mode === 'low';

@@ -13,10 +13,12 @@
 // the baseline exactly.
 //
 // Effects are degraded most-expensive-first:
-//   tier 1: SSGI off
-//   tier 2: SSAO off
-//   tier 3: bloom off
-//   tier 4: light cull maxActive halved (min 4)
+//   tier 1: SSR off
+//   tier 2: TAA off
+//   tier 3: SSGI off
+//   tier 4: SSAO off
+//   tier 5: bloom off
+//   tier 6: light cull maxActive halved (min 4)
 // Tier 0 restores everything in the baseline.
 
 const LOW_FPS = 50;
@@ -33,11 +35,13 @@ export function createAdaptiveQuality({ getState, applyState }) {
     let _aboveSince = 0;
     let _baseline = null;       // snapshot of user flags when adaptive turned on
 
-    const MAX_TIER = 4;
+    const MAX_TIER = 6;
 
     function snapshot() {
         const s = getState();
         return {
+            ssr: !!s.ssr?.enabled,
+            aa: !!s.aa?.enabled,
             ssgi: !!s.ssgi?.enabled,
             ssao: !!s.ssao?.enabled,
             bloom: !!s.bloom?.enabled,
@@ -50,11 +54,13 @@ export function createAdaptiveQuality({ getState, applyState }) {
     function applyTier(t) {
         if (!_baseline) return;
         const s = getState();
-        if (s.ssgi) s.ssgi.enabled = _baseline.ssgi && t < 1;
-        if (s.ssao) s.ssao.enabled = _baseline.ssao && t < 2;
-        if (s.bloom) s.bloom.enabled = _baseline.bloom && t < 3;
+        if (s.ssr) s.ssr.enabled = _baseline.ssr && t < 1;
+        if (s.aa) s.aa.enabled = _baseline.aa && t < 2;
+        if (s.ssgi) s.ssgi.enabled = _baseline.ssgi && t < 3;
+        if (s.ssao) s.ssao.enabled = _baseline.ssao && t < 4;
+        if (s.bloom) s.bloom.enabled = _baseline.bloom && t < 5;
         if (s.lightCull) {
-            s.lightCull.maxActive = t < 4 ? _baseline.maxActive : Math.max(4, _baseline.maxActive >> 1);
+            s.lightCull.maxActive = t < 6 ? _baseline.maxActive : Math.max(4, _baseline.maxActive >> 1);
         }
         applyState({ persist: false, switchSky: false });
     }
@@ -70,6 +76,8 @@ export function createAdaptiveQuality({ getState, applyState }) {
         } else if (_baseline) {
             // Restore the user's baseline exactly.
             const s = getState();
+            if (s.ssr) s.ssr.enabled = _baseline.ssr;
+            if (s.aa) s.aa.enabled = _baseline.aa;
             if (s.ssgi) s.ssgi.enabled = _baseline.ssgi;
             if (s.ssao) s.ssao.enabled = _baseline.ssao;
             if (s.bloom) s.bloom.enabled = _baseline.bloom;

@@ -49,6 +49,7 @@ const POST_FX_SUPPORTED = (() => {
 //   getPostProcessVolumeManager
 //   getPostProcessing           - the PostProcessing pass instance
 //   getPostProcessNodes         - { sceneColor, bloomNode, ssgiOutput, ssgiNode }
+//   getPostProcessRenderData    - aux pass/history state for TAA/SSR
 //   globalPostProcessUniforms   - bloom uniform refs (live)
 //   getDDGIManager              - () => DDGIManager
 //   getCornellPanelLight        - () => light | null (cornell-only)
@@ -69,6 +70,7 @@ export function createWorldEnvSystem({
     getPostProcessVolumeManager,
     getPostProcessing,
     getPostProcessNodes,
+    getPostProcessRenderData,
     globalPostProcessUniforms,
     getDDGIManager,
     getCornellPanelLight,
@@ -87,7 +89,7 @@ export function createWorldEnvSystem({
         hemi: { enabled: true, intensity: 1.5 },
         sun: { enabled: true, castShadow: true, intensity: 2.5 },
         tonemap: { exposure: 1.0 },
-        aa: { enabled: false },   // FXAA edge AA on the post path; default off
+        aa: { enabled: false },   // Temporal AA on the post path; FXAA fallback
         // Forward-friendly image-quality uplift: raise internal render
         // resolution above the default DPR cap when explicitly enabled.
         renderResolution: { enabled: false, scale: 1.15, maxDpr: 2.5 },
@@ -98,6 +100,7 @@ export function createWorldEnvSystem({
         // GTAO contact-shadow ambient occlusion. Cheap, big grounding payoff;
         // on by default. intensity 0..1 = how strongly AO darkens (1 = full).
         ssao: { enabled: true, intensity: 0.85, radius: 0.5, samples: 16, thickness: 1.0, scale: 1.0 },
+        ssr: { enabled: false, intensity: 0.95, maxDistance: 16.0, thickness: 0.65, quality: 0.85, resolutionScale: 1.0, blurQuality: 2 },
         ssgi: { enabled: false, giIntensity: 2.0, aoIntensity: 1.0, radius: 8.0, thickness: 0.6, sliceCount: 1, stepCount: 8 },
         fog: { enabled: true, density: 0.012, opacity: 0.055 },
         ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
@@ -184,17 +187,34 @@ export function createWorldEnvSystem({
     function shouldUsePostProcessingPipeline() {
         if (!POST_FX_SUPPORTED) return false;
         const perf = isPerfModeEnabled();
-        return !!((worldEnvState.bloom?.enabled && !perf)
+        return !!((worldEnvState.aa?.enabled && !perf)
+            || (worldEnvState.bloom?.enabled && !perf)
             || (worldEnvState.ssao?.enabled && !perf)
+            || (worldEnvState.ssr?.enabled && !perf)
             || (worldEnvState.ssgi?.enabled && !perf));
+    }
+
+    function resetTaaHistory() {
+        const data = getPostProcessRenderData?.();
+        data?.taa?.resetHistory?.();
     }
 
     function rebuildPostProcessingOutputNode() {
         const postProcessing = getPostProcessing();
         const postProcessNodes = getPostProcessNodes();
         if (!postProcessing || !postProcessNodes) return;
-        const { sceneColor, bloomNode, aoOutput, ssgiOutput } = postProcessNodes;
+        const { sceneColor, bloomNode, aoOutput, ssgiOutput, traaNode, ssrNode } = postProcessNodes;
+        const renderData = getPostProcessRenderData?.();
         const perf = isPerfModeEnabled();
+        const aaEnabled = !!(worldEnvState.aa?.enabled && !perf);
+        const taaEnabled = !!(aaEnabled && traaNode);
+        const ssrEnabled = !!(worldEnvState.ssr?.enabled && !perf && ssrNode);
+        if (renderData?.taa) {
+            if (renderData.taa.enabled !== taaEnabled) renderData.taa.resetHistory?.();
+            renderData.taa.enabled = taaEnabled;
+        }
+        if (renderData?.ssr) renderData.ssr.enabled = ssrEnabled;
+        applySSRSettings();
         if (!shouldUsePostProcessingPipeline()) {
             postProcessing.outputNode = sceneColor;
             return;
@@ -202,27 +222,28 @@ export function createWorldEnvSystem({
         // AO multiplies the lit color FIRST (darkens creases/contacts), then
         // bloom is added on top so emissive highlights aren't dimmed by AO.
         // intensity 0..1 lerps between "no AO" (1.0) and the raw AO factor.
-        let litColor = sceneColor;
+        let litColor = taaEnabled ? traaNode : sceneColor;
         if (worldEnvState.ssao?.enabled && !perf && aoOutput) {
             const k = float(worldEnvState.ssao.intensity ?? 1.0);
             const aoFactor = mix(float(1.0), aoOutput.r, k);
-            litColor = sceneColor.mul(vec4(vec3(aoFactor), 1.0));
+            litColor = litColor.mul(vec4(vec3(aoFactor), 1.0));
         }
         let outputNode = litColor;
+        if (worldEnvState.ssgi?.enabled && !perf && ssgiOutput) {
+            outputNode = outputNode
+                .mul(vec4(vec3(ssgiOutput.a), 1))
+                .add(vec4(ssgiOutput.rgb, 0));
+        }
+        if (ssrEnabled) {
+            outputNode = outputNode.add(ssrNode);
+        }
+        if (aaEnabled && !taaEnabled) {
+            outputNode = fxaa(outputNode);
+        }
         if (worldEnvState.bloom?.enabled && !perf) {
             outputNode = outputNode.add(bloomNode);
         }
-        if (worldEnvState.ssgi?.enabled && !perf && ssgiOutput) {
-            outputNode = sceneColor
-                .mul(vec4(vec3(ssgiOutput.a), 1))
-                .add(vec4(ssgiOutput.rgb, 0))
-                .add(worldEnvState.bloom?.enabled && !perf ? bloomNode : vec4(0, 0, 0, 0));
-        }
-        // FXAA edge AA — opt-in (can speckle flat surfaces). TAA was removed: it
-        // requires a velocity MRT on the scene pass, which conflicts with the
-        // shadow-map renders three runs inside the scene render (see note in
-        // postProcessingSetup).
-        postProcessing.outputNode = worldEnvState.aa?.enabled ? fxaa(outputNode) : outputNode;
+        postProcessing.outputNode = outputNode;
     }
 
     function applySSGISettings() {
@@ -245,6 +266,18 @@ export function createWorldEnvSystem({
         node.thickness.value = s.thickness;
         node.scale.value = s.scale;
         node.samples.value = Math.max(4, Math.min(32, Math.round(s.samples)));
+    }
+
+    function applySSRSettings() {
+        const node = getPostProcessNodes()?.ssrNode;
+        const s = worldEnvState.ssr || WORLD_ENV_DEFAULTS.ssr;
+        if (!node || !s) return;
+        node.opacity.value = s.intensity;
+        node.maxDistance.value = s.maxDistance;
+        node.thickness.value = s.thickness;
+        node.quality.value = Math.max(0, Math.min(1, s.quality ?? 0.5));
+        node.resolutionScale = Math.max(0.25, Math.min(1, s.resolutionScale ?? 0.75));
+        node.blurQuality.value = Math.max(1, Math.min(3, Math.round(s.blurQuality ?? 2)));
     }
 
     function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
@@ -321,6 +354,7 @@ export function createWorldEnvSystem({
         // Screen Space GI + Ambient Occlusion
         applySSGISettings();
         applySSAOSettings();
+        applySSRSettings();
         rebuildPostProcessingOutputNode();
 
         // Fog
@@ -415,6 +449,13 @@ export function createWorldEnvSystem({
             setSlider(worldEnvUiRefs.ssaoIntensity, worldEnvUiRefs.ssaoIntensityValue, s.ssao.intensity, 2);
             setSlider(worldEnvUiRefs.ssaoRadius, worldEnvUiRefs.ssaoRadiusValue, s.ssao.radius, 2);
         }
+        if (s.ssr) {
+            setToggle(worldEnvUiRefs.ssrOff, worldEnvUiRefs.ssrOn, s.ssr.enabled);
+            setSlider(worldEnvUiRefs.ssrIntensity, worldEnvUiRefs.ssrIntensityValue, s.ssr.intensity, 2);
+            setSlider(worldEnvUiRefs.ssrMaxDistance, worldEnvUiRefs.ssrMaxDistanceValue, s.ssr.maxDistance, 1);
+            setSlider(worldEnvUiRefs.ssrThickness, worldEnvUiRefs.ssrThicknessValue, s.ssr.thickness, 2);
+            setSlider(worldEnvUiRefs.ssrQuality, worldEnvUiRefs.ssrQualityValue, s.ssr.quality, 2);
+        }
 
         setToggle(worldEnvUiRefs.ssgiOff, worldEnvUiRefs.ssgiOn, s.ssgi.enabled);
 
@@ -455,6 +496,7 @@ export function createWorldEnvSystem({
             const off = [];
             if (!s.sky.enabled) off.push('Sky');
             if (!s.bloom.enabled) off.push('Bloom');
+            if (s.ssr && !s.ssr.enabled) off.push('SSR');
             if (!s.ssgi.enabled) off.push('SSGI');
             if (!s.fog.enabled) off.push('Fog');
             if (!s.ddgi.enabled) off.push('DDGI');
@@ -508,13 +550,16 @@ export function createWorldEnvSystem({
             s.hemi.enabled = false;
             s.sun.enabled = false;
             s.bloom.enabled = false;
+            if (s.ssr) s.ssr.enabled = false;
             s.ssgi.enabled = false;
             s.fog.enabled = false;
             s.ddgi.enabled = false;
             s.shadows.enabled = false;
             if (s.renderResolution) s.renderResolution.enabled = false;
         } else if (mode === 'perf') {
+            s.aa.enabled = false;
             s.bloom.enabled = false;
+            if (s.ssr) s.ssr.enabled = false;
             s.ssgi.enabled = false;
             s.fog.enabled = false;
             s.ddgi.enabled = false;
@@ -541,6 +586,8 @@ export function createWorldEnvSystem({
         rebuildPostProcessingOutputNode,
         applySSGISettings,
         applySSAOSettings,
+        applySSRSettings,
+        resetTaaHistory,
         applyWorldEnvState,
         updateWorldEnvUi,
         setWorldEnvMaster,
