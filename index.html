@@ -18,13 +18,13 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Drug Tycoon">
     <link rel="apple-touch-icon" href="./icon-192.png">
-  <script type="module" crossorigin src="/polyflow-3d/assets/index-qg6VMpCl.js"></script>
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-D93_YJkm.js"></script>
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/rolldown-runtime-Dw2cE7zH.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-physics-BZxYQruA.js">
   <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-realtime-CLQfEXVt.js">
-  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-three-eZ8ECXpj.js">
-  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-ui-DfeWaKn0.js">
-  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-BJoO2zo3.css">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-three-DOSYYs-f.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-ui-BsPug2mq.js">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-D5AIQxQS.css">
 </head>
 
 <body>
@@ -183,6 +183,7 @@
                                 <option value="doomTest">Doom Test Arena</option>
                                 <option value="doomArena" selected>Rogue Waves</option>
                                 <option value="drugTycoon">Drug Tycoon</option>
+                                <option value="shootingSim">Shooting Simulator</option>
                                 <option value="soccerField">Soccer Field</option>
                                 <option value="soccerFieldTerrain">Terrain</option>
                             </select>
@@ -757,12 +758,51 @@
                             </details>
 
                             <details class="viewer-menu-section">
-                                <summary class="viewer-menu-section-summary">Anti-Aliasing (FXAA)</summary>
+                                <summary class="viewer-menu-section-summary">Anti-Aliasing (Temporal)</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
                                         <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-aa-off">Off</button>
                                         <button class="btn viewer-toggle-btn" id="we-aa-on">On</button>
                                     </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Resolution Boost</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-render-resolution-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-render-resolution-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Raises internal render resolution above the default DPR cap. Biggest image-quality gain in the current forward path, but expensive.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Render Resolution</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Scale</div>
+                                        <input type="range" id="we-render-resolution-scale" min="1" max="1.75" step="0.05" value="1.15">
+                                        <div class="viewer-slider-value" id="we-render-resolution-scale-value">1.15</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Max DPR</div>
+                                        <input type="range" id="we-render-resolution-max-dpr" min="1" max="3" step="0.05" value="2.50">
+                                        <div class="viewer-slider-value" id="we-render-resolution-max-dpr-value">2.50</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Final internal resolution = min(device DPR * scale, max DPR) while Resolution Boost is on.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Adaptive Quality</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-adaptive-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-adaptive-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Auto-lowers effects (SSGI → SSAO → bloom → fewer lights) when FPS drops, and restores them when it recovers. Good for weaker GPUs / mobile.</div>
                                 </div>
                             </details>
 
@@ -788,6 +828,58 @@
                                         <input id="we-bloom-threshold" type="range" min="0" max="4" step="0.01" value="2.20">
                                         <div class="viewer-slider-value" id="we-bloom-threshold-value">2.20</div>
                                     </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Ambient Occlusion (GTAO)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-ssao-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssao-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Strength</div>
+                                        <input type="range" id="we-ssao-intensity" min="0" max="1" step="0.05" value="0.85">
+                                        <div class="viewer-slider-value" id="we-ssao-intensity-value">0.85</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Radius</div>
+                                        <input type="range" id="we-ssao-radius" min="0.1" max="2" step="0.05" value="0.5">
+                                        <div class="viewer-slider-value" id="we-ssao-radius-value">0.5</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Contact-shadow darkening in creases. Performance mode pauses it.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Screen Space Reflections (SSR)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssr-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ssr-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input type="range" id="we-ssr-intensity" min="0" max="1.5" step="0.05" value="0.95">
+                                        <div class="viewer-slider-value" id="we-ssr-intensity-value">0.95</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Distance</div>
+                                        <input type="range" id="we-ssr-max-distance" min="1" max="24" step="0.5" value="16">
+                                        <div class="viewer-slider-value" id="we-ssr-max-distance-value">16.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Thickness</div>
+                                        <input type="range" id="we-ssr-thickness" min="0.05" max="1.5" step="0.05" value="0.65">
+                                        <div class="viewer-slider-value" id="we-ssr-thickness-value">0.65</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Quality</div>
+                                        <input type="range" id="we-ssr-quality" min="0.1" max="1" step="0.05" value="0.85">
+                                        <div class="viewer-slider-value" id="we-ssr-quality-value">0.85</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Reflects only visible screen pixels. Performance mode pauses it.</div>
                                 </div>
                             </details>
 
@@ -913,6 +1005,22 @@
                                         <div class="viewer-slider-value" id="we-shadows-map-size-value">512</div>
                                     </div>
                                     <div class="viewer-inline-note">Bias and Normal Bias fight self-shadow seams (raise to fix) and peter-panning (lower to fix). PCF Radius softens edges. Map Size trades GPU memory for sharpness; each step doubles memory on point lights.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Light Culling</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-lightcull-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-lightcull-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Max Active Lights</div>
+                                        <input id="we-lightcull-max" type="range" min="1" max="64" step="1" value="16">
+                                        <div class="viewer-slider-value" id="we-lightcull-max-value">16</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Keeps only the N most important point/spot lights lit each frame (by brightness ÷ distance²). The sun, ambient and hemisphere lights are never culled. Big FPS win in light-heavy scenes.</div>
                                 </div>
                             </details>
 
@@ -1340,6 +1448,19 @@
                                 <button class="mobile-pause-quality-btn" id="mobile-quality-med" type="button">Med</button>
                                 <button class="mobile-pause-quality-btn" id="mobile-quality-high" type="button">High</button>
                             </div>
+                        </div>
+                        <button class="mobile-pause-btn mobile-pause-gfx-toggle" id="mobile-pause-gfx-toggle" type="button" aria-expanded="false">Graphics Settings</button>
+                        <div class="mobile-pause-gfx" id="mobile-pause-gfx" hidden>
+                            <div class="mobile-pause-gfx-row"><span>Bloom</span><button class="mobile-gfx-tog" id="gfx-bloom" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Ambient Light</span><button class="mobile-gfx-tog" id="gfx-ambient" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Ambient Occlusion</span><button class="mobile-gfx-tog" id="gfx-ssao" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Reflections (SSR)</span><button class="mobile-gfx-tog" id="gfx-ssr" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Temporal AA</span><button class="mobile-gfx-tog" id="gfx-taa" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Shadows</span><button class="mobile-gfx-tog" id="gfx-shadows" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Fog</span><button class="mobile-gfx-tog" id="gfx-fog" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Adaptive Quality</span><button class="mobile-gfx-tog" id="gfx-adaptive" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Light Cull</span><button class="mobile-gfx-tog" id="gfx-lightcull" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row mobile-pause-gfx-slider"><span>Max Lights</span><input type="range" id="gfx-maxlights" min="1" max="48" step="1" value="16"><span id="gfx-maxlights-val">16</span></div>
                         </div>
                         <button class="mobile-pause-btn mobile-pause-exit" id="mobile-pause-exit" type="button">Exit to Games</button>
                     </div>
