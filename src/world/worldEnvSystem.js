@@ -208,6 +208,10 @@ export function createWorldEnvSystem({
 
     function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
         const s = worldEnvState;
+        // SSGI is force-disabled: its low-sample screen-space pass speckles
+        // surfaces as grain. Hard off here so saved state / presets can't
+        // re-enable it.
+        s.ssgi.enabled = false;
         const perf = isPerfModeEnabled();
         // Post-FX (bloom/SSGI) are skipped entirely where unsupported (Firefox).
         const runtimeBloomEnabled = s.bloom.enabled && !perf && POST_FX_SUPPORTED;
