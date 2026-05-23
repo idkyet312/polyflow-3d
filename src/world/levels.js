@@ -2236,12 +2236,13 @@ export function createLevels(deps) {
             addBox('grow-wall-e', [WT, H, D], [ox + W * 0.5, oy + H * 0.5, oz], rWallMat, { solid: true });
             addBox('grow-wall-w', [WT, H, D], [ox - W * 0.5, oy + H * 0.5, oz], rWallMat, { solid: true });
             // Grow lamps over the plant rows (north half) + a couple fill lights.
-            const lampMat = flatMat('#fff0c0', { rough: 0.4, emissive: '#ffd27a', emissiveIntensity: 1.3 });
+            // Bright emissive so they glow strongly through the scene-color bloom.
+            const lampMat = flatMat('#fff6e0', { rough: 0.4, emissive: '#ffe2a0', emissiveIntensity: 4.5 });
             [-7, 0, 7].forEach((lx, k) => {
                 addBox(`grow-lamp-${k}`, [3.4, 0.18, 1.6], [ox + lx, oy + H - 0.4, oz - 4], lampMat);
             });
             [[-6, -3], [6, -3], [0, 5]].forEach(([lx, lz], k) => {
-                const rl = new THREE.PointLight(0xffe6b0, 6, 24, 1.4);
+                const rl = new THREE.PointLight(0xffe6b0, 9, 24, 1.4);
                 rl.position.set(ox + lx, oy + H - 0.8, oz + lz);
                 rl.name = `grow-light-${k}`;
                 root.add(rl);
@@ -2284,13 +2285,13 @@ export function createLevels(deps) {
         };
         buildGrowRoom(...ROOM_ORIGIN);
 
-        // Plant pots: two rows in the north half of the (now larger) room.
+        // Plant spots: two rows in the north half of the room. The visible
+        // fabric grow bag is drawn by the drugTycoon plant mesh itself, so no
+        // placeholder box here — just the floor positions for each plant.
         const POTS = [];
-        const potMat = flatMat('#2a1d12', { rough: 0.9 });
         [-8, -4.6, -1.2, 2.2, 5.6].forEach((px) => {
             [-6.5, -3.0].forEach((pz) => {
                 const wx = ROOM_ORIGIN[0] + px, wz = ROOM_ORIGIN[2] + pz;
-                addBox(`grow-pot-${POTS.length}`, [1.1, 0.5, 1.1], [wx, 0.25, wz], potMat, { solid: true });
                 POTS.push([wx, 0, wz]);
             });
         });
@@ -2475,16 +2476,6 @@ export function createLevels(deps) {
                 // No auto gun pickup — the player picks a weapon from a card when
                 // they step off the start pad. Wave flow lives in the attached
                 // game-mode script; afterLoad just wires the shared actors.
-                afterLoad: rogueArenaAfterLoad,
-            };
-        }
-
-        if (levelId === 'roguePit') {
-            return {
-                id: 'roguePit',
-                assetName: 'Rogue Pit',
-                fileSize: 300000,
-                create: createRoguePitLevel,
                 afterLoad: rogueArenaAfterLoad,
             };
         }

@@ -25,6 +25,13 @@ export const ROGUE_ENEMY_VARIANTS = {
     boss:   { hpMul: 22,  speedMul: 0.8,  cooldownMul: 0.7, scale: 2.6, tint: '#ef4444', xp: 12, score: 250 },
 };
 
+const ROGUE_HELP_TITLE = 'ROGUE WAVES - HOW TO PLAY';
+const ROGUE_HELP_LINES = [
+    'Step off the start pad and pick a weapon card.',
+    'Survive waves, dodge projectiles, and collect XP orbs from kills.',
+    'Level up to pick upgrade cards. Boss waves spawn stronger enemies.',
+];
+
 // Elite modifier: rolled per non-boss spawn from wave 4+. Beefier, faster,
 // gold-tinted, and worth far more XP/score. Adds a build-defining "do I focus
 // it?" decision to a wave instead of every enemy being interchangeable.
@@ -729,9 +736,12 @@ export function createRogueWaves(deps) {
             + 'transition:transform .12s,border-color .12s,box-shadow .12s;'
             + 'box-shadow:0 8px 30px rgba(0,0,0,0.5);box-sizing:border-box;';
         if (mobileState.enabled) {
-            // Smaller cards, centered as a tight 3-up row.
-            return base + 'flex:1 1 0;min-width:0;width:26vw;max-width:150px;'
-                + 'min-height:120px;padding:10px 8px;';
+            // Smaller cards, centered as a tight 3-up row that fits any
+            // viewport. Height bounded in vh so all 3 + title + hint stay
+            // on screen in both portrait and landscape.
+            return base + 'flex:1 1 0;min-width:0;width:30vw;max-width:150px;'
+                + 'min-height:0;height:auto;max-height:62vh;overflow:auto;'
+                + 'padding:8px 6px;display:flex;flex-direction:column;justify-content:center;';
         }
         return base + 'width:220px;height:280px;padding:26px 18px;';
     }
@@ -755,6 +765,7 @@ export function createRogueWaves(deps) {
             position:absolute; inset:0; z-index:1200; pointer-events:auto;
             background:rgba(4,10,18,0.78); backdrop-filter:blur(3px);
             display:flex; flex-direction:column; align-items:center; justify-content:center;
+            padding:${mobileState.enabled ? '8px' : '0'}; box-sizing:border-box; overflow:auto;
             font-family:"Trebuchet MS",system-ui,sans-serif; color:#eaf6ff;`;
         const title = document.createElement('div');
         title.textContent = 'LEVEL ' + r.level + ' — CHOOSE AN UPGRADE';
@@ -781,8 +792,8 @@ export function createRogueWaves(deps) {
         });
         overlay.appendChild(row);
         const hint = document.createElement('div');
-        hint.textContent = 'Click a card to continue';
-        hint.style.cssText = 'margin-top:24px;font:600 14px/1 inherit;opacity:0.6;';
+        hint.textContent = mobileState.enabled ? 'Tap a card to continue' : 'Click a card to continue';
+        hint.style.cssText = `margin-top:${mobileState.enabled ? 10 : 24}px;font:600 ${mobileState.enabled ? 11 : 14}px/1 inherit;opacity:0.6;`;
         overlay.appendChild(hint);
 
         (document.getElementById('canvas-container') || document.body)?.appendChild(overlay);
@@ -854,6 +865,7 @@ export function createRogueWaves(deps) {
             position:absolute; inset:0; z-index:1200; pointer-events:auto;
             background:rgba(4,10,18,0.82); backdrop-filter:blur(3px);
             display:flex; flex-direction:column; align-items:center; justify-content:center;
+            padding:${mobileState.enabled ? '8px' : '0'}; box-sizing:border-box; overflow:auto;
             font-family:"Trebuchet MS",system-ui,sans-serif; color:#eaf6ff;`;
         const title = document.createElement('div');
         title.textContent = 'ROGUE WAVES — CHOOSE YOUR WEAPON';
@@ -884,7 +896,7 @@ export function createRogueWaves(deps) {
         overlay.appendChild(row);
         const hint = document.createElement('div');
         hint.textContent = 'Pick a weapon to start the run';
-        hint.style.cssText = 'margin-top:24px;font:600 14px/1 inherit;opacity:0.6;';
+        hint.style.cssText = `margin-top:${mobileState.enabled ? 10 : 24}px;font:600 ${mobileState.enabled ? 11 : 14}px/1 inherit;opacity:0.6;`;
         overlay.appendChild(hint);
 
         (document.getElementById('canvas-container') || document.body)?.appendChild(overlay);
@@ -930,6 +942,10 @@ export function createRogueWaves(deps) {
         }
     }
 
+    function getHowToPlay() {
+        return { title: ROGUE_HELP_TITLE, lines: ROGUE_HELP_LINES.slice() };
+    }
+
     // expose the window.* surface the game-mode script + legacy callers use
     if (typeof window !== 'undefined') {
         window.rogueWaves = {
@@ -940,7 +956,7 @@ export function createRogueWaves(deps) {
             openRogueDeathScreen, closeRogueDeathScreen,
             updateRogueXpBar, setRogueWaveHud,
             updateDoomArenaLevelState, updateRogueGameMode,
-            RogueAPI,
+            RogueAPI, getHowToPlay,
         };
         window.resetRogueState = resetRogueState;
         window.spawnRogueXpOrb = spawnRogueXpOrb;
@@ -963,6 +979,6 @@ export function createRogueWaves(deps) {
         openRogueDeathScreen, closeRogueDeathScreen,
         updateRogueXpBar, setRogueWaveHud,
         updateDoomArenaLevelState, updateRogueGameMode,
-        RogueAPI,
+        RogueAPI, getHowToPlay,
     };
 }

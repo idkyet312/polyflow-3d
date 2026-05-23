@@ -35,6 +35,7 @@ export function createInputHandlers(deps) {
         resetDoomMiniLevelState, resetDoomArenaLevelState,
         resetShowcaseCamera,
         adjustShowcaseSpeed,
+        handleGameLauncherPause = null,
     } = deps;
 
     // True when the current level is a self-contained game mode (Drug Tycoon,
@@ -42,7 +43,7 @@ export function createInputHandlers(deps) {
     // default left/right-click mouse ACTIONS (e.g. throw-ball) so they don't
     // fire inside a game mode. The gun's own fire flag is NOT gated by this.
     const GAME_MODE_SAMPLE_TYPES = new Set([
-        'drugTycoon', 'doomArena', 'roguePit', 'doomTest',
+        'drugTycoon', 'doomArena', 'doomTest',
     ]);
     function inGameMode() {
         // sampleType lives on the loaded level mesh (core.currentMesh).
@@ -104,6 +105,20 @@ export function createInputHandlers(deps) {
         }
 
         if (gameplay.active) {
+            const isMobile = (typeof document !== 'undefined'
+                && document.body.classList.contains('is-mobile'))
+                || (typeof window !== 'undefined'
+                    && window.matchMedia?.('(pointer:coarse)')?.matches);
+            // On PC: active but the cursor isn't locked yet (the initial
+            // auto-lock can be denied right after a scene swap, esp. Firefox) —
+            // treat this click as a gesture to (re)acquire the lock.
+            // On mobile there is NO pointer lock; tapping must shoot/bat, not
+            // pop the browser's "show cursor" prompt, so skip this entirely.
+            if (!isMobile && !gameplay.pointerLocked && event.type === 'mousedown') {
+                event.preventDefault();
+                renderer()?.domElement?.requestPointerLock?.();
+                return;
+            }
             if (event.button === 0) {
                 gameplay.input.fire = event.type === 'mousedown';
                 if (event.type === 'mousedown') gameplay.input.firePressed = true;
@@ -213,9 +228,25 @@ export function createInputHandlers(deps) {
 
         if (!gameplay.pointerLocked && !gameplay.active) return;
 
+        // Entered play but the lock was never actually acquired (e.g. the
+        // request came from outside a user-gesture, or the browser denied it
+        // — common in Firefox after a scene swap). This unlock event is not the
+        // user Stopping; keep gameplay active and let them click to lock. Only a
+        // genuine lock-release (pointerLocked was true) should fall through to
+        // the Stop/restore path below.
+        if (gameplay.active && !gameplay.pointerLocked) return;
+
         // Rogue card picker released the lock on purpose to show the cursor.
         // This is a PAUSE, not a Stop — don't tear down / restore the scene.
         if (gameplay.roguePaused) {
+            gameplay.pointerLocked = false;
+            gameplay.velocity.set(0, 0, 0);
+            physics.desiredVelocity.set(0, 0, 0);
+            resetMovementInputState();
+            return;
+        }
+
+        if (handleGameLauncherPause?.()) {
             gameplay.pointerLocked = false;
             gameplay.velocity.set(0, 0, 0);
             physics.desiredVelocity.set(0, 0, 0);

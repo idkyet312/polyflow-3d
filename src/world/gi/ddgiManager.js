@@ -413,6 +413,16 @@ export function createDDGIManager() {
 
     function tick() {
         if (!state.grid || !state.camera) return;
+
+        // Early-out when DDGI isn't active in the scene: nothing enabled, or no
+        // volume to light. Skips the per-frame volume selection / scale checks /
+        // uniform refresh / bake entirely. The debug overlay still gets a chance
+        // to hide itself, then we bail.
+        if (!state.enabled || !state.activeVolume) {
+            if (state.debug?.isVisible()) state.debug.update(state.grid, state.irradianceAtlas);
+            return;
+        }
+
         chooseActiveVolume();
 
         const previousKey = gridKey();
@@ -440,7 +450,7 @@ export function createDDGIManager() {
         if (state.debug?.isVisible()) state.debug.update(state.grid, state.irradianceAtlas);
         state.sampler?.refreshUniforms();
 
-        if (!state.enabled || !state.activeVolume) return;
+        // (enabled + activeVolume already guaranteed by the early-out at top.)
         if (state.injectionEnabled && state.scene && state.sampler) patchSceneMaterials(state.scene);
 
         const every = Math.max(1, state.bakeEveryN | 0);

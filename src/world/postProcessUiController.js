@@ -27,9 +27,9 @@ export function createPostProcessUiController({
         if (!refs) return;
 
         if (refs.exposureValue) refs.exposureValue.textContent = formatValue(Number.parseFloat(refs.exposureInput?.value ?? '1'), 2);
-        if (refs.bloomStrengthValue) refs.bloomStrengthValue.textContent = formatValue(Number.parseFloat(refs.bloomStrengthInput?.value ?? '1.25'), 2);
-        if (refs.bloomRadiusValue) refs.bloomRadiusValue.textContent = formatValue(Number.parseFloat(refs.bloomRadiusInput?.value ?? '0.95'), 2);
-        if (refs.bloomThresholdValue) refs.bloomThresholdValue.textContent = formatValue(Number.parseFloat(refs.bloomThresholdInput?.value ?? '0.48'), 2);
+        if (refs.bloomStrengthValue) refs.bloomStrengthValue.textContent = formatValue(Number.parseFloat(refs.bloomStrengthInput?.value ?? '0.28'), 2);
+        if (refs.bloomRadiusValue) refs.bloomRadiusValue.textContent = formatValue(Number.parseFloat(refs.bloomRadiusInput?.value ?? '0.35'), 2);
+        if (refs.bloomThresholdValue) refs.bloomThresholdValue.textContent = formatValue(Number.parseFloat(refs.bloomThresholdInput?.value ?? '1.10'), 2);
         if (refs.blendSpeedValue) refs.blendSpeedValue.textContent = formatValue(Number.parseFloat(refs.blendSpeedInput?.value ?? '2.5'), 1);
     }
 
@@ -123,9 +123,9 @@ export function createPostProcessUiController({
 
         const settings = {
             toneMappingExposure: readInputValue(refs.exposureInput, 1.0, 0.1, 2.5),
-            bloomStrength: readInputValue(refs.bloomStrengthInput, 1.25, 0, 3),
-            bloomRadius: readInputValue(refs.bloomRadiusInput, 0.95, 0, 2),
-            bloomThreshold: readInputValue(refs.bloomThresholdInput, 0.48, 0, 2),
+            bloomStrength: readInputValue(refs.bloomStrengthInput, 0.28, 0, 3),
+            bloomRadius: readInputValue(refs.bloomRadiusInput, 0.35, 0, 2),
+            bloomThreshold: readInputValue(refs.bloomThresholdInput, 1.10, 0, 2),
             priority: Math.round(readInputValue(refs.priorityInput, 0, -100, 100)),
         };
         const transitionSpeed = readInputValue(refs.blendSpeedInput, 2.5, 0.1, 10);

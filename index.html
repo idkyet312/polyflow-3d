@@ -168,7 +168,6 @@
                                 <option value="brickRoom">Brick Room (POM Demo)</option>
                                 <option value="doomTest">Doom Test Arena</option>
                                 <option value="doomArena" selected>Rogue Waves</option>
-                                <option value="roguePit">Rogue Pit</option>
                                 <option value="drugTycoon">Drug Tycoon</option>
                                 <option value="soccerField">Soccer Field</option>
                                 <option value="soccerFieldTerrain">Terrain</option>
@@ -743,6 +742,16 @@
                             </details>
 
                             <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Anti-Aliasing (FXAA)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-aa-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-aa-on">On</button>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Glow / Bloom</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
@@ -751,18 +760,18 @@
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Strength</div>
-                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="1.25">
-                                        <div class="viewer-slider-value" id="we-bloom-strength-value">1.25</div>
+                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.5">
+                                        <div class="viewer-slider-value" id="we-bloom-strength-value">0.50</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Radius</div>
-                                        <input id="we-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.95">
-                                        <div class="viewer-slider-value" id="we-bloom-radius-value">0.95</div>
+                                        <input id="we-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.35">
+                                        <div class="viewer-slider-value" id="we-bloom-radius-value">0.35</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Threshold</div>
-                                        <input id="we-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
-                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">0.48</div>
+                                        <input id="we-bloom-threshold" type="range" min="0" max="4" step="0.01" value="2.20">
+                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">2.20</div>
                                     </div>
                                 </div>
                             </details>
@@ -1018,18 +1027,18 @@
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Bloom Strength</div>
-                                        <input id="post-process-bloom-strength" type="range" min="0" max="3" step="0.01" value="1.25">
-                                        <div class="viewer-slider-value" id="post-process-bloom-strength-value">1.25</div>
+                                        <input id="post-process-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.28">
+                                        <div class="viewer-slider-value" id="post-process-bloom-strength-value">0.28</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Bloom Radius</div>
-                                        <input id="post-process-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.95">
-                                        <div class="viewer-slider-value" id="post-process-bloom-radius-value">0.95</div>
+                                        <input id="post-process-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.35">
+                                        <div class="viewer-slider-value" id="post-process-bloom-radius-value">0.35</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Bloom Threshold</div>
-                                        <input id="post-process-bloom-threshold" type="range" min="0" max="2" step="0.01" value="0.48">
-                                        <div class="viewer-slider-value" id="post-process-bloom-threshold-value">0.48</div>
+                                        <input id="post-process-bloom-threshold" type="range" min="0" max="2" step="0.01" value="1.10">
+                                        <div class="viewer-slider-value" id="post-process-bloom-threshold-value">1.10</div>
                                     </div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Blend Speed</div>
@@ -1282,11 +1291,50 @@
                 <button class="btn desktop-mobile-toggle" id="desktop-mobile-toggle" type="button">Mobile UI</button>
                 <div class="desktop-version-badge" aria-label="Desktop app version">v0.0.1</div>
 
+                <div class="mobile-start-screen" id="mobile-start-screen" aria-label="Mobile start">
+                    <div class="mobile-start-split" id="mobile-start-split">
+                        <button class="mobile-start-choice mobile-start-games" id="mobile-start-games" type="button">
+                            <span>Games</span>
+                        </button>
+                        <button class="mobile-start-choice mobile-start-engine" id="mobile-start-engine" type="button">
+                            <span>Engine</span>
+                        </button>
+                    </div>
+                    <div class="mobile-game-widget" id="mobile-game-widget" aria-label="Game select">
+                        <div class="mobile-game-widget-top">
+                            <button class="mobile-game-back" id="mobile-game-back" type="button">Back</button>
+                            <div class="mobile-game-widget-title">Games</div>
+                        </div>
+                        <div class="mobile-game-list" id="mobile-game-list"></div>
+                    </div>
+                </div>
+
+                <div class="mobile-pause-menu" id="mobile-pause-menu" aria-label="Paused">
+                    <div class="mobile-pause-card">
+                        <div class="mobile-pause-title">Paused</div>
+                        <button class="mobile-pause-btn" id="mobile-pause-continue" type="button">Continue</button>
+                        <button class="mobile-pause-btn mobile-pause-info-toggle" id="mobile-pause-info-toggle" type="button" aria-expanded="false">Info</button>
+                        <div class="mobile-pause-info" id="mobile-pause-info" hidden>
+                            <div class="mobile-pause-info-title" id="mobile-pause-info-title"></div>
+                            <div class="mobile-pause-info-lines" id="mobile-pause-info-lines"></div>
+                        </div>
+                        <div class="mobile-pause-quality">
+                            <div class="mobile-pause-quality-title">Quality</div>
+                            <div class="mobile-pause-quality-row" aria-label="Quality">
+                                <button class="mobile-pause-quality-btn is-active" id="mobile-quality-low" type="button">Low</button>
+                                <button class="mobile-pause-quality-btn" id="mobile-quality-med" type="button">Med</button>
+                                <button class="mobile-pause-quality-btn" id="mobile-quality-high" type="button">High</button>
+                            </div>
+                        </div>
+                        <button class="mobile-pause-btn mobile-pause-exit" id="mobile-pause-exit" type="button">Exit to Games</button>
+                    </div>
+                </div>
+
                 <div class="mobile-rotate-notice" id="mobile-rotate-notice" aria-live="polite">
                     <div class="mobile-rotate-inner">
                         <div class="mobile-rotate-icon" aria-hidden="true">⟳</div>
-                        <div class="mobile-rotate-title">Rotate your device</div>
-                        <div class="mobile-rotate-sub">Turn horizontal to play. You can still switch levels below.</div>
+                        <div class="mobile-rotate-title">Turn horizontal to play</div>
+                        <div class="mobile-rotate-sub">Rotate your device to landscape.</div>
                         <button class="btn mobile-chip" id="mobile-rotate-menu" type="button">Menu / Level</button>
                     </div>
                 </div>

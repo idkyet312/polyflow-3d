@@ -1,5 +1,30 @@
 import { vec3, vec4 } from 'three/tsl';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
+import { core } from '../runtime/appCore.js';
+
+// Game-mode levels skip DDGI: its live probe bake is noisy (random-seeded,
+// low-sample) and speckles every GI-lit surface as grain. These scenes use
+// plain direct lighting instead.
+const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest']);
+function inGameModeLevel() {
+    const t = core.currentMesh?.userData?.sampleType;
+    return !!(t && GAME_MODE_SAMPLE_TYPES.has(t));
+}
+
+// Firefox's WebGPU is still experimental and chokes on the post-process node
+// graph (bloom MRT + SSGI compute) — it renders black instead of the scene.
+// Detect it once and skip the post-FX pipeline there so the plain scene draws.
+// Chrome/Edge (stable WebGPU) keep the full pipeline.
+const POST_FX_SUPPORTED = (() => {
+    if (typeof navigator === 'undefined') return true;
+    const ua = navigator.userAgent || '';
+    const isFirefox = /firefox/i.test(ua);
+    if (isFirefox) {
+        console.warn('[postFX] Firefox detected — disabling bloom/SSGI post-processing (experimental WebGPU renders them black). Use Chrome/Edge for full effects.');
+        return false;
+    }
+    return true;
+})();
 
 // World Environment system — Godot-style global graphics inspector. Owns:
 //   - WORLD_ENV_DEFAULTS preset
@@ -58,7 +83,8 @@ export function createWorldEnvSystem({
         hemi: { enabled: true, intensity: 1.5 },
         sun: { enabled: true, castShadow: true, intensity: 2.5 },
         tonemap: { exposure: 1.0 },
-        bloom: { enabled: true, strength: 0.6, radius: 0.95, threshold: 0.9 },
+        aa: { enabled: false },   // FXAA edge AA on the post path; default off
+        bloom: { enabled: true, strength: 0.5, radius: 0.35, threshold: 2.2 },
         ssgi: { enabled: false, giIntensity: 2.0, aoIntensity: 1.0, radius: 8.0, thickness: 0.6, sliceCount: 1, stepCount: 8 },
         fog: { enabled: true, density: 0.012, opacity: 0.055 },
         ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
@@ -135,6 +161,7 @@ export function createWorldEnvSystem({
     }
 
     function shouldUsePostProcessingPipeline() {
+        if (!POST_FX_SUPPORTED) return false;
         const perf = isPerfModeEnabled();
         return !!((worldEnvState.bloom?.enabled && !perf)
             || (worldEnvState.ssgi?.enabled && !perf));
@@ -161,9 +188,10 @@ export function createWorldEnvSystem({
                 .add(vec4(ssgiOutput.rgb, 0))
                 .add(worldEnvState.bloom?.enabled && !perf ? bloomNode : vec4(0, 0, 0, 0));
         }
-        // Final FXAA pass — cheap edge AA so the post-FX path doesn't look
-        // jagged (the plain renderer.render path uses MSAA samples=2 instead).
-        postProcessing.outputNode = fxaa(outputNode);
+        // FXAA edge AA — user-toggleable (worldEnvState.aa.enabled), default off.
+        // It can speckle flat textureless surfaces, so it's opt-in. When off, the
+        // composite is rendered straight (no AA on the post path).
+        postProcessing.outputNode = worldEnvState.aa?.enabled ? fxaa(outputNode) : outputNode;
     }
 
     function applySSGISettings() {
@@ -181,11 +209,13 @@ export function createWorldEnvSystem({
     function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
         const s = worldEnvState;
         const perf = isPerfModeEnabled();
-        const runtimeBloomEnabled = s.bloom.enabled && !perf;
+        // Post-FX (bloom/SSGI) are skipped entirely where unsupported (Firefox).
+        const runtimeBloomEnabled = s.bloom.enabled && !perf && POST_FX_SUPPORTED;
         const runtimeFogEnabled = s.fog.enabled && !perf;
         // fix/ddgi-correctness: decouple DDGI from perf-mode (see runtime.js
-        // comment in PR #22).
-        const runtimeDdgiEnabled = s.ddgi.enabled;
+        // comment in PR #22). Game modes force DDGI off — its live bake grain
+        // showed up as speckle across all surfaces (Drug Tycoon grow room etc).
+        const runtimeDdgiEnabled = s.ddgi.enabled && !inGameModeLevel();
 
         // Sky / Background
         const environmentController = getEnvironmentController();
@@ -228,15 +258,16 @@ export function createWorldEnvSystem({
         // to neutral. When on, push the user's slider values through both the
         // shader uniforms AND the volume defaults so volume-based grading still works.
         if (runtimeBloomEnabled) {
-            postProcessVolumeManager?.setEnabled?.(true);
-            if (globalPostProcessUniforms.bloomStrength) globalPostProcessUniforms.bloomStrength.value = s.bloom.strength;
-            if (globalPostProcessUniforms.bloomRadius) globalPostProcessUniforms.bloomRadius.value = s.bloom.radius;
-            if (globalPostProcessUniforms.bloomThreshold) globalPostProcessUniforms.bloomThreshold.value = s.bloom.threshold;
             postProcessVolumeManager?.setDefaultSettings?.({
                 bloomStrength: s.bloom.strength,
                 bloomRadius: s.bloom.radius,
                 bloomThreshold: s.bloom.threshold,
-            });
+                toneMappingExposure: s.tonemap.exposure,
+            }, { immediate: true });
+            postProcessVolumeManager?.setEnabled?.(true);
+            if (globalPostProcessUniforms.bloomStrength) globalPostProcessUniforms.bloomStrength.value = s.bloom.strength;
+            if (globalPostProcessUniforms.bloomRadius) globalPostProcessUniforms.bloomRadius.value = s.bloom.radius;
+            if (globalPostProcessUniforms.bloomThreshold) globalPostProcessUniforms.bloomThreshold.value = s.bloom.threshold;
         } else {
             postProcessVolumeManager?.setEnabled?.(false);
         }
@@ -305,6 +336,8 @@ export function createWorldEnvSystem({
         setSlider(worldEnvUiRefs.sunIntensity, worldEnvUiRefs.sunIntensityValue, s.sun.intensity, 2);
 
         setSlider(worldEnvUiRefs.exposure, worldEnvUiRefs.exposureValue, s.tonemap.exposure, 2);
+
+        setToggle(worldEnvUiRefs.aaOff, worldEnvUiRefs.aaOn, !!s.aa?.enabled);
 
         setToggle(worldEnvUiRefs.bloomOff, worldEnvUiRefs.bloomOn, s.bloom.enabled);
         setSlider(worldEnvUiRefs.bloomStrength, worldEnvUiRefs.bloomStrengthValue, s.bloom.strength, 2);

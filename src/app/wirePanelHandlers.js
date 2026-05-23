@@ -231,6 +231,10 @@ export function wirePanelHandlers(opts) {
 
     wireSlider(worldEnvUiRefs?.exposure, 'tonemap.exposure', (v) => { worldEnvState.tonemap.exposure = v; });
 
+    wireToggle(worldEnvUiRefs?.aaOff, worldEnvUiRefs?.aaOn,
+        () => { worldEnvState.aa.enabled = false; },
+        () => { worldEnvState.aa.enabled = true; });
+
     wireToggle(worldEnvUiRefs?.bloomOff, worldEnvUiRefs?.bloomOn,
         () => { worldEnvState.bloom.enabled = false; },
         () => { worldEnvState.bloom.enabled = true; });

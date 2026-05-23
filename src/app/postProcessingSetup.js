@@ -31,8 +31,14 @@ export function setupPostProcessing(opts) {
     const sceneNormal = scenePass.getTextureNode('normal');
     const sceneDepth = scenePass.getTextureNode('depth');
 
+    // Bloom from the HDR scene COLOR (not the emissive MRT). The emissive MRT
+    // channel carried low-level noise on non-emissive surfaces; bloom amplified
+    // it into grain on everything. Blooming the scene color and letting the
+    // luminance threshold isolate bright pixels is the standard approach: only
+    // genuinely bright pixels (emissive lights, whose emissiveIntensity makes
+    // them HDR-bright) bloom; dim lit surfaces stay below threshold → no grain.
     const bloomNode = bloom(
-        sceneEmissive,
+        sceneColor,
         globalPostProcessUniforms.bloomStrength,
         globalPostProcessUniforms.bloomRadius,
         globalPostProcessUniforms.bloomThreshold,
@@ -52,7 +58,11 @@ export function setupPostProcessing(opts) {
     (bloomNode?._renderTargetsVertical || []).forEach(sanitize);
 
     const ssgiNode = ssgi(sceneColor, sceneDepth, sceneNormal, camera);
-    ssgiNode.useTemporalFiltering = false;
+    // Temporal filtering converges the SSGI noise across frames. Without it the
+    // raw GI is heavily grainy (it needs a manual DenoiseNode otherwise), which
+    // showed up as static grain across the sky + walls. The sliceCount/stepCount
+    // presets we use (1/12) are the recommended "Low" preset for temporal-on.
+    ssgiNode.useTemporalFiltering = true;
     const ssgiOutput = ssgiNode.getTextureNode();
 
     const postProcessing = new RenderPipeline(renderer);

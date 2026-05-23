@@ -346,6 +346,12 @@ import {
     bindMobilePad,
 } from '../ui/mobileControls.js';
 import {
+    setupMobileStartScreen,
+    closeMobileGamePauseMenu,
+    handleMobileExitPlay,
+    isMobileGamePaused,
+} from '../ui/mobileStartScreen.js';
+import {
     setupSceneSerialization,
     loadWorldFromSceneFolder,
     getActorComponentFlags,
@@ -611,9 +617,9 @@ let gpuTimestampResolvePending = null;
 let latestGpuRenderMs = 0;
 let environmentController, volumetricFogController, postProcessVolumeManager;
 const globalPostProcessUniforms = {
-    bloomStrength: uniform(1.25),
-    bloomRadius: uniform(0.95),
-    bloomThreshold: uniform(0.48)
+    bloomStrength: uniform(0.28),
+    bloomRadius: uniform(0.35),
+    bloomThreshold: uniform(1.1)
 };
 let postProcessNodes = null;
 
@@ -640,7 +646,7 @@ let perfModeUiRefs = null;
 // (the previous default) don't override the new boot-on-DDGI default. See doc
 // comment on PERF_MODE_DEFAULT_ENABLED above for the broader fix context.
 // Bumped v4 -> v5 for RT DDGI live-bake controls.
-const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v5';
+const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v6';
 // World environment state + apply/save/load extracted to
 // ../world/worldEnvSystem.js. The module owns the mutable state object;
 // the local `worldEnvState` alias below is the SAME ref the module holds
@@ -820,6 +826,9 @@ const mobileState = {
     lastWorldTapTime: 0,
     lastWorldTapX: 0,
     lastWorldTapY: 0,
+    launchedFromGames: false,
+    currentGameLevelId: null,
+    quality: 'low',
 };
 const importedPropState = {
     nextId: 1,
@@ -3625,9 +3634,8 @@ function ensureDDGITestVolume(rig) {
     const ddgi = new DDGIVolumeComponent({
         gridDims,
         cellSize,
-        // Cranked high enough to push GI past the engine's bloom threshold
-        // (0.48) so coloured bounce visibly fills shadowed regions of the
-        // Cornell box. Below this value the patcher's emissiveNode write
+        // Cranked high enough so coloured bounce visibly fills shadowed
+        // regions of the Cornell box. Below this value the patcher's emissiveNode write
         // gets crushed by the bloom HDR mask + ACES tonemap and shadows
         // render pure black even when DDGI is correctly sampling the
         // colour-bled probes above them.
@@ -4548,10 +4556,29 @@ async function init() {
     mobileState.enabled = isMobile;
     document.body.classList.toggle('is-mobile', isMobile);
 
+    // Hard guard: on a touch device, neuter requestPointerLock so NO code path
+    // (engine, Drug Tycoon, Rogue, resume overlays) can trigger the OS "switch
+    // apps / show your cursor" prompt that breaks touch gameplay. Touch has no
+    // cursor to lock. Wrapped in try/catch + writability check because the
+    // prototype property can be non-writable in some engines (assigning would
+    // throw under ESM strict mode and abort init — which broke the start screen).
+    if (isMobile && typeof Element !== 'undefined' && Element.prototype.requestPointerLock) {
+        try {
+            Object.defineProperty(Element.prototype, 'requestPointerLock', {
+                value: function noopPointerLock() { /* disabled on touch */ },
+                writable: true,
+                configurable: true,
+            });
+        } catch (e) {
+            console.warn('[mobile] could not disable requestPointerLock; relying on per-call guards', e);
+        }
+    }
+
     // Add listeners immediately so UI is responsive even if WASM is loading
     document.getElementById('load-level')?.addEventListener('click', (e) => {
         e.stopPropagation();
         const levelId = document.getElementById('level-select')?.value || 'soccerField';
+        mobileState.launchedFromGames = false;
         loadSample(levelId);
     });
 
@@ -4744,6 +4771,8 @@ async function init() {
         sunIntensityValue: document.getElementById('we-sun-intensity-value'),
         exposure: document.getElementById('we-tonemap-exposure'),
         exposureValue: document.getElementById('we-tonemap-exposure-value'),
+        aaOff: document.getElementById('we-aa-off'),
+        aaOn: document.getElementById('we-aa-on'),
         bloomOff: document.getElementById('we-bloom-off'),
         bloomOn: document.getElementById('we-bloom-on'),
         bloomStrength: document.getElementById('we-bloom-strength'),
@@ -5000,10 +5029,14 @@ async function init() {
 
     // PERF: pixel ratio capped at 2 — HiDPI 3x/4x devices were drawing 9-16x
     // 1080p for no perceptible win.
-    // AA: cheap MSAA (2 samples) on the plain render path; FXAA node is added
-    // to the post-process output for the bloom/SSGI path (see worldEnvSystem).
-    renderer = new WebGPURenderer({ antialias: true, samples: 2, alpha: true, trackTimestamp: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // AA off by default (no MSAA). Edge AA is opt-in via the Anti-Aliasing
+    // toggle in the menu, which enables the FXAA node on the post path
+    // (see worldEnvSystem.rebuildPostProcessingOutputNode / worldEnvState.aa).
+    renderer = new WebGPURenderer({ antialias: false, samples: 0, alpha: true, trackTimestamp: true });
+    // PERF: cap render resolution. Mobile GPUs choke at native 2-3x DPR (4-9x
+    // the pixels) — cap to 1.25x there. Desktop stays at 2x max.
+    const maxPixelRatio = mobileState.enabled ? 1.25 : 2;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.shadowMap.enabled = true;
@@ -5186,8 +5219,9 @@ async function init() {
         });
     } catch (e) { /* boot order — DDGI may not be live yet */ }
 
-    // Create example widgets
-    createExampleWidgets();
+    if (window.DEBUG_WIDGET_API) {
+        createExampleWidgets();
+    }
 
     window.addEventListener('resize', onWindowResize);
 
@@ -5264,20 +5298,37 @@ async function init() {
         updateGameplayDebugRay();
         const updateDuration = performance.now() - updateStart;
 
+        const gameplaySimPaused = gameplay.roguePaused || isMobileGamePaused();
         // Gameplay-phase systems are registered with explicit `before`/`after`
         // deps; the registry runs them in topological order and records timing.
-        const gameplaySystemMetrics = gameplaySystems.tickPhase('gameplay', delta, frameCtx);
+        const gameplaySystemMetrics = gameplaySimPaused
+            ? gameplaySystems.getLastMetrics()
+            : gameplaySystems.tickPhase('gameplay', delta, frameCtx);
 
         let physicsMetrics = { total: 0, step: 0, sync: 0, collisions: 0 };
-        if (gameplay.active) {
+        if (gameplay.active && !gameplaySimPaused) {
             physicsMetrics = stepPhysics(delta);
             updateLitePhysicsPools();
         }
-        updateVehicleVisuals(delta);
-        updateVehicleSurfaceEffects(delta);
+        // Split the frame: a game mode (Drug Tycoon, Rogue, Doom) runs only the
+        // systems it needs and skips engine/editor-only per-frame work (vehicle
+        // visuals, grass/water, object animations, widgets, debug rays). The
+        // mode's own logic runs via updateGameplay → gameplaySystems + the
+        // per-mode updaters; this just trims the showcase/editor overhead.
+        const frameInGameMode = gameplay.active
+            && GAME_MODE_TYPES.includes(currentMesh?.userData?.sampleType);
+
+        // Vehicles only exist in free/engine scenes (or if one is actively
+        // driven). Skip the visual/surface sync otherwise.
+        if (!frameInGameMode || gameplay.activeVehicleId) {
+            updateVehicleVisuals(delta);
+            updateVehicleSurfaceEffects(delta);
+        }
         syncActorCoreInstances();
-        grassField?.update(delta);
-        water?.update(delta);
+        if (!frameInGameMode) {
+            grassField?.update(delta);
+            water?.update(delta);
+        }
         // Performance toggle: skip the per-frame work entirely when on.
         // setPerfModeEnabled has already called setEnabled(false) on each subsystem
         // so visuals stay flat; we just skip the update/tick CPU cost here.
@@ -5293,19 +5344,24 @@ async function init() {
         const _ddgiMs = performance.now() - _ddgiStart;
         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
         // Cornell ray debug: redraw the rays cast from the chosen probe
-        // every frame so a moving / rebaking world stays in sync.
-        updateCornellRayDebug();
-        updateObjectAnimations(delta);
-        tickForceAllSceneMeshShadows();
+        // every frame so a moving / rebaking world stays in sync. Editor-only.
+        if (!frameInGameMode) {
+            updateCornellRayDebug();
+            updateObjectAnimations(delta);
+            tickForceAllSceneMeshShadows();
+        }
 
         multiplayerController?.syncLocalSnapshot(getLocalMultiplayerSnapshot());        multiplayerController?.update(delta);
 
         try {
-            // Update widget system
-            if (widgetManager) {
+            // Update widget system — engine UI widgets, not used by game modes.
+            if (widgetManager && !frameInGameMode) {
                 widgetManager.update(delta);
             }
 
+            // Object tick scripts: Rogue Waves drives its game-mode actor through
+            // this, so keep it in game modes; Drug Tycoon has no script actors so
+            // the pass is a cheap empty loop there.
             const scriptStart = performance.now();
             runObjectTickScripts(delta);
             if (gameplay.activeVehicleId) {
@@ -5320,7 +5376,7 @@ async function init() {
             gameplay.inputReleasedThisFrame.length = 0;
             const scriptDuration = performance.now() - scriptStart;
 
-            tickRaycastDebugLine();
+            if (!frameInGameMode) tickRaycastDebugLine();
             const renderStart = performance.now();
             if (postProcessing && shouldUsePostProcessingPipeline()) {
                 postProcessing.render();
@@ -5622,6 +5678,7 @@ const _inputHandlers = createInputHandlers({
     resetDoomMiniLevelState, resetDoomArenaLevelState,
     resetShowcaseCamera: (...a) => resetShowcaseCamera(...a),
     adjustShowcaseSpeed,
+    handleGameLauncherPause: handleMobileExitPlay,
 });
 const handleGameplayMouseMove = _inputHandlers.handleGameplayMouseMove;
 const handleShowcaseMouseButton = _inputHandlers.handleShowcaseMouseButton;
@@ -5653,7 +5710,13 @@ function enterGameplay() {
     updateWorldPresentation();
     updateGameplayUI();
 
-    if (!mobileState.enabled) {
+    // Never request pointer lock on touch devices — it triggers the OS
+    // "switch apps / show cursor" prompt and breaks touch gameplay. Guard on
+    // both the mobile flag AND a coarse-pointer check in case the flag is stale.
+    const isTouch = mobileState.enabled
+        || (typeof window !== 'undefined' && window.matchMedia?.('(pointer:coarse)')?.matches)
+        || document.body.classList.contains('is-mobile');
+    if (!isTouch) {
         renderer.domElement.requestPointerLock?.();
     }
 }
@@ -5677,6 +5740,11 @@ function repairSampleCollisionHierarchyAfterRestore() {
 }
 
 function exitGameplay() {
+    if (isMobileGamePaused()) {
+        closeMobileGamePauseMenu({ restorePause: false });
+        gameplay.roguePaused = false;
+    }
+
     if (!mobileState.enabled && document.pointerLockElement === renderer.domElement) {
         document.exitPointerLock();
         return;
@@ -5733,6 +5801,11 @@ function exitGameplay() {
 }
 
 function forceExitGameplayForWorldLoad() {
+    if (isMobileGamePaused()) {
+        closeMobileGamePauseMenu({ restorePause: false });
+        gameplay.roguePaused = false;
+    }
+
     if (!mobileState.enabled && document.pointerLockElement === renderer?.domElement) {
         document.exitPointerLock?.();
     }
@@ -5794,7 +5867,7 @@ function setTextIfChanged(element, value) {
     if (element.textContent !== value) element.textContent = value;
 }
 
-const GAME_MODE_TYPES = ['drugTycoon', 'doomArena', 'roguePit', 'doomTest'];
+const GAME_MODE_TYPES = ['drugTycoon', 'doomArena', 'doomTest'];
 
 function updateGameplayUI() {
     const hasAsset = !!currentMesh;
@@ -6520,6 +6593,13 @@ function wireExtractedModules() {
         isDrivingVehicle, setCameraMode, runMouseAction, exitVehicle, enterVehicle,
         applyGameplayCameraRotation, applyShowcaseCameraRotation,
         getActiveVehicleProp,
+        handleMobileExitPlay,
+    });
+    setupMobileStartScreen({
+        mobileState, gameplay, physics, worldEnvState, WORLD_ENV_DEFAULTS,
+        setCameraMode, setMobileMenuOpen, loadSample, setPerfModeEnabled,
+        applyWorldEnvState, resetMobileInputState,
+        requestGameplayPointerLock: () => renderer?.domElement?.requestPointerLock?.(),
     });
 
     setupSceneSerialization({

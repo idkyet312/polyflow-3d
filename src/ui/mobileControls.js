@@ -10,6 +10,59 @@ function inDrugTycoon() {
     return core.currentMesh?.userData?.sampleType === 'drugTycoon';
 }
 
+// Mirrors inGameMode() in inputHandlers.js. Used to suppress the default
+// touch "throw ball" (sphere/cube) action while inside a game mode.
+const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest']);
+function inGameMode() {
+    const sampleType = core.currentMesh?.userData?.sampleType;
+    if (sampleType && GAME_MODE_SAMPLE_TYPES.has(sampleType)) return true;
+    return !!window.drugTycoon?.inRoom;
+}
+
+// Per-context mobile button spec: which of the three action buttons show, and
+// their labels. Each game mode only spawns the buttons it actually uses, so the
+// screen isn't cluttered with controls the mode ignores.
+//   jump        — Jump / Up / Brake
+//   rightAction — Fire / Action (throw) / Down (heli)
+//   action2     — E (interact) / Enter-Exit (vehicle)
+function getMobileButtonSpec() {
+    if (!gameplay.active) {
+        return { jump: false, rightAction: false, action2: false };
+    }
+    const sampleType = core.currentMesh?.userData?.sampleType;
+
+    // Drug Tycoon: just movement + the E interact button. The gun adds Fire.
+    if (sampleType === 'drugTycoon') {
+        return {
+            jump: false,
+            rightAction: !!window.drugTycoon?.hasGun,
+            rightLabel: 'Fire',
+            action2: true,
+            action2Label: 'E',
+        };
+    }
+
+    // Rogue Waves / Doom arenas: shooter controls — Jump + Fire, no interact.
+    if (sampleType === 'doomArena' || sampleType === 'doomTest') {
+        return {
+            jump: true,
+            rightAction: true,
+            rightLabel: gameplay.weapon?.type ? 'Fire' : 'Action',
+            action2: false,
+        };
+    }
+
+    // Free/engine scene: full set — Jump, Action/Fire, Enter-Exit vehicle.
+    return {
+        jump: true,
+        jumpLabel: isFlyingHelicopter() ? 'Up' : isDrivingVehicle() ? 'Brake' : 'Jump',
+        rightAction: true,
+        rightLabel: isFlyingHelicopter() ? 'Down' : gameplay.weapon?.type ? 'Fire' : 'Action',
+        action2: true,
+        action2Label: isDrivingVehicle() ? 'Exit' : 'Enter',
+    };
+}
+
 // ─── Module-scope deps populated by setupMobileControls ─────────────────────
 let mobileState, gameplay, showcase, vehicleState, physics;
 let mobileMenuToggleBtn, mobileModeToggleBtn, mobileExitPlayBtn, mobileRotateMenuBtn;
@@ -22,7 +75,8 @@ let MOBILE_MOVE_THRESHOLD, MOBILE_MOVE_RADIUS_FACTOR, MOBILE_LOOK_SENSITIVITY,
 
 // Functions from main.js
 let isDrivingVehicle, setCameraMode, runMouseAction, exitVehicle, enterVehicle,
-    applyGameplayCameraRotation, applyShowcaseCameraRotation, getActiveVehicleProp;
+    applyGameplayCameraRotation, applyShowcaseCameraRotation, getActiveVehicleProp,
+    handleMobileExitPlay;
 
 function isFlyingHelicopter() {
     return !!(isDrivingVehicle?.() && getActiveVehicleProp?.()?.userData?.prefabId === 'helicopter');
@@ -47,6 +101,7 @@ export function setupMobileControls(deps) {
         applyGameplayCameraRotation,
         applyShowcaseCameraRotation,
         getActiveVehicleProp,
+        handleMobileExitPlay,
     } = deps);
 
     // DOM refs are resolved at setup time (same as original main.js)
@@ -64,7 +119,10 @@ export function setupMobileControls(deps) {
 
     mobileMenuToggleBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
     mobileModeToggleBtn?.addEventListener('click', () => setCameraMode(gameplay.active ? 'showcase' : 'play'));
-    mobileExitPlayBtn?.addEventListener('click', () => setCameraMode('showcase'));
+    mobileExitPlayBtn?.addEventListener('click', () => {
+        if (handleMobileExitPlay?.()) return;
+        setCameraMode('showcase');
+    });
     mobileRotateMenuBtn?.addEventListener('click', () => setMobileMenuOpen(!mobileState.menuOpen));
 
     mobileJumpBtn?.addEventListener('pointerdown', (event) => {
@@ -104,6 +162,12 @@ export function setupMobileControls(deps) {
             mobileRightActionBtn.setPointerCapture?.(event.pointerId);
             return;
         }
+        // In a game mode, suppress the default throw so tapping the action
+        // button doesn't fling spheres/cubes. Free scenes still throw.
+        if (gameplay.active && inGameMode()) {
+            event.preventDefault();
+            return;
+        }
         runMouseAction('right', event);
     });
     const releaseRightActionBtn = () => {
@@ -135,15 +199,36 @@ export function setupMobileControls(deps) {
         resetMobileMovePad();
     });
 
+    // Right half of the screen = look around. A drag rotates the camera; a
+    // quick tap (little/no movement) fires the weapon (shoot/bat) so the player
+    // can aim with the right thumb and tap to fire in one zone.
+    const _lookTap = { startX: 0, startY: 0, moved: 0, down: false };
+    const LOOK_TAP_SLOP = 12; // px of total movement still counts as a tap
     bindMobilePad(mobileLookPad, mobileLookThumb, (event) => {
-        const lastX = mobileLookPad.dataset.lastX ? Number(mobileLookPad.dataset.lastX) : event.clientX;
-        const lastY = mobileLookPad.dataset.lastY ? Number(mobileLookPad.dataset.lastY) : event.clientY;
+        const hasLast = !!mobileLookPad.dataset.lastX;
+        if (!hasLast) {
+            _lookTap.startX = event.clientX;
+            _lookTap.startY = event.clientY;
+            _lookTap.moved = 0;
+            _lookTap.down = true;
+        }
+        const lastX = hasLast ? Number(mobileLookPad.dataset.lastX) : event.clientX;
+        const lastY = hasLast ? Number(mobileLookPad.dataset.lastY) : event.clientY;
         const deltaX = event.clientX - lastX;
         const deltaY = event.clientY - lastY;
+        _lookTap.moved += Math.abs(deltaX) + Math.abs(deltaY);
         mobileLookPad.dataset.lastX = String(event.clientX);
         mobileLookPad.dataset.lastY = String(event.clientY);
         updateMobileLookPad(event.clientX, event.clientY, deltaX, deltaY);
     }, () => {
+        // Tap (no real drag) → one-shot fire.
+        if (_lookTap.down && _lookTap.moved <= LOOK_TAP_SLOP && gameplay.active) {
+            gameplay.input.firePressed = true;
+            gameplay.input.fire = true;
+            // Release the held flag next tick so auto weapons fire once per tap.
+            window.setTimeout(() => { gameplay.input.fire = false; }, 60);
+        }
+        _lookTap.down = false;
         if (mobileLookPad?.dataset) {
             delete mobileLookPad.dataset.lastX;
             delete mobileLookPad.dataset.lastY;
@@ -274,17 +359,11 @@ export function resetMobileLookPad() {
 // ─── Action buttons ────────────────────────────────────────────────────────────
 
 export function syncMobileActionVisibility() {
-    if (mobileJumpBtn) {
-        mobileJumpBtn.hidden = !gameplay.active;
-    }
+    const spec = getMobileButtonSpec();
 
-    if (mobileRightActionBtn) {
-        mobileRightActionBtn.hidden = !gameplay.active;
-    }
-
-    if (mobileAction2Btn) {
-        mobileAction2Btn.hidden = !gameplay.active;
-    }
+    if (mobileJumpBtn) mobileJumpBtn.hidden = !spec.jump;
+    if (mobileRightActionBtn) mobileRightActionBtn.hidden = !spec.rightAction;
+    if (mobileAction2Btn) mobileAction2Btn.hidden = !spec.action2;
 
     if (mobileModeToggleBtn) {
         mobileModeToggleBtn.textContent = gameplay.active ? 'Showcase' : 'Play';
@@ -301,17 +380,10 @@ export function updateMobileButtons() {
         mobileMenuToggleBtn.classList.toggle('viewer-toggle-btn-active', mobileState.menuOpen);
     }
 
-    if (mobileJumpBtn) {
-        mobileJumpBtn.textContent = isFlyingHelicopter() ? 'Up' : isDrivingVehicle() ? 'Brake' : 'Jump';
-    }
-
-    if (mobileRightActionBtn) {
-        mobileRightActionBtn.textContent = isFlyingHelicopter() ? 'Down' : gameplay.weapon?.type ? 'Fire' : 'Action';
-    }
-
-    if (mobileAction2Btn) {
-        mobileAction2Btn.textContent = inDrugTycoon() ? 'E' : isDrivingVehicle() ? 'Exit' : 'Enter';
-    }
+    const spec = getMobileButtonSpec();
+    if (mobileJumpBtn && spec.jumpLabel) mobileJumpBtn.textContent = spec.jumpLabel;
+    if (mobileRightActionBtn && spec.rightLabel) mobileRightActionBtn.textContent = spec.rightLabel;
+    if (mobileAction2Btn && spec.action2Label) mobileAction2Btn.textContent = spec.action2Label;
 
     syncMobileActionVisibility();
 }

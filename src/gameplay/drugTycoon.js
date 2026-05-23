@@ -68,6 +68,8 @@ const FLOOR_OFFSET = 0.1;         // matches PLAYER_SETTINGS.floorOffset-ish
 const BUD_SIZE = 0.16;            // physics bud half-extent-ish
 const BUD_GRAB_RANGE = 3.2;       // how far the cursor can grab a bud
 const BUD_HOLD_DIST = 1.6;        // distance in front of camera while held
+const BUD_TOUCH_PICK_RADIUS = 54; // px fallback so touch can grab without aiming at crosshair
+const BUD_RETURN_MS = 30000;      // fallen bench buds return to inventory after 30s
 const BAG_HALF = [0.55, 0.5, 0.55]; // bag trigger zone half-extents
 
 export function createDrugTycoon(deps) {
@@ -119,14 +121,15 @@ export function createDrugTycoon(deps) {
             // ---- grow room -------------------------------------------------
             inRoom: false,        // player currently inside the grow room
             buds: 0,              // harvested loose buds (pre-bagging)
-            plants: [],           // { mesh, stage, grownAt, pos } per pot
+            plants: [],           // { mesh, planted, watered, stage, grownAt, pos } per pot
             plantsBuilt: false,   // pots populated once
             baggingOpen: false,   // (legacy) drag-and-drop panel up
             // ---- physics bagging ------------------------------------------
-            physBuds: [],         // { mesh, body } loose physics buds on the bench
+            physBuds: [],         // { mesh, body, returnAt? } loose physics buds on the bench
             bagMesh: null,        // visual bag at the bench
             bagPos: null,         // [x,y,z] centre of the bag trigger zone
             grabbed: null,        // the physBud currently held by the cursor
+            touchGrabbed: null,   // physBud currently held by a direct touch drag
         };
     }
 
@@ -312,7 +315,7 @@ export function createDrugTycoon(deps) {
     // explaining how to play this game mode. Lives entirely in this module.
     const HELP_TITLE = 'DRUG TYCOON — HOW TO PLAY';
     const HELP_LINES = [
-        '🌿 GROW: Start at home. Harvest ripe plants [E], then drag buds into the bag at the bench (hold Fire) to package product.',
+        '🌿 GROW: At home, walk to a pot — [E] plant a seed, [E] water it, wait for it to ripen, then [E] harvest. Drag buds into the bag at the bench (hold Fire) to package product.',
         '🍳 COOK: Outside at the green bench [E] — add reagents in the right order, then MIX. Higher purity = more cash.',
         '📱 ORDERS: Press [P] for your phone. Sell only to the customer whose shirt matches the order colour [E].',
         '💰 SELL: Each deal pays out but raises your Wanted level (stars). Heat cools over time.',
@@ -324,21 +327,11 @@ export function createDrugTycoon(deps) {
 
     let _helpBtnEl = null;
     let _helpPanelEl = null;
+    // The green "?" help FAB is removed on both PC and mobile. The how-to-play
+    // panel is still reachable via toggleHelp() (e.g. a keybind), just no FAB.
     function ensureHelpButton() {
-        if (_helpBtnEl?.parentNode) return _helpBtnEl;
-        const b = document.createElement('button');
-        b.className = 'tycoon-overlay';
-        b.type = 'button';
-        b.textContent = '?';
-        b.style.cssText = 'position:absolute;right:18px;top:16px;z-index:1101;pointer-events:auto;'
-            + 'width:42px;height:42px;border-radius:50%;cursor:pointer;'
-            + 'font:900 22px/1 "Trebuchet MS",system-ui,sans-serif;color:#0a140e;'
-            + 'background:linear-gradient(160deg,#9dffa0,#3fbf5f);border:2px solid rgba(0,0,0,0.25);'
-            + 'box-shadow:0 4px 14px rgba(0,0,0,0.5);';
-        b.addEventListener('click', (e) => { e.preventDefault(); toggleHelp(); });
-        (document.getElementById('canvas-container') || document.body)?.appendChild(b);
-        _helpBtnEl = b;
-        return b;
+        if (_helpBtnEl?.parentNode) { _helpBtnEl.remove(); _helpBtnEl = null; }
+        return null;
     }
     function toggleHelp() {
         const s = ensureState();
@@ -379,6 +372,9 @@ export function createDrugTycoon(deps) {
         const s = window.drugTycoon;
         if (s) s.helpOpen = false;
         gameplay.roguePaused = false;
+    }
+    function getHowToPlay() {
+        return { title: HELP_TITLE, lines: HELP_LINES.slice() };
     }
 
     // ---- interact key (on-foot E edge) ----------------------------------
@@ -437,7 +433,8 @@ export function createDrugTycoon(deps) {
         const s = ensureState();
         const el = ensureHud();
         el.style.display = 'block';
-        ensureHelpButton().style.display = 'block';   // "?" help FAB (PC + mobile)
+        const helpBtn = ensureHelpButton();           // "?" help FAB (PC only)
+        if (helpBtn) helpBtn.style.display = 'block';
         const stars = wantedStars(s);
         const starColor = stars >= 4 ? '#ff4d4d' : stars >= 2 ? '#ffae00' : '#ffd24a';
         el.innerHTML =
@@ -1408,55 +1405,222 @@ export function createDrugTycoon(deps) {
         Jolt.destroy(p);
     }
 
-    // A weed plant mesh that swaps look by growth stage: a pot-top stem plus
-    // foliage that scales up, turning amber + budding when ripe.
+    // One fan leaf: the iconic cannabis palmate leaflet — a fanned cluster of
+    // 7 thin tapered blades sharing a base, angled outward. Returned as a small
+    // group that can be tilted/rotated as a whole.
+    function makeFanLeaf(mat) {
+        const leaf = new THREE.Group();
+        const fingers = 7;
+        for (let i = 0; i < fingers; i++) {
+            // Centre finger longest, outer fingers progressively shorter.
+            const k = Math.abs(i - (fingers - 1) / 2);
+            const len = 0.42 - k * 0.07;
+            const blade = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.004, 0.05, len, 4),
+                mat,
+            );
+            blade.geometry.scale(1, 1, 0.32);          // flatten into a blade
+            blade.position.y = len * 0.5;
+            const fan = (i - (fingers - 1) / 2) * 0.34; // spread the fingers
+            const f = new THREE.Group();
+            f.add(blade);
+            f.rotation.z = fan;
+            leaf.add(f);
+        }
+        return leaf;
+    }
+
+    // A realistic, bushy cannabis plant in a fabric grow bag (see reference):
+    // black fabric pot + soil that always stay, plus a `foliage` group — a tall
+    // central stalk with side BRANCHES angling up-and-out (denser/longer low,
+    // shorter near the top → Christmas-tree silhouette), each branch carrying
+    // fan leaves and a bud tip, topped by a main cola. Group origin = pot base.
     function makePlantMesh() {
         const g = new THREE.Group();
-        const stem = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.05, 0.07, 0.6, 5),
-            new THREE.MeshStandardMaterial({ color: '#3f6d2a', roughness: 0.9 }),
+
+        // Fabric grow bag (black cylinder, slightly tapered) + dark soil.
+        const pot = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.3, 0.26, 0.5, 24),
+            new THREE.MeshStandardMaterial({ color: '#1a1a1c', roughness: 1.0 }),
         );
-        stem.position.y = 0.3;   // stem bottom sits at the group origin (pot rim)
-        const leaves = new THREE.Mesh(
-            new THREE.IcosahedronGeometry(0.5, 0),
-            new THREE.MeshStandardMaterial({ color: '#2f7d34', roughness: 0.85 }),
+        pot.position.y = 0.25;
+        pot.castShadow = true; pot.receiveShadow = true;
+        // A subtle rolled rim so it reads as a fabric bag.
+        const rim = new THREE.Mesh(
+            new THREE.TorusGeometry(0.29, 0.035, 8, 24),
+            new THREE.MeshStandardMaterial({ color: '#2a2a2d', roughness: 1.0 }),
         );
-        leaves.position.y = 0.75;
-        leaves.name = 'leaves';
-        g.add(stem); g.add(leaves);
-        g.userData.leaves = leaves;
+        rim.rotation.x = Math.PI / 2;
+        rim.position.y = 0.5;
+        const soil = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.27, 0.27, 0.06, 24),
+            new THREE.MeshStandardMaterial({ color: '#241a12', roughness: 1 }),
+        );
+        soil.position.y = 0.5;
+        g.add(pot); g.add(rim); g.add(soil);
+
+        // Foliage group — everything that grows. Scaled/recoloured per stage.
+        const foliage = new THREE.Group();
+        foliage.position.y = 0.52;                      // start at the soil line
+        const stemMat = new THREE.MeshStandardMaterial({ color: '#3f6d2a', roughness: 0.9 });
+        const leafMat = new THREE.MeshStandardMaterial({ color: '#2f7d34', roughness: 0.85 });
+        const budMat = new THREE.MeshStandardMaterial({ color: '#3f8a3a', roughness: 0.75 });
+        foliage.userData.leafMat = leafMat;
+        foliage.userData.budMat = budMat;
+        const buds = [];                               // all bud meshes (recoloured ripe)
+        foliage.userData.buds = buds;
+
+        const STALK_H = 1.5;
+        const stalk = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.03, 0.07, STALK_H, 7),
+            stemMat,
+        );
+        stalk.position.y = STALK_H * 0.5;
+        stalk.castShadow = true;
+        foliage.add(stalk);
+
+        // Helper: a branch = a thin stem tilted out, with 2 fan leaves and a
+        // small bud at the tip. Built pointing +Y, then tilted by the caller.
+        const makeBranch = (length, leafScale) => {
+            const br = new THREE.Group();
+            const stem = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.012, 0.022, length, 5),
+                stemMat,
+            );
+            stem.position.y = length * 0.5;
+            br.add(stem);
+            // Two fan leaves partway and at the tip.
+            [0.55, 1.0].forEach((f, li) => {
+                const leaf = makeFanLeaf(leafMat);
+                leaf.position.y = length * f;
+                leaf.rotation.x = -0.7;
+                leaf.scale.setScalar(leafScale * (li === 0 ? 0.85 : 1));
+                br.add(leaf);
+            });
+            // Bud nugget at the tip.
+            const bud = new THREE.Mesh(new THREE.IcosahedronGeometry(0.06, 1), budMat);
+            bud.position.y = length + 0.04;
+            br.add(bud);
+            buds.push(bud);
+            return br;
+        };
+
+        // Tiers of branches up the stalk: lower tiers longer + more numerous,
+        // upper tiers shorter → the tapered bushy silhouette.
+        const tiers = [
+            { h: 0.32, count: 5, len: 0.62, tilt: 1.15, leaf: 1.1 },
+            { h: 0.62, count: 5, len: 0.55, tilt: 1.0,  leaf: 1.0 },
+            { h: 0.9,  count: 4, len: 0.45, tilt: 0.85, leaf: 0.9 },
+            { h: 1.15, count: 4, len: 0.34, tilt: 0.7,  leaf: 0.78 },
+            { h: 1.35, count: 3, len: 0.24, tilt: 0.55, leaf: 0.65 },
+        ];
+        tiers.forEach((tier, ti) => {
+            for (let i = 0; i < tier.count; i++) {
+                const az = (i / tier.count) * Math.PI * 2 + ti * 0.6;
+                const node = new THREE.Group();
+                node.position.y = tier.h;
+                node.rotation.y = az;
+                const br = makeBranch(tier.len, tier.leaf);
+                br.rotation.z = tier.tilt;             // angle the branch outward
+                node.add(br);
+                foliage.add(node);
+            }
+        });
+
+        // Main top cola — the dense apical bud cluster, biggest of all.
+        const cola = new THREE.Mesh(
+            new THREE.IcosahedronGeometry(0.16, 1),
+            budMat,
+        );
+        cola.position.y = STALK_H + 0.02;
+        cola.scale.set(0.9, 1.6, 0.9);                 // elongated cola shape
+        cola.name = 'cola';
+        foliage.add(cola);
+        foliage.userData.cola = cola;
+        buds.push(cola);
+
+        g.add(foliage);
+        g.userData.foliage = foliage;
         return g;
     }
+    // Plant lifecycle: empty → (plant seed) seeded → (water) growing →
+    // stages → ripe → (harvest) empty. The foliage hides when empty, shows a
+    // tiny dry sprout when seeded-but-unwatered, then scales/greens as it grows.
     function applyPlantStage(plant) {
-        const leaves = plant.mesh?.userData?.leaves;
-        if (!leaves) return;
+        const foliage = plant.mesh?.userData?.foliage;
+        if (!foliage) return;
+        const leafMat = foliage.userData.leafMat;
+        const budMat = foliage.userData.budMat;
+        const buds = foliage.userData.buds || [];
+        // The pot + soil always show; only the foliage hides/scales.
+        plant.mesh.visible = true;
+
+        if (!plant.planted) {
+            foliage.visible = false;           // empty pot, just soil
+            return;
+        }
+        foliage.visible = true;
         const ripe = plant.stage >= PLANT_STAGES;
+        // Buds only appear once flowering (stage 2+); hidden while vegging.
+        const showBuds = plant.watered && plant.stage >= 2;
+        for (const b of buds) b.visible = showBuds;
+
+        if (!plant.watered) {
+            // Dry seedling — tiny + brownish, waiting for water.
+            foliage.scale.setScalar(0.18);
+            leafMat.color.set('#6b5a2a');
+            leafMat.emissive = new THREE.Color('#000000');
+            leafMat.emissiveIntensity = 0;
+            return;
+        }
+
+        // Watered: scale up over the stages; green while growing, leaves yellow-
+        // green and buds turn amber + glow when ripe.
         const t = Math.min(1, plant.stage / PLANT_STAGES);
-        leaves.scale.setScalar(0.4 + t * 0.9);
-        leaves.material.color.set(ripe ? '#b6d957' : '#2f7d34');
-        leaves.material.emissive = new THREE.Color(ripe ? '#5a7a18' : '#000000');
-        leaves.material.emissiveIntensity = ripe ? 0.4 : 0;
+        foliage.scale.setScalar(0.35 + t * 0.85);
+        leafMat.color.set(ripe ? '#7faa3a' : '#2f7d34');
+        leafMat.emissive = new THREE.Color(ripe ? '#3a5a14' : '#000000');
+        leafMat.emissiveIntensity = ripe ? 0.25 : 0;
+        budMat.color.set(ripe ? '#c2a23a' : '#3f8a3a');
+        budMat.emissive = new THREE.Color(ripe ? '#7a5a10' : '#000000');
+        budMat.emissiveIntensity = ripe ? 0.5 : 0;
     }
     function ensurePlants(s, layout) {
         if (s.plantsBuilt) return;
         const { scene } = core;
         const pots = Array.isArray(layout.growPots) ? layout.growPots : [];
-        const now = performance.now?.() || Date.now();
         for (const pot of pots) {
             const mesh = makePlantMesh();
-            mesh.position.set(pot[0], pot[1] + 0.5, pot[2]); // sit on the pot rim
+            mesh.position.set(pot[0], pot[1], pot[2]); // group origin = pot base
             scene?.add(mesh);
-            // Start fully grown / ripe so the player can harvest immediately.
-            const plant = { mesh, stage: PLANT_STAGES, grownAt: now + PLANT_GROW_MS, pos: pot };
+            // Start EMPTY — the player must plant a seed, then water it.
+            const plant = { mesh, planted: false, watered: false, stage: 0, grownAt: 0, pos: pot };
             applyPlantStage(plant);
             s.plants.push(plant);
         }
         s.plantsBuilt = true;
     }
+    function plantSeed(s, plant) {
+        if (plant.planted) return;
+        plant.planted = true;
+        plant.watered = false;
+        plant.stage = 0;
+        plant.grownAt = 0;
+        applyPlantStage(plant);
+        floatText('Seed planted — needs water', plant.mesh.position.clone().setY(plant.mesh.position.y + 1.2), '#cdd6e3');
+    }
+    function waterPlant(s, plant) {
+        if (!plant.planted || plant.watered) return;
+        plant.watered = true;
+        plant.grownAt = (performance.now?.() || Date.now()) + PLANT_GROW_MS;
+        applyPlantStage(plant);
+        floatText('💧 Watered — growing', plant.mesh.position.clone().setY(plant.mesh.position.y + 1.2), '#7fd0ff');
+    }
     function updatePlants(s) {
         const now = performance.now?.() || Date.now();
         for (const p of s.plants) {
-            if (p.stage < PLANT_STAGES && now >= p.grownAt) {
+            // Only watered plants advance through growth stages.
+            if (p.planted && p.watered && p.stage < PLANT_STAGES && now >= p.grownAt) {
                 p.stage += 1;
                 p.grownAt = now + PLANT_GROW_MS;
                 applyPlantStage(p);
@@ -1464,10 +1628,13 @@ export function createDrugTycoon(deps) {
         }
     }
     function harvestPlant(s, plant) {
-        if (plant.stage < PLANT_STAGES) return;
+        if (!plant.planted || plant.stage < PLANT_STAGES) return;
         s.buds += BUDS_PER_PLANT;
+        // Back to an empty pot — replant + rewater for the next crop.
+        plant.planted = false;
+        plant.watered = false;
         plant.stage = 0;
-        plant.grownAt = (performance.now?.() || Date.now()) + PLANT_GROW_MS;
+        plant.grownAt = 0;
         applyPlantStage(plant);
         floatText(`+${BUDS_PER_PLANT} buds`, plant.mesh.position.clone().setY(plant.mesh.position.y + 1.4), '#b6ff6a');
     }
@@ -1561,6 +1728,32 @@ export function createDrugTycoon(deps) {
         const i = s.physBuds.indexOf(bud);
         if (i >= 0) s.physBuds.splice(i, 1);
         if (s.grabbed === bud) s.grabbed = null;
+        if (s.touchGrabbed === bud) s.touchGrabbed = null;
+        if (_mobileBudDrag.bud === bud) releaseMobileBudDrag();
+    }
+    function queuePhysBudReturn(s, bud) {
+        // Don't destroy the bud — let it keep falling and stay visible. Mark a
+        // reset time; processPendingBudReturns removes it + credits inventory
+        // once BUD_RETURN_MS elapses.
+        if (!bud || bud.returnAt) return;
+        bud.returnAt = (performance.now?.() || Date.now()) + BUD_RETURN_MS;
+        const pos = bud.mesh?.position?.clone?.() || new THREE.Vector3(...(s.bagPos || [0, 1, 0]));
+        floatText('bud returns in 30s', pos.setY(pos.y + 0.45), '#b6ff6a');
+    }
+    function processPendingBudReturns(s) {
+        if (!Array.isArray(s.physBuds) || s.physBuds.length === 0) return;
+        const now = performance.now?.() || Date.now();
+        let returned = 0;
+        for (const bud of [...s.physBuds]) {
+            if (bud.returnAt && now >= bud.returnAt) {
+                destroyPhysBud(s, bud);
+                returned += 1;
+            }
+        }
+        if (returned > 0) {
+            s.buds += returned;
+            floatText(`+${returned} bud${returned === 1 ? '' : 's'}`, new THREE.Vector3(...(s.bagPos || [0, 1, 0])), '#b6ff6a');
+        }
     }
     function clearPhysBuds(s) {
         for (const bud of [...(s.physBuds || [])]) destroyPhysBud(s, bud);
@@ -1568,16 +1761,183 @@ export function createDrugTycoon(deps) {
         if (s.bagMesh) { try { scene?.remove(s.bagMesh); } catch (e) {} s.bagMesh = null; }
         s.bagPos = null;
         s.grabbed = null;
+        s.touchGrabbed = null;
+        releaseMobileBudDrag();
     }
 
     const _grabCamPos = new THREE.Vector3();
     const _grabCamDir = new THREE.Vector3();
     const _grabTarget = new THREE.Vector3();
     const _budPos = new THREE.Vector3();
+    const _touchNdc = new THREE.Vector2();
+    const _touchRaycaster = new THREE.Raycaster();
+    const _touchPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const _touchDragTarget = new THREE.Vector3();
+    const _touchScreenPos = new THREE.Vector3();
+    const _mobileBudDrag = {
+        pointerId: null,
+        bud: null,
+        hasTarget: false,
+    };
+    let _mobileBudDragEventsInstalled = false;
+
+    function isMobileBudDragContext() {
+        const s = window.drugTycoon;
+        return !!(
+            gameplay.active
+            && core.currentMesh?.userData?.sampleType === 'drugTycoon'
+            && s?.inRoom
+            && !s.shopOpen
+            && !s.cooking
+            && !s.baggingOpen
+            && !s.helpOpen
+            && Array.isArray(s.physBuds)
+            && s.physBuds.length > 0
+        );
+    }
+
+    function setTouchRayFromEvent(event) {
+        const renderer = core.renderer;
+        const camera = core.camera;
+        const rect = renderer?.domElement?.getBoundingClientRect?.();
+        if (!rect || rect.width <= 0 || rect.height <= 0 || !camera) return false;
+        _touchNdc.set(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        _touchRaycaster.setFromCamera(_touchNdc, camera);
+        return true;
+    }
+
+    function pickTouchBud(event, s) {
+        if (!setTouchRayFromEvent(event)) return null;
+        const meshes = s.physBuds.map((bud) => bud.mesh).filter(Boolean);
+        const hits = _touchRaycaster.intersectObjects(meshes, false);
+        if (hits.length > 0) {
+            return s.physBuds.find((bud) => bud.mesh === hits[0].object) || null;
+        }
+
+        const renderer = core.renderer;
+        const camera = core.camera;
+        const rect = renderer?.domElement?.getBoundingClientRect?.();
+        if (!rect || !camera) return null;
+
+        let best = null;
+        let bestDistSq = BUD_TOUCH_PICK_RADIUS * BUD_TOUCH_PICK_RADIUS;
+        for (const bud of s.physBuds) {
+            _touchScreenPos.copy(bud.mesh.position).project(camera);
+            if (_touchScreenPos.z < -1 || _touchScreenPos.z > 1) continue;
+            const sx = rect.left + (_touchScreenPos.x * 0.5 + 0.5) * rect.width;
+            const sy = rect.top + (-_touchScreenPos.y * 0.5 + 0.5) * rect.height;
+            const dx = event.clientX - sx;
+            const dy = event.clientY - sy;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < bestDistSq) {
+                bestDistSq = d2;
+                best = bud;
+            }
+        }
+        return best;
+    }
+
+    function updateMobileBudDragTarget(event) {
+        const bud = _mobileBudDrag.bud;
+        if (!bud || !setTouchRayFromEvent(event)) return false;
+        const s = window.drugTycoon;
+        const baseY = s?.bagPos?.[1] ?? bud.mesh?.position?.y ?? 1.2;
+        const ray = _touchRaycaster.ray;
+        const layout = core.currentMesh?.userData?.drugTycoonLevel || {};
+        const bench = Array.isArray(layout.packagingBench) ? layout.packagingBench : null;
+
+        // Horizontal axis = bench->bag direction (falls back to bag X axis).
+        let nx = 1, nz = 0, ox = 0, oz = 0;
+        if (s?.bagPos) {
+            ox = s.bagPos[0];
+            oz = s.bagPos[2];
+            if (bench) {
+                const ax = s.bagPos[0] - bench[0];
+                const az = s.bagPos[2] - bench[2];
+                const len = Math.hypot(ax, az) || 1;
+                nx = ax / len;
+                nz = az / len;
+            }
+        }
+
+        // Vertical drag plane: contains the axis line, faces the camera so an
+        // up-swipe lifts the bud (Y) while along-swipe slides it on the axis.
+        const px = -nz, pz = nx;            // plane normal (perp to axis, horizontal)
+        _touchPlane.normal.set(px, 0, pz);
+        _touchPlane.constant = -(px * ox + pz * oz);
+        if (!ray.intersectPlane(_touchPlane, _touchDragTarget)) {
+            _touchDragTarget.copy(ray.origin).addScaledVector(ray.direction, BUD_HOLD_DIST);
+        }
+
+        // Project onto axis for horizontal, take Y from the plane hit for lift.
+        const dx = _touchDragTarget.x - ox;
+        const dz = _touchDragTarget.z - oz;
+        const t = Math.max(-3.0, Math.min(0.8, dx * nx + dz * nz));
+        const y = Math.max(baseY, Math.min(baseY + 2.5, _touchDragTarget.y));
+        _touchDragTarget.set(ox + nx * t, y, oz + nz * t);
+
+        _mobileBudDrag.hasTarget = true;
+        return true;
+    }
+
+    function releaseMobileBudDrag(event = null) {
+        if (event && _mobileBudDrag.pointerId !== event.pointerId) return false;
+        const s = window.drugTycoon;
+        if (s?.grabbed === _mobileBudDrag.bud) s.grabbed = null;
+        if (s?.touchGrabbed === _mobileBudDrag.bud) s.touchGrabbed = null;
+        _mobileBudDrag.pointerId = null;
+        _mobileBudDrag.bud = null;
+        _mobileBudDrag.hasTarget = false;
+        return true;
+    }
+
+    function installMobileBudDragEvents() {
+        if (_mobileBudDragEventsInstalled) return;
+        const canvas = core.renderer?.domElement;
+        if (!canvas) return;
+        _mobileBudDragEventsInstalled = true;
+
+        canvas.addEventListener('pointerdown', (event) => {
+            if (event.pointerType === 'mouse' || !isMobileBudDragContext()) return;
+            const s = ensureState();
+            const bud = pickTouchBud(event, s);
+            if (!bud) return;
+            event.preventDefault();
+            event.stopPropagation();
+            canvas.setPointerCapture?.(event.pointerId);
+            _mobileBudDrag.pointerId = event.pointerId;
+            _mobileBudDrag.bud = bud;
+            s.grabbed = bud;
+            s.touchGrabbed = bud;
+            updateMobileBudDragTarget(event);
+        }, { capture: true, passive: false });
+
+        canvas.addEventListener('pointermove', (event) => {
+            if (_mobileBudDrag.pointerId !== event.pointerId) return;
+            event.preventDefault();
+            event.stopPropagation();
+            updateMobileBudDragTarget(event);
+        }, { capture: true, passive: false });
+
+        const end = (event) => {
+            if (_mobileBudDrag.pointerId !== event.pointerId) return;
+            event.preventDefault();
+            event.stopPropagation();
+            releaseMobileBudDrag(event);
+        };
+        canvas.addEventListener('pointerup', end, { capture: true, passive: false });
+        canvas.addEventListener('pointercancel', end, { capture: true, passive: false });
+        canvas.addEventListener('lostpointercapture', () => releaseMobileBudDrag(), { capture: true });
+    }
+
     function updatePhysBagging(s, dt) {
         if (!physics?.ready || !physics.Jolt) return;
         const { Jolt, bodyInterface } = physics;
         const { camera } = core;
+        processPendingBudReturns(s);
 
         // 1) Sync every bud mesh to its body.
         for (const bud of s.physBuds) {
@@ -1589,12 +1949,13 @@ export function createDrugTycoon(deps) {
 
         // 2) Grab handling. Hold Fire to grab the bud under the cursor; release
         //    to let go (velocity persists, so you can fling it).
-        const holding = !!gameplay.input?.fire;
+        const touchDragging = _mobileBudDrag.pointerId !== null && s.grabbed === _mobileBudDrag.bud;
+        const holding = touchDragging || !!gameplay.input?.fire;
         if (camera) {
             camera.getWorldPosition(_grabCamPos);
             camera.getWorldDirection(_grabCamDir).normalize();
         }
-        if (holding && !s.grabbed && camera) {
+        if (holding && !s.grabbed && camera && !touchDragging) {
             // Pick nearest bud within range of the aim ray.
             let best = null, bestScore = -Infinity;
             for (const bud of s.physBuds) {
@@ -1614,7 +1975,11 @@ export function createDrugTycoon(deps) {
         // 3) Drive the grabbed bud toward a point in front of the camera using
         //    velocity (so the throw carries momentum on release).
         if (s.grabbed && camera) {
-            _grabTarget.copy(_grabCamPos).addScaledVector(_grabCamDir, BUD_HOLD_DIST);
+            if (touchDragging && _mobileBudDrag.hasTarget) {
+                _grabTarget.copy(_touchDragTarget);
+            } else {
+                _grabTarget.copy(_grabCamPos).addScaledVector(_grabCamDir, BUD_HOLD_DIST);
+            }
             const p = s.grabbed.body.GetPosition();
             const inv = 1 / Math.max(dt, 1 / 120);
             const vx = (_grabTarget.x - p.GetX()) * inv;
@@ -1643,6 +2008,15 @@ export function createDrugTycoon(deps) {
                     floatText('+1 bagged', new THREE.Vector3(...s.bagPos).setY(s.bagPos[1] + 0.6), '#9dffa0');
                     destroyPhysBud(s, bud);
                 }
+            }
+        }
+
+        // 5) Any bud that falls below the bench top returns to loose inventory after 30s.
+        const layout = core.currentMesh?.userData?.drugTycoonLevel || {};
+        const benchY = Array.isArray(layout.packagingBench) ? layout.packagingBench[1] : (s.bagPos?.[1] ?? 1.5) - 0.5;
+        for (const bud of [...s.physBuds]) {
+            if (bud.mesh.position.y < benchY - 0.35) {
+                queuePhysBudReturn(s, bud);
             }
         }
     }
@@ -1808,8 +2182,10 @@ export function createDrugTycoon(deps) {
     function updateDrugTycoonState(playerPos, delta = 0.016) {
         const { currentMesh } = core;
         if (currentMesh?.userData?.sampleType !== 'drugTycoon') return;
+        installMobileBudDragEvents();
         installInteractKey();
         const s = ensureState();
+        processPendingBudReturns(s);
         const layout = currentMesh.userData.drugTycoonLevel || {};
         const dt = Math.min(0.05, Math.max(0.001, delta));
 
@@ -1885,15 +2261,21 @@ export function createDrugTycoon(deps) {
                 // Drop a physics bud on the bench; hold Fire to drag it across
                 // into the bag. Any bud reaching the bag is packaged.
                 if (s.buds > 0) {
-                    promptR = `[E] Drop a bud (${s.buds}) · hold Fire to drag into bag`;
+                    promptR = `[E] Drop a bud (${s.buds}) · touch/drag into bag`;
                     if (interactR) spawnPhysBud(s, layout);
                 } else if (s.physBuds.length > 0) {
-                    promptR = 'Drag buds into the bag (hold Fire)';
+                    promptR = 'Drag buds into the bag';
                 } else {
                     promptR = 'Harvest buds first';
                 }
             } else if (bestPlant) {
-                if (bestPlant.stage >= PLANT_STAGES) {
+                if (!bestPlant.planted) {
+                    promptR = '[E] Plant a seed';
+                    if (interactR) plantSeed(s, bestPlant);
+                } else if (!bestPlant.watered) {
+                    promptR = '[E] Water the seed';
+                    if (interactR) waterPlant(s, bestPlant);
+                } else if (bestPlant.stage >= PLANT_STAGES) {
                     promptR = '[E] Harvest plant';
                     if (interactR) harvestPlant(s, bestPlant);
                 } else {
@@ -2089,12 +2471,12 @@ export function createDrugTycoon(deps) {
     // ---- window surface -------------------------------------------------
     if (typeof window !== 'undefined') {
         window.drugTycoonApi = {
-            ensureState, resetState, updateDrugTycoonState, openCook, closeCook, openShop, closeShop, openBagging, closeBagging, togglePhone, toggleHelp, queueInteract,
+            ensureState, resetState, updateDrugTycoonState, openCook, closeCook, openShop, closeShop, openBagging, closeBagging, togglePhone, toggleHelp, queueInteract, getHowToPlay,
         };
         window.resetDrugTycoonState = resetState;
     }
 
     return {
-        ensureState, resetState, updateDrugTycoonState, openCook, closeCook, openShop, closeShop, openBagging, closeBagging, togglePhone, toggleHelp, queueInteract,
+        ensureState, resetState, updateDrugTycoonState, openCook, closeCook, openShop, closeShop, openBagging, closeBagging, togglePhone, toggleHelp, queueInteract, getHowToPlay,
     };
 }

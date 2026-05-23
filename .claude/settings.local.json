@@ -57,7 +57,14 @@
       "Bash(node --check \"e:/JOBS/polyflow-3d/src/physics/core.js\")",
       "Bash(npm test *)",
       "Bash(node --check src/gameplay/rogueWaves.js)",
-      "Bash(node --check e:/JOBS/polyflow-3d/src/gameplay/drugTycoon.js)"
+      "Bash(node --check e:/JOBS/polyflow-3d/src/gameplay/drugTycoon.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173/polyflow-3d/)",
+      "Bash(node --check src/world/worldEnvSystem.js)",
+      "Bash(node --check src/app/postProcessingSetup.js)",
+      "Bash(curl -s \"http://localhost:5173/polyflow-3d/src/world/worldEnvSystem.js\")",
+      "Bash(curl -s \"http://localhost:5173/polyflow-3d/src/world/worldEnvSystem.js\" -o /dev/null -w \"served:%{http_code}\\\\n\")",
+      "Bash(node --check src/app/wirePanelHandlers.js)",
+      "Bash(node --check src/ui/mobileStartScreen.js)"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"

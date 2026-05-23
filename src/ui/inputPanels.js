@@ -1,6 +1,15 @@
 import * as THREE from 'three';
 import { core } from '../runtime/appCore.js';
 
+// Mirrors inGameMode() in inputHandlers.js. Used to suppress the default
+// touch "throw ball" (sphere/cube) action while inside a game mode.
+const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest']);
+function inGameMode() {
+    const sampleType = core.currentMesh?.userData?.sampleType;
+    if (sampleType && GAME_MODE_SAMPLE_TYPES.has(sampleType)) return true;
+    return !!window.drugTycoon?.inRoom;
+}
+
 // Terrain UI panel + gameplay event/key handling + showcase input,
 // extracted from runtime.js. Zero span-local module state (no leak risk).
 // Live engine refs (camera/renderer/transformControl/worldFloor/grassField/
@@ -334,12 +343,16 @@ export function createInputPanels(deps) {
         core.renderer.domElement.addEventListener('pointerdown', (event) => {
             if (event.pointerType === 'mouse') return;
             if (gameplay.active) {
-                if (gameplay.weapon.type) {
+                // Mobile tap = fire. Set the fire flag for an engine weapon OR a
+                // game mode (Drug Tycoon pistol/bat, Rogue weapon) — each mode's
+                // own logic decides what "fire" does (shoot or swing the bat).
+                if (gameplay.weapon.type || inGameMode()) {
                     gameplay.input.fire = true;
                     gameplay.input.firePressed = true;
                     event.preventDefault();
                     return;
                 }
+                // Free scene with no weapon: keep the throw-ball action.
                 if (runMouseAction('left', event)) {
                     event.preventDefault();
                 }
@@ -351,16 +364,14 @@ export function createInputPanels(deps) {
                 event.preventDefault();
             }
         }, { passive: false });
-        core.renderer.domElement.addEventListener('pointerup', (event) => {
-            if (event.pointerType !== 'mouse' && gameplay.active && gameplay.weapon.type) {
+        const releaseTouchFire = (event) => {
+            if (event.pointerType !== 'mouse' && gameplay.active
+                && (gameplay.weapon.type || inGameMode())) {
                 gameplay.input.fire = false;
             }
-        }, { passive: true });
-        core.renderer.domElement.addEventListener('pointercancel', (event) => {
-            if (event.pointerType !== 'mouse' && gameplay.active && gameplay.weapon.type) {
-                gameplay.input.fire = false;
-            }
-        }, { passive: true });
+        };
+        core.renderer.domElement.addEventListener('pointerup', releaseTouchFire, { passive: true });
+        core.renderer.domElement.addEventListener('pointercancel', releaseTouchFire, { passive: true });
     }
 
     function adjustShowcaseSpeed(direction) {

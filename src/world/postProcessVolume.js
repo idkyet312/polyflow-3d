@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 
 const DEFAULT_POST_PROCESS_SETTINGS = {
-    bloomStrength: 1.25,
-    bloomRadius: 0.95,
-    bloomThreshold: 0.48,
+    bloomStrength: 0.28,
+    bloomRadius: 0.35,
+    bloomThreshold: 1.1,
     toneMappingExposure: 1.0,
     priority: 0,
 };
@@ -174,6 +174,13 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
         syncDebugVisibility();
     }
 
+    function syncToResolvedSettings() {
+        const target = clonePostProcessSettings(resolveTargetSettings());
+        state.targetSettings = target;
+        state.currentSettings = clonePostProcessSettings(target);
+        applyResolvedSettings(target);
+    }
+
     function getSnapshot() {
         return {
             currentSettings: clonePostProcessSettings(state.currentSettings),
@@ -220,6 +227,7 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
         const next = !!enabled;
         if (state.enabled === next) {
             if (!next) applyResolvedSettings(DISABLED_POST_PROCESS_SETTINGS);
+            else syncToResolvedSettings();
             return;
         }
         state.enabled = next;
@@ -227,6 +235,9 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
             // Apply neutral settings immediately so the disable is visible this frame
             // without waiting for the lerp.
             applyResolvedSettings(DISABLED_POST_PROCESS_SETTINGS);
+        } else {
+            // Avoid one-frame/transition bloom using stale high-radius defaults.
+            syncToResolvedSettings();
         }
     }
 
@@ -238,8 +249,9 @@ export function createPostProcessVolumeManager({ scene, camera, renderer, global
         ensureEditorVolume,
         removeEditorVolume,
         update,
-        setDefaultSettings: (settings) => {
+        setDefaultSettings: (settings, { immediate = false } = {}) => {
             state.defaultSettings = clonePostProcessSettings({ ...state.defaultSettings, ...settings });
+            if (immediate && state.enabled) syncToResolvedSettings();
         },
         setTransitionSpeed,
         setDebugVisible,
