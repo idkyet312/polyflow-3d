@@ -53,6 +53,7 @@ const POST_FX_SUPPORTED = (() => {
 //   getDDGIManager              - () => DDGIManager
 //   getCornellPanelLight        - () => light | null (cornell-only)
 //   isPerfModeEnabled           - () => bool
+//   applyRenderResolutionSettings - renderer pixel-ratio/size forwarder
 //   applyShadowTuningToScene    - tuning forwarder
 //   applyPomTuningToScene       - tuning forwarder
 //   applyCornellTestPreset      - master preset hook
@@ -72,6 +73,9 @@ export function createWorldEnvSystem({
     getDDGIManager,
     getCornellPanelLight,
     isPerfModeEnabled,
+    applyRenderResolutionSettings,
+    getLightCull,
+    getAdaptiveQuality,
     applyShadowTuningToScene,
     applyPomTuningToScene,
     applyCornellTestPreset,
@@ -84,6 +88,12 @@ export function createWorldEnvSystem({
         sun: { enabled: true, castShadow: true, intensity: 2.5 },
         tonemap: { exposure: 1.0 },
         aa: { enabled: false },   // FXAA edge AA on the post path; default off
+        // Forward-friendly image-quality uplift: raise internal render
+        // resolution above the default DPR cap when explicitly enabled.
+        renderResolution: { enabled: false, scale: 1.15, maxDpr: 2.5 },
+        // Adaptive quality — FPS watchdog that steps effects down/up. Off by
+        // default; opt-in (mainly for weaker GPUs / mobile).
+        adaptive: { enabled: false },
         bloom: { enabled: true, strength: 0.5, radius: 0.35, threshold: 2.2 },
         // GTAO contact-shadow ambient occlusion. Cheap, big grounding payoff;
         // on by default. intensity 0..1 = how strongly AO darkens (1 = full).
@@ -99,6 +109,10 @@ export function createWorldEnvSystem({
         // shadow camera → sharp near shadows + cheap far ones (vs one stretched
         // 2048 map). cascades 2–3 is the sweet spot.
         shadows: { enabled: true, bias: 0.0, normalBias: 0.0, radius: 7.9, mapSize: 512, csm: true, cascades: 3 },
+        // Dynamic light culling: keep only the N most important point/spot lights
+        // lit per frame (by intensity/distance²). Real FPS win in light-heavy
+        // scenes; the sun/ambient/hemi are never culled. On by default.
+        lightCull: { enabled: true, maxActive: 16 },
         // Parallax Occlusion Mapping defaults.
         pom: { enabled: false, intensity: 0.04, quality: 'medium' },
     });
@@ -180,12 +194,11 @@ export function createWorldEnvSystem({
         const postProcessNodes = getPostProcessNodes();
         if (!postProcessing || !postProcessNodes) return;
         const { sceneColor, bloomNode, aoOutput, ssgiOutput } = postProcessNodes;
+        const perf = isPerfModeEnabled();
         if (!shouldUsePostProcessingPipeline()) {
             postProcessing.outputNode = sceneColor;
             return;
         }
-
-        const perf = isPerfModeEnabled();
         // AO multiplies the lit color FIRST (darkens creases/contacts), then
         // bloom is added on top so emissive highlights aren't dimmed by AO.
         // intensity 0..1 lerps between "no AO" (1.0) and the raw AO factor.
@@ -205,9 +218,10 @@ export function createWorldEnvSystem({
                 .add(vec4(ssgiOutput.rgb, 0))
                 .add(worldEnvState.bloom?.enabled && !perf ? bloomNode : vec4(0, 0, 0, 0));
         }
-        // FXAA edge AA — user-toggleable (worldEnvState.aa.enabled), default off.
-        // It can speckle flat textureless surfaces, so it's opt-in. When off, the
-        // composite is rendered straight (no AA on the post path).
+        // FXAA edge AA — opt-in (can speckle flat surfaces). TAA was removed: it
+        // requires a velocity MRT on the scene pass, which conflicts with the
+        // shadow-map renders three runs inside the scene render (see note in
+        // postProcessingSetup).
         postProcessing.outputNode = worldEnvState.aa?.enabled ? fxaa(outputNode) : outputNode;
     }
 
@@ -282,6 +296,7 @@ export function createWorldEnvSystem({
         if (renderer) {
             renderer.toneMappingExposure = s.tonemap.exposure;
         }
+        applyRenderResolutionSettings?.(s.renderResolution);
         const postProcessVolumeManager = getPostProcessVolumeManager();
         postProcessVolumeManager?.setDefaultSettings?.({ toneMappingExposure: s.tonemap.exposure });
 
@@ -336,6 +351,19 @@ export function createWorldEnvSystem({
         applyShadowTuningToScene(s.shadows);
         applyPomTuningToScene(s.pom);
 
+        // Dynamic light culling config (the per-frame cull runs in the frame loop).
+        const lc = getLightCull?.();
+        if (lc && s.lightCull) {
+            lc.setMaxActive(s.lightCull.maxActive);
+            lc.setEnabled(s.lightCull.enabled);
+        }
+
+        // Adaptive quality watchdog enable/disable (its per-frame update runs in
+        // the frame loop). setEnabled is a no-op when unchanged, so the re-apply
+        // it triggers internally doesn't recurse.
+        const aq = getAdaptiveQuality?.();
+        if (aq && s.adaptive) aq.setEnabled(s.adaptive.enabled);
+
         if (persist) saveWorldEnvToStorage();
         updateWorldEnvUi();
     }
@@ -370,11 +398,23 @@ export function createWorldEnvSystem({
         setSlider(worldEnvUiRefs.exposure, worldEnvUiRefs.exposureValue, s.tonemap.exposure, 2);
 
         setToggle(worldEnvUiRefs.aaOff, worldEnvUiRefs.aaOn, !!s.aa?.enabled);
+        if (s.renderResolution) {
+            setToggle(worldEnvUiRefs.renderResolutionOff, worldEnvUiRefs.renderResolutionOn, s.renderResolution.enabled);
+            setSlider(worldEnvUiRefs.renderResolutionScale, worldEnvUiRefs.renderResolutionScaleValue, s.renderResolution.scale, 2);
+            setSlider(worldEnvUiRefs.renderResolutionMaxDpr, worldEnvUiRefs.renderResolutionMaxDprValue, s.renderResolution.maxDpr, 2);
+        }
+        if (s.adaptive) setToggle(worldEnvUiRefs.adaptiveOff, worldEnvUiRefs.adaptiveOn, s.adaptive.enabled);
 
         setToggle(worldEnvUiRefs.bloomOff, worldEnvUiRefs.bloomOn, s.bloom.enabled);
         setSlider(worldEnvUiRefs.bloomStrength, worldEnvUiRefs.bloomStrengthValue, s.bloom.strength, 2);
         setSlider(worldEnvUiRefs.bloomRadius, worldEnvUiRefs.bloomRadiusValue, s.bloom.radius, 2);
         setSlider(worldEnvUiRefs.bloomThreshold, worldEnvUiRefs.bloomThresholdValue, s.bloom.threshold, 2);
+
+        if (s.ssao) {
+            setToggle(worldEnvUiRefs.ssaoOff, worldEnvUiRefs.ssaoOn, s.ssao.enabled);
+            setSlider(worldEnvUiRefs.ssaoIntensity, worldEnvUiRefs.ssaoIntensityValue, s.ssao.intensity, 2);
+            setSlider(worldEnvUiRefs.ssaoRadius, worldEnvUiRefs.ssaoRadiusValue, s.ssao.radius, 2);
+        }
 
         setToggle(worldEnvUiRefs.ssgiOff, worldEnvUiRefs.ssgiOn, s.ssgi.enabled);
 
@@ -398,6 +438,11 @@ export function createWorldEnvSystem({
         setSlider(worldEnvUiRefs.shadowsNormalBias, worldEnvUiRefs.shadowsNormalBiasValue, s.shadows.normalBias, 2);
         setSlider(worldEnvUiRefs.shadowsRadius, worldEnvUiRefs.shadowsRadiusValue, s.shadows.radius, 1);
         setSlider(worldEnvUiRefs.shadowsMapSize, worldEnvUiRefs.shadowsMapSizeValue, s.shadows.mapSize, 0);
+
+        if (s.lightCull) {
+            setToggle(worldEnvUiRefs.lightCullOff, worldEnvUiRefs.lightCullOn, s.lightCull.enabled);
+            setSlider(worldEnvUiRefs.lightCullMax, worldEnvUiRefs.lightCullMaxValue, s.lightCull.maxActive, 0);
+        }
 
         setToggle(worldEnvUiRefs.pomOff, worldEnvUiRefs.pomOn, s.pom.enabled);
         setSlider(worldEnvUiRefs.pomIntensity, worldEnvUiRefs.pomIntensityValue, s.pom.intensity, 3);
@@ -467,11 +512,13 @@ export function createWorldEnvSystem({
             s.fog.enabled = false;
             s.ddgi.enabled = false;
             s.shadows.enabled = false;
+            if (s.renderResolution) s.renderResolution.enabled = false;
         } else if (mode === 'perf') {
             s.bloom.enabled = false;
             s.ssgi.enabled = false;
             s.fog.enabled = false;
             s.ddgi.enabled = false;
+            if (s.renderResolution) s.renderResolution.enabled = false;
         } else if (mode === 'cornell') {
             applyCornellTestPreset();
             return;

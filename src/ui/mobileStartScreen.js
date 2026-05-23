@@ -174,6 +174,66 @@ export function setupMobileStartScreen(deps) {
     qualityMedBtn?.addEventListener('click', () => applyMobileQualitySetting('medium'));
     qualityHighBtn?.addEventListener('click', () => applyMobileQualitySetting('high'));
     syncMobileQualityButtons();
+    wireGraphicsSettings();
+}
+
+// ---- in-game graphics settings (pause menu "Graphics Settings") -----------
+// Per-effect toggles + a max-lights slider, layered on top of the Low/Med/High
+// presets. Each flips a worldEnvState flag and re-applies live.
+function setGfxToggle(btn, on) {
+    if (!btn) return;
+    btn.dataset.on = on ? '1' : '0';
+    btn.textContent = on ? 'On' : 'Off';
+    btn.classList.toggle('is-on', !!on);
+}
+function syncGraphicsSettings() {
+    const s = worldEnvState;
+    setGfxToggle(document.getElementById('gfx-bloom'), s.bloom?.enabled);
+    setGfxToggle(document.getElementById('gfx-ssao'), s.ssao?.enabled);
+    setGfxToggle(document.getElementById('gfx-shadows'), s.shadows?.enabled);
+    setGfxToggle(document.getElementById('gfx-fog'), s.fog?.enabled);
+    setGfxToggle(document.getElementById('gfx-adaptive'), s.adaptive?.enabled);
+    setGfxToggle(document.getElementById('gfx-lightcull'), s.lightCull?.enabled);
+    const ml = document.getElementById('gfx-maxlights');
+    const mlv = document.getElementById('gfx-maxlights-val');
+    if (ml && s.lightCull) { ml.value = String(s.lightCull.maxActive); }
+    if (mlv && s.lightCull) { mlv.textContent = String(s.lightCull.maxActive); }
+}
+function wireGraphicsSettings() {
+    const gfxToggleBtn = document.getElementById('mobile-pause-gfx-toggle');
+    const gfxPanel = document.getElementById('mobile-pause-gfx');
+    gfxToggleBtn?.addEventListener('click', () => {
+        const show = gfxPanel?.hidden !== false;
+        if (gfxPanel) gfxPanel.hidden = !show;
+        gfxToggleBtn.setAttribute('aria-expanded', show ? 'true' : 'false');
+        if (show) syncGraphicsSettings();
+    });
+    const bind = (id, getSec) => {
+        const btn = document.getElementById(id);
+        btn?.addEventListener('click', () => {
+            const sec = getSec();
+            if (!sec) return;
+            sec.enabled = !sec.enabled;
+            setGfxToggle(btn, sec.enabled);
+            applyWorldEnvState({ persist: true, switchSky: false });
+        });
+    };
+    bind('gfx-bloom', () => worldEnvState.bloom);
+    bind('gfx-ssao', () => worldEnvState.ssao);
+    bind('gfx-shadows', () => worldEnvState.shadows);
+    bind('gfx-fog', () => worldEnvState.fog);
+    bind('gfx-adaptive', () => worldEnvState.adaptive);
+    bind('gfx-lightcull', () => worldEnvState.lightCull);
+    const ml = document.getElementById('gfx-maxlights');
+    ml?.addEventListener('input', () => {
+        const v = parseInt(ml.value, 10);
+        if (Number.isFinite(v) && worldEnvState.lightCull) {
+            worldEnvState.lightCull.maxActive = v;
+            const mlv = document.getElementById('gfx-maxlights-val');
+            if (mlv) mlv.textContent = String(v);
+            applyWorldEnvState({ persist: true, switchSky: false });
+        }
+    });
 }
 
 function getMobileGameOptions() {
@@ -225,6 +285,7 @@ export function applyMobileQualitySetting(quality = 'medium') {
     s.ddgi.rayDebug = false;
     s.ddgi.contributionView = false;
     s.ddgi.solidTest = false;
+    if (s.renderResolution) s.renderResolution.enabled = false;
 
     const lowMode = mode === 'low';
     s.sky.enabled = !lowMode;
@@ -234,6 +295,12 @@ export function applyMobileQualitySetting(quality = 'medium') {
     s.sun.intensity = 0.8;       // softer sun
     s.sun.castShadow = !lowMode;
     s.shadows.enabled = !lowMode;
+
+    // Post effects per preset: low = none, medium/high = SSAO. Adaptive quality
+    // + light culling default on everywhere so weak GPUs self-protect.
+    if (s.ssao) s.ssao.enabled = !lowMode;
+    if (s.lightCull) s.lightCull.enabled = true;
+    if (s.adaptive) s.adaptive.enabled = mode !== 'high';   // high = fixed max quality
 
     if (mode === 'low') {
         clearPendingHighBloom();
@@ -326,6 +393,7 @@ export function handleMobileExitPlay() {
     }
     resetMobileInputState();
     renderPauseInfo({ open: false });
+    syncGraphicsSettings();   // reflect live graphics state in the settings panel
     document.body.classList.add('mobile-game-paused');
     return true;
 }

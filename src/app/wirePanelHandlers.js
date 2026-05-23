@@ -235,12 +235,30 @@ export function wirePanelHandlers(opts) {
         () => { worldEnvState.aa.enabled = false; },
         () => { worldEnvState.aa.enabled = true; });
 
+    wireToggle(worldEnvUiRefs?.renderResolutionOff, worldEnvUiRefs?.renderResolutionOn,
+        () => { worldEnvState.renderResolution.enabled = false; },
+        () => { worldEnvState.renderResolution.enabled = true; });
+    wireSlider(worldEnvUiRefs?.renderResolutionScale, 'renderResolution.scale',
+        (v) => { worldEnvState.renderResolution.scale = v; });
+    wireSlider(worldEnvUiRefs?.renderResolutionMaxDpr, 'renderResolution.maxDpr',
+        (v) => { worldEnvState.renderResolution.maxDpr = v; });
+
+    wireToggle(worldEnvUiRefs?.adaptiveOff, worldEnvUiRefs?.adaptiveOn,
+        () => { worldEnvState.adaptive.enabled = false; },
+        () => { worldEnvState.adaptive.enabled = true; });
+
     wireToggle(worldEnvUiRefs?.bloomOff, worldEnvUiRefs?.bloomOn,
         () => { worldEnvState.bloom.enabled = false; },
         () => { worldEnvState.bloom.enabled = true; });
     wireSlider(worldEnvUiRefs?.bloomStrength, 'bloom.strength', (v) => { worldEnvState.bloom.strength = v; });
     wireSlider(worldEnvUiRefs?.bloomRadius, 'bloom.radius', (v) => { worldEnvState.bloom.radius = v; });
     wireSlider(worldEnvUiRefs?.bloomThreshold, 'bloom.threshold', (v) => { worldEnvState.bloom.threshold = v; });
+
+    wireToggle(worldEnvUiRefs?.ssaoOff, worldEnvUiRefs?.ssaoOn,
+        () => { worldEnvState.ssao.enabled = false; },
+        () => { worldEnvState.ssao.enabled = true; });
+    wireSlider(worldEnvUiRefs?.ssaoIntensity, 'ssao.intensity', (v) => { worldEnvState.ssao.intensity = v; });
+    wireSlider(worldEnvUiRefs?.ssaoRadius, 'ssao.radius', (v) => { worldEnvState.ssao.radius = v; });
 
     wireToggle(worldEnvUiRefs?.ssgiOff, worldEnvUiRefs?.ssgiOn,
         () => { worldEnvState.ssgi.enabled = false; },
@@ -285,6 +303,12 @@ export function wirePanelHandlers(opts) {
     wireSlider(worldEnvUiRefs?.shadowsNormalBias, 'shadows.normalBias', (v) => { worldEnvState.shadows.normalBias = v; });
     wireSlider(worldEnvUiRefs?.shadowsRadius, 'shadows.radius', (v) => { worldEnvState.shadows.radius = v; });
     wireSlider(worldEnvUiRefs?.shadowsMapSize, 'shadows.mapSize', (v) => { worldEnvState.shadows.mapSize = v | 0; });
+
+    wireToggle(worldEnvUiRefs?.lightCullOff, worldEnvUiRefs?.lightCullOn,
+        () => { worldEnvState.lightCull.enabled = false; },
+        () => { worldEnvState.lightCull.enabled = true; });
+    wireSlider(worldEnvUiRefs?.lightCullMax, 'lightCull.maxActive',
+        (v) => { worldEnvState.lightCull.maxActive = Math.max(1, Math.round(v)); }, (s) => parseInt(s, 10));
 
     wireToggle(worldEnvUiRefs?.pomOff, worldEnvUiRefs?.pomOn,
         () => { worldEnvState.pom.enabled = false; },

@@ -19,6 +19,7 @@ export function createLevels(deps) {
         setActorResetTransform, setActorWorldPositionExact, setTerrainModeGrid,
         spawnDynamicPrimitive, spawnGameplayPrefab, syncActorBodyToRenderTransform,
         tagGameplayPrefabActor, tintGameplayPrefabActor, updateSoccerGoalies,
+        applyShowcaseGraphics,
     } = deps;
     // Live accessor: currentMesh is reassigned on every level load in
     // runtime.js. Read it through the shared engine keystone (appCore.core),
@@ -2389,10 +2390,11 @@ export function createLevels(deps) {
             if (emissive) { m.emissive = new THREE.Color(emissive); m.emissiveIntensity = emissiveIntensity; }
             return m;
         };
-        const addBox = (name, size, position, material, { actorSurface = '', solid = false } = {}) => {
+        const addBox = (name, size, position, material, { actorSurface = '', solid = false, rotY = 0 } = {}) => {
             const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), material);
             mesh.name = name;
             mesh.position.set(position[0], position[1], position[2]);
+            if (rotY) mesh.rotation.y = rotY;
             mesh.castShadow = true; mesh.receiveShadow = true;
             root.add(mesh);
             if (actorSurface || solid) {
@@ -2405,51 +2407,105 @@ export function createLevels(deps) {
             return mesh;
         };
 
-        // ---- materials ----
-        const floorMat = mat('#3a3f47', { rough: 0.95 });
-        const wallMat  = mat('#23272e', { rough: 0.92 });
-        const trimMat  = mat('#ffd24a', { rough: 0.5, emissive: '#ffd24a', emissiveIntensity: 0.2 });
-        const benchMat = mat('#2b3038', { rough: 0.85, metal: 0.2 });
-        const ceilMat  = mat('#15181d', { rough: 0.95 });
+        // ---- materials, tuned for the new post stack -------------------
+        // SSR rewards low roughness + a touch of metalness → a polished epoxy
+        // floor that mirrors the lights/targets. SSAO rewards crevices → trims,
+        // baseboards, coves. Bloom rewards HDR emissives → punchy strip lights +
+        // neon accents (emissiveIntensity well above 1 so they cross threshold).
+        const floorMat = mat('#2a2f38', { rough: 0.12, metal: 0.35 });        // wet/polished — strong SSR
+        const wallMat  = mat('#262b33', { rough: 0.85 });
+        const wallAccentMat = mat('#171a20', { rough: 0.7, metal: 0.15 });    // darker recessed panels
+        const baseMat  = mat('#15181d', { rough: 0.6, metal: 0.25 });         // glossy baseboard (catches reflections)
+        const pillarMat = mat('#33373f', { rough: 0.45, metal: 0.3 });        // semi-gloss pillars → reflect
+        const trimMat  = mat('#ffd24a', { rough: 0.35, emissive: '#ffd24a', emissiveIntensity: 1.1 });   // gently bloom-bright
+        const benchMat = mat('#2b3038', { rough: 0.4, metal: 0.45 });         // brushed metal bench
+        const ceilMat  = mat('#101319', { rough: 0.9 });
+        const lampMat  = mat('#ffffff', { rough: 0.3, emissive: '#fff4e6', emissiveIntensity: 1.5 });    // tubes — just over bloom threshold
+        const neonCyan = mat('#9fefff', { rough: 0.3, emissive: '#3fd0ff', emissiveIntensity: 1.4 });
+        const neonRed  = mat('#ff6b6b', { rough: 0.3, emissive: '#ff3a3a', emissiveIntensity: 1.6 });
+        const railMat  = mat('#3a4049', { rough: 0.3, metal: 0.6 });          // chrome-ish rails → SSR
 
         // ---- shell: floor, ceiling, four walls ----
         addBox('shootsim-floor', [HALL_W, T, HALL_L], [0, -T * 0.5, 0], floorMat, { actorSurface: 'floor' });
         addBox('shootsim-ceil', [HALL_W, T, HALL_L], [0, WALL_H, 0], ceilMat, { actorSurface: 'roof' });
-        addBox('shootsim-wall-back', [HALL_W, WALL_H, T], [0, WALL_H * 0.5, -HALL_L * 0.5], wallMat, { solid: true });   // downrange backstop
+        addBox('shootsim-wall-back', [HALL_W, WALL_H, T], [0, WALL_H * 0.5, -HALL_L * 0.5], wallMat, { solid: true });
         addBox('shootsim-wall-front', [HALL_W, WALL_H, T], [0, WALL_H * 0.5, HALL_L * 0.5], wallMat, { solid: true });
         addBox('shootsim-wall-l', [T, WALL_H, HALL_L], [-HALL_W * 0.5, WALL_H * 0.5, 0], wallMat, { solid: true });
         addBox('shootsim-wall-r', [T, WALL_H, HALL_L], [HALL_W * 0.5, WALL_H * 0.5, 0], wallMat, { solid: true });
 
-        // Downrange backstop accent + lane divider rails so it reads as a range.
-        addBox('shootsim-backstop', [HALL_W - 0.6, WALL_H - 1.0, 0.3], [0, (WALL_H - 1.0) * 0.5, -HALL_L * 0.5 + 0.4], mat('#1a1d22', { rough: 1.0 }));
+        // Glossy baseboards along both side walls — give SSAO a contact crease
+        // and SSR a low strip to reflect the floor lights.
+        for (const sx of [-1, 1]) {
+            addBox(`shootsim-base-${sx}`, [0.3, 0.5, HALL_L], [sx * (HALL_W * 0.5 - 0.15), 0.25, 0], baseMat);
+            // Recessed wall panels (depth for SSAO + darker reflection breakup).
+            for (let z = -HALL_L * 0.5 + 6; z < HALL_L * 0.5; z += 8) {
+                addBox(`shootsim-panel-${sx}-${z}`, [0.12, WALL_H - 2.2, 4.6], [sx * (HALL_W * 0.5 - 0.12), WALL_H * 0.5, z], wallAccentMat);
+            }
+        }
+
+        // Structural pillars down both sides — depth + AO + SSR catchers.
+        for (const sx of [-1, 1]) {
+            for (let z = -HALL_L * 0.5 + 8; z < HALL_L * 0.5 - 4; z += 12) {
+                addBox(`shootsim-pillar-${sx}-${z}`, [0.9, WALL_H, 0.9], [sx * (HALL_W * 0.5 - 0.7), WALL_H * 0.5, z], pillarMat, { solid: true });
+                // Cyan neon strip up each pillar — vertical bloom accents.
+                addBox(`shootsim-pillar-neon-${sx}-${z}`, [0.14, WALL_H - 1.4, 0.14], [sx * (HALL_W * 0.5 - 1.18), WALL_H * 0.5, z], neonCyan);
+            }
+        }
+
+        // Downrange backstop: angled, with rubber-baffle look + a glowing red
+        // "RANGE HOT" bar so there's HDR colour at the far end for bloom + SSR.
+        addBox('shootsim-backstop', [HALL_W - 0.6, WALL_H - 1.0, 0.5], [0, (WALL_H - 1.0) * 0.5, -HALL_L * 0.5 + 0.5], mat('#101216', { rough: 1.0 }));
+        addBox('shootsim-hotbar', [HALL_W - 3, 0.5, 0.2], [0, WALL_H - 1.1, -HALL_L * 0.5 + 0.85], neonRed);
+
         const LANES = 5;
         const laneSpacing = (HALL_W - 4) / (LANES - 1);
         const laneXs = [];
         for (let i = 0; i < LANES; i++) laneXs.push(-((HALL_W - 4) / 2) + i * laneSpacing);
-        for (const lx of laneXs) {
-            // Low divider rail running downrange between firing positions.
-            addBox(`shootsim-rail-${lx.toFixed(1)}`, [0.12, 1.0, HALL_L * 0.55], [lx - laneSpacing * 0.5, 0.5, HALL_L * 0.1], mat('#30353d', { rough: 0.9 }));
+        for (let i = 0; i < LANES; i++) {
+            const lx = laneXs[i];
+            // Chrome divider rail between firing positions (offset to the left of
+            // each lane), reflective for SSR.
+            if (i > 0) {
+                addBox(`shootsim-rail-${i}`, [0.1, 1.05, HALL_L * 0.5], [lx - laneSpacing * 0.5, 0.52, HALL_L * 0.08], railMat, { solid: true });
+            }
+            // Glowing lane-number puck set into the floor at each firing position.
+            addBox(`shootsim-lanemark-${i}`, [0.5, 0.04, 0.5], [lx, 0.03, HALL_L * 0.5 - 6.2], neonCyan);
         }
 
-        // ---- firing line: a bench the player stands behind ----
+        // ---- firing line: brushed-metal bench + glowing line ----
         const lineZ = HALL_L * 0.5 - 8;
         addBox('shootsim-bench', [HALL_W - 2, 1.0, 1.0], [0, 0.5, lineZ], benchMat, { solid: true });
-        addBox('shootsim-bench-trim', [HALL_W - 2, 0.1, 1.05], [0, 1.02, lineZ], trimMat);
-        addBox('shootsim-line', [HALL_W - 1, 0.05, 0.25], [0, 0.03, lineZ + 1.4], trimMat);   // yellow "do not cross" line
+        addBox('shootsim-bench-trim', [HALL_W - 2, 0.12, 1.06], [0, 1.03, lineZ], trimMat);
+        addBox('shootsim-line', [HALL_W - 1, 0.04, 0.22], [0, 0.03, lineZ + 1.4], trimMat);   // glowing "do not cross" line
 
-        // ---- ceiling strip lights ----
-        for (let z = -HALL_L * 0.4; z <= HALL_L * 0.4; z += 10) {
-            addBox(`shootsim-lamp-${z}`, [HALL_W - 8, 0.15, 1.4], [0, WALL_H - 0.2, z], mat('#fff6e0', { rough: 0.4, emissive: '#fff0d0', emissiveIntensity: 0.9 }));
-            const lp = new THREE.PointLight(0xfff0d0, 5.5, 28, 1.4);
-            lp.position.set(0, WALL_H - 0.6, z);
+        // ---- ceiling: recessed cove + bright tube lights (bloom + SSR) ----
+        // A dark recessed channel so the bright tubes sit in shadow (AO/contrast),
+        // and each tube is HDR-bright so it blooms + reflects in the epoxy floor.
+        for (let z = -HALL_L * 0.42; z <= HALL_L * 0.42; z += 7.5) {
+            addBox(`shootsim-cove-${z}`, [HALL_W - 5, 0.4, 2.0], [0, WALL_H - 0.02, z], ceilMat);
+            addBox(`shootsim-lamp-${z}`, [HALL_W - 7, 0.12, 1.1], [0, WALL_H - 0.32, z], lampMat);
+            const lp = new THREE.PointLight(0xfff6ec, 3.2, 26, 1.7);   // cooler + dimmer so the bay isn't flooded warm
+            lp.position.set(0, WALL_H - 0.8, z);
             lp.castShadow = false;
             lp.name = `shootsim-light-${z}`;
             root.add(lp);
         }
 
-        // ---- lane layout contract: target stand positions downrange ----
-        // Stagger depth a touch so the row isn't a flat wall of plates.
+        // ---- target spotlights: a focused warm spot per lane onto the targets,
+        // so targets are dramatically lit (CSM-style cone shadows + crisp SSAO).
         const lanes = laneXs.map((lx, i) => [lx, 0, -HALL_L * 0.5 + 6 + (i % 2) * 4]);
+        lanes.forEach(([lx, , lz], i) => {
+            const sp = new THREE.SpotLight(0xfff0d8, 4.5, 24, Math.PI / 7, 0.4, 1.6);
+            sp.position.set(lx, WALL_H - 0.8, lz + 5);
+            sp.target.position.set(lx, 1.4, lz);
+            sp.castShadow = i < 2;   // a couple cast real shadows; light-cull/clustered handles the rest
+            if (sp.castShadow) configurePointLightShadow(sp);
+            sp.name = `shootsim-spot-${i}`;
+            root.add(sp);
+            root.add(sp.target);
+        });
+
+        // ---- lane layout contract (unchanged — gameplay module reads this) ----
         root.userData.shootingSimLevel = {
             playerSpawn: [0, 0.85, lineZ + 2.2],
             firingLineZ: lineZ,
@@ -2458,10 +2514,13 @@ export function createLevels(deps) {
             hallLength: HALL_L,
         };
 
-        // Ambient + key fill so the bay isn't pitch black between lamps.
-        const amb = new THREE.AmbientLight(0xb9c4d6, 0.5);
+        // Cool ambient fill so shadowed areas read blue-grey (contrast vs warm
+        // tubes), kept low so SSAO + spot pools stay punchy.
+        const amb = new THREE.AmbientLight(0x8a9bc0, 0.35);
         root.add(amb);
-        const key = new THREE.PointLight(0xffffff, 6, 80, 1.2);
+        const hemi = new THREE.HemisphereLight(0xcfe0ff, 0x14171c, 0.4);
+        root.add(hemi);
+        const key = new THREE.PointLight(0xffffff, 3, 70, 1.4);
         key.position.set(0, WALL_H - 0.5, lineZ);
         key.castShadow = true;
         configurePointLightShadow(key);
@@ -2648,6 +2707,9 @@ export function createLevels(deps) {
                     }
                     // Fresh range each load. The module owns its own state.
                     try { window.shootingSimApi?.resetState?.(); } catch (e) {}
+                    // Showcase scene: switch on the full post stack (SSR + TAA +
+                    // SSAO + bloom) so the range shows the renderer at its best.
+                    try { applyShowcaseGraphics?.(); } catch (e) {}
                     return null;
                 },
             };

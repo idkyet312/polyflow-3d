@@ -20,14 +20,20 @@ export function setupPostProcessing(opts) {
         registerDebug,
     } = opts;
 
+    // NOTE: no scene-pass MRT. SSR/TAA need extra G-buffer targets (normal/
+    // metalness/roughness/velocity), but setting a multi-target MRT on the scene
+    // pass also applies to the shadow-map renders that three runs INSIDE the
+    // scene render (CSM cascades, spot depth) — their depth materials only write
+    // one target, so WebGPU rejects the pipeline ("targets[1] no fragment
+    // output"). That breaks all shadows. Bloom + GTAO work from color+depth only
+    // (depth is always available), so the post stack stays single-target + safe.
     const scenePass = pass(scene, camera);
     const sceneColor = scenePass.getTextureNode('output');
     const sceneDepth = scenePass.getTextureNode('depth');
 
     // Ground Truth Ambient Occlusion (GTAO) — contact-shadow darkening in
-    // creases/corners, derived from the scene depth (normals reconstructed from
-    // depth, so no extra MRT channel needed). Output is a single AO factor in
-    // .r (1 = open, 0 = fully occluded); worldEnvSystem composites + gates it.
+    // creases/corners. Reconstructs normals from depth (null normalNode) → no
+    // extra MRT needed.
     const aoNode = ao(sceneDepth, null, camera);
     const aoOutput = aoNode.getTextureNode();
 
@@ -58,7 +64,10 @@ export function setupPostProcessing(opts) {
     (bloomNode?._renderTargetsVertical || []).forEach(sanitize);
 
     const postProcessing = new RenderPipeline(renderer);
-    const postProcessNodes = { sceneColor, bloomNode, aoNode, aoOutput, ssgiNode: null, ssgiOutput: null };
+    const postProcessNodes = {
+        sceneColor, sceneDepth, bloomNode, aoNode, aoOutput,
+        ssgiNode: null, ssgiOutput: null,
+    };
     applySSGISettings();
     applySSAOSettings();
     rebuildPostProcessingOutputNode();

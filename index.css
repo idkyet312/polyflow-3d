@@ -2087,6 +2087,53 @@ body.mobile-game-paused .mobile-pause-menu {
   color: #fff;
 }
 
+/* In-game graphics settings panel (pause menu) */
+.mobile-pause-gfx {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+  max-height: 38vh;
+  overflow-y: auto;
+  padding: 0.5rem 0.4rem;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+.mobile-pause-gfx[hidden] { display: none; }
+.mobile-pause-gfx-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  color: #dfe7f2;
+  font: 700 0.82rem/1.1 system-ui, sans-serif;
+}
+.mobile-gfx-tog {
+  appearance: none;
+  min-width: 3.2rem;
+  min-height: 2rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #9aa6b6;
+  font: 900 0.8rem/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+.mobile-gfx-tog.is-on {
+  background: #4ade80;
+  color: #05130a;
+  border-color: #4ade80;
+}
+.mobile-pause-gfx-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+.mobile-pause-gfx-slider span:last-child {
+  min-width: 1.6rem;
+  text-align: right;
+}
+
 /* Short viewport (landscape phones): pack the pause card tight so all
    controls fit on screen without scrolling. */
 @media (max-height: 560px) {

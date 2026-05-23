@@ -148,6 +148,8 @@ import { setupPostProcessing } from './postProcessingSetup.js';
 import { wirePanelHandlers } from './wirePanelHandlers.js';
 import { createLevelStateSystem } from '../gameplay/levelStateSystem.js';
 import { createWorldEnvSystem } from '../world/worldEnvSystem.js';
+import { createLightCull } from '../world/lighting/lightCull.js';
+import { createAdaptiveQuality } from '../world/adaptiveQuality.js';
 
 // Default World instance — owns the event bus and gameplay system registry.
 // Anything that today references `eventBus` / `gameplaySystems` at module
@@ -668,6 +670,9 @@ const _worldEnvSystem = createWorldEnvSystem({
     getDDGIManager: () => getDDGIManager(),
     getCornellPanelLight: () => cornellPanelLight,
     isPerfModeEnabled: () => perfModeEnabled,
+    applyRenderResolutionSettings: (...a) => applyRenderResolutionSettings(...a),
+    getLightCull: () => lightCull,
+    getAdaptiveQuality: () => adaptiveQuality,
     applyShadowTuningToScene: (...a) => applyShadowTuningToScene(...a),
     applyPomTuningToScene: (...a) => applyPomTuningToScene(...a),
     applyCornellTestPreset: (...a) => applyCornellTestPreset(...a),
@@ -675,6 +680,17 @@ const _worldEnvSystem = createWorldEnvSystem({
 });
 const WORLD_ENV_DEFAULTS = _worldEnvSystem.WORLD_ENV_DEFAULTS;
 const worldEnvState = _worldEnvSystem.getWorldEnvState();
+// Per-frame dynamic light culler (keeps only the N most important point/spot
+// lights lit). Driven from the frame loop; configured from worldEnvState.
+const lightCull = createLightCull();
+registerDebug('lightCull', lightCull);
+// Adaptive quality watchdog — auto-steps effects down/up based on FPS. Reads +
+// mutates worldEnvState, then re-applies. Driven from the frame loop.
+const adaptiveQuality = createAdaptiveQuality({
+    getState: () => worldEnvState,
+    applyState: (...a) => applyWorldEnvState(...a),
+});
+registerDebug('adaptiveQuality', adaptiveQuality);
 let worldEnvUiRefs = null;
 let ddgiTestVolumeActor = null;
 let ddgiTestRigActor = null;
@@ -4254,8 +4270,30 @@ function setExampleWidgetsVisible(visible) {
 // CPU update work.
 function setPerfModeEnabled(isEnabled) {
     perfModeEnabled = !!isEnabled;
+    // Perf mode pauses the per-frame light cull (frame loop guards on it); make
+    // sure any lights it dimmed are restored so they don't stay dark while paused.
+    if (perfModeEnabled) { try { lightCull.restoreAll(); } catch (e) {} }
     applyWorldEnvState({ persist: false, switchSky: false });
     updatePerfModeUi();
+}
+
+function getDefaultRendererPixelRatioCap() {
+    return mobileState.enabled ? 1.25 : 2;
+}
+
+function applyRenderResolutionSettings(settings = worldEnvState?.renderResolution) {
+    if (!renderer || !container) return;
+    const devicePixelRatio = Math.max(1, Number(window.devicePixelRatio) || 1);
+    const baseCap = getDefaultRendererPixelRatioCap();
+    const enabled = !!settings?.enabled;
+    const scale = enabled
+        ? THREE.MathUtils.clamp(Number(settings?.scale) || 1, 1, 1.75)
+        : 1;
+    const maxDpr = enabled
+        ? THREE.MathUtils.clamp(Number(settings?.maxDpr) || baseCap, baseCap, 3)
+        : baseCap;
+    renderer.setPixelRatio(Math.min(devicePixelRatio * scale, maxDpr));
+    renderer.setSize(container.clientWidth, container.clientHeight);
 }
 
 // ──────────────────────────────────────────────────────────
@@ -4788,6 +4826,14 @@ async function init() {
         exposureValue: document.getElementById('we-tonemap-exposure-value'),
         aaOff: document.getElementById('we-aa-off'),
         aaOn: document.getElementById('we-aa-on'),
+        renderResolutionOff: document.getElementById('we-render-resolution-off'),
+        renderResolutionOn: document.getElementById('we-render-resolution-on'),
+        renderResolutionScale: document.getElementById('we-render-resolution-scale'),
+        renderResolutionScaleValue: document.getElementById('we-render-resolution-scale-value'),
+        renderResolutionMaxDpr: document.getElementById('we-render-resolution-max-dpr'),
+        renderResolutionMaxDprValue: document.getElementById('we-render-resolution-max-dpr-value'),
+        adaptiveOff: document.getElementById('we-adaptive-off'),
+        adaptiveOn: document.getElementById('we-adaptive-on'),
         bloomOff: document.getElementById('we-bloom-off'),
         bloomOn: document.getElementById('we-bloom-on'),
         bloomStrength: document.getElementById('we-bloom-strength'),
@@ -4796,6 +4842,12 @@ async function init() {
         bloomRadiusValue: document.getElementById('we-bloom-radius-value'),
         bloomThreshold: document.getElementById('we-bloom-threshold'),
         bloomThresholdValue: document.getElementById('we-bloom-threshold-value'),
+        ssaoOff: document.getElementById('we-ssao-off'),
+        ssaoOn: document.getElementById('we-ssao-on'),
+        ssaoIntensity: document.getElementById('we-ssao-intensity'),
+        ssaoIntensityValue: document.getElementById('we-ssao-intensity-value'),
+        ssaoRadius: document.getElementById('we-ssao-radius'),
+        ssaoRadiusValue: document.getElementById('we-ssao-radius-value'),
         ssgiOff: document.getElementById('we-ssgi-off'),
         ssgiOn: document.getElementById('we-ssgi-on'),
         fogOff: document.getElementById('we-fog-off'),
@@ -4832,6 +4884,10 @@ async function init() {
         shadowsRadiusValue: document.getElementById('we-shadows-radius-value'),
         shadowsMapSize: document.getElementById('we-shadows-map-size'),
         shadowsMapSizeValue: document.getElementById('we-shadows-map-size-value'),
+        lightCullOff: document.getElementById('we-lightcull-off'),
+        lightCullOn: document.getElementById('we-lightcull-on'),
+        lightCullMax: document.getElementById('we-lightcull-max'),
+        lightCullMaxValue: document.getElementById('we-lightcull-max-value'),
         pomOff: document.getElementById('we-pom-off'),
         pomOn: document.getElementById('we-pom-on'),
         pomIntensity: document.getElementById('we-pom-intensity'),
@@ -5047,12 +5103,29 @@ async function init() {
     // AA off by default (no MSAA). Edge AA is opt-in via the Anti-Aliasing
     // toggle in the menu, which enables the FXAA node on the post path
     // (see worldEnvSystem.rebuildPostProcessingOutputNode / worldEnvState.aa).
-    renderer = new WebGPURenderer({ antialias: false, samples: 0, alpha: true, trackTimestamp: true });
-    // PERF: cap render resolution. Mobile GPUs choke at native 2-3x DPR (4-9x
-    // the pixels) — cap to 1.25x there. Desktop stays at 2x max.
-    const maxPixelRatio = mobileState.enabled ? 1.25 : 2;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, maxPixelRatio));
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    // requiredLimits: the post stack's G-buffer MRT (color+normal+metalness+
+    // roughness+velocity = 5 RGBA16F targets = 40 bytes/sample) exceeds the
+    // default 32-byte maxColorAttachmentBytesPerSample. Bump it — but three
+    // forwards requiredLimits straight to adapter.requestDevice(), which REJECTS
+    // if the adapter can't meet them, so clamp to what the adapter actually
+    // supports (querying it ourselves first). Weaker adapters that can't fit 5
+    // targets won't run SSR+TAA together, but they still boot.
+    const requiredLimits = {};
+    try {
+        const adapter = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
+        const maxBytes = adapter?.limits?.maxColorAttachmentBytesPerSample;
+        if (maxBytes && maxBytes > 32) {
+            requiredLimits.maxColorAttachmentBytesPerSample = Math.min(128, maxBytes);
+        }
+    } catch (e) { /* no WebGPU / adapter query failed — fall back to defaults */ }
+    renderer = new WebGPURenderer({
+        antialias: false, samples: 0, alpha: true, trackTimestamp: true,
+        requiredLimits,
+    });
+    // PERF: base render resolution cap. Mobile GPUs choke at native 2-3x DPR
+    // (4-9x the pixels) — cap to 1.25x there. Desktop stays at 2x max unless
+    // the World Environment Resolution Boost explicitly overrides it.
+    applyRenderResolutionSettings();
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -5395,6 +5468,16 @@ async function init() {
             const scriptDuration = performance.now() - scriptStart;
 
             if (!frameInGameMode) tickRaycastDebugLine();
+            // Dynamic light culling: dim all but the N most important point/spot
+            // lights before rendering (skipped in perf mode — it disables lights
+            // wholesale anyway). Cheap CPU pass; big shader win in light-heavy scenes.
+            if (!perfModeEnabled && lightCull.isEnabled()) {
+                try { lightCull.update(scene, camera); } catch (e) {}
+            }
+            // Adaptive quality FPS watchdog: may toggle effects on/off this frame.
+            if (!perfModeEnabled && adaptiveQuality.isEnabled()) {
+                try { adaptiveQuality.update(delta); } catch (e) {}
+            }
             const renderStart = performance.now();
             if (postProcessing && shouldUsePostProcessingPipeline()) {
                 postProcessing.render();
@@ -5436,6 +5519,9 @@ let makeDoomShotgunSpriteTexture = () => null;
 
 function loadSample(levelId = 'soccerField') {
     clearCurrentMesh();
+    // Drop stale light-cull bookkeeping so the new level recaptures fresh
+    // intensities (and we don't restore a dimmed value onto a recycled uuid).
+    try { lightCull.reset(); } catch (e) {}
 
     const level = getBuiltinLevelDefinition(levelId);
     currentMesh = level.create();
@@ -5477,7 +5563,7 @@ function loadSample(levelId = 'soccerField') {
 function onWindowResize() {
     camera.aspect = container.clientWidth / container.clientHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    applyRenderResolutionSettings();
 }
 
 function clearCurrentMesh() {
@@ -6576,6 +6662,17 @@ function wireExtractedModules() {
             tagGameplayPrefabActor,
             tintGameplayPrefabActor,
             updateSoccerGoalies: (...a) => updateSoccerGoalies(...a),
+            // Showcase preset for graphics-demo levels (e.g. the shooting range):
+            // turn on the post stack so it looks its best. Not persisted, so it
+            // never overwrites the user's saved global graphics prefs.
+            applyShowcaseGraphics: () => {
+                try {
+                    const s = worldEnvState;
+                    if (s.ssao) s.ssao.enabled = true;
+                    if (s.bloom) s.bloom.enabled = true;
+                    applyWorldEnvState({ persist: false, switchSky: false });
+                } catch (e) {}
+            },
         });
         getBuiltinLevelDefinition = lv.getBuiltinLevelDefinition;
         updateDoomEnemySpriteAnimation = lv.updateDoomEnemySpriteAnimation;

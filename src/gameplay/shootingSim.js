@@ -91,23 +91,46 @@ export function createShootingSim(deps) {
     }
 
     // ---- target factory -------------------------------------------------
-    const _laneMat = () => new THREE.MeshStandardMaterial({ color: '#3a4150', roughness: 0.9 });
+    // Reflective chrome stand (SSR-friendly: low roughness + high metalness).
+    const _standMat = () => new THREE.MeshStandardMaterial({ color: '#cdd6e3', roughness: 0.18, metalness: 0.9 });
+    // A small reflective base disc grounds each stand (catches floor reflections).
+    function addStand(group, height) {
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.06, height, 12), _standMat());
+        post.position.y = height * 0.5;
+        post.castShadow = true;
+        group.add(post);
+        const base = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.06, 16), _standMat());
+        base.position.y = 0.03;
+        base.castShadow = true; base.receiveShadow = true;
+        group.add(base);
+    }
 
-    // A bullseye plate: concentric ring discs on a thin post. Stores ring radii
-    // for scoring. `face` is the +Z normal toward the shooter.
+    // A bullseye plate: concentric ring discs on a chrome stand. The rings have a
+    // slight emissive so they pop under bloom; a glossy backing plate reflects.
     function makeBullseye() {
         const group = new THREE.Group();
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.2, 8), _laneMat());
-        post.position.y = 0.6;
-        group.add(post);
+        addStand(group, 1.5);
         const faceGrp = new THREE.Group();
         faceGrp.position.y = 1.5;
+        // Glossy dark backing plate behind the rings → SSR catcher + AO contact.
+        const backing = new THREE.Mesh(
+            new THREE.CylinderGeometry(1.0, 1.0, 0.06, 40),
+            new THREE.MeshStandardMaterial({ color: '#0c0e12', roughness: 0.25, metalness: 0.5 }),
+        );
+        backing.rotation.x = Math.PI / 2;
+        backing.position.z = -0.04;
+        backing.castShadow = true; backing.receiveShadow = true;
+        faceGrp.add(backing);
         // Draw rings outer→inner so inner sits on top.
         for (let i = RINGS.length - 1; i >= 0; i--) {
             const [r, , col] = RINGS[i];
             const disc = new THREE.Mesh(
-                new THREE.CircleGeometry(r, 32),
-                new THREE.MeshStandardMaterial({ color: col, roughness: 0.6, side: THREE.DoubleSide, emissive: '#000', emissiveIntensity: 0 }),
+                new THREE.CircleGeometry(r, 40),
+                new THREE.MeshStandardMaterial({
+                    color: col, roughness: 0.35, metalness: 0.1,
+                    side: THREE.DoubleSide, emissive: new THREE.Color(col),
+                    emissiveIntensity: i === 0 ? 0.6 : 0.18,   // bullseye glows most
+                }),
             );
             disc.position.z = 0.01 * (RINGS.length - i);
             faceGrp.add(disc);
@@ -117,22 +140,27 @@ export function createShootingSim(deps) {
         return { group, faceGrp, type: 'plate' };
     }
 
-    // A human-ish silhouette plate that falls back on hit then stands up.
+    // A human-ish silhouette plate (matte composite) on a chrome stand, glowing
+    // center scoring zone. Falls back on hit then stands up.
     function makeSilhouette() {
         const group = new THREE.Group();
-        const mat = new THREE.MeshStandardMaterial({ color: '#c2502f', roughness: 0.8 });
+        addStand(group, 0.6);
+        const mat = new THREE.MeshStandardMaterial({ color: '#c2502f', roughness: 0.55, metalness: 0.15 });
         const board = new THREE.Group();
-        const torso = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.06), mat);
-        torso.position.y = 1.1;
-        const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.06), mat);
-        head.position.y = 1.78;
+        board.position.y = 0.6;
+        const torso = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.0, 0.07), mat);
+        torso.position.y = 0.5;
+        torso.castShadow = true; torso.receiveShadow = true;
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.07), mat);
+        head.position.y = 1.18;
+        head.castShadow = true;
         board.add(torso); board.add(head);
-        // White center scoring zone, raised slightly so it reads.
+        // Glowing center scoring zone (bloom + clear aim point).
         const zone = new THREE.Mesh(
-            new THREE.CircleGeometry(0.22, 24),
-            new THREE.MeshStandardMaterial({ color: '#f0f0f0', roughness: 0.7, emissive: '#000', emissiveIntensity: 0 }),
+            new THREE.CircleGeometry(0.22, 28),
+            new THREE.MeshStandardMaterial({ color: '#f6f9ff', roughness: 0.4, emissive: '#aee4ff', emissiveIntensity: 0.7 }),
         );
-        zone.position.set(0, 1.15, 0.05);
+        zone.position.set(0, 0.55, 0.06);
         board.add(zone);
         board.userData.zone = zone;
         group.add(board);
@@ -140,18 +168,21 @@ export function createShootingSim(deps) {
         return { group, board, type: 'popup', down: false, resetAt: 0 };
     }
 
-    // A small mover plate that slides along X.
+    // A glowing teal mover plate on a chrome stand that slides along X.
     function makeMover() {
         const group = new THREE.Group();
+        addStand(group, 1.4);
         const plate = new THREE.Mesh(
-            new THREE.CircleGeometry(0.32, 24),
-            new THREE.MeshStandardMaterial({ color: '#2dd4bf', roughness: 0.6, side: THREE.DoubleSide, emissive: '#000', emissiveIntensity: 0 }),
+            new THREE.CylinderGeometry(0.32, 0.32, 0.05, 32),
+            new THREE.MeshStandardMaterial({
+                color: '#2dd4bf', roughness: 0.3, metalness: 0.2,
+                emissive: '#15b8a6', emissiveIntensity: 0.85,
+            }),
         );
+        plate.rotation.x = Math.PI / 2;
         plate.position.y = 1.4;
+        plate.castShadow = true;
         group.add(plate);
-        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.4, 8), _laneMat());
-        post.position.y = 0.7;
-        group.add(post);
         return { group, plate, type: 'mover', t: Math.random() * Math.PI * 2, span: 3.0, speed: 1.0 + Math.random() };
     }
 
