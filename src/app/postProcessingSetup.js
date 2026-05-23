@@ -2,34 +2,34 @@
 // after scene/camera/renderer/sceneSystem exist. Returns the freshly-built
 // instances so the runtime can store them in its module-scope handles.
 //
-// Steps: MRT scenePass → bloom node (with name-sanitization workaround for
-// WebGPU validation) → SSGI node → RenderPipeline → DDGI/lightmap init.
+// Steps: scenePass → bloom node (with name-sanitization workaround for
+// WebGPU validation) → RenderPipeline → DDGI/lightmap init.
 
-import { pass, mrt, output, emissive, normalView } from 'three/tsl';
+import { pass } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
+import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { RenderPipeline } from 'three/webgpu';
 
 export function setupPostProcessing(opts) {
     const {
         scene, camera, renderer, sceneSystem, mainDirectionalLight,
         globalPostProcessUniforms,
-        applySSGISettings, rebuildPostProcessingOutputNode,
+        applySSGISettings, applySSAOSettings, rebuildPostProcessingOutputNode,
         createPostProcessVolumeManager, syncPostProcessVolumeUi,
         getDDGIManager, createLightmapBaker,
         registerDebug,
     } = opts;
 
     const scenePass = pass(scene, camera);
-    scenePass.setMRT(mrt({
-        output: output,
-        emissive: emissive,
-        normal: normalView,
-    }));
     const sceneColor = scenePass.getTextureNode('output');
-    const sceneEmissive = scenePass.getTextureNode('emissive');
-    const sceneNormal = scenePass.getTextureNode('normal');
     const sceneDepth = scenePass.getTextureNode('depth');
+
+    // Ground Truth Ambient Occlusion (GTAO) — contact-shadow darkening in
+    // creases/corners, derived from the scene depth (normals reconstructed from
+    // depth, so no extra MRT channel needed). Output is a single AO factor in
+    // .r (1 = open, 0 = fully occluded); worldEnvSystem composites + gates it.
+    const aoNode = ao(sceneDepth, null, camera);
+    const aoOutput = aoNode.getTextureNode();
 
     // Bloom from the HDR scene COLOR (not the emissive MRT). The emissive MRT
     // channel carried low-level noise on non-emissive surfaces; bloom amplified
@@ -57,17 +57,10 @@ export function setupPostProcessing(opts) {
     (bloomNode?._renderTargetsHorizontal || []).forEach(sanitize);
     (bloomNode?._renderTargetsVertical || []).forEach(sanitize);
 
-    const ssgiNode = ssgi(sceneColor, sceneDepth, sceneNormal, camera);
-    // Temporal filtering converges the SSGI noise across frames. Without it the
-    // raw GI is heavily grainy (it needs a manual DenoiseNode otherwise), which
-    // showed up as static grain across the sky + walls. The sliceCount/stepCount
-    // presets we use (1/12) are the recommended "Low" preset for temporal-on.
-    ssgiNode.useTemporalFiltering = true;
-    const ssgiOutput = ssgiNode.getTextureNode();
-
     const postProcessing = new RenderPipeline(renderer);
-    const postProcessNodes = { sceneColor, bloomNode, ssgiNode, ssgiOutput };
+    const postProcessNodes = { sceneColor, bloomNode, aoNode, aoOutput, ssgiNode: null, ssgiOutput: null };
     applySSGISettings();
+    applySSAOSettings();
     rebuildPostProcessingOutputNode();
 
     const postProcessVolumeManager = createPostProcessVolumeManager({

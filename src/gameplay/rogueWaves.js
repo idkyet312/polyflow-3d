@@ -36,6 +36,7 @@ const ROGUE_HELP_LINES = [
 // gold-tinted, and worth far more XP/score. Adds a build-defining "do I focus
 // it?" decision to a wave instead of every enemy being interchangeable.
 const ELITE_MOD = { hpMul: 2.6, speedMul: 1.15, scaleMul: 1.25, xpAdd: 3, scoreAdd: 60, tint: '#ffd23f' };
+let rogueStatusHookInstalled = false;
 function rollEliteChance(wave) {
     if (wave < 4) return 0;
     return Math.min(0.28, 0.05 + (wave - 4) * 0.025);
@@ -57,11 +58,13 @@ const ROGUE_CARDS_BY_WEAPON = {
         { t: 'Match Barrel',  d: '+35% damage, -10% fire rate', a: (b) => { b.damage *= 1.35; b.fireRate *= 0.9; } },
         { t: 'Steady Aim',    d: '+15% damage',            a: (b) => b.damage *= 1.15 },
         { t: 'Spray & Pray',  d: '+18% fire rate',         a: (b) => b.fireRate *= 1.18 },
+        { t: 'Minigun Moment', d: 'Every 5s, fire like a minigun for 2s', a: (b) => { b.smgMinigun = true; b.smgMinigunStartedAt = performance.now?.() || Date.now(); } },
     ],
     throwingStar: [
         { t: 'Honed Edge',    d: '+25% star damage',       a: (b) => b.damage *= 1.25 },
         { t: 'Quick Draw',    d: '+25% throw rate',        a: (b) => b.fireRate *= 1.25 },
         { t: 'Ricochet+',     d: 'Star lasts longer',      a: (b) => b.pellets += 1 },
+        { t: 'Triple Star',   d: 'Throw 3 stars at once',  a: (b) => b.starCount = Math.max(b.starCount || 1, 3) },
         { t: 'Bloodletter',   d: '+35% dmg, -10% throw rate', a: (b) => { b.damage *= 1.35; b.fireRate *= 0.9; } },
         { t: 'Twin Fang',     d: '+20% throw rate',        a: (b) => b.fireRate *= 1.2 },
         { t: 'Serrated',      d: '+18% star damage',       a: (b) => b.damage *= 1.18 },
@@ -80,6 +83,33 @@ export function createRogueWaves(deps) {
         equipDoomShotgun, equipStraightGun, equipThrowingStar,
     } = deps;
 
+    let _spawnFlareGeo = null;
+    function spawnRogueSpawnFlare(position, color = 0xff3030, scale = 1) {
+        const { scene } = core;
+        if (!scene || !position) return;
+        if (!_spawnFlareGeo) _spawnFlareGeo = new THREE.TorusGeometry(0.9, 0.035, 8, 32);
+        const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85, toneMapped: false });
+        const ring = new THREE.Mesh(_spawnFlareGeo, mat);
+        ring.position.set(position.x, position.y + 0.05, position.z);
+        ring.rotation.x = Math.PI / 2;
+        ring.scale.setScalar(scale);
+        ring.renderOrder = 9;
+        scene.add(ring);
+        const born = performance.now?.() || Date.now();
+        const tick = () => {
+            if (!ring.parent) return;
+            const t = Math.min(1, ((performance.now?.() || Date.now()) - born) / 650);
+            ring.scale.setScalar(scale * (1 + t * 1.6));
+            mat.opacity = 0.85 * (1 - t);
+            if (t < 1) requestAnimationFrame(tick);
+            else {
+                scene.remove(ring);
+                mat.dispose();
+            }
+        };
+        requestAnimationFrame(tick);
+    }
+
     // ---- enemy variants -------------------------------------------------
     function spawnRogueEnemy(variant, position, wave = 1, { elite = false } = {}) {
         const v = ROGUE_ENEMY_VARIANTS[variant] || ROGUE_ENEMY_VARIANTS.grunt;
@@ -90,6 +120,7 @@ export function createRogueWaves(deps) {
         const eliteSpeed = elite ? ELITE_MOD.speedMul : 1;
         const eliteScale = elite ? ELITE_MOD.scaleMul : 1;
         const hp = base * v.hpMul * waveScale * eliteHp;
+        spawnRogueSpawnFlare(position, elite ? 0xffd23f : new THREE.Color(v.tint).getHex(), v.scale * eliteScale);
         const actor = spawnDoomEnemyAt(position, {
             label: `Arena ${elite ? 'ELITE ' : ''}${variant} W${wave}`,
             groundY: position.y,
@@ -124,10 +155,12 @@ export function createRogueWaves(deps) {
     // ---- run state ------------------------------------------------------
     function defaultRogueBuffs() {
         return {
-            damage: 1, fireRate: 1, pellets: 0, magSize: 0, reloadSpeed: 1,
+            damage: 1, fireRate: 1, pellets: 0, magSize: 0, reloadSpeed: 1, starCount: 1,
+            smgMinigun: false, smgMinigunStartedAt: 0,
             moveSpeed: 1, maxHealth: 1, damageTaken: 1, lifesteal: 0, xpGain: 1,
+            orbRadius: 0, orbMagnet: 1, healthDrop: 0, waveHeal: 0, comboWindow: 0,
             // Status-effect upgrades (0 = inactive):
-            //   burn        - damage-per-second applied for BURN_DURATION on hit
+            //   burn        - total capped burn damage applied over BURN_DURATION
             //   slow        - 0..1 movement slow fraction applied on hit
             //   freezeChance- 0..1 chance per hit to fully freeze for FREEZE_DURATION
             burn: 0, slow: 0, freezeChance: 0,
@@ -135,7 +168,7 @@ export function createRogueWaves(deps) {
     }
 
     function ensureRogueState() {
-        if (!window.rogueBuffs) window.rogueBuffs = defaultRogueBuffs();
+        window.rogueBuffs = { ...defaultRogueBuffs(), ...(window.rogueBuffs || {}) };
         if (!window.rogue) {
             window.rogue = {
                 xp: 0, level: 1, xpToNext: 5, orbs: [], picking: false,
@@ -249,6 +282,7 @@ export function createRogueWaves(deps) {
     // window.onRogueEnemyHit engine hook installed in installRogueStatusHook().
     const BURN_DURATION_MS = 3000;   // total burn lifetime per refresh
     const BURN_TICK_MS = 500;        // DoT cadence
+    const BURN_MAX_DAMAGE = 0.55;    // cap total burn damage per ignite
     const SLOW_DURATION_MS = 1800;   // slow lingers then decays
     const FREEZE_DURATION_MS = 1100; // hard stop
     const STATUS_FLOAT_COOLDOWN_MS = 600; // throttle floating "Frozen!" text
@@ -256,7 +290,7 @@ export function createRogueWaves(deps) {
     function ensureRogueStatus(actor) {
         if (!actor.userData.rogueStatus) {
             actor.userData.rogueStatus = {
-                burnUntil: 0, burnDps: 0, burnTickAt: 0,
+                burnUntil: 0, burnDps: 0, burnTickAt: 0, burnRemaining: 0,
                 slowUntil: 0, slowMul: 1,
                 freezeUntil: 0, lastFloatAt: 0,
             };
@@ -273,7 +307,9 @@ export function createRogueWaves(deps) {
         const now = performance.now?.() || Date.now();
 
         if ((buffs.burn || 0) > 0) {
-            st.burnDps = buffs.burn;
+            const burnTotal = Math.min(BURN_MAX_DAMAGE, buffs.burn);
+            st.burnDps = burnTotal / (BURN_DURATION_MS / 1000);
+            st.burnRemaining = Math.max(st.burnRemaining || 0, burnTotal);
             st.burnUntil = now + BURN_DURATION_MS;
             if (!st.burnTickAt) st.burnTickAt = now + BURN_TICK_MS;
         }
@@ -292,8 +328,8 @@ export function createRogueWaves(deps) {
     }
 
     function installRogueStatusHook() {
-        if (typeof window === 'undefined' || window.__rogueStatusHookInstalled) return;
-        window.__rogueStatusHookInstalled = true;
+        if (typeof window === 'undefined' || rogueStatusHookInstalled) return;
+        rogueStatusHookInstalled = true;
         window.onRogueEnemyHit = (actor, _dmg, fatal) => {
             if (fatal) return;
             applyRogueStatusOnHit(actor);
@@ -312,14 +348,16 @@ export function createRogueWaves(deps) {
             if (!st) { ai._slowFactor = 1; continue; }
 
             // Burn DoT.
-            if (st.burnUntil > now && st.burnDps > 0) {
+            if (st.burnUntil > now && st.burnDps > 0 && (st.burnRemaining || 0) > 0) {
                 if (now >= st.burnTickAt) {
                     st.burnTickAt = now + BURN_TICK_MS;
-                    if (damageFn) damageFn(a, st.burnDps * (BURN_TICK_MS / 1000));
+                    const damage = Math.min(st.burnRemaining, st.burnDps * (BURN_TICK_MS / 1000));
+                    st.burnRemaining -= damage;
+                    if (damageFn && damage > 0) damageFn(a, damage);
                     try { flashActorHit(a, 0xff8a3d); } catch (e) {}
                 }
             } else {
-                st.burnDps = 0; st.burnTickAt = 0;
+                st.burnDps = 0; st.burnTickAt = 0; st.burnRemaining = 0;
             }
 
             // Freeze takes priority, then slow, then full speed.
@@ -363,6 +401,9 @@ export function createRogueWaves(deps) {
         if (!r || !r.orbs.length || !playerPos) return;
         const dt = Math.min(0.05, Math.max(0.001, delta || 0.016));
         const now = performance.now?.() || Date.now();
+        const buffs = window.rogueBuffs || {};
+        const pickupRadius = 1.0 + (buffs.orbRadius || 0);
+        const magnet = Math.max(0.1, buffs.orbMagnet || 1);
         for (let i = r.orbs.length - 1; i >= 0; i--) {
             const o = r.orbs[i];
             const m = o.mesh;
@@ -371,7 +412,7 @@ export function createRogueWaves(deps) {
             const dy = (playerPos.y + 1.0) - m.position.y;
             const dz = playerPos.z - m.position.z;
             const dist = Math.hypot(dx, dy, dz);
-            if (dist < 1.0 || age > 12) {
+            if (dist < pickupRadius || age > 12) {
                 scene?.remove(m);
                 r.orbs.splice(i, 1);
                 if (age <= 12) {
@@ -389,7 +430,7 @@ export function createRogueWaves(deps) {
                 m.position.y += o.vy * dt;
                 m.position.z += o.vz * dt;
             } else {
-                const pull = 6 + age * 4;
+                const pull = (6 + age * 4) * magnet;
                 m.position.x += (dx / dist) * pull * dt;
                 m.position.y += (dy / dist) * pull * dt;
                 m.position.z += (dz / dist) * pull * dt;
@@ -419,7 +460,7 @@ export function createRogueWaves(deps) {
     // require pressure — rewards aggressive play without being free.
     const COMBO_BASE_WINDOW_MS = 3200;
     function comboWindowMs(combo) {
-        return COMBO_BASE_WINDOW_MS + Math.min(2000, combo * 60);
+        return COMBO_BASE_WINDOW_MS + (window.rogueBuffs?.comboWindow || 0) + Math.min(2000, combo * 60);
     }
     function onRogueEnemyKilled(x, y, z, actor) {
         const r = ensureRogueState();
@@ -449,7 +490,7 @@ export function createRogueWaves(deps) {
         }
 
         // Health drop scales gently with combo; elites guarantee a drop.
-        const dropChance = (isElite ? 1 : 0) + 0.10 + Math.min(0.20, r.combo * 0.012);
+        const dropChance = (isElite ? 1 : 0) + 0.10 + (window.rogueBuffs?.healthDrop || 0) + Math.min(0.20, r.combo * 0.012);
         if (Math.random() < dropChance) spawnRogueHealthOrb(x, y + 0.9, z);
 
         // Bomber detonation: damage nearby living enemies + spray bonus XP orbs.
@@ -572,6 +613,20 @@ export function createRogueWaves(deps) {
         }
     }
 
+    function onRogueWaveCleared(wave = 0) {
+        const r = ensureRogueState();
+        const n = Math.max(0, wave | 0);
+        if (!n || r._lastClearedWaveReward === n) return;
+        r._lastClearedWaveReward = n;
+        const buffs = window.rogueBuffs || {};
+        const heal = 0.04 + (buffs.waveHeal || 0);
+        if (heal > 0) setPlayerHealth((gameplay.health ?? 1) + heal);
+        const bonusXp = Math.max(1, Math.floor(n / 2));
+        grantRogueXp(bonusXp);
+        rogueBanner(`WAVE ${n} CLEARED<br><span style="font-size:16px;color:#cdeaff">+${bonusXp} XP</span>`, '#7fe0ff');
+        if (n % 3 === 0) spawnRogueHealthOrb(0, 1.0, 0);
+    }
+
     // ---- game-mode API surface (used by ROGUE_GAMEMODE_SCRIPT) ----------
     const RogueAPI = {
         state: () => ensureRogueState(),
@@ -627,6 +682,7 @@ export function createRogueWaves(deps) {
         },
         waveCleared: (actors) => !Array.isArray(actors) || actors.length === 0
             || isDoomMiniWaveCleared(actors),
+        onWaveCleared: onRogueWaveCleared,
         setHud: (text) => setRogueWaveHud(text),
         now: () => performance.now?.() || Date.now(),
         isDead: () => !!ensureRogueState().dead,
@@ -708,11 +764,15 @@ export function createRogueWaves(deps) {
         { t: 'Plating',       d: '-18% damage taken',        a: (b) => b.damageTaken *= 0.82 },
         { t: 'Vampirism',     d: '+4% HP per kill',          a: (b) => b.lifesteal += 0.04 },
         { t: 'Battle Trance', d: '+25% XP gain',             a: (b) => b.xpGain *= 1.25 },
+        { t: 'Magnet Core',   d: 'XP and health orbs pull harder from farther away', a: (b) => { b.orbRadius += 0.7; b.orbMagnet *= 1.35; } },
+        { t: 'Scavenger',     d: '+12% health drop chance',  a: (b) => b.healthDrop += 0.12 },
+        { t: 'Second Wind',   d: 'Heal after every cleared wave', a: (b) => b.waveHeal += 0.06 },
+        { t: 'Momentum',      d: 'Combo timer lasts longer', a: (b) => b.comboWindow += 1000 },
         { t: 'Field Medic',   d: 'Heal to full now',         a: () => setPlayerHealth(1) },
         { t: 'Glass Cannon',  d: '+45% damage, +10% dmg taken', a: (b) => { b.damage *= 1.45; b.damageTaken *= 1.10; } },
         // Status-effect line. Stacks add up so investing in one element scales.
-        { t: 'Incendiary',    d: 'Hits set enemies on fire (burn DoT)', a: (b) => b.burn += 14 },
-        { t: 'Wildfire',      d: '+18 burn damage / sec',    a: (b) => b.burn += 18 },
+        { t: 'Incendiary',    d: 'Hits burn for 0.25 total damage', a: (b) => b.burn = Math.max(b.burn || 0, 0.25) },
+        { t: 'Wildfire',      d: '+0.12 total burn damage, capped', a: (b) => b.burn = Math.min(BURN_MAX_DAMAGE, (b.burn || 0) + 0.12) },
         { t: 'Cryo Rounds',   d: 'Hits slow enemies by 35%', a: (b) => b.slow = Math.min(0.8, (b.slow || 0) + 0.35) },
         { t: 'Permafrost',    d: '+18% chance to freeze on hit', a: (b) => b.freezeChance = Math.min(0.6, (b.freezeChance || 0) + 0.18) },
     ];
@@ -952,6 +1012,7 @@ export function createRogueWaves(deps) {
             ensureRogueState, resetRogueState,
             spawnRogueXpOrb, updateRogueXpOrbs, grantRogueXp,
             onRogueEnemyKilled, spawnRogueHealthOrb, spawnRogueEnemy,
+            onRogueWaveCleared,
             openRogueCardPicker, closeRogueCardPicker, openRogueWeaponPicker,
             openRogueDeathScreen, closeRogueDeathScreen,
             updateRogueXpBar, setRogueWaveHud,
@@ -961,6 +1022,7 @@ export function createRogueWaves(deps) {
         window.resetRogueState = resetRogueState;
         window.spawnRogueXpOrb = spawnRogueXpOrb;
         window.onRogueEnemyKilled = onRogueEnemyKilled;
+        window.onRogueWaveCleared = onRogueWaveCleared;
         window.spawnRogueEnemy = spawnRogueEnemy;
         window.updateRogueXpBar = updateRogueXpBar;
         window.openRogueCardPicker = openRogueCardPicker;
@@ -975,6 +1037,7 @@ export function createRogueWaves(deps) {
         ensureRogueState, resetRogueState,
         spawnRogueXpOrb, updateRogueXpOrbs, grantRogueXp,
         onRogueEnemyKilled, spawnRogueHealthOrb, spawnRogueEnemy,
+        onRogueWaveCleared,
         openRogueCardPicker, closeRogueCardPicker, openRogueWeaponPicker,
         openRogueDeathScreen, closeRogueDeathScreen,
         updateRogueXpBar, setRogueWaveHud,

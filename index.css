@@ -2399,16 +2399,16 @@ body.mobile-ui-preview .mobile-move-pad {
   min-height: clamp(6.2rem, 15vh, 8rem);
 }
 
-/* Look = drag anywhere on the RIGHT HALF of the screen. The look pad escapes
-   the dock and covers the right half, transparent, behind the action buttons
-   (which keep their own taps via higher z-index). Delta-based, so it tracks
-   the finger from wherever it starts. */
+/* Look = drag anywhere on the RIGHTMOST 33% of the screen. The look pad escapes
+   the dock and covers that strip, transparent, behind the action buttons (which
+   keep their own taps via higher z-index). Delta-based, so it tracks the finger
+   from wherever it starts. */
 body.mobile-ui-preview .mobile-look-pad {
   position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
-  left: 50%;
+  left: 67%;
   width: auto;
   min-height: 0;
   height: auto;
@@ -2814,13 +2814,13 @@ body.mobile-ui-preview .viewer-checkbox-row {
     min-height: clamp(6.2rem, 15vh, 8rem);
   }
 
-  /* Look = drag anywhere on the RIGHT HALF of the screen (see preview block). */
+  /* Look = drag anywhere on the RIGHTMOST 33% of the screen (see preview block). */
   .mobile-look-pad {
     position: fixed;
     top: 0;
     right: 0;
     bottom: 0;
-    left: 50%;
+    left: 67%;
     width: auto;
     min-height: 0;
     height: auto;

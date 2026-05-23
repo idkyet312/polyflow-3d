@@ -43,7 +43,7 @@ export function createInputHandlers(deps) {
     // default left/right-click mouse ACTIONS (e.g. throw-ball) so they don't
     // fire inside a game mode. The gun's own fire flag is NOT gated by this.
     const GAME_MODE_SAMPLE_TYPES = new Set([
-        'drugTycoon', 'doomArena', 'doomTest',
+        'drugTycoon', 'doomArena', 'doomTest', 'shootingSim',
     ]);
     function inGameMode() {
         // sampleType lives on the loaded level mesh (core.currentMesh).

@@ -1,9 +1,9 @@
 import * as THREE from 'three';
-import { WebGPURenderer, RenderPipeline } from 'three/webgpu';
-import { pass, mrt, output, emissive, normalView, uniform, vec3, vec4 } from 'three/tsl';
-import { bloom } from 'three/addons/tsl/display/BloomNode.js';
-import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
+import { WebGPURenderer, RectAreaLightNode } from 'three/webgpu';
+import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTexturesLib.js';
+import { uniform } from 'three/tsl';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { CSMShadowNode } from 'three/addons/csm/CSMShadowNode.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import gsap from 'gsap';
@@ -180,6 +180,7 @@ registerDebug('gameplaySystems', gameplaySystems);
 registerDebug('services', services);
 import { createRogueWaves } from '../gameplay/rogueWaves.js';
 import { createDrugTycoon } from '../gameplay/drugTycoon.js';
+import { createShootingSim } from '../gameplay/shootingSim.js';
 import {
     AHUD,
     installUePrototypeMethods,
@@ -553,7 +554,7 @@ function createExampleWidgets() {
         console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
     }
 }
-const LIGHT_ACTOR_KINDS = new Set(['pointLight', 'spotLight']);
+const LIGHT_ACTOR_KINDS = new Set(['pointLight', 'spotLight', 'rectLight']);
 
 function isLightActorKind(kind = '') {
     return LIGHT_ACTOR_KINDS.has(kind);
@@ -646,7 +647,7 @@ let perfModeUiRefs = null;
 // (the previous default) don't override the new boot-on-DDGI default. See doc
 // comment on PERF_MODE_DEFAULT_ENABLED above for the broader fix context.
 // Bumped v4 -> v5 for RT DDGI live-bake controls.
-const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v6';
+const WORLD_ENV_STORAGE_KEY = 'polyflow.worldEnvironment.v7';
 // World environment state + apply/save/load extracted to
 // ../world/worldEnvSystem.js. The module owns the mutable state object;
 // the local `worldEnvState` alias below is the SAME ref the module holds
@@ -2124,6 +2125,7 @@ let updateDoomArenaLevelState = () => {};
 let updateRogueGameMode = () => {};
 let updateRogueXpOrbs = () => {};
 let updateDrugTycoonState = () => {};
+let updateShootingSimState = () => {};
 let resetRogueState = () => {};
 let updateRogueXpBar = () => {};
 let openRogueWeaponPicker = () => {};
@@ -3208,10 +3210,9 @@ function applyPomTuningToScene(tuning, root = scene) {
 // Walks the scene and stamps the World Options shadow tuning onto every
 // shadow-casting light. Point + spot + directional all share the same set of
 // shadow params so a single panel covers all three. bias/normalBias/radius
-// apply immediately; mapSize changes are deferred to the next frame because
-// three.js's PointShadowNode dereferences shadow.map mid-frame and a
-// synchronous reallocation produces a null-deref crash.
-const _pendingShadowMapResizes = new Set();
+// apply immediately. WebGPU shadow render targets cannot be resized safely
+// after allocation because RenderTarget.setSize() disposes textures that may
+// still be referenced by queued GPU work.
 function applyShadowTuningToScene(tuning, root = scene) {
     if (!tuning || !root?.traverse) return;
     const bias = Number.isFinite(tuning.bias) ? tuning.bias : 0.0005;
@@ -3225,30 +3226,17 @@ function applyShadowTuningToScene(tuning, root = scene) {
         obj.shadow.bias = bias;
         if ('normalBias' in obj.shadow) obj.shadow.normalBias = normalBias;
         obj.shadow.radius = radius;
-        if (obj.shadow.mapSize.x !== mapSize || obj.shadow.mapSize.y !== mapSize) {
-            // Defer the map.dispose() + map = null to a microtask between
-            // frames so we don't yank the texture out from under a pending
-            // shadow-pass dereference.
-            _pendingShadowMapResizes.add(obj);
+        if (!obj.shadow.map && (obj.shadow.mapSize.x !== mapSize || obj.shadow.mapSize.y !== mapSize)) {
             obj.shadow.mapSize.set(mapSize, mapSize);
         }
         obj.shadow.needsUpdate = true;
     });
     if (renderer?.shadowMap) renderer.shadowMap.needsUpdate = true;
 
-    if (_pendingShadowMapResizes.size > 0) {
-        const toResize = Array.from(_pendingShadowMapResizes);
-        _pendingShadowMapResizes.clear();
-        requestAnimationFrame(() => {
-            for (const light of toResize) {
-                if (!light?.shadow) continue;
-                light.shadow.map?.dispose?.();
-                light.shadow.map = null;
-                light.shadow.needsUpdate = true;
-            }
-            if (renderer?.shadowMap) renderer.shadowMap.needsUpdate = true;
-        });
-    }
+    // Cascaded Shadow Maps on the sun light. Only when shadows are enabled;
+    // tuning.csm (default on) + tuning.cascades drive it.
+    const wantCSM = tuning.enabled !== false && tuning.csm !== false;
+    setMainLightCSM(wantCSM, Math.max(1, Math.min(4, (tuning.cascades | 0) || 3)));
 }
 
 function spawnLightActor(kind, { userData = null, position = null, scale = 8, includeScripts = true } = {}) {
@@ -3432,6 +3420,30 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         group.add(target);
         light.target = target;
         group.add(light);
+    } else if (kind === 'rectLight') {
+        // Rectangular area light — soft panel glow. Width/height taken from
+        // saved data (fallback square based on radius). Emits from +Z by
+        // default (RectAreaLight faces -Z, so the visible panel sits on +Z).
+        const rw = Number.isFinite(savedLight.width) && savedLight.width > 0 ? savedLight.width : Math.max(1.5, radius * 0.5);
+        const rh = Number.isFinite(savedLight.height) && savedLight.height > 0 ? savedLight.height : Math.max(0.6, radius * 0.2);
+
+        // Glowing panel so the light source is visible (and blooms).
+        const panel = markHelperObject(new THREE.Mesh(
+            new THREE.PlaneGeometry(rw, rh),
+            new THREE.MeshBasicMaterial({ color: lightColor.clone(), toneMapped: false, side: THREE.DoubleSide }),
+        ));
+        panel.name = 'rect-light-panel';
+        group.add(panel);
+
+        light = new THREE.RectAreaLight(lightColor, intensity, rw, rh);
+        light.name = 'rect-light-source';
+        // RectAreaLight emits along -Z; rotate so it faces downward by default
+        // (ceiling panel). Editors can rotate the actor to re-aim it.
+        light.lookAt(0, -1, 0);
+        group.add(light);
+        // Stash size so it round-trips through userData below.
+        savedLight.width = rw;
+        savedLight.height = rh;
     }
 
     if (!light) {
@@ -3453,6 +3465,8 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
             castShadow,
             angle,
             penumbra,
+            width: savedLight.width,
+            height: savedLight.height,
         },
     };
 
@@ -4254,6 +4268,7 @@ const saveWorldEnvToStorage = _worldEnvSystem.saveWorldEnvToStorage;
 const shouldUsePostProcessingPipeline = _worldEnvSystem.shouldUsePostProcessingPipeline;
 const rebuildPostProcessingOutputNode = _worldEnvSystem.rebuildPostProcessingOutputNode;
 const applySSGISettings = _worldEnvSystem.applySSGISettings;
+const applySSAOSettings = _worldEnvSystem.applySSAOSettings;
 const applyWorldEnvState = _worldEnvSystem.applyWorldEnvState;
 const updateWorldEnvUi = _worldEnvSystem.updateWorldEnvUi;
 const setWorldEnvMaster = _worldEnvSystem.setWorldEnvMaster;
@@ -5041,6 +5056,9 @@ async function init() {
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
+    // RectAreaLight needs its BRDF approximation (LTC) textures loaded once
+    // before any rect-area light renders. Required by the WebGPU node path.
+    try { RectAreaLightNode.setLTC(RectAreaLightTexturesLib.init()); } catch (e) { console.warn('[light] RectAreaLight LTC init failed', e); }
     renderer.localClippingEnabled = true; // Essential for the reflection
     renderer.domElement.tabIndex = 0;
     container.appendChild(renderer.domElement);
@@ -5055,7 +5073,7 @@ async function init() {
     } = setupPostProcessing({
         scene, camera, renderer, sceneSystem, mainDirectionalLight,
         globalPostProcessUniforms,
-        applySSGISettings, rebuildPostProcessingOutputNode,
+        applySSGISettings, applySSAOSettings, rebuildPostProcessingOutputNode,
         createPostProcessVolumeManager, syncPostProcessVolumeUi,
         getDDGIManager, createLightmapBaker,
         registerDebug,
@@ -5859,6 +5877,44 @@ function updateMainDirectionalLightShadowFocus() {
     mainDirectionalLight.target.updateMatrixWorld();
 }
 
+// Toggle Cascaded Shadow Maps on the main sun/directional light. CSM splits the
+// view frustum into `cascades` slices, each rendered into its own tight shadow
+// camera, then blends them — sharp contact shadows up close, cheap coverage far
+// out (vs one stretched ortho map). The CSMShadowNode self-updates its cascade
+// frustums each frame from the active camera; we just attach/detach it.
+let _mainCSM = null;
+function setMainLightCSM(enabled, cascades = 3) {
+    const light = mainDirectionalLight;
+    if (!light?.shadow) return;
+    const want = !!enabled;
+    const haveSame = _mainCSM && want && _mainCSM.cascades === cascades;
+    if (haveSame) return;
+    // Tear down any existing CSM node first.
+    if (_mainCSM) {
+        try { _mainCSM.dispose?.(); } catch (e) {}
+        _mainCSM = null;
+    }
+    if (!want) {
+        light.shadow.shadowNode = null;          // back to the default single-cascade PCF shadow
+        return;
+    }
+    try {
+        _mainCSM = new CSMShadowNode(light, {
+            cascades: Math.max(1, Math.min(4, cascades | 0)),
+            maxFar: MAIN_SHADOW_FAR,
+            mode: 'practical',
+            lightMargin: 200,
+        });
+        // ShadowBaseNode reads .camera from the node builder on first setup; the
+        // attach is all we need for the WebGPU shadow pass to pick it up.
+        light.shadow.shadowNode = _mainCSM;
+    } catch (e) {
+        console.warn('[CSM] failed to enable cascaded shadows', e);
+        _mainCSM = null;
+        light.shadow.shadowNode = null;
+    }
+}
+
 // Avoid clobbering DOM textContent every call: writing the same string still
 // triggers layout invalidation in some browsers and shows up as churn under
 // heavy frame loads.
@@ -5867,7 +5923,7 @@ function setTextIfChanged(element, value) {
     if (element.textContent !== value) element.textContent = value;
 }
 
-const GAME_MODE_TYPES = ['drugTycoon', 'doomArena', 'doomTest'];
+const GAME_MODE_TYPES = ['drugTycoon', 'doomArena', 'doomTest', 'shootingSim'];
 
 function updateGameplayUI() {
     const hasAsset = !!currentMesh;
@@ -5998,6 +6054,7 @@ const _frameLoop = createFrameLoop({
     updateDoomArenaLevelState: (...a) => updateDoomArenaLevelState(...a),
     updateRogueXpOrbs: (...a) => updateRogueXpOrbs(...a),
     updateDrugTycoonState: (...a) => updateDrugTycoonState(...a),
+    updateShootingSimState: (...a) => updateShootingSimState(...a),
     updateGameplayUI: (...a) => updateGameplayUI(...a),
     resetDoomMiniLevelState,
     resetDoomArenaLevelState,
@@ -6492,6 +6549,13 @@ function wireExtractedModules() {
             setPlayerHealth,
         });
         updateDrugTycoonState = dt.updateDrugTycoonState;
+    }
+
+    // Shooting Simulator (self-contained range mode, own level). Same factory
+    // pattern; only the per-frame driver is wired into the frame loop.
+    {
+        const ss = createShootingSim({ gameplay });
+        updateShootingSimState = ss.updateShootingSimState;
     }
 
     // Built-in level builders (extracted to ../world/levels.js). Inject engine

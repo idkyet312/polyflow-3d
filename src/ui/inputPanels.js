@@ -3,7 +3,7 @@ import { core } from '../runtime/appCore.js';
 
 // Mirrors inGameMode() in inputHandlers.js. Used to suppress the default
 // touch "throw ball" (sphere/cube) action while inside a game mode.
-const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest']);
+const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest', 'shootingSim']);
 function inGameMode() {
     const sampleType = core.currentMesh?.userData?.sampleType;
     if (sampleType && GAME_MODE_SAMPLE_TYPES.has(sampleType)) return true;

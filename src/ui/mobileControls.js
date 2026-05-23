@@ -9,10 +9,13 @@ import { core } from '../runtime/appCore.js';
 function inDrugTycoon() {
     return core.currentMesh?.userData?.sampleType === 'drugTycoon';
 }
+function inShootingSim() {
+    return core.currentMesh?.userData?.sampleType === 'shootingSim';
+}
 
 // Mirrors inGameMode() in inputHandlers.js. Used to suppress the default
 // touch "throw ball" (sphere/cube) action while inside a game mode.
-const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest']);
+const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest', 'shootingSim']);
 function inGameMode() {
     const sampleType = core.currentMesh?.userData?.sampleType;
     if (sampleType && GAME_MODE_SAMPLE_TYPES.has(sampleType)) return true;
@@ -49,6 +52,17 @@ function getMobileButtonSpec() {
             rightAction: true,
             rightLabel: gameplay.weapon?.type ? 'Fire' : 'Action',
             action2: false,
+        };
+    }
+
+    // Shooting Simulator: Fire button + Action 2 opens the mode menu (R/M on PC).
+    if (sampleType === 'shootingSim') {
+        return {
+            jump: false,
+            rightAction: true,
+            rightLabel: 'Fire',
+            action2: true,
+            action2Label: 'Menu',
         };
     }
 
@@ -155,7 +169,7 @@ export function setupMobileControls(deps) {
         }
         // Engine weapon OR the Drug Tycoon pistol: hold to fire, suppress the
         // default right mouse action so no ball is thrown while armed.
-        if (gameplay.active && (gameplay.weapon?.type || (inDrugTycoon() && window.drugTycoon?.hasGun))) {
+        if (gameplay.active && (gameplay.weapon?.type || (inDrugTycoon() && window.drugTycoon?.hasGun) || inShootingSim())) {
             event.preventDefault();
             gameplay.input.fire = true;
             gameplay.input.firePressed = true;
@@ -184,6 +198,12 @@ export function setupMobileControls(deps) {
         if (inDrugTycoon()) {
             event.preventDefault();
             window.drugTycoonApi?.queueInteract?.();
+            return;
+        }
+        // Shooting Sim: Action 2 opens the mode menu (Practice / Time Attack).
+        if (inShootingSim()) {
+            event.preventDefault();
+            window.shootingSimApi?.openMenu?.();
             return;
         }
         if (isDrivingVehicle()) {

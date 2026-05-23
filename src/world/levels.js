@@ -2224,9 +2224,11 @@ export function createLevels(deps) {
         const BENCH_LOCAL = [ROOM_W * 0.5 - 2.4, ROOM_D * 0.5 - 12];
         const buildGrowRoom = (ox, oy, oz) => {
             const W = ROOM_W, D = ROOM_D, H = 4.6, WT = 0.4;
-            const floorMat = flatMat('#5a4a3a', { rough: 0.95 });
-            const rWallMat = flatMat('#6b6f5e', { rough: 0.92 });
-            const ceilMat  = flatMat('#3a3d34', { rough: 0.95 });
+            // Dim grow-tent surfaces — dark enough to stay moody but light enough
+            // for the purple fill to read across the whole room.
+            const floorMat = flatMat('#3a3030', { rough: 0.95 });
+            const rWallMat = flatMat('#363a30', { rough: 0.93 });
+            const ceilMat  = flatMat('#262820', { rough: 0.95 });
             // Floor (walkable) + ceiling.
             addBox('grow-floor', [W, WT, D], [ox, oy - WT * 0.5, oz], floorMat, { actorSurface: 'floor' });
             addBox('grow-ceil',  [W, WT, D], [ox, oy + H, oz], ceilMat);
@@ -2235,53 +2237,64 @@ export function createLevels(deps) {
             addBox('grow-wall-s', [W, H, WT], [ox, oy + H * 0.5, oz + D * 0.5], rWallMat, { solid: true });
             addBox('grow-wall-e', [WT, H, D], [ox + W * 0.5, oy + H * 0.5, oz], rWallMat, { solid: true });
             addBox('grow-wall-w', [WT, H, D], [ox - W * 0.5, oy + H * 0.5, oz], rWallMat, { solid: true });
-            // Grow lamps over the plant rows (north half) + a couple fill lights.
-            // Bright emissive so they glow strongly through the scene-color bloom.
-            const lampMat = flatMat('#fff6e0', { rough: 0.4, emissive: '#ffe2a0', emissiveIntensity: 4.5 });
+            // Purple grow lamps: a glowing emissive bar + a rectangular area
+            // light under each. Emissive kept modest so the panels read PURPLE
+            // (not blown-out white) while still blooming.
+            const lampMat = flatMat('#a34dff', { rough: 0.4, emissive: '#8f35ff', emissiveIntensity: 1.4 });
             [-7, 0, 7].forEach((lx, k) => {
-                addBox(`grow-lamp-${k}`, [3.4, 0.18, 1.6], [ox + lx, oy + H - 0.4, oz - 4], lampMat);
+                addBox(`grow-lamp-${k}`, [3.2, 0.08, 1.35], [ox + lx, oy + H - WT - 0.12, oz - 4], lampMat);
+                const rect = new THREE.RectAreaLight(0xa34dff, 4.0, 3.6, 2.0);
+                rect.position.set(ox + lx, oy + H - WT - 0.22, oz - 4);
+                rect.lookAt(ox + lx, oy, oz - 4);   // aim straight down at the plants
+                rect.name = `grow-rect-light-${k}`;
+                root.add(rect);
             });
-            [[-6, -3], [6, -3], [0, 5]].forEach(([lx, lz], k) => {
-                const rl = new THREE.PointLight(0xffe6b0, 9, 24, 1.4);
-                rl.position.set(ox + lx, oy + H - 0.8, oz + lz);
-                rl.name = `grow-light-${k}`;
-                root.add(rl);
-            });
+            // Purple ambient fill across the WHOLE room — ambient lights every
+            // surface equally, so this is what spreads the purple everywhere
+            // (walls, pots, bench, door) instead of just under the lamps.
+            const growAmbient = new THREE.AmbientLight(0x8a66c8, 1.4);
+            growAmbient.name = 'grow-ambient';
+            root.add(growAmbient);
+            // A gentle purple hemisphere too, so up-facing surfaces (pot rims,
+            // bench top) catch a touch more light than down-facing ones.
+            const growHemi = new THREE.HemisphereLight(0xa884ff, 0x140a20, 0.6);
+            growHemi.position.set(ox, oy + H, oz);
+            growHemi.name = 'grow-hemi';
+            root.add(growHemi);
+            // Props use darker, low/no-emissive materials so they sit inside the
+            // moody purple lighting instead of glowing/popping out of it. Only
+            // the small interaction signs keep a faint glow as way-finding hints.
             // Packaging bench (steel) in the NE corner.
-            const benchMat = flatMat('#46505a', { rough: 0.5, metal: 0.4 });
+            const benchMat = flatMat('#2a2f36', { rough: 0.6, metal: 0.3 });
             addBox('grow-bench', [4, 1.0, 1.6], [ox + BENCH_LOCAL[0] - 1.0, oy + 0.5, oz + BENCH_LOCAL[1]], benchMat, { solid: true });
-            // A small "PACK" sign over the bench so it reads as the bagging spot.
-            const signMat = flatMat('#123022', { rough: 0.4, emissive: '#39d98a', emissiveIntensity: 0.7 });
-            addBox('grow-bench-sign', [2.4, 0.6, 0.12], [ox + BENCH_LOCAL[0] - 1.0, oy + 2.4, oz + BENCH_LOCAL[1] - 0.7], signMat);
 
-            // Exit door on the south (+Z) wall — framed + glowing so it reads as
-            // the way out. Non-solid so the player can walk into it to leave.
-            const doorFrameMat = flatMat('#caa15a', { rough: 0.5, emissive: '#caa15a', emissiveIntensity: 0.25 });
-            const doorSlabMat  = flatMat('#5b3a1c', { rough: 0.55, emissive: '#7a5224', emissiveIntensity: 0.4 });
+            // Exit door on the south (+Z) wall. Non-solid so the player can walk
+            // into it to leave. Dark wood, no glow.
+            const doorFrameMat = flatMat('#5a4424', { rough: 0.6 });
+            const doorSlabMat  = flatMat('#3a2614', { rough: 0.7 });
             const exitZ = oz + D * 0.5 - WT * 0.5 - 0.02;
             addBox('grow-exit-frame', [2.0, 3.0, 0.12], [ox, oy + 1.5, exitZ], doorFrameMat);
             addBox('grow-exit-door',  [1.6, 2.6, 0.18], [ox, oy + 1.3, exitZ - 0.05], doorSlabMat);
-            const exitKnob = flatMat('#ffe08a', { rough: 0.3, metal: 0.6, emissive: '#ffd24a', emissiveIntensity: 0.7 });
+            const exitKnob = flatMat('#9a8050', { rough: 0.4, metal: 0.5 });
             addBox('grow-exit-knob', [0.16, 0.16, 0.16], [ox + 0.55, oy + 1.25, exitZ - 0.14], exitKnob);
-            // "EXIT" glow strip above the door.
-            const exitSign = flatMat('#102a16', { rough: 0.4, emissive: '#39d98a', emissiveIntensity: 0.9 });
-            addBox('grow-exit-sign', [1.6, 0.35, 0.1], [ox, oy + 3.15, exitZ], exitSign);
+            // Small white glow strip under the door — the only way-finding marker.
+            const exitStrip = flatMat('#ffffff', { rough: 0.4, emissive: '#ffffff', emissiveIntensity: 1.2 });
+            addBox('grow-exit-strip', [1.4, 0.06, 0.1], [ox, oy + 0.05, exitZ], exitStrip);
 
-            // Bed in the SW corner — sleep here to skip to morning.
-            const bedFrameMat = flatMat('#3a2a1c', { rough: 0.9 });
-            const mattressMat = flatMat('#b8c4d0', { rough: 0.85 });
-            const pillowMat   = flatMat('#e8eef4', { rough: 0.8 });
+            // Bed in the SW corner — sleep here to skip to morning. Muted fabric.
+            const bedFrameMat = flatMat('#2a1f15', { rough: 0.9 });
+            const mattressMat = flatMat('#4a5058', { rough: 0.9 });
+            const pillowMat   = flatMat('#5a6068', { rough: 0.85 });
             const bx = ox - W * 0.5 + 1.6, bz = oz + D * 0.5 - 2.2;
             addBox('grow-bed-frame', [2.2, 0.5, 3.4], [bx, oy + 0.25, bz], bedFrameMat, { solid: true });
             addBox('grow-bed-mattress', [2.0, 0.3, 3.0], [bx, oy + 0.6, bz], mattressMat);
             addBox('grow-bed-pillow', [1.7, 0.22, 0.7], [bx, oy + 0.82, bz - 1.05], pillowMat);
 
-            // Upgrade desk (gold) in the SE corner — open the upgrade shop here.
-            const upgMat = flatMat('#3a2f0a', { rough: 0.35, emissive: '#d4a017', emissiveIntensity: 0.55 });
+            // Upgrade desk in the SE corner — open the upgrade shop here. Dark
+            // wood, faint sign glow only.
+            const upgMat = flatMat('#2a2410', { rough: 0.5 });
             const ux = ox + W * 0.5 - 2.4, uz = oz + D * 0.5 - 2.4;
             addBox('grow-upgrade', [2.4, 1.0, 1.6], [ux, oy + 0.5, uz], upgMat, { solid: true });
-            const upgSignMat = flatMat('#2a2410', { rough: 0.4, emissive: '#ffd24a', emissiveIntensity: 0.8 });
-            addBox('grow-upgrade-sign', [2.0, 0.5, 0.12], [ux, oy + 2.3, uz - 0.7], upgSignMat);
         };
         buildGrowRoom(...ROOM_ORIGIN);
 
@@ -2346,6 +2359,116 @@ export function createLevels(deps) {
         root.add(sun);
 
         applySilPomLighting(root, sun.position.clone());
+        return root;
+    }
+
+    // Shooting Simulator level: an indoor firing-range bay. A long hall with a
+    // firing line near the player and a row of target stands downrange. The game
+    // loop (scoring, target reactions, time-attack) lives in the self-contained
+    // shootingSim module; this just builds geometry + the lane layout contract.
+    function createShootingSimLevel() {
+        const root = new THREE.Group();
+        root.name = 'PolyFlow_Shooting_Sim';
+        root.userData.sampleType = 'shootingSim';
+        root.userData.hideTerrainPresentation = true;
+        root.userData.skipNormalization = true;
+
+        const HALL_W = 22;       // width across the lanes
+        const HALL_L = 60;       // length downrange (player at +Z end, targets at -Z)
+        const WALL_H = 6.0;
+        const T = 0.4;
+
+        root.userData.preferredSpawn = { position: [0, 0.3, HALL_L * 0.5 - 4], yaw: Math.PI, pitch: -0.02 };
+        root.userData.preferredShowcase = {
+            position: [0, PLAYER_SETTINGS.eyeHeight + 1.0, HALL_L * 0.5 - 2],
+            target: [0, 1.4, -HALL_L * 0.3],
+        };
+
+        const mat = (color, { rough = 0.9, metal = 0.0, emissive = null, emissiveIntensity = 0 } = {}) => {
+            const m = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color(color), roughness: rough, metalness: metal });
+            if (emissive) { m.emissive = new THREE.Color(emissive); m.emissiveIntensity = emissiveIntensity; }
+            return m;
+        };
+        const addBox = (name, size, position, material, { actorSurface = '', solid = false } = {}) => {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), material);
+            mesh.name = name;
+            mesh.position.set(position[0], position[1], position[2]);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            root.add(mesh);
+            if (actorSurface || solid) {
+                const actor = makeSampleLevelMeshActor(name, mesh, {
+                    kind: 'imported', castShadow: true, receiveShadow: true, skipPhysicsCollision: true,
+                    userData: actorSurface ? { doomMapSurface: actorSurface } : {},
+                });
+                if (solid || actorSurface === 'floor' || actorSurface === 'roof') enableStaticMeshActorCollision(actor);
+            }
+            return mesh;
+        };
+
+        // ---- materials ----
+        const floorMat = mat('#3a3f47', { rough: 0.95 });
+        const wallMat  = mat('#23272e', { rough: 0.92 });
+        const trimMat  = mat('#ffd24a', { rough: 0.5, emissive: '#ffd24a', emissiveIntensity: 0.2 });
+        const benchMat = mat('#2b3038', { rough: 0.85, metal: 0.2 });
+        const ceilMat  = mat('#15181d', { rough: 0.95 });
+
+        // ---- shell: floor, ceiling, four walls ----
+        addBox('shootsim-floor', [HALL_W, T, HALL_L], [0, -T * 0.5, 0], floorMat, { actorSurface: 'floor' });
+        addBox('shootsim-ceil', [HALL_W, T, HALL_L], [0, WALL_H, 0], ceilMat, { actorSurface: 'roof' });
+        addBox('shootsim-wall-back', [HALL_W, WALL_H, T], [0, WALL_H * 0.5, -HALL_L * 0.5], wallMat, { solid: true });   // downrange backstop
+        addBox('shootsim-wall-front', [HALL_W, WALL_H, T], [0, WALL_H * 0.5, HALL_L * 0.5], wallMat, { solid: true });
+        addBox('shootsim-wall-l', [T, WALL_H, HALL_L], [-HALL_W * 0.5, WALL_H * 0.5, 0], wallMat, { solid: true });
+        addBox('shootsim-wall-r', [T, WALL_H, HALL_L], [HALL_W * 0.5, WALL_H * 0.5, 0], wallMat, { solid: true });
+
+        // Downrange backstop accent + lane divider rails so it reads as a range.
+        addBox('shootsim-backstop', [HALL_W - 0.6, WALL_H - 1.0, 0.3], [0, (WALL_H - 1.0) * 0.5, -HALL_L * 0.5 + 0.4], mat('#1a1d22', { rough: 1.0 }));
+        const LANES = 5;
+        const laneSpacing = (HALL_W - 4) / (LANES - 1);
+        const laneXs = [];
+        for (let i = 0; i < LANES; i++) laneXs.push(-((HALL_W - 4) / 2) + i * laneSpacing);
+        for (const lx of laneXs) {
+            // Low divider rail running downrange between firing positions.
+            addBox(`shootsim-rail-${lx.toFixed(1)}`, [0.12, 1.0, HALL_L * 0.55], [lx - laneSpacing * 0.5, 0.5, HALL_L * 0.1], mat('#30353d', { rough: 0.9 }));
+        }
+
+        // ---- firing line: a bench the player stands behind ----
+        const lineZ = HALL_L * 0.5 - 8;
+        addBox('shootsim-bench', [HALL_W - 2, 1.0, 1.0], [0, 0.5, lineZ], benchMat, { solid: true });
+        addBox('shootsim-bench-trim', [HALL_W - 2, 0.1, 1.05], [0, 1.02, lineZ], trimMat);
+        addBox('shootsim-line', [HALL_W - 1, 0.05, 0.25], [0, 0.03, lineZ + 1.4], trimMat);   // yellow "do not cross" line
+
+        // ---- ceiling strip lights ----
+        for (let z = -HALL_L * 0.4; z <= HALL_L * 0.4; z += 10) {
+            addBox(`shootsim-lamp-${z}`, [HALL_W - 8, 0.15, 1.4], [0, WALL_H - 0.2, z], mat('#fff6e0', { rough: 0.4, emissive: '#fff0d0', emissiveIntensity: 0.9 }));
+            const lp = new THREE.PointLight(0xfff0d0, 5.5, 28, 1.4);
+            lp.position.set(0, WALL_H - 0.6, z);
+            lp.castShadow = false;
+            lp.name = `shootsim-light-${z}`;
+            root.add(lp);
+        }
+
+        // ---- lane layout contract: target stand positions downrange ----
+        // Stagger depth a touch so the row isn't a flat wall of plates.
+        const lanes = laneXs.map((lx, i) => [lx, 0, -HALL_L * 0.5 + 6 + (i % 2) * 4]);
+        root.userData.shootingSimLevel = {
+            playerSpawn: [0, 0.85, lineZ + 2.2],
+            firingLineZ: lineZ,
+            lanes,
+            hallWidth: HALL_W,
+            hallLength: HALL_L,
+        };
+
+        // Ambient + key fill so the bay isn't pitch black between lamps.
+        const amb = new THREE.AmbientLight(0xb9c4d6, 0.5);
+        root.add(amb);
+        const key = new THREE.PointLight(0xffffff, 6, 80, 1.2);
+        key.position.set(0, WALL_H - 0.5, lineZ);
+        key.castShadow = true;
+        configurePointLightShadow(key);
+        key.name = 'shootsim-key';
+        root.add(key);
+
+        applySilPomLighting(root, key.position.clone());
         return root;
     }
 
@@ -2505,6 +2628,31 @@ export function createLevels(deps) {
             };
         }
 
+        if (levelId === 'shootingSim') {
+            return {
+                id: 'shootingSim',
+                assetName: 'Shooting Simulator',
+                fileSize: 180000,
+                create: createShootingSimLevel,
+                afterLoad: () => {
+                    const layout = cm()?.userData?.shootingSimLevel || {};
+                    const startActor = spawnGameplayPrefab('playerSpawn');
+                    if (startActor) {
+                        startActor.userData.label = 'Start';
+                        const mesh = getActorRenderObject(startActor);
+                        if (mesh && Array.isArray(layout.playerSpawn)) {
+                            mesh.position.set(layout.playerSpawn[0], layout.playerSpawn[1], layout.playerSpawn[2]);
+                            mesh.updateMatrixWorld(true);
+                        }
+                        applyPlayerSpawnFromActor(startActor);
+                    }
+                    // Fresh range each load. The module owns its own state.
+                    try { window.shootingSimApi?.resetState?.(); } catch (e) {}
+                    return null;
+                },
+            };
+        }
+
         if (levelId === 'soccerFieldTerrain') {
             return createFlatTerrainLevelDefinition();
         }
@@ -2520,6 +2668,6 @@ export function createLevels(deps) {
         createBrickRoomLevel, setDoomEnemySpriteFrame, drawDoomEnemySpriteFrame,
         makeDoomEnemySpriteSheet, updateDoomEnemySpriteAnimation, applyDoomEnemySpriteSkin,
         makeDoomShotgunSpriteTexture, createDoomTestLevel, createDoomArenaLevel,
-        createRoguePitLevel, createDrugTycoonLevel, getBuiltinLevelDefinition,
+        createRoguePitLevel, createDrugTycoonLevel, createShootingSimLevel, getBuiltinLevelDefinition,
     };
 }

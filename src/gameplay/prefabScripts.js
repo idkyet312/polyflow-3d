@@ -421,6 +421,7 @@ function Tick(DeltaTime) {
         api.setHud('WAVE ' + wave + boss + ' · ' + alive + ' left' +
             (r.combo > 1 ? '  <span style="color:#ffd166">Combo x' + r.combo + '</span>' : ''));
         if (api.waveCleared(actors)) {
+            api.onWaveCleared?.(wave);
             phase = 'breather';
             nextWaveAt = api.now() + BREATHER_MS;
         }

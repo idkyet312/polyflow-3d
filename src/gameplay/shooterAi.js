@@ -202,7 +202,7 @@ export function createShooterAi(deps) {
 
                 shooter.lastPhysicsHitAt = now;
                 const dmg = THREE.MathUtils.clamp(SHOOTER_AI_PREFAB.hitDamage * (speed / 5), 0.12, 0.45)
-                    * (isStar ? 0.5 : 1);
+                    * (isStar ? 0.75 : 1);
                 damageShooterAi(actor, dmg);
                 break;
             }

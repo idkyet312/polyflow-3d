@@ -28,7 +28,7 @@ export function createFrameLoop(deps) {
         resetGameplayPrefabs,
         clearActiveVehicle,
         updateDoomMiniLevelState, updateDoomArenaLevelState,
-        updateRogueXpOrbs, updateDrugTycoonState,
+        updateRogueXpOrbs, updateDrugTycoonState, updateShootingSimState,
         updateGameplayUI,
         resetDoomMiniLevelState, resetDoomArenaLevelState,
     } = deps;
@@ -233,6 +233,7 @@ export function createFrameLoop(deps) {
         updateDoomMiniLevelState(characterPosition);
         updateDoomArenaLevelState(characterPosition);
         updateDrugTycoonState(characterPosition, delta);
+        updateShootingSimState(characterPosition, delta);
         const mesh = currentMesh();
         if (mesh?.userData?.sampleType === 'doomArena') {
             updateRogueXpOrbs(characterPosition, delta);

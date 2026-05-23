@@ -9,7 +9,15 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <!-- PWA: installable web app (Add to Home Screen / Android) -->
+    <link rel="manifest" href="./manifest.webmanifest">
+    <meta name="theme-color" content="#0d0f14">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Drug Tycoon">
+    <link rel="apple-touch-icon" href="./icon-192.png">
     <link rel="stylesheet" href="./index.css">
 </head>
 
@@ -169,6 +177,7 @@
                                 <option value="doomTest">Doom Test Arena</option>
                                 <option value="doomArena" selected>Rogue Waves</option>
                                 <option value="drugTycoon">Drug Tycoon</option>
+                                <option value="shootingSim">Shooting Simulator</option>
                                 <option value="soccerField">Soccer Field</option>
                                 <option value="soccerFieldTerrain">Terrain</option>
                             </select>
@@ -212,6 +221,7 @@
                                         <option value="cube">Cube Actor</option>
                                         <option value="pointLight">Point Light Actor</option>
                                         <option value="spotLight">Spot Light Actor</option>
+                                        <option value="rectLight">Rect Area Light Actor</option>
                                         <option value="vehicle">Vehicle Actor</option>
                                         <option value="imported">Imported Actor</option>
                                         <option value="capsule">Simple AI Actor</option>

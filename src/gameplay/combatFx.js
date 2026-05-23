@@ -73,7 +73,7 @@ export function createCombatFx({
     // Build a PannerNode at world (x,y,z) so the sound is spatialized relative
     // to the camera-mounted listener. Returns the panner (connected to
     // destination), or context.destination if no position / panner unsupported.
-    function makeSpatialSink(context, x, y, z) {
+    function makeSpatialSink(context, x, y, z, options = {}) {
         if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
             return context.destination;
         }
@@ -85,9 +85,9 @@ export function createCombatFx({
         }
         panner.panningModel = 'HRTF';
         panner.distanceModel = 'inverse';
-        panner.refDistance = 4;
-        panner.maxDistance = 90;
-        panner.rolloffFactor = 1.1;
+        panner.refDistance = Number.isFinite(options.refDistance) ? options.refDistance : 4;
+        panner.maxDistance = Number.isFinite(options.maxDistance) ? options.maxDistance : 90;
+        panner.rolloffFactor = Number.isFinite(options.rolloffFactor) ? options.rolloffFactor : 1.1;
         const tt = context.currentTime;
         if (panner.positionX) {
             panner.positionX.setValueAtTime(x, tt);
@@ -207,7 +207,10 @@ export function createCombatFx({
         if (!context) return;
         const t = context.currentTime;
         const vol = clamp01(volume);
-        const sink = makeSpatialSink(context, x, y, z);
+        const sink = makeSpatialSink(context, x, y, z, {
+            refDistance: 12,
+            maxDistance: 270,
+        });
 
         // Lowpassed noise body (the dull thwack), darker + slightly longer.
         const dur = 0.16;

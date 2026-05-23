@@ -1,7 +1,7 @@
 // Mobile game launcher + pause menu. Kept outside runtime.js so the entry
 // stays under the architecture line cap.
 
-const MOBILE_GAME_LEVEL_IDS = ['doomArena', 'drugTycoon', 'doomTest', 'soccerField'];
+const MOBILE_GAME_LEVEL_IDS = ['doomArena', 'drugTycoon', 'shootingSim', 'doomTest', 'soccerField'];
 
 const FALLBACK_GAME_INFO = {
     doomArena: {
@@ -18,6 +18,14 @@ const FALLBACK_GAME_INFO = {
             'Harvest plants at home, drag buds into bags at the bench, then cook product.',
             'Use phone orders to find matching buyers. Sell to earn cash.',
             'Spend cash on upgrades. Heat brings cops; sleep to skip night.',
+        ],
+    },
+    shootingSim: {
+        title: 'Shooting Simulator - How To Play',
+        lines: [
+            'Aim with look, Fire to shoot the targets downrange.',
+            'Bullseyes score by ring; silhouettes drop on hit; movers pay more.',
+            'Chain hits for a streak bonus. [R] starts a 60s Time Attack; [M] opens the menu.',
         ],
     },
     doomTest: {
@@ -174,6 +182,7 @@ function getMobileGameOptions() {
         return [
             { id: 'doomArena', label: 'Rogue Waves' },
             { id: 'drugTycoon', label: 'Drug Tycoon' },
+            { id: 'shootingSim', label: 'Shooting Simulator' },
             { id: 'doomTest', label: 'Doom Test Arena' },
             { id: 'soccerField', label: 'Soccer Field' },
         ];
@@ -209,7 +218,9 @@ export function applyMobileQualitySetting(quality = 'medium') {
     const s = worldEnvState;
 
     mobileState.quality = mode;
-    s.ambient.enabled = true;
+    const lowRogueAmbient = mode === 'low' && mobileState.currentGameLevelId === 'doomArena';
+    s.ambient.enabled = lowRogueAmbient;   // Rogue low mode needs fill; other modes stay scene-lit only.
+    s.ambient.intensity = lowRogueAmbient ? 0.8 : WORLD_ENV_DEFAULTS.ambient.intensity;
     s.ddgi.debugProbes = false;
     s.ddgi.rayDebug = false;
     s.ddgi.contributionView = false;
@@ -218,7 +229,9 @@ export function applyMobileQualitySetting(quality = 'medium') {
     const lowMode = mode === 'low';
     s.sky.enabled = !lowMode;
     s.hemi.enabled = !lowMode;
+    s.hemi.intensity = 0.25;     // dim sky fill so interiors read dark
     s.sun.enabled = !lowMode;
+    s.sun.intensity = 0.8;       // softer sun
     s.sun.castShadow = !lowMode;
     s.shadows.enabled = !lowMode;
 
@@ -257,7 +270,7 @@ export function applyMobileQualitySetting(quality = 'medium') {
         s.bloom.radius = 0.35;
         s.bloom.threshold = 2.2;
         s.ssgi.enabled = false;   // SSGI off — it speckled surfaces as grain
-        s.fog.enabled = true;
+        s.fog.enabled = false;
         s.fog.density = 0.012;
         s.fog.opacity = 0.055;
         s.ddgi.enabled = true;
@@ -354,6 +367,9 @@ function getGameModeInfo(levelId) {
     }
     if (levelId === 'doomArena') {
         return window.rogueWaves?.getHowToPlay?.();
+    }
+    if (levelId === 'shootingSim') {
+        return window.shootingSimApi?.getHowToPlay?.();
     }
     return null;
 }

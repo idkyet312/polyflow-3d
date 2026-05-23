@@ -1,11 +1,11 @@
-import { vec3, vec4 } from 'three/tsl';
+import { vec3, vec4, mix, float } from 'three/tsl';
 import { fxaa } from 'three/addons/tsl/display/FXAANode.js';
 import { core } from '../runtime/appCore.js';
 
 // Game-mode levels skip DDGI: its live probe bake is noisy (random-seeded,
 // low-sample) and speckles every GI-lit surface as grain. These scenes use
 // plain direct lighting instead.
-const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest']);
+const GAME_MODE_SAMPLE_TYPES = new Set(['drugTycoon', 'doomArena', 'doomTest', 'shootingSim']);
 function inGameModeLevel() {
     const t = core.currentMesh?.userData?.sampleType;
     return !!(t && GAME_MODE_SAMPLE_TYPES.has(t));
@@ -79,19 +79,26 @@ export function createWorldEnvSystem({
 }) {
     const WORLD_ENV_DEFAULTS = Object.freeze({
         sky: { enabled: true, preset: 'sunny-sky', blurriness: 0.05 },
-        ambient: { enabled: true, intensity: 1.0 },
+        ambient: { enabled: false, intensity: 1.0 },
         hemi: { enabled: true, intensity: 1.5 },
         sun: { enabled: true, castShadow: true, intensity: 2.5 },
         tonemap: { exposure: 1.0 },
         aa: { enabled: false },   // FXAA edge AA on the post path; default off
         bloom: { enabled: true, strength: 0.5, radius: 0.35, threshold: 2.2 },
+        // GTAO contact-shadow ambient occlusion. Cheap, big grounding payoff;
+        // on by default. intensity 0..1 = how strongly AO darkens (1 = full).
+        ssao: { enabled: true, intensity: 0.85, radius: 0.5, samples: 16, thickness: 1.0, scale: 1.0 },
         ssgi: { enabled: false, giIntensity: 2.0, aoIntensity: 1.0, radius: 8.0, thickness: 0.6, sliceCount: 1, stepCount: 8 },
         fog: { enabled: true, density: 0.012, opacity: 0.055 },
         ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
         // Shadow tuning is global across point/spot/directional lights so the
         // user has one knob to fight self-shadow seams scene-wide instead of
         // hunting per-light.
-        shadows: { enabled: true, bias: 0.0, normalBias: 0.0, radius: 7.9, mapSize: 512 },
+        // `csm` enables Cascaded Shadow Maps on the main sun/directional light:
+        // splits the view frustum into `cascades` slices, each with a tight
+        // shadow camera → sharp near shadows + cheap far ones (vs one stretched
+        // 2048 map). cascades 2–3 is the sweet spot.
+        shadows: { enabled: true, bias: 0.0, normalBias: 0.0, radius: 7.9, mapSize: 512, csm: true, cascades: 3 },
         // Parallax Occlusion Mapping defaults.
         pom: { enabled: false, intensity: 0.04, quality: 'medium' },
     });
@@ -164,6 +171,7 @@ export function createWorldEnvSystem({
         if (!POST_FX_SUPPORTED) return false;
         const perf = isPerfModeEnabled();
         return !!((worldEnvState.bloom?.enabled && !perf)
+            || (worldEnvState.ssao?.enabled && !perf)
             || (worldEnvState.ssgi?.enabled && !perf));
     }
 
@@ -171,14 +179,23 @@ export function createWorldEnvSystem({
         const postProcessing = getPostProcessing();
         const postProcessNodes = getPostProcessNodes();
         if (!postProcessing || !postProcessNodes) return;
-        const { sceneColor, bloomNode, ssgiOutput } = postProcessNodes;
+        const { sceneColor, bloomNode, aoOutput, ssgiOutput } = postProcessNodes;
         if (!shouldUsePostProcessingPipeline()) {
             postProcessing.outputNode = sceneColor;
             return;
         }
 
         const perf = isPerfModeEnabled();
-        let outputNode = sceneColor;
+        // AO multiplies the lit color FIRST (darkens creases/contacts), then
+        // bloom is added on top so emissive highlights aren't dimmed by AO.
+        // intensity 0..1 lerps between "no AO" (1.0) and the raw AO factor.
+        let litColor = sceneColor;
+        if (worldEnvState.ssao?.enabled && !perf && aoOutput) {
+            const k = float(worldEnvState.ssao.intensity ?? 1.0);
+            const aoFactor = mix(float(1.0), aoOutput.r, k);
+            litColor = sceneColor.mul(vec4(vec3(aoFactor), 1.0));
+        }
+        let outputNode = litColor;
         if (worldEnvState.bloom?.enabled && !perf) {
             outputNode = outputNode.add(bloomNode);
         }
@@ -204,6 +221,16 @@ export function createWorldEnvSystem({
         node.thickness.value = s.thickness;
         node.sliceCount.value = Math.max(1, Math.min(4, Math.round(s.sliceCount)));
         node.stepCount.value = Math.max(1, Math.min(32, Math.round(s.stepCount)));
+    }
+
+    function applySSAOSettings() {
+        const node = getPostProcessNodes()?.aoNode;
+        const s = worldEnvState.ssao || WORLD_ENV_DEFAULTS.ssao;
+        if (!node) return;
+        node.radius.value = s.radius;
+        node.thickness.value = s.thickness;
+        node.scale.value = s.scale;
+        node.samples.value = Math.max(4, Math.min(32, Math.round(s.samples)));
     }
 
     function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
@@ -276,8 +303,9 @@ export function createWorldEnvSystem({
             postProcessVolumeManager?.setEnabled?.(false);
         }
 
-        // Screen Space GI
+        // Screen Space GI + Ambient Occlusion
         applySSGISettings();
+        applySSAOSettings();
         rebuildPostProcessingOutputNode();
 
         // Fog
@@ -465,6 +493,7 @@ export function createWorldEnvSystem({
         shouldUsePostProcessingPipeline,
         rebuildPostProcessingOutputNode,
         applySSGISettings,
+        applySSAOSettings,
         applyWorldEnvState,
         updateWorldEnvUi,
         setWorldEnvMaster,
