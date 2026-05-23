@@ -285,60 +285,41 @@ export function applyMobileQualitySetting(quality = 'medium') {
     const s = worldEnvState;
 
     mobileState.quality = mode;
-    const lowRogueAmbient = mode === 'low' && mobileState.currentGameLevelId === 'doomArena';
-    s.ambient.enabled = lowRogueAmbient;   // Rogue low mode needs fill; other modes stay scene-lit only.
-    s.ambient.intensity = lowRogueAmbient ? 0.8 : WORLD_ENV_DEFAULTS.ambient.intensity;
-    s.ddgi.debugProbes = false;
-    s.ddgi.rayDebug = false;
-    s.ddgi.contributionView = false;
-    s.ddgi.solidTest = false;
-    if (s.aa) s.aa.enabled = false;
-    if (s.ssr) s.ssr.enabled = false;
-    if (s.renderResolution) s.renderResolution.enabled = false;
-
     const lowMode = mode === 'low';
-    s.sky.enabled = !lowMode;
-    s.hemi.enabled = !lowMode;
-    s.hemi.intensity = 0.25;     // dim sky fill so interiors read dark
-    s.sun.enabled = !lowMode;
-    s.sun.intensity = 0.8;       // softer sun
-    s.sun.castShadow = !lowMode;
-    s.shadows.enabled = !lowMode;
+    const medMode = mode === 'medium';
+    const highMode = mode === 'high';
 
-    // Post effects per preset: low = none, medium/high = SSAO. Adaptive quality
-    // + light culling default on everywhere so weak GPUs self-protect.
+    // Only touch rows exposed in the pause-menu Graphics Settings panel.
+    if (s.sky) s.sky.enabled = !lowMode;
+    if (s.bloom) {
+        s.bloom.enabled = !lowMode;
+        if (medMode) {
+            s.bloom.strength = 0.4;
+            s.bloom.radius = 0.25;
+            s.bloom.threshold = 2.2;
+        } else if (highMode) {
+            s.bloom.strength = 0.5;
+            s.bloom.radius = 0.35;
+            s.bloom.threshold = 2.2;
+        }
+    }
     if (s.ssao) s.ssao.enabled = !lowMode;
-    if (s.lightCull) s.lightCull.enabled = true;
-    if (s.adaptive) s.adaptive.enabled = mode !== 'high';   // high = fixed max quality
+    if (s.ssr) s.ssr.enabled = highMode;
+    if (s.aa) s.aa.enabled = highMode;
+    if (s.shadows) s.shadows.enabled = !lowMode;
+    if (s.fog) s.fog.enabled = medMode;
+    if (s.adaptive) s.adaptive.enabled = !highMode;
+    if (s.lightCull) {
+        s.lightCull.enabled = true;
+        s.lightCull.maxActive = lowMode ? 6 : medMode ? 12 : 16;
+    }
 
-    if (mode === 'low') {
-        clearPendingHighBloom();
-        setPerfModeEnabled(true);
-        s.bloom.enabled = false;
-        s.ssgi.enabled = false;
-        s.fog.enabled = false;
-        s.ddgi.enabled = false;
-        s.pom.enabled = false;
-        s.tonemap.exposure = 0.95;
-        s.shadows.mapSize = 256;
-        s.shadows.radius = 5.0;
-    } else if (mode === 'medium') {
-        clearPendingHighBloom();
-        setPerfModeEnabled(false);
-        s.bloom.enabled = true;
-        s.bloom.strength = 0.4;
-        s.bloom.radius = 0.25;
-        s.bloom.threshold = 2.2;
-        s.ssgi.enabled = false;
-        s.fog.enabled = true;
-        s.fog.density = 0.009;
-        s.fog.opacity = 0.035;
-        s.ddgi.enabled = false;
-        s.pom.enabled = false;
-        s.tonemap.exposure = 1.0;
-        s.shadows.mapSize = 512;
-        s.shadows.radius = 7.0;
-    } else {
+    clearPendingHighBloom();
+    applyWorldEnvState({ persist: true, switchSky: false });
+    syncMobileQualityButtons();
+    syncGraphicsSettings();
+    return;
+    if (mode !== 'low' && mode !== 'medium') {
         clearPendingHighBloom();
         setPerfModeEnabled(false);
         s.bloom.enabled = true;

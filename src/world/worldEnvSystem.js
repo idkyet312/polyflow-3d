@@ -95,7 +95,7 @@ export function createWorldEnvSystem({
         renderResolution: { enabled: false, scale: 1.15, maxDpr: 2.5 },
         // Adaptive quality — FPS watchdog that steps effects down/up. Off by
         // default; opt-in (mainly for weaker GPUs / mobile).
-        adaptive: { enabled: false },
+        adaptive: { enabled: true },
         bloom: { enabled: true, strength: 0.5, radius: 0.35, threshold: 2.2 },
         // GTAO contact-shadow ambient occlusion. Cheap, big grounding payoff;
         // on by default. intensity 0..1 = how strongly AO darkens (1 = full).
@@ -203,7 +203,7 @@ export function createWorldEnvSystem({
         const postProcessing = getPostProcessing();
         const postProcessNodes = getPostProcessNodes();
         if (!postProcessing || !postProcessNodes) return;
-        const { sceneColor, bloomNode, aoOutput, ssgiOutput, traaNode, ssrNode } = postProcessNodes;
+        const { sceneColor, bloomNode, aoOutput, ssgiOutput, traaNode, traaSsrNode, ssrNode } = postProcessNodes;
         const renderData = getPostProcessRenderData?.();
         const perf = isPerfModeEnabled();
         const aaEnabled = !!(worldEnvState.aa?.enabled && !perf);
@@ -222,7 +222,7 @@ export function createWorldEnvSystem({
         // AO multiplies the lit color FIRST (darkens creases/contacts), then
         // bloom is added on top so emissive highlights aren't dimmed by AO.
         // intensity 0..1 lerps between "no AO" (1.0) and the raw AO factor.
-        let litColor = taaEnabled ? traaNode : sceneColor;
+        let litColor = taaEnabled ? (ssrEnabled && traaSsrNode ? traaSsrNode : traaNode) : sceneColor;
         if (worldEnvState.ssao?.enabled && !perf && aoOutput) {
             const k = float(worldEnvState.ssao.intensity ?? 1.0);
             const aoFactor = mix(float(1.0), aoOutput.r, k);
@@ -234,7 +234,7 @@ export function createWorldEnvSystem({
                 .mul(vec4(vec3(ssgiOutput.a), 1))
                 .add(vec4(ssgiOutput.rgb, 0));
         }
-        if (ssrEnabled) {
+        if (ssrEnabled && !taaEnabled) {
             outputNode = outputNode.add(ssrNode);
         }
         if (aaEnabled && !taaEnabled) {

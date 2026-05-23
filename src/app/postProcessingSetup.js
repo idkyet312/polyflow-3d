@@ -75,7 +75,6 @@ export function setupPostProcessing(opts) {
         globalPostProcessUniforms.bloomThreshold,
     );
 
-    const traaNode = traa(sceneColor, sceneDepth, sceneVelocity, camera);
     const ssrNode = ssr(
         sceneColor,
         sceneDepth,
@@ -89,6 +88,8 @@ export function setupPostProcessing(opts) {
     ssrNode.thickness.value = 0.65;
     ssrNode.quality.value = 0.85;
     ssrNode.resolutionScale = 1.0;
+    const traaNode = traa(sceneColor, sceneDepth, sceneVelocity, camera);
+    const traaSsrNode = traa(sceneColor.add(ssrNode), sceneDepth, sceneVelocity, camera);
 
     // BloomNode names its internal render-target textures "UnrealBloomPass.*".
     // The WebGPU backend uses texture.name as the GPU resource label, and
@@ -104,6 +105,8 @@ export function setupPostProcessing(opts) {
     (bloomNode?._renderTargetsVertical || []).forEach(sanitize);
     sanitize(traaNode?._historyRenderTarget);
     sanitize(traaNode?._resolveRenderTarget);
+    sanitize(traaSsrNode?._historyRenderTarget);
+    sanitize(traaSsrNode?._resolveRenderTarget);
     sanitize(ssrNode?._ssrRenderTarget);
     sanitize(ssrNode?._blurRenderTarget);
 
@@ -124,11 +127,13 @@ export function setupPostProcessing(opts) {
         jitter: { frame: 0, x: 0, y: 0 },
         taa: {
             node: traaNode,
+            nodeWithSSR: traaSsrNode,
             output: traaNode?.getTextureNode?.() ?? traaNode,
             enabled: false,
             resetHistory() {
                 if (postProcessRenderData.history) postProcessRenderData.history.valid = false;
                 if (traaNode && Number.isFinite(traaNode._jitterIndex)) traaNode._jitterIndex = 0;
+                if (traaSsrNode && Number.isFinite(traaSsrNode._jitterIndex)) traaSsrNode._jitterIndex = 0;
             },
         },
         ssr: {
@@ -141,7 +146,7 @@ export function setupPostProcessing(opts) {
         sceneColor, sceneDepth,
         sceneNormalMaterial, sceneMaterialData, normalMaterialPass,
         sceneVelocity, velocityPass,
-        bloomNode, aoNode, aoOutput, traaNode, ssrNode,
+        bloomNode, aoNode, aoOutput, traaNode, traaSsrNode, ssrNode,
         ssrOutput: ssrNode?.getTextureNode?.() ?? ssrNode,
         ssgiNode: null, ssgiOutput: null,
     };

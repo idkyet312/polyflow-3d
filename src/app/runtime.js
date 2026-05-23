@@ -6563,11 +6563,21 @@ function wireExtractedModules() {
             // Showcase preset for graphics-demo levels (e.g. the shooting range):
             // turn on the post stack so it looks its best. Not persisted, so it
             // never overwrites the user's saved global graphics prefs.
-            applyShowcaseGraphics: ({ indoor = false } = {}) => {
+            applyShowcaseGraphics: ({
+                indoor = false,
+                globalLights = !indoor,
+                sun = globalLights,
+                ambient = globalLights,
+                hemi = globalLights,
+            } = {}) => {
                 try {
                     setPerfModeEnabled(false);
                     const s = worldEnvState;
                     if (indoor && s.sky) s.sky.enabled = false;
+                    if (s.sun) s.sun.enabled = !!sun;
+                    if (s.ambient) s.ambient.enabled = !!ambient;
+                    if (s.hemi) s.hemi.enabled = !!hemi;
+                    if (indoor && s.pom) s.pom.enabled = false;
                     if (s.adaptive) s.adaptive.enabled = false;
                     if (s.aa) s.aa.enabled = true;
                     if (s.ssr) Object.assign(s.ssr, {

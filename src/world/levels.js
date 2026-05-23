@@ -1656,7 +1656,7 @@ export function createLevels(deps) {
         const accentSet = getProceduralBrickSet('accent');
         const BRICK_TILE_M = 1.6;
 
-        const brickMat = (set, { color = '#ffffff', metal = 0.05 } = {}) => {
+        const brickMat = (set, { color = '#ffffff', metal = 0.05, rough = 1.0, envIntensity = 1.0 } = {}) => {
             const albedo = set.albedo.clone();
             const normal = set.normal.clone();
             const height = set.height.clone();
@@ -1673,9 +1673,10 @@ export function createLevels(deps) {
             }
             const mat = new DDGIMeshStandardNodeMaterial({
                 color: new THREE.Color(color),
-                roughness: 1.0,
+                roughness: rough,
                 metalness: metal,
             });
+            if ('envMapIntensity' in mat) mat.envMapIntensity = envIntensity;
             mat.map = albedo;
             mat.normalMap = normal;
             mat.normalScale = new THREE.Vector2(1.1, 1.1);
@@ -1755,7 +1756,7 @@ export function createLevels(deps) {
 
         // Shell: floor, ceiling, four walls.
         addBox('arena-floor', [ARENA, T, ARENA], [0, -T * 0.5, 0],
-            brickMat(floorSet, { color: '#6c6258' }), { actorSurface: 'floor' });
+            brickMat(floorSet, { color: '#4c4240', metal: 0.55, rough: 0.16, envIntensity: 0.04 }), { actorSurface: 'floor' });
         addBox('arena-ceiling', [ARENA, T, ARENA], [0, ARENA_H + T * 0.5, 0],
             flatMat('#241f1c', { rough: 0.95 }), { actorSurface: 'roof' });
         addBox('arena-wall-n', [ARENA, ARENA_H, T], [0, ARENA_H * 0.5, -HALF],
@@ -2597,6 +2598,7 @@ export function createLevels(deps) {
         if (gm) gm.userData.label = 'Rogue Game Mode';
         cm().userData.rogueGameModeActorId = gm?.id || '';
 
+        try { applyShowcaseGraphics?.({ indoor: true, sun: false, ambient: true, hemi: false }); } catch (e) {}
         return null;
     }
 
@@ -2736,7 +2738,7 @@ export function createLevels(deps) {
                     try { window.shootingSimApi?.resetState?.(); } catch (e) {}
                     // Showcase scene: switch on the full post stack (SSR + TAA +
                     // SSAO + bloom) so the range shows the renderer at its best.
-                    try { applyShowcaseGraphics?.({ indoor: true }); } catch (e) {}
+                    try { applyShowcaseGraphics?.({ indoor: true, globalLights: false }); } catch (e) {}
                     return null;
                 },
             };
