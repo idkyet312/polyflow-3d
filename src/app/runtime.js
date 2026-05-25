@@ -586,7 +586,7 @@ function getActorKindDefaultScale(kind = 'sphere') {
 }
 
 // --- Configuration ---
-let scene, camera, renderer, currentMesh, transformControl, postProcessing, mainDirectionalLight;
+let scene, camera, renderer, currentMesh, transformControl, customTransformGizmo, postProcessing, mainDirectionalLight;
 
 // Engine keystone: bind the reassigned module-scope refs into the shared
 // appCore context EAGERLY (at declaration time, not inside wireExtractedModules)
@@ -726,6 +726,8 @@ const IMPORTED_PROP_COMPLEX_HULL_RADIUS = 0.01;
 // the green wall is on the right, matching the ddgi-cornell-box demo.
 const SHOWCASE_CAMERA_POSITION = new THREE.Vector3(0, 1.0, 2.6);
 const SHOWCASE_CAMERA_TARGET = new THREE.Vector3(0, 0.9, 0);
+let updateCustomTransformGizmo = () => {};
+
 const JOLT_NON_MOVING_LAYER = 0;
 const JOLT_MOVING_LAYER = 1;
 const JOLT_OBJECT_LAYER_COUNT = 2;
@@ -2703,6 +2705,20 @@ function markDDGISkipCapture(object) {
     return object;
 }
 
+// Top-left HUD badge reflecting the EFFECTIVE Temporal AA state (off while the
+// gizmo is on screen). Only touches the DOM when the state actually changes.
+let _taaIndicatorEl = null;
+let _taaIndicatorState = null;
+function updateTaaIndicator(on) {
+    if (_taaIndicatorState === on) return;
+    _taaIndicatorState = on;
+    if (!_taaIndicatorEl) _taaIndicatorEl = document.getElementById('taa-indicator');
+    if (!_taaIndicatorEl) return;
+    _taaIndicatorEl.textContent = on ? 'TAA: ON' : 'TAA: OFF';
+    _taaIndicatorEl.classList.toggle('taa-on', on);
+    _taaIndicatorEl.classList.toggle('taa-off', !on);
+}
+
 function invalidateDDGI(reason, fastWarmupFrames = 2) {
     try {
         getDDGIManager().invalidate({ reason, fastWarmupFrames });
@@ -2828,17 +2844,18 @@ function syncTransformControlState() {
     const shouldEnable = !gameplay.active && !gameplay.pointerLocked;
 
     transformControl.enabled = shouldEnable;
-    if (helper) {
-        helper.visible = shouldEnable && !!transformControl.object;
-    }
+    if (helper) helper.visible = false;
+    updateCustomTransformGizmo();
 
     if (!shouldEnable) {
         transformControl.detach();
+        updateCustomTransformGizmo();
         return;
     }
 
     if (transformControl.object || blueprintState.active) {
-        if (helper) helper.visible = !!transformControl.object;
+        if (helper) helper.visible = false;
+        updateCustomTransformGizmo();
         return;
     }
 
@@ -2846,7 +2863,8 @@ function syncTransformControlState() {
     const selectedMesh = getActorSelectionObject(selectedActor);
     if (selectedMesh) {
         transformControl.attach(selectedMesh);
-        if (helper) helper.visible = true;
+        if (helper) helper.visible = false;
+        updateCustomTransformGizmo();
     }
 }
 
@@ -5083,7 +5101,121 @@ async function init() {
             updateSceneActorDetailsUI();
         }
     });
-    scene.add(transformControl.getHelper());
+    const transformHelper = transformControl.getHelper();
+    scene.add(transformHelper);
+    transformHelper.visible = false;
+
+    // Use TransformControls for picking/drag math only. The stock helper has
+    // transparent picker/plane handles that render as black blocks in WebGPU
+    // post-processing. Draw our own opaque, UNLIT translate gizmo as real meshes
+    // in the main scene (like the DDGI debug spheres) — opaque unlit geometry
+    // survives the post pipeline cleanly, no black squares, no overlay pass.
+    const GIZMO_AXIS_COLOR = { X: 0xff3b30, Y: 0x4cd964, Z: 0x2f7bff };
+    const GIZMO_AXIS_ROTATION = {
+        X: [0, 0, -Math.PI / 2],
+        Y: [0, 0, 0],
+        Z: [Math.PI / 2, 0, 0],
+    };
+    const customGizmoIdentityQuaternion = new THREE.Quaternion();
+    const customGizmoShaftGeometry = new THREE.CylinderGeometry(0.012, 0.012, 1.0, 16);
+    const customGizmoConeGeometry = new THREE.ConeGeometry(0.05, 0.16, 20);
+    const hideNativeTransformControlMaterials = () => {
+        transformHelper.traverse((node) => {
+            if (!node.isMesh && !node.isLine) return;
+            const materials = Array.isArray(node.material) ? node.material : (node.material ? [node.material] : []);
+            for (const material of materials) {
+                material.visible = false;
+                material.colorWrite = false;
+                material.depthWrite = false;
+                material.needsUpdate = true;
+            }
+        });
+    };
+    customTransformGizmo = new THREE.Group();
+    customTransformGizmo.name = 'CustomTransformTranslateGizmo';
+    customTransformGizmo.visible = false;
+
+    const makeCustomGizmoMaterial = (color) => {
+        // Lit standard material so the gizmo shades like the rest of the scene
+        // objects (tonemapped, fogged, depth-tested, shadowed). Emissive keeps
+        // the handles readable when a face is in shadow.
+        const material = new THREE.MeshStandardMaterial({
+            color,
+            roughness: 0.5,
+            metalness: 0.0,
+            emissive: color,
+            emissiveIntensity: 0.15,
+        });
+        material.name = 'TransformGizmoLitMaterial';
+        return material;
+    };
+
+    for (const [axis, color] of Object.entries(GIZMO_AXIS_COLOR)) {
+        const material = makeCustomGizmoMaterial(color);
+        const axisGroup = new THREE.Group();
+        axisGroup.name = `CustomTransform${axis}`;
+        axisGroup.rotation.set(...GIZMO_AXIS_ROTATION[axis]);
+
+        const shaft = new THREE.Mesh(customGizmoShaftGeometry, material);
+        shaft.name = `${axis}Shaft`;
+
+        const positiveCone = new THREE.Mesh(customGizmoConeGeometry, material);
+        positiveCone.name = `${axis}PositiveCone`;
+        positiveCone.position.y = 0.58;
+
+        const negativeCone = new THREE.Mesh(customGizmoConeGeometry, material);
+        negativeCone.name = `${axis}NegativeCone`;
+        negativeCone.position.y = -0.58;
+        negativeCone.rotation.x = Math.PI;
+
+        axisGroup.add(shaft, positiveCone, negativeCone);
+        customTransformGizmo.add(axisGroup);
+    }
+
+    customTransformGizmo.traverse((node) => {
+        node.frustumCulled = false;
+        if (node.isMesh) {
+            node.castShadow = true;
+            node.receiveShadow = true;
+        }
+    });
+    scene.add(customTransformGizmo);
+
+    updateCustomTransformGizmo = () => {
+        if (!customTransformGizmo) return;
+        hideNativeTransformControlMaterials();
+        const object = transformControl?.object;
+        const shouldShow = !!(transformControl?.enabled && object && transformControl.mode === 'translate');
+        customTransformGizmo.visible = shouldShow;
+        transformHelper.visible = false;
+        if (!shouldShow) return;
+
+        object.updateMatrixWorld();
+        customTransformGizmo.position.setFromMatrixPosition(object.matrixWorld);
+        if (transformControl.space === 'local') {
+            object.getWorldQuaternion(tempQuaternionA);
+            customTransformGizmo.quaternion.copy(tempQuaternionA);
+        } else {
+            customTransformGizmo.quaternion.copy(customGizmoIdentityQuaternion);
+        }
+
+        let factor = 1;
+        if (camera.isOrthographicCamera) {
+            factor = (camera.top - camera.bottom) / camera.zoom;
+        } else {
+            camera.getWorldPosition(tempVectorF);
+            const distance = customTransformGizmo.position.distanceTo(tempVectorF);
+            factor = distance * Math.min(1.9 * Math.tan(Math.PI * camera.fov / 360) / camera.zoom, 7);
+        }
+        customTransformGizmo.scale.setScalar(factor * transformControl.size / 4);
+    };
+    const updateTransformHelperMatrixWorld = transformHelper.updateMatrixWorld.bind(transformHelper);
+    transformHelper.updateMatrixWorld = (force) => {
+        updateTransformHelperMatrixWorld(force);
+        updateCustomTransformGizmo();
+    };
+    hideNativeTransformControlMaterials();
+    updateCustomTransformGizmo();
 
     // Wire extracted modules now that scene/camera/renderer/transformControl/sceneSystem
     // and DOM refs all exist. Must happen before any module-bound helper is called.
@@ -5373,7 +5505,19 @@ async function init() {
             if (!perfModeEnabled && adaptiveQuality.isEnabled()) {
                 try { adaptiveQuality.update(delta); } catch (e) {}
             }
+            // Reflection probe: push live camera matrices + env map + viewport so
+            // its screen-space reconstruction + PMREM sample stay current.
+            if (postProcessRenderData?.reflectionProbe?.enabled) {
+                postProcessNodes?.reflectionProbe?.refreshFromCamera?.(camera, renderer);
+            }
+            // Volumetric lighting: push live camera matrices for the world-ray
+            // reconstruction used by the analytic fog/in-scatter integration.
+            if (postProcessRenderData?.volumetric?.enabled) {
+                postProcessNodes?.volumetric?.refreshFromCamera?.(camera);
+            }
+            updateTaaIndicator(!!postProcessRenderData?.taa?.enabled);   // top-left HUD badge
             const renderStart = performance.now();
+            // Gizmo is a real unlit mesh in the main scene; nothing special to do.
             if (postProcessing && shouldUsePostProcessingPipeline()) {
                 postProcessing.render();
             } else {

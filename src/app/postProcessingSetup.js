@@ -14,6 +14,8 @@ import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
 import { ssr } from 'three/addons/tsl/display/SSRNode.js';
 import { RenderPipeline } from 'three/webgpu';
+import { createReflectionProbe } from '../world/lighting/reflectionProbe.js';
+import { createVolumetricLighting } from '../world/lighting/volumetricLightingNode.js';
 
 export function setupPostProcessing(opts) {
     const {
@@ -32,6 +34,7 @@ export function setupPostProcessing(opts) {
     const scenePass = pass(scene, camera);
     const sceneColor = scenePass.getTextureNode('output');
     const sceneDepth = scenePass.getTextureNode('depth');
+
 
     // Auxiliary SSR scene-data pass. Dormant until SSR consumes it, but keeps
     // the forward beauty pass shadow-safe. RGB stores view normal; A carries
@@ -88,8 +91,31 @@ export function setupPostProcessing(opts) {
     ssrNode.thickness.value = 0.65;
     ssrNode.quality.value = 0.85;
     ssrNode.resolutionScale = 1.0;
+    // Sphere reflection probe. Reflection SOURCE = scene.environment PMREM
+    // (read live), sphere-parallax corrected. Doubles as the SSR fallback: where
+    // the SSR ray misses (a < 1) the probe fills in, so off-screen/sky
+    // reflections no longer vanish. The probe G-buffer inputs are the same MRT
+    // targets SSR consumes (depth, view normal, roughness in normal.a).
+    const reflectionProbe = createReflectionProbe({
+        getEnvironment: () => scene.environment || null,
+    });
+    // SSR composited with the probe fallback (vec4 reflection to ADD on top of
+    // the lit scene, same role as the raw ssrNode add).
+    const ssrProbeNode = reflectionProbe.composeSSRWithProbe(ssrNode, {
+        depthNode: sceneDepth,
+        viewNormalNode: sceneNormalMaterial,
+        roughnessNode: sceneNormalMaterial.a,
+    });
+
+    // Volumetric lighting / height fog. Analytic directional in-scatter applied
+    // over the lit scene BEFORE tonemap+bloom so bright sun haze blooms. Built
+    // as a function of the (already SSR/probe-composited) lit color so reflections
+    // are fogged correctly; the runtime swaps which lit-color input it wraps.
+    const volumetric = createVolumetricLighting();
+
     const traaNode = traa(sceneColor, sceneDepth, sceneVelocity, camera);
     const traaSsrNode = traa(sceneColor.add(ssrNode), sceneDepth, sceneVelocity, camera);
+    const traaSsrProbeNode = traa(sceneColor.add(ssrProbeNode), sceneDepth, sceneVelocity, camera);
 
     // BloomNode names its internal render-target textures "UnrealBloomPass.*".
     // The WebGPU backend uses texture.name as the GPU resource label, and
@@ -107,6 +133,8 @@ export function setupPostProcessing(opts) {
     sanitize(traaNode?._resolveRenderTarget);
     sanitize(traaSsrNode?._historyRenderTarget);
     sanitize(traaSsrNode?._resolveRenderTarget);
+    sanitize(traaSsrProbeNode?._historyRenderTarget);
+    sanitize(traaSsrProbeNode?._resolveRenderTarget);
     sanitize(ssrNode?._ssrRenderTarget);
     sanitize(ssrNode?._blurRenderTarget);
 
@@ -128,12 +156,14 @@ export function setupPostProcessing(opts) {
         taa: {
             node: traaNode,
             nodeWithSSR: traaSsrNode,
+            nodeWithSSRProbe: traaSsrProbeNode,
             output: traaNode?.getTextureNode?.() ?? traaNode,
             enabled: false,
             resetHistory() {
                 if (postProcessRenderData.history) postProcessRenderData.history.valid = false;
                 if (traaNode && Number.isFinite(traaNode._jitterIndex)) traaNode._jitterIndex = 0;
                 if (traaSsrNode && Number.isFinite(traaSsrNode._jitterIndex)) traaSsrNode._jitterIndex = 0;
+                if (traaSsrProbeNode && Number.isFinite(traaSsrProbeNode._jitterIndex)) traaSsrProbeNode._jitterIndex = 0;
             },
         },
         ssr: {
@@ -141,13 +171,24 @@ export function setupPostProcessing(opts) {
             output: ssrNode?.getTextureNode?.() ?? ssrNode,
             enabled: false,
         },
+        reflectionProbe: {
+            instance: reflectionProbe,
+            node: ssrProbeNode,
+            enabled: false,
+        },
+        volumetric: {
+            instance: volumetric,
+            enabled: false,
+        },
     };
     const postProcessNodes = {
         sceneColor, sceneDepth,
         sceneNormalMaterial, sceneMaterialData, normalMaterialPass,
         sceneVelocity, velocityPass,
-        bloomNode, aoNode, aoOutput, traaNode, traaSsrNode, ssrNode,
+        bloomNode, aoNode, aoOutput, traaNode, traaSsrNode, traaSsrProbeNode, ssrNode,
         ssrOutput: ssrNode?.getTextureNode?.() ?? ssrNode,
+        reflectionProbe, ssrProbeNode,
+        volumetric,
         ssgiNode: null, ssgiOutput: null,
     };
     applySSGISettings();
@@ -170,6 +211,8 @@ export function setupPostProcessing(opts) {
     });
 
     registerDebug('ddgi', getDDGIManager());
+    registerDebug('reflectionProbe', reflectionProbe);
+    registerDebug('volumetricLighting', volumetric);
     registerDebug('lightmapBaker', lightmapBaker);
     registerDebug('postProcessRenderData', postProcessRenderData);
     // Entity bridge debug handle:

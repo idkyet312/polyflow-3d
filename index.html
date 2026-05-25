@@ -149,6 +149,7 @@
                 </section>
             </aside>
             <div id="canvas-container">
+                <div id="taa-indicator" aria-hidden="true">TAA: —</div>
                 <div class="viewer-menu" aria-label="Viewer controls">
                     <div class="viewer-menu-card">
                         <div class="viewer-menu-label">Camera Mode</div>
@@ -663,7 +664,7 @@
                                 <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-master-on">All On</button>
                                 <button class="btn viewer-toggle-btn" id="we-master-off">All Off</button>
                                 <button class="btn viewer-toggle-btn" id="we-master-perf">Performance</button>
-                                <button class="btn viewer-toggle-btn" id="we-master-cornell">Cornell Test</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-debug-off">Debug Off</button>
                             </div>
                             <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off SSGI / Fog / Bloom in one click.</div>
 
@@ -874,6 +875,21 @@
                                         <div class="viewer-slider-value" id="we-ssr-quality-value">0.85</div>
                                     </div>
                                     <div class="viewer-inline-note">Reflects only visible screen pixels. Performance mode pauses it.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group" style="margin-top:10px;">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-probe-off">Probe Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-probe-on">Probe On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probe Intensity</div>
+                                        <input type="range" id="we-probe-intensity" min="0" max="2" step="0.05" value="1">
+                                        <div class="viewer-slider-value" id="we-probe-intensity-value">1.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probe Radius</div>
+                                        <input type="range" id="we-probe-radius" min="5" max="200" step="1" value="40">
+                                        <div class="viewer-slider-value" id="we-probe-radius-value">40</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Sphere reflection probe fills SSR misses (off-screen / sky) from the environment map, sphere-parallax corrected. Requires SSR On.</div>
                                 </div>
                             </details>
 
@@ -909,6 +925,37 @@
                             </details>
 
                             <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Volumetric Lighting (Sun Scatter)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-vol-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-vol-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Density</div>
+                                        <input id="we-vol-density" type="range" min="0" max="0.15" step="0.001" value="0.02">
+                                        <div class="viewer-slider-value" id="we-vol-density-value">0.020</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Height Falloff</div>
+                                        <input id="we-vol-height" type="range" min="0" max="0.4" step="0.005" value="0.08">
+                                        <div class="viewer-slider-value" id="we-vol-height-value">0.080</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Sun Scatter</div>
+                                        <input id="we-vol-sun" type="range" min="0" max="5" step="0.05" value="1.2">
+                                        <div class="viewer-slider-value" id="we-vol-sun-value">1.20</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Anisotropy</div>
+                                        <input id="we-vol-aniso" type="range" min="0" max="0.95" step="0.01" value="0.72">
+                                        <div class="viewer-slider-value" id="we-vol-aniso-value">0.72</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Analytic directional sun in-scatter + height fog (look toward the sun for the glow). Composited before bloom. No shadow shafts in this pass.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
                                 <summary class="viewer-menu-section-summary">Global Illumination (DDGI)</summary>
                                 <div class="viewer-menu-section-body">
                                     <div class="viewer-toggle-group viewer-post-process-toggle-group">
@@ -933,6 +980,12 @@
                                         <input id="we-ddgi-intensity" type="range" min="0" max="16" step="0.05" value="12.0">
                                         <div class="viewer-slider-value" id="we-ddgi-intensity-value">12.0</div>
                                     </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Specular GI</div>
+                                        <input id="we-ddgi-specular" type="range" min="0" max="4" step="0.05" value="0">
+                                        <div class="viewer-slider-value" id="we-ddgi-specular-value">0.0</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Specular GI feeds probe radiance into the reflection BRDF — rough/glossy off-screen reflections the env map can't give. Probes are low-res, so it's blurry by design.</div>
                                     <div class="viewer-slider-group">
                                         <div class="viewer-slider-label">Light Intensity</div>
                                         <input id="we-ddgi-light-intensity" type="range" min="0" max="8" step="0.05" value="0.35">

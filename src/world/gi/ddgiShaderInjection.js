@@ -1,5 +1,6 @@
 import * as THREE from 'three';
-import { Fn, vec2, vec3, float, int, texture, uniform, uniformArray, positionWorld, normalWorld, mix } from 'three/tsl';
+import { Fn, vec2, vec3, float, int, texture, uniform, uniformArray, positionWorld, normalWorld, mix, roughness, reflectVector, pow4 } from 'three/tsl';
+import { LightingNode } from 'three/webgpu';
 import { DDGIMeshStandardNodeMaterial } from './DDGIMeshStandardNodeMaterial.js';
 
 const DDGI_PATCH_VERSION = 14;
@@ -44,6 +45,9 @@ export function createDDGISampler({
     const uChebyshevFloor = uniform(0.0);
     const uSolidTestEnabled = uniform(0.0);
     const uSolidTestColor = uniform(new THREE.Vector3(1.5, 0.9, 0.2));
+    // Specular GI: scales the DDGI radiance fed into the BRDF's specular term.
+    // 0 disables (diffuse-only DDGI, original behaviour).
+    const uSpecIntensity = uniform(0.0);
     const atlasTex = texture(createBlackTexture());
     const tmpMin = new THREE.Vector3();
     const tmpMax = new THREE.Vector3();
@@ -177,8 +181,42 @@ export function createDDGISampler({
         return blended.mul(uIntensity).clamp(vec3(0), vec3(8.0));
     });
 
+    // ---- Specular GI from the DDGI probes --------------------------------
+    // The DDGI atlas stores cosine-convolved IRRADIANCE, so it can only feed
+    // LOW-FREQUENCY (rough/glossy) specular — there are no sharp mirror mips.
+    // We sample the probes along the roughness-bent reflection vector (the same
+    // vector three's EnvironmentNode uses for IBL radiance) and inject the
+    // result into the lighting context's `radiance` accumulator, so the standard
+    // GGX specular BRDF consumes it exactly like an env map would. This gives
+    // multi-surface, off-screen specular bounce that SSR/env maps can't, capped
+    // to rough reflections by the probe resolution.
+    const specularRadiance = Fn(() => {
+        const N = normalWorld.normalize();
+        // World-space reflection vector, bent toward the normal by roughness
+        // (pow4 curve, matching three's createRadianceContext) so rough surfaces
+        // don't gather radiance from behind their tangent plane. reflectVector is
+        // already world-space (reflectView · cameraViewMatrix).
+        const R = pow4(roughness).mix(reflectVector, N).normalize();
+        const rad = giSampleFn(positionWorld, R).max(vec3(0));
+        return rad.mul(uIntensity).mul(uSpecIntensity).clamp(vec3(0), vec3(8.0));
+    });
+
+    // LightingNode that adds the DDGI specular radiance to the BRDF specular
+    // term. Mirrors three's EnvironmentNode contract (radiance accumulator) but
+    // sourced from probes instead of a PMREM env map. No-op when uSpecIntensity
+    // is 0 (the shader still runs; the multiply zeroes the contribution).
+    class DDGISpecularNode extends LightingNode {
+        setup(builder) {
+            if (builder?.context?.radiance) {
+                builder.context.radiance.addAssign(specularRadiance());
+            }
+        }
+    }
+
     return {
         node: sampleNode(),
+        specularLightingNode: new DDGISpecularNode(),
+        setSpecularIntensity: (v) => { uSpecIntensity.value = Number.isFinite(v) ? v : 0; },
         refreshUniforms,
         setCaptureBypass,
         debugViewMixNode: uDebugViewBlend,
@@ -261,7 +299,7 @@ function convertToDDGIMaterial(mat) {
     return converted;
 }
 
-export function patchMaterials(root, ddgiNode, { forceRebuild = false } = {}) {
+export function patchMaterials(root, ddgiNode, { forceRebuild = false, specularNode = null } = {}) {
     if (!root || !ddgiNode) return;
     let assigned = 0;
     let converted = 0;
@@ -302,6 +340,10 @@ export function patchMaterials(root, ddgiNode, { forceRebuild = false } = {}) {
             try {
                 if (forceRebuild) mat.dispose?.();
                 mat.ddgiIrradianceNode = ddgiNode;
+                // Specular GI: the shared LightingNode that adds DDGI radiance to
+                // the BRDF specular term (see DDGISpecularNode). Same node on every
+                // material — its contribution is gated by uSpecIntensity.
+                mat.ddgiSpecularNode = specularNode;
                 if (FORCE_RED_MATERIAL_OVERRIDE_TEST) {
                     mat.colorNode = vec3(1, 0, 0);
                     mat.emissiveNode = vec3(4, 0, 0);

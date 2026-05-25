@@ -29,6 +29,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
     constructor(parameters) {
         super(parameters);
         this.ddgiIrradianceNode = null;
+        this.ddgiSpecularNode = null;
         this.isDDGIMeshStandardNodeMaterial = true;
 
         // POM state. heightMap is a regular three.js texture property; the
@@ -75,6 +76,17 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
             return new IrradianceNode(this.ddgiIrradianceNode);
         }
         return super.setupLightMap(builder);
+    }
+
+    // Specular GI: feed the DDGI radiance LightingNode (set by patchMaterials as
+    // ddgiSpecularNode) into the standard environment/radiance slot so the GGX
+    // specular BRDF consumes probe radiance like an env map. Falls back to the
+    // material's own env map when no DDGI specular node is assigned.
+    setupEnvironment(builder) {
+        if (this.ddgiSpecularNode) {
+            return this.ddgiSpecularNode;
+        }
+        return super.setupEnvironment(builder);
     }
 
     /**
@@ -273,6 +285,7 @@ export class DDGIMeshStandardNodeMaterial extends MeshStandardNodeMaterial {
     copy(source) {
         super.copy(source);
         this.ddgiIrradianceNode = source.ddgiIrradianceNode ?? null;
+        this.ddgiSpecularNode = source.ddgiSpecularNode ?? null;
         this.heightMap = source.heightMap ?? null;
         this.pomEnabled = !!source.pomEnabled;
         this.pomIntensity = source.pomIntensity ?? 0.04;

@@ -493,6 +493,24 @@ main {
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
+#taa-indicator {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 50;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font: 600 11px/1.2 ui-monospace, monospace;
+  letter-spacing: 0.04em;
+  color: #d8e0e8;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  pointer-events: none;
+  user-select: none;
+}
+#taa-indicator.taa-on { color: #7CFC9A; border-color: rgba(124, 252, 154, 0.4); }
+#taa-indicator.taa-off { color: #ff9b8a; border-color: rgba(255, 155, 138, 0.4); }
+
 #canvas-container.drag-active {
   border-color: rgba(0, 102, 255, 0.75);
   box-shadow: 0 0 0 1px rgba(0, 102, 255, 0.45), 0 0 28px rgba(0, 102, 255, 0.2);

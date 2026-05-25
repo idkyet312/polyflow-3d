@@ -37,6 +37,7 @@ export function createDDGIManager() {
         hysteresis: 0.92,
         normalBias: 0.12,
         intensity: 3.18,
+        specularIntensity: 0,
         debugProbeIndex: 0,
         irradianceAtlas: null,
         atlasProbeCount: 0,
@@ -85,6 +86,14 @@ export function createDDGIManager() {
         });
     }
 
+    // Recreate the sampler AND reapply the persisted specular GI intensity (the
+    // sampler holds the uSpecIntensity uniform, so a fresh one resets to 0).
+    function rebuildSampler() {
+        state.sampler = createSampler();
+        state.sampler.setSpecularIntensity?.(state.specularIntensity || 0);
+        return state.sampler;
+    }
+
     function init({ scene, renderer, camera, getDirectionalLight }) {
         state.scene = scene;
         state.renderer = renderer;
@@ -93,7 +102,7 @@ export function createDDGIManager() {
         state.grid = createProbeGrid({ dims: DEFAULT_GRID_DIMS, cellSize: DEFAULT_CELL_SIZE });
         state.debug = createDDGIDebug({ scene, layer: DDGI_CAPTURE_LAYER });
         ensureAtlasForGrid();
-        state.sampler = createSampler();
+        rebuildSampler();
         state._implicitVolume = {
             gridDims: { ...DEFAULT_GRID_DIMS },
             cellSize: DEFAULT_CELL_SIZE,
@@ -119,7 +128,7 @@ export function createDDGIManager() {
         state.probeInitialized = new Uint8Array(count);
         state.atlasNeedsClear = true;
         _probePositions = Array.from({ length: count }, () => new THREE.Vector3());
-        state.sampler = createSampler();
+        rebuildSampler();
         recreateRTCompute();
     }
 
@@ -492,7 +501,15 @@ export function createDDGIManager() {
 
     function patchSceneMaterials(root, options) {
         if (!state.sampler) return;
-        patchMaterials(root || state.scene, state.sampler.node, options);
+        patchMaterials(root || state.scene, state.sampler.node, {
+            ...options,
+            specularNode: state.sampler.specularLightingNode || null,
+        });
+    }
+
+    function setSpecularIntensity(v) {
+        state.specularIntensity = Number.isFinite(v) ? v : 0;
+        state.sampler?.setSpecularIntensity?.(state.specularIntensity);
     }
 
     function setInjectionEnabled(v) {
@@ -509,7 +526,7 @@ export function createDDGIManager() {
     function setSolidTestEnabled(v) {
         const changed = state.solidTestEnabled !== !!v;
         state.solidTestEnabled = !!v;
-        if (changed) state.sampler = createSampler();
+        if (changed) rebuildSampler();
         state.sampler?.refreshUniforms();
         if (state.injectionEnabled) patchSceneMaterials(state.scene, { forceRebuild: changed });
     }
@@ -623,6 +640,7 @@ export function createDDGIManager() {
         setBakeEveryN,
         setProbesPerFrame,
         setIntensity,
+        setSpecularIntensity,
         setHysteresis,
         setNormalBias,
         getSnapshot,

@@ -65,7 +65,11 @@
       "Bash(curl -s \"http://localhost:5173/polyflow-3d/src/world/worldEnvSystem.js\" -o /dev/null -w \"served:%{http_code}\\\\n\")",
       "Bash(node --check src/app/wirePanelHandlers.js)",
       "Bash(node --check src/ui/mobileStartScreen.js)",
-      "Bash(node scripts/gen-pwa-icons.mjs)"
+      "Bash(node scripts/gen-pwa-icons.mjs)",
+      "Bash(xargs wc -l)",
+      "Bash(node scripts/check-architecture.mjs)",
+      "Bash(echo \"EXIT $?\")",
+      "Bash(echo \"ARCH $?\")"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"

@@ -198,7 +198,7 @@ export function wirePanelHandlers(opts) {
     worldEnvUiRefs?.masterOnBtn?.addEventListener('click', () => setWorldEnvMaster('on'));
     worldEnvUiRefs?.masterOffBtn?.addEventListener('click', () => setWorldEnvMaster('off'));
     worldEnvUiRefs?.masterPerfBtn?.addEventListener('click', () => setWorldEnvMaster('perf'));
-    worldEnvUiRefs?.masterCornellBtn?.addEventListener('click', () => setWorldEnvMaster('cornell'));
+    worldEnvUiRefs?.masterDebugOffBtn?.addEventListener('click', () => setWorldEnvMaster('debug-off'));
     worldEnvUiRefs?.resetBtn?.addEventListener('click', () => resetWorldEnvDefaults());
 
     wireToggle(worldEnvUiRefs?.skyOff, worldEnvUiRefs?.skyOn,
@@ -268,6 +268,20 @@ export function wirePanelHandlers(opts) {
     wireSlider(worldEnvUiRefs?.ssrThickness, 'ssr.thickness', (v) => { worldEnvState.ssr.thickness = v; });
     wireSlider(worldEnvUiRefs?.ssrQuality, 'ssr.quality', (v) => { worldEnvState.ssr.quality = v; });
 
+    wireToggle(worldEnvUiRefs?.probeOff, worldEnvUiRefs?.probeOn,
+        () => { worldEnvState.reflectionProbe.enabled = false; },
+        () => { worldEnvState.reflectionProbe.enabled = true; });
+    wireSlider(worldEnvUiRefs?.probeIntensity, 'reflectionProbe.intensity', (v) => { worldEnvState.reflectionProbe.intensity = v; });
+    wireSlider(worldEnvUiRefs?.probeRadius, 'reflectionProbe.radius', (v) => { worldEnvState.reflectionProbe.radius = v; });
+
+    wireToggle(worldEnvUiRefs?.volOff, worldEnvUiRefs?.volOn,
+        () => { worldEnvState.volumetric.enabled = false; },
+        () => { worldEnvState.volumetric.enabled = true; });
+    wireSlider(worldEnvUiRefs?.volDensity, 'volumetric.density', (v) => { worldEnvState.volumetric.density = v; });
+    wireSlider(worldEnvUiRefs?.volHeight, 'volumetric.heightFalloff', (v) => { worldEnvState.volumetric.heightFalloff = v; });
+    wireSlider(worldEnvUiRefs?.volSun, 'volumetric.sunIntensity', (v) => { worldEnvState.volumetric.sunIntensity = v; });
+    wireSlider(worldEnvUiRefs?.volAniso, 'volumetric.anisotropy', (v) => { worldEnvState.volumetric.anisotropy = v; });
+
     wireToggle(worldEnvUiRefs?.ssgiOff, worldEnvUiRefs?.ssgiOn,
         () => { worldEnvState.ssgi.enabled = false; },
         () => { worldEnvState.ssgi.enabled = true; });
@@ -290,6 +304,7 @@ export function wirePanelHandlers(opts) {
             worldEnvState.ddgi.probesPerFrame = worldEnvState.ddgi.bakeEveryN;
         }, (s) => parseInt(s, 10));
     wireSlider(worldEnvUiRefs?.ddgiIntensity, 'ddgi.intensity', (v) => { worldEnvState.ddgi.intensity = v; });
+    wireSlider(worldEnvUiRefs?.ddgiSpecular, 'ddgi.specularIntensity', (v) => { worldEnvState.ddgi.specularIntensity = v; });
     wireSlider(worldEnvUiRefs?.ddgiLightIntensity, 'ddgi.lightIntensity', (v) => { worldEnvState.ddgi.lightIntensity = v; });
     wireToggle(worldEnvUiRefs?.ddgiProbeDebugOff, worldEnvUiRefs?.ddgiProbeDebugOn,
         () => { worldEnvState.ddgi.debugProbes = false; },

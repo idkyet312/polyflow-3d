@@ -101,9 +101,23 @@ export function createWorldEnvSystem({
         // on by default. intensity 0..1 = how strongly AO darkens (1 = full).
         ssao: { enabled: true, intensity: 0.85, radius: 0.5, samples: 16, thickness: 1.0, scale: 1.0 },
         ssr: { enabled: false, intensity: 0.95, maxDistance: 16.0, thickness: 0.65, quality: 0.85, resolutionScale: 1.0, blurQuality: 2 },
+        // Sphere reflection probe. Source = scene.environment PMREM, sphere-
+        // parallax corrected so reflections track local geometry. Doubles as
+        // the SSR fallback: where the screen-space ray misses (off-screen/sky),
+        // the probe fills in instead of reflections vanishing. center/radius
+        // wrap the playable area; intensity scales the contribution.
+        reflectionProbe: { enabled: false, intensity: 1.0, radius: 40.0, centerX: 0, centerY: 2, centerZ: 0 },
         ssgi: { enabled: false, giIntensity: 2.0, aoIntensity: 1.0, radius: 8.0, thickness: 0.6, sliceCount: 1, stepCount: 8 },
         fog: { enabled: true, density: 0.012, opacity: 0.055 },
-        ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
+        // Analytic volumetric lighting (post pass). Directional sun in-scatter +
+        // exponential height fog. Distinct from `fog` (legacy billboard sheets).
+        // Off by default; opt-in. anisotropy = forward-scatter (god-ray glow).
+        volumetric: {
+            enabled: false, density: 0.02, heightFalloff: 0.08, baseHeight: 0.0,
+            sunIntensity: 1.2, anisotropy: 0.72, maxOpacity: 0.85, intensity: 1.0,
+            fogColor: 0x9fb2c8, sunColor: 0xfff0d8,
+        },
+        ddgi: { enabled: true, liveBake: true, bakeEveryN: 4, probesPerFrame: 4, intensity: 12.0, specularIntensity: 0.0, lightIntensity: 0.35, debugProbes: false, rayDebug: false, contributionView: false, solidTest: false },
         // Shadow tuning is global across point/spot/directional lights so the
         // user has one knob to fight self-shadow seams scene-wide instead of
         // hunting per-light.
@@ -203,18 +217,24 @@ export function createWorldEnvSystem({
         const postProcessing = getPostProcessing();
         const postProcessNodes = getPostProcessNodes();
         if (!postProcessing || !postProcessNodes) return;
-        const { sceneColor, bloomNode, aoOutput, ssgiOutput, traaNode, traaSsrNode, ssrNode } = postProcessNodes;
+        const { sceneColor, sceneDepth, bloomNode, aoOutput, ssgiOutput, traaNode, traaSsrNode, traaSsrProbeNode, ssrNode, ssrProbeNode, volumetric } = postProcessNodes;
         const renderData = getPostProcessRenderData?.();
         const perf = isPerfModeEnabled();
         const aaEnabled = !!(worldEnvState.aa?.enabled && !perf);
         const taaEnabled = !!(aaEnabled && traaNode);
         const ssrEnabled = !!(worldEnvState.ssr?.enabled && !perf && ssrNode);
+        // Reflection probe = SSR's off-screen fallback. Only meaningful when SSR
+        // is active (it reuses SSR's G-buffer + hit mask). probeEnabled gates
+        // swapping the plain SSR add for the probe-composited add.
+        const probeEnabled = !!(worldEnvState.reflectionProbe?.enabled && ssrEnabled && ssrProbeNode);
         if (renderData?.taa) {
             if (renderData.taa.enabled !== taaEnabled) renderData.taa.resetHistory?.();
             renderData.taa.enabled = taaEnabled;
         }
         if (renderData?.ssr) renderData.ssr.enabled = ssrEnabled;
+        if (renderData?.reflectionProbe) renderData.reflectionProbe.enabled = probeEnabled;
         applySSRSettings();
+        applyReflectionProbeSettings();
         if (!shouldUsePostProcessingPipeline()) {
             postProcessing.outputNode = sceneColor;
             return;
@@ -222,7 +242,11 @@ export function createWorldEnvSystem({
         // AO multiplies the lit color FIRST (darkens creases/contacts), then
         // bloom is added on top so emissive highlights aren't dimmed by AO.
         // intensity 0..1 lerps between "no AO" (1.0) and the raw AO factor.
-        let litColor = taaEnabled ? (ssrEnabled && traaSsrNode ? traaSsrNode : traaNode) : sceneColor;
+        let litColor = taaEnabled
+            ? (ssrEnabled
+                ? (probeEnabled && traaSsrProbeNode ? traaSsrProbeNode : traaSsrNode)
+                : traaNode)
+            : sceneColor;
         if (worldEnvState.ssao?.enabled && !perf && aoOutput) {
             const k = float(worldEnvState.ssao.intensity ?? 1.0);
             const aoFactor = mix(float(1.0), aoOutput.r, k);
@@ -235,7 +259,17 @@ export function createWorldEnvSystem({
                 .add(vec4(ssgiOutput.rgb, 0));
         }
         if (ssrEnabled && !taaEnabled) {
-            outputNode = outputNode.add(ssrNode);
+            outputNode = outputNode.add(probeEnabled && ssrProbeNode ? ssrProbeNode : ssrNode);
+        }
+        // Volumetric lighting / height fog wraps the lit color BEFORE bloom so
+        // bright sun in-scatter blooms. Uses the new analytic node (directional
+        // scattering), distinct from the legacy billboard-sheet fog controller.
+        const volEnabled = !!(worldEnvState.volumetric?.enabled && !perf && volumetric && sceneDepth);
+        const renderDataVol = getPostProcessRenderData?.();
+        if (renderDataVol?.volumetric) renderDataVol.volumetric.enabled = volEnabled;
+        if (volEnabled) {
+            applyVolumetricSettings();
+            outputNode = volumetric.build(outputNode, sceneDepth);
         }
         if (aaEnabled && !taaEnabled) {
             outputNode = fxaa(outputNode);
@@ -278,6 +312,40 @@ export function createWorldEnvSystem({
         node.quality.value = Math.max(0, Math.min(1, s.quality ?? 0.5));
         node.resolutionScale = Math.max(0.25, Math.min(1, s.resolutionScale ?? 0.75));
         node.blurQuality.value = Math.max(1, Math.min(3, Math.round(s.blurQuality ?? 2)));
+    }
+
+    function applyReflectionProbeSettings() {
+        const probe = getPostProcessNodes()?.reflectionProbe;
+        const s = worldEnvState.reflectionProbe || WORLD_ENV_DEFAULTS.reflectionProbe;
+        if (!probe || !s) return;
+        probe.setBounds({ x: s.centerX ?? 0, y: s.centerY ?? 2, z: s.centerZ ?? 0 }, s.radius ?? 40);
+        probe.setIntensity(s.intensity ?? 1.0);
+    }
+
+    function applyVolumetricSettings() {
+        const vol = getPostProcessNodes()?.volumetric;
+        const s = worldEnvState.volumetric || WORLD_ENV_DEFAULTS.volumetric;
+        if (!vol || !s) return;
+        vol.setParams({
+            density: s.density,
+            heightFalloff: s.heightFalloff,
+            baseHeight: s.baseHeight,
+            sunIntensity: s.sunIntensity,
+            anisotropy: s.anisotropy,
+            maxOpacity: s.maxOpacity,
+            intensity: s.intensity,
+        });
+        if (Number.isFinite(s.fogColor)) vol.setColors({ fog: s.fogColor });
+        if (Number.isFinite(s.sunColor)) vol.setColors({ sun: s.sunColor });
+        // Sun direction = toward the sun = (light world pos − target). The fog
+        // node normalizes; clone to avoid mutating the light's vectors.
+        const sun = getMainDirectionalLight?.();
+        if (sun?.position?.clone) {
+            sun.updateMatrixWorld?.();
+            const dir = sun.position.clone();
+            if (sun.target?.position) dir.sub(sun.target.position);
+            vol.setSunDirection(dir);
+        }
     }
 
     function applyWorldEnvState({ persist = true, switchSky = true } = {}) {
@@ -372,6 +440,8 @@ export function createWorldEnvSystem({
         ddgi?.setLiveBake?.(s.ddgi.liveBake);
         ddgi?.setBakeEveryN?.(s.ddgi.bakeEveryN ?? s.ddgi.probesPerFrame);
         ddgi?.setIntensity?.(s.ddgi.intensity);
+        // Specular GI off in game-mode levels (DDGI itself is disabled there).
+        ddgi?.setSpecularIntensity?.(runtimeDdgiEnabled ? (s.ddgi.specularIntensity ?? 0) : 0);
         ddgi?.setDebugVisible?.(s.ddgi.debugProbes);
         ddgi?.setContributionViewEnabled?.(runtimeDdgiEnabled && s.ddgi.contributionView);
         ddgi?.setSolidTestEnabled?.(runtimeDdgiEnabled && s.ddgi.solidTest);
@@ -456,6 +526,18 @@ export function createWorldEnvSystem({
             setSlider(worldEnvUiRefs.ssrThickness, worldEnvUiRefs.ssrThicknessValue, s.ssr.thickness, 2);
             setSlider(worldEnvUiRefs.ssrQuality, worldEnvUiRefs.ssrQualityValue, s.ssr.quality, 2);
         }
+        if (s.reflectionProbe) {
+            setToggle(worldEnvUiRefs.probeOff, worldEnvUiRefs.probeOn, s.reflectionProbe.enabled);
+            setSlider(worldEnvUiRefs.probeIntensity, worldEnvUiRefs.probeIntensityValue, s.reflectionProbe.intensity, 2);
+            setSlider(worldEnvUiRefs.probeRadius, worldEnvUiRefs.probeRadiusValue, s.reflectionProbe.radius, 0);
+        }
+        if (s.volumetric) {
+            setToggle(worldEnvUiRefs.volOff, worldEnvUiRefs.volOn, s.volumetric.enabled);
+            setSlider(worldEnvUiRefs.volDensity, worldEnvUiRefs.volDensityValue, s.volumetric.density, 3);
+            setSlider(worldEnvUiRefs.volHeight, worldEnvUiRefs.volHeightValue, s.volumetric.heightFalloff, 3);
+            setSlider(worldEnvUiRefs.volSun, worldEnvUiRefs.volSunValue, s.volumetric.sunIntensity, 2);
+            setSlider(worldEnvUiRefs.volAniso, worldEnvUiRefs.volAnisoValue, s.volumetric.anisotropy, 2);
+        }
 
         setToggle(worldEnvUiRefs.ssgiOff, worldEnvUiRefs.ssgiOn, s.ssgi.enabled);
 
@@ -468,6 +550,7 @@ export function createWorldEnvSystem({
         if (worldEnvUiRefs.ddgiBakeEveryN) worldEnvUiRefs.ddgiBakeEveryN.value = s.ddgi.bakeEveryN;
         if (worldEnvUiRefs.ddgiBakeEveryNValue) worldEnvUiRefs.ddgiBakeEveryNValue.textContent = String(s.ddgi.bakeEveryN);
         setSlider(worldEnvUiRefs.ddgiIntensity, worldEnvUiRefs.ddgiIntensityValue, s.ddgi.intensity, 16);
+        setSlider(worldEnvUiRefs.ddgiSpecular, worldEnvUiRefs.ddgiSpecularValue, s.ddgi.specularIntensity ?? 0, 2);
         setSlider(worldEnvUiRefs.ddgiLightIntensity, worldEnvUiRefs.ddgiLightIntensityValue, s.ddgi.lightIntensity, 2);
         setToggle(worldEnvUiRefs.ddgiProbeDebugOff, worldEnvUiRefs.ddgiProbeDebugOn, s.ddgi.debugProbes);
         setToggle(worldEnvUiRefs.ddgiRayDebugOff, worldEnvUiRefs.ddgiRayDebugOn, s.ddgi.rayDebug);
@@ -564,9 +647,21 @@ export function createWorldEnvSystem({
             s.fog.enabled = false;
             s.ddgi.enabled = false;
             if (s.renderResolution) s.renderResolution.enabled = false;
-        } else if (mode === 'cornell') {
-            applyCornellTestPreset();
-            return;
+        } else if (mode === 'debug-off') {
+            // Basic rendering only: kill EVERY post-FX / GI / shadow effect so the
+            // pipeline bypasses to a plain renderer.render (no offscreen passes).
+            // Base lighting (sky/ambient/hemi/sun) stays on so the scene is lit.
+            s.aa.enabled = false;
+            s.bloom.enabled = false;
+            if (s.ssao) s.ssao.enabled = false;
+            if (s.ssr) s.ssr.enabled = false;
+            if (s.reflectionProbe) s.reflectionProbe.enabled = false;
+            s.ssgi.enabled = false;
+            if (s.volumetric) s.volumetric.enabled = false;
+            s.fog.enabled = false;
+            s.ddgi.enabled = false;
+            s.shadows.enabled = false;
+            if (s.renderResolution) s.renderResolution.enabled = false;
         }
         applyWorldEnvState();
     }
