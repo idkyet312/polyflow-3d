@@ -343,10 +343,9 @@ export function isTransformControlSphereHit(event, { mode = null } = {}) {
         return false;
     }
 
-    const helper = transformControl.getHelper?.() ?? null;
-    if (helper && helper.visible === false) {
-        return false;
-    }
+    // NOTE: the native helper is intentionally kept invisible (we draw a custom
+    // gizmo instead), so we do NOT gate on helper.visible here — the gizmo is
+    // "showing" whenever transformControl has an attached object (checked above).
 
     const rect = renderer.domElement.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
@@ -362,10 +361,13 @@ export function isTransformControlSphereHit(event, { mode = null } = {}) {
 
     const activeMode = transformControl.getMode?.() ?? 'translate';
     const cameraDistance = camera.position.distanceTo(gizmoCenter);
+    // Rotate must enclose the full ring sphere (rings reach ~0.7 of the gizmo
+    // screen-scale), so its block radius is large enough that clicks anywhere
+    // inside/on the rings never fall through to actor selection.
     const modeScale = activeMode === 'scale'
         ? 1.15
         : activeMode === 'rotate'
-            ? 1.35
+            ? 2.5
             : 1.5;
     const sphereRadius = Math.max(0.8, cameraDistance * 0.085 * (transformControl.size || 1) * modeScale);
     const distanceToRay = Math.sqrt(raycaster.ray.distanceSqToPoint(gizmoCenter));

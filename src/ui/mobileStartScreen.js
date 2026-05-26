@@ -1,7 +1,26 @@
 // Mobile game launcher + pause menu. Kept outside runtime.js so the entry
 // stays under the architecture line cap.
 
+import { getPlaytimeSeconds, formatPlaytime, resetPlaytime } from '../gameplay/playtime.js';
+import { getAwards, resetAwards } from '../gameplay/awards.js';
+
 const MOBILE_GAME_LEVEL_IDS = ['doomArena', 'drugTycoon', 'shootingSim', 'doomTest', 'soccerField'];
+
+// localStorage keys to nuke when the per-game "Reset progress" button fires.
+// Anything not in this map just gets its playtime + awards wiped.
+const GAME_SAVE_KEYS = {
+    drugTycoon: ['polyflow.drugTycoon.save.v1'],
+    shootingSim: ['polyflow.shootingSim.best.v1'],
+};
+
+// Picker-button id → in-game sampleType. They almost always match; soccer is
+// the odd one (picker says 'soccerField', the level userData says
+// 'soccerTargetField'). Used to look up playtime + awards by the same key the
+// trackers were ticked with.
+const PICKER_ID_TO_SAMPLE_TYPE = {
+    soccerField: 'soccerTargetField',
+};
+const sampleKeyFor = (pickerId) => PICKER_ID_TO_SAMPLE_TYPE[pickerId] || pickerId;
 
 const FALLBACK_GAME_INFO = {
     doomArena: {
@@ -117,6 +136,21 @@ export function setupMobileStartScreen(deps) {
 
     gameList?.addEventListener('click', (event) => {
         const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+        // Reset button: confirm, wipe progress for this game, re-render. Do
+        // NOT fall through to the launch handler.
+        const resetBtn = target?.closest?.('.mobile-game-reset');
+        const resetId = resetBtn?.dataset?.resetId;
+        if (resetId) {
+            event.stopPropagation();
+            const label = resetBtn.closest('.mobile-game-row')?.querySelector('.mobile-game-label')?.textContent || resetId;
+            const ok = (typeof confirm === 'function')
+                ? confirm(`Reset all progress for ${label}? This clears the save, playtime, and awards. This cannot be undone.`)
+                : true;
+            if (!ok) return;
+            resetGameProgress(resetId);
+            renderGameList(gameList);
+            return;
+        }
         const button = target?.closest?.('.mobile-game-button');
         const levelId = button?.dataset?.levelId;
         if (!levelId) return;
@@ -264,14 +298,65 @@ function renderGameList(gameList) {
     if (!gameList) return;
     const fragment = document.createDocumentFragment();
     getMobileGameOptions().forEach(({ id, label }) => {
+        // Row wrapper — keeps the launcher button and the smaller reset button
+        // visually distinct but on the same line.
+        const row = document.createElement('div');
+        row.className = 'mobile-game-row';
+        row.style.cssText = 'display:flex;align-items:stretch;gap:8px;width:100%;';
+
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'mobile-game-button';
         button.dataset.levelId = id;
-        button.textContent = label;
-        fragment.appendChild(button);
+        button.style.cssText = 'flex:1 1 auto;display:flex;flex-direction:column;align-items:flex-start;gap:4px;text-align:left;';
+
+        const sampleKey = sampleKeyFor(id);
+        const playtime = getPlaytimeSeconds(sampleKey);
+        const { unlocked, total } = getAwards(sampleKey);
+        const meta = [];
+        if (playtime > 0) meta.push(`⏱ ${formatPlaytime(playtime)}`);
+        if (total > 0) meta.push(`🏅 ${unlocked} / ${total}`);
+        else meta.push('🏅 —');
+
+        button.innerHTML = `<span class="mobile-game-label">${label}</span>`
+            + `<span class="mobile-game-meta" style="font-size:12px;opacity:.7;font-weight:600;">${meta.join('  ·  ')}</span>`;
+        row.appendChild(button);
+
+        // Reset button — wipes that game's save + playtime + awards. Only
+        // shown if there's any progress to wipe (cleaner empty state).
+        if (playtime > 0 || unlocked > 0 || (GAME_SAVE_KEYS[id]?.length)) {
+            const reset = document.createElement('button');
+            reset.type = 'button';
+            reset.className = 'mobile-game-reset';
+            reset.dataset.resetId = id;
+            reset.title = 'Reset all progress for this game';
+            reset.textContent = '↺ Reset';
+            reset.style.cssText = 'flex:0 0 auto;padding:0 14px;font-size:13px;font-weight:700;'
+                + 'background:rgba(60,20,20,0.85);color:#ffd6d6;border:1px solid rgba(255,120,120,0.35);'
+                + 'border-radius:8px;cursor:pointer;';
+            row.appendChild(reset);
+        }
+
+        fragment.appendChild(row);
     });
     gameList.replaceChildren(fragment);
+}
+
+// Wipe a single game's progress (localStorage saves + playtime + awards).
+function resetGameProgress(levelId) {
+    if (!levelId) return;
+    const keys = GAME_SAVE_KEYS[levelId] || [];
+    for (const k of keys) {
+        try { localStorage.removeItem(k); } catch (e) {}
+    }
+    const sampleKey = sampleKeyFor(levelId);
+    resetPlaytime(sampleKey);
+    resetAwards(sampleKey);
+    // Drug Tycoon owns a live `window.drugTycoon` state object; null it so a
+    // re-entry rebuilds from defaults instead of resurrecting the cleared save.
+    if (levelId === 'drugTycoon' && typeof window !== 'undefined') {
+        try { delete window.drugTycoon; } catch (e) { window.drugTycoon = undefined; }
+    }
 }
 
 function syncMobileQualityButtons() {

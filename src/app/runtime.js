@@ -27,6 +27,7 @@ import {
 import { createDrivableCarVisual } from '../vehicle/visual.js';
 import { createVehicleFx } from '../vehicle/fx.js';
 import { createCombatFx } from '../gameplay/combatFx.js';
+import { unlockAward as _unlockAward } from '../gameplay/awards.js';
 import { createHeldWeapons } from '../gameplay/heldWeapons.js';
 import { createSceneBundle } from '../world/sceneBundle.js';
 import { createLevels } from '../world/levels.js';
@@ -146,6 +147,10 @@ import { createFrameLoop } from './frameLoop.js';
 import { createInputHandlers } from './inputHandlers.js';
 import { setupPostProcessing } from './postProcessingSetup.js';
 import { createWorldEnvUiRefs } from './worldEnvUiRefs.js';
+import { createShadowTuning } from './shadowTuning.js';
+import { createHudBridge } from './hudBridge.js';
+import { createShadowDebug } from './shadowDebug.js';
+import { createActorCore } from './actorCore.js';
 import { wirePanelHandlers } from './wirePanelHandlers.js';
 import { createLevelStateSystem } from '../gameplay/levelStateSystem.js';
 import { createWorldEnvSystem } from '../world/worldEnvSystem.js';
@@ -185,16 +190,11 @@ import { createRogueWaves } from '../gameplay/rogueWaves.js';
 import { createDrugTycoon } from '../gameplay/drugTycoon.js';
 import { createShootingSim } from '../gameplay/shootingSim.js';
 import {
-    AHUD,
     installUePrototypeMethods,
     buildUeContext,
     detectsUeLifecycle,
-    UButtonWidget,
-    UImageWidget,
-    UProgressBarWidget,
-    UTextWidget,
-    UUserWidget,
 } from '../scripting/ueApi.js';
+// AHUD + U*Widget classes moved to ./hudBridge.js along with the HUD bridge.
 import {
     SoundGeneratorAudioListener,
     EngineSoundGenerator as WasmEngineSoundGenerator,
@@ -308,6 +308,7 @@ import {
     ensureScriptHandles,
     getActorByBodyId,
 } from '../scripting/objectEvents.js';
+import { installGizmoAxisPicker } from '../scripting/gizmoAxisPicker.js';
 import {
     setupDebugConsole,
     pushTimingSample,
@@ -423,140 +424,12 @@ import {
 installUePrototypeMethods();
 
 
-// Global widget manager instance
+// Global widget manager instance. The Unreal-style HUD bridge
+// (window.WidgetAPI, window.UnrealWidgetAPI, getRuntimeHud,
+// createExampleWidgets) is extracted to ./hudBridge.js and instantiated
+// after the playerCombat block below — it reads this `widgetManager` live.
 let widgetManager;
-let runtimeHud;
 
-// Widget API functions (call these from Three.js commands)
-window.WidgetAPI = {
-    createWidget: (type, config) => {
-        if (!widgetManager) return null;
-        return widgetManager.createWidget(type, config);
-    },
-
-    updateWidget: (id, updates) => {
-        if (!widgetManager) return false;
-        return widgetManager.updateWidget(id, updates);
-    },
-
-    showWidget: (id, visible) => {
-        if (!widgetManager) return false;
-        return widgetManager.showWidget(id, visible);
-    },
-
-    removeWidget: (id) => {
-        if (!widgetManager) return false;
-        return widgetManager.removeWidget(id);
-    },
-
-    setWidgetPosition: (id, position, space) => {
-        if (!widgetManager) return false;
-        return widgetManager.setWidgetPosition(id, position, space);
-    },
-
-    setWidgetScale: (id, scale) => {
-        if (!widgetManager) return false;
-        return widgetManager.setWidgetScale(id, scale);
-    },
-
-    getWidget: (id) => {
-        if (!widgetManager) return null;
-        return widgetManager.getWidget(id);
-    },
-
-    getAllWidgets: () => {
-        if (!widgetManager) return [];
-        return widgetManager.getAllWidgets();
-    }
-};
-
-function getRuntimeHud() {
-    if (!runtimeHud) {
-        runtimeHud = new AHUD({ widgetApi: window.WidgetAPI });
-    }
-    return runtimeHud;
-}
-window.UnrealWidgetAPI = {
-    AHUD,
-    UUserWidget,
-    UTextWidget,
-    UImageWidget,
-    UProgressBarWidget,
-    UButtonWidget,
-    CreateWidget: (WidgetClass = UUserWidget, config = {}) => getRuntimeHud().CreateWidget(WidgetClass, config),
-    GetHUD: () => getRuntimeHud(),
-};
-
-// Example widget creation function
-function createExampleWidgets() {
-    if (!widgetManager) return;
-
-    const hud = getRuntimeHud();
-    const visible = !!gameplay.active;
-
-    const scoreWidget = hud.CreateWidget(UTextWidget, {
-        Text: 'Score: 0',
-        fontSize: 20,
-        color: '#ffff00',
-        backgroundColor: 'rgba(0, 0, 0, 0.7)',
-        position: { x: 0.16, y: 0.9 },
-        visible,
-    });
-    scoreWidget.AddToViewport(20);
-
-    const healthBar = hud.CreateWidget(UProgressBarWidget, {
-        Percent: gameplay.health,
-        width: 200,
-        height: 16,
-        fillColor: gameplay.health > 0.35 ? '#00ff66' : '#ff3b30',
-        backgroundColor: 'rgba(5,10,12,0.88)',
-        borderColor: 'rgba(0,0,0,0.75)',
-        borderWidth: '1px',
-        borderRadius: '3px',
-        position: { x: 0.16, y: 0.78 },
-        visible,
-    });
-    healthBar.AddToViewport(20);
-
-    const healthText = hud.CreateWidget(UTextWidget, {
-        Text: 'Health: 100%',
-        fontSize: 16,
-        color: '#ffffff',
-        backgroundColor: 'rgba(0, 0, 0, 0.7)',
-        position: { x: 0.16, y: 0.765 },
-        visible,
-    });
-    healthText.AddToViewport(20);
-
-    const speedWidget = hud.CreateWidget(UTextWidget, {
-        Text: 'Speed: 0 km/h',
-        fontSize: 16,
-        color: '#00ffff',
-        backgroundColor: 'rgba(0, 0, 0, 0.7)',
-        position: { x: 0.16, y: 0.7 },
-        visible,
-    });
-    speedWidget.AddToViewport(20);
-
-    window.exampleWidgets = {
-        score: scoreWidget,
-        health: healthBar,
-        healthText,
-        speed: speedWidget,
-    };
-    window.gameHud = hud;
-    window.gameScore = 0;
-    setPlayerHealth(window.playerHealth ?? 1);
-
-    if (window.DEBUG_WIDGET_API) {
-        console.log('Example widgets created:', window.exampleWidgets);
-        console.log('Widget API available at window.WidgetAPI');
-        console.log('Unreal widget API available at window.UnrealWidgetAPI');
-        console.log('Example usage:');
-        console.log('  WidgetAPI.createWidget("text", {text: "Hello!", position: {x: 0.5, y: 0.5}})');
-        console.log('  UnrealWidgetAPI.CreateWidget(UTextWidget, { Text: "Hello HUD" }).AddToViewport(25)');
-    }
-}
 const LIGHT_ACTOR_KINDS = new Set(['pointLight', 'spotLight', 'rectLight']);
 
 function isLightActorKind(kind = '') {
@@ -684,6 +557,22 @@ const _worldEnvSystem = createWorldEnvSystem({
 const WORLD_ENV_DEFAULTS = _worldEnvSystem.WORLD_ENV_DEFAULTS;
 const worldEnvState = _worldEnvSystem.getWorldEnvState();
 const resetTaaHistory = _worldEnvSystem.resetTaaHistory;
+// Shadow + POM scene-tuning helpers (extracted to ./shadowTuning.js). Live
+// scene/renderer read via core; worldEnvState + perfModeEnabled passed as
+// getters (both mutate/reassign after this point), setMainLightCSM is a
+// hoisted function decl defined further down. Instantiated here so all five
+// helpers exist before the first invocation in spawnLightActor (~init time).
+const {
+    requestLightShadowRefresh,
+    configurePointLightShadow,
+    requestScenePointLightShadowRefresh,
+    applyPomTuningToScene,
+    applyShadowTuningToScene,
+} = createShadowTuning({
+    getWorldEnvState: () => worldEnvState,
+    isPerfModeEnabled: () => perfModeEnabled,
+    setMainLightCSM: (...a) => setMainLightCSM(...a),
+});
 // Per-frame dynamic light culler (keeps only the N most important point/spot
 // lights lit). Driven from the frame loop; configured from worldEnvState.
 const lightCull = createLightCull();
@@ -714,7 +603,7 @@ const {
     stopObjectAnimations,
     updateObjectAnimations,
 } = createObjectLifecycle({ animationMixers });
-const actorCoreSyncState = new Map();
+// actorCoreSyncState moved into the createActorCore() factory closure (./actorCore.js).
 const MODEL_TARGET_MAX_DIMENSION = 12;
 const PROP_TARGET_MAX_DIMENSION = 2.35;
 const VEHICLE_CUSTOM_IMPORT_VALUE = '__custom_import__';
@@ -1047,6 +936,18 @@ const shadowDebugState = {
     lastLightCount: 0,
     autoApplyIntervalMs: 500,
 };
+// Shadow-debug "force all scene meshes to shadow" tooling extracted to
+// ./shadowDebug.js. State + UI refs stay here (shared by-ref with the debug
+// console / panel handlers); the helpers read them via getters. scene/renderer
+// read live via core. Bound here so all six helpers exist before init calls them.
+const _shadowDebug = createShadowDebug({
+    getShadowDebugState: () => shadowDebugState,
+    getShadowDebugUiRefs: () => shadowDebugUiRefs,
+});
+const updateShadowDebugUi = _shadowDebug.updateShadowDebugUi;
+const forceAllSceneMeshShadows = _shadowDebug.forceAllSceneMeshShadows;
+const setForceAllSceneMeshShadowsEnabled = _shadowDebug.setForceAllSceneMeshShadowsEnabled;
+const tickForceAllSceneMeshShadows = _shadowDebug.tickForceAllSceneMeshShadows;
 const gameplay = {
     canPlay: true,
     active: false,
@@ -1815,6 +1716,19 @@ if (typeof window !== 'undefined') {
     queueMicrotask(() => { window.setPlayerHealth = setPlayerHealth; });
 }
 
+// Unreal-style HUD / widget bridge extracted to ./hudBridge.js. Owns the lazy
+// AHUD singleton, installs window.WidgetAPI + window.UnrealWidgetAPI (done in
+// the factory body), and builds the example HUD overlay. widgetManager is
+// read live (constructed later in init); gameplay + setPlayerHealth exist by
+// now. createExampleWidgets() is called from init after the manager is built.
+const _hudBridge = createHudBridge({
+    getWidgetManager: () => widgetManager,
+    gameplay,
+    setPlayerHealth,
+});
+const getRuntimeHud = _hudBridge.getRuntimeHud;
+const createExampleWidgets = _hudBridge.createExampleWidgets;
+
 // 'player:damaged' subscribers — each runs independently. Order doesn't
 // matter (no inter-handler reads). Hit feedback (flash + shake + sound)
 // runs first because the user expects the visceral cue before the
@@ -2422,6 +2336,15 @@ function addGameScore(amount) {
     const value = Number(amount) || 0;
     window.gameScore = (Number(window.gameScore) || 0) + value;
     window.exampleWidgets?.score?.SetText(`Score: ${Math.floor(window.gameScore)}`);
+    // Soccer awards — count goals scored (gameScore is the goal counter here).
+    if (value > 0 && core.currentMesh?.userData?.sampleType === 'soccerTargetField') {
+        const goals = Math.floor(Number(window.gameScore) || 0);
+        if (goals >= 1)  _unlockAward('soccerTargetField', 'goal1');
+        if (goals >= 5)  _unlockAward('soccerTargetField', 'goal5');
+        if (goals >= 10) _unlockAward('soccerTargetField', 'goal10');
+        if (goals >= 25) _unlockAward('soccerTargetField', 'goal25');
+        if (goals >= 50) _unlockAward('soccerTargetField', 'goal50');
+    }
 }
 if (typeof window !== 'undefined') {
     window.addGameScore = addGameScore;
@@ -2705,18 +2628,27 @@ function markDDGISkipCapture(object) {
     return object;
 }
 
-// Top-left HUD badge reflecting the EFFECTIVE Temporal AA state (off while the
-// gizmo is on screen). Only touches the DOM when the state actually changes.
+// Top-left HUD badge showing the gizmo's active transform axis (the axis being
+// hovered/dragged). Only touches the DOM when the label actually changes.
+const GIZMO_AXIS_LABEL = {
+    X: 'AXIS: X', Y: 'AXIS: Y', Z: 'AXIS: Z',
+    XY: 'AXIS: XY', YZ: 'AXIS: YZ', XZ: 'AXIS: XZ',
+    XYZ: 'AXIS: SCREEN', XYZE: 'AXIS: TRACKBALL', E: 'AXIS: VIEW',
+};
 let _taaIndicatorEl = null;
 let _taaIndicatorState = null;
-function updateTaaIndicator(on) {
-    if (_taaIndicatorState === on) return;
-    _taaIndicatorState = on;
+function updateGizmoAxisIndicator() {
+    const axis = transformControl?.object ? (transformControl.axis ?? null) : null;
+    const label = axis ? (GIZMO_AXIS_LABEL[axis] ?? `AXIS: ${axis}`) : '';
+    if (_taaIndicatorState === label) return;
+    _taaIndicatorState = label;
     if (!_taaIndicatorEl) _taaIndicatorEl = document.getElementById('taa-indicator');
     if (!_taaIndicatorEl) return;
-    _taaIndicatorEl.textContent = on ? 'TAA: ON' : 'TAA: OFF';
-    _taaIndicatorEl.classList.toggle('taa-on', on);
-    _taaIndicatorEl.classList.toggle('taa-off', !on);
+    _taaIndicatorEl.textContent = label;
+    const active = !!axis;
+    _taaIndicatorEl.classList.toggle('taa-on', active);
+    _taaIndicatorEl.classList.toggle('taa-off', !active);
+    _taaIndicatorEl.style.display = label ? '' : 'none';
 }
 
 function invalidateDDGI(reason, fastWarmupFrames = 2) {
@@ -3176,107 +3108,11 @@ function spawnDDGIVolumeActor({ userData = null, position = null, size = null, o
     return actor;
 }
 
-function requestLightShadowRefresh(light) {
-    if (!light?.castShadow || !light.shadow) return;
-    if (light.isPointLight && light.shadow.camera) {
-        light.shadow.camera.near = 0.1;
-        light.shadow.camera.far = Math.max(light.distance > 0 ? light.distance : 24, 0.5);
-        light.shadow.camera.updateProjectionMatrix?.();
-    }
-    light.shadow.needsUpdate = true;
-    if (renderer?.shadowMap) {
-        renderer.shadowMap.needsUpdate = true;
-    }
-}
-
-function configurePointLightShadow(light, opts = {}) {
-    if (!light?.isPointLight || !light.shadow) return light;
-    // Inherit any unspecified value from the global shadow tuning in
-    // worldEnvState so newly-spawned lights match the World Options panel
-    // without an extra apply pass. Callers that pass an explicit value still
-    // win — useful for the cornell preset which sets its own defaults.
-    const g = worldEnvState?.shadows ?? {};
-    const mapSize = Number.isFinite(opts.mapSize) ? opts.mapSize : (g.mapSize ?? 512);
-    const bias = Number.isFinite(opts.bias) ? opts.bias : (g.bias ?? 0.0005);
-    const normalBias = Number.isFinite(opts.normalBias) ? opts.normalBias : (g.normalBias ?? 0.02);
-    const radius = Number.isFinite(opts.radius) ? opts.radius : (g.radius ?? 2.5);
-    light.shadow.mapSize.set(mapSize, mapSize);
-    light.shadow.bias = bias;
-    light.shadow.radius = radius;
-    if ('normalBias' in light.shadow) light.shadow.normalBias = normalBias;
-    light.shadow.autoUpdate = false;
-    requestLightShadowRefresh(light);
-    return light;
-}
-
-function requestScenePointLightShadowRefresh(root = scene) {
-    root?.traverse?.((obj) => {
-        if (!obj?.isPointLight || !obj.castShadow) return;
-        requestLightShadowRefresh(obj);
-    });
-}
-
-// Walks the scene and stamps the World Options POM tuning onto every
-// DDGI-converted material. Materials without a heightMap stay inert; ones
-// with a heightMap get the global enabled flag plus live intensity update.
-// Quality changes trigger a TSL recompile via material.syncPomGraphIfStale().
-// Perf mode forces enabled=false regardless of user setting.
-function applyPomTuningToScene(tuning, root = scene) {
-    if (!tuning || !root?.traverse) return;
-    const wantEnabled = !!tuning.enabled && !perfModeEnabled;
-    const intensity = Math.max(0, Number.isFinite(tuning.intensity) ? tuning.intensity : 0.04);
-    const quality = tuning.quality || 'medium';
-
-    root.traverse((obj) => {
-        if (!obj.isMesh) return;
-        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
-        for (const m of mats) {
-            if (!m?.isDDGIMeshStandardNodeMaterial) continue;
-            // Don't force pomEnabled=true on materials that don't have a
-            // heightMap — the material's own rebuild path treats missing
-            // heightMap as "disabled" automatically, but flipping the flag
-            // anyway wastes a needsUpdate cycle.
-            const hasHeight = !!m.heightMap;
-            m.pomEnabled = wantEnabled && hasHeight;
-            m.pomQuality = quality;
-            m.setPomIntensity?.(intensity);
-            m.pomIntensity = intensity;
-            m.syncPomGraphIfStale?.();
-        }
-    });
-}
-
-// Walks the scene and stamps the World Options shadow tuning onto every
-// shadow-casting light. Point + spot + directional all share the same set of
-// shadow params so a single panel covers all three. bias/normalBias/radius
-// apply immediately. WebGPU shadow render targets cannot be resized safely
-// after allocation because RenderTarget.setSize() disposes textures that may
-// still be referenced by queued GPU work.
-function applyShadowTuningToScene(tuning, root = scene) {
-    if (!tuning || !root?.traverse) return;
-    const bias = Number.isFinite(tuning.bias) ? tuning.bias : 0.0005;
-    const normalBias = Number.isFinite(tuning.normalBias) ? tuning.normalBias : 0.02;
-    const radius = Math.max(0, Number.isFinite(tuning.radius) ? tuning.radius : 2.5);
-    const mapSize = Math.max(64, Math.min(4096, Number.isFinite(tuning.mapSize) ? (tuning.mapSize | 0) : 512));
-
-    root.traverse((obj) => {
-        if (!obj?.castShadow || !obj.shadow) return;
-        if (!obj.isPointLight && !obj.isSpotLight && !obj.isDirectionalLight) return;
-        obj.shadow.bias = bias;
-        if ('normalBias' in obj.shadow) obj.shadow.normalBias = normalBias;
-        obj.shadow.radius = radius;
-        if (!obj.shadow.map && (obj.shadow.mapSize.x !== mapSize || obj.shadow.mapSize.y !== mapSize)) {
-            obj.shadow.mapSize.set(mapSize, mapSize);
-        }
-        obj.shadow.needsUpdate = true;
-    });
-    if (renderer?.shadowMap) renderer.shadowMap.needsUpdate = true;
-
-    // Cascaded Shadow Maps on the sun light. Only when shadows are enabled;
-    // tuning.csm (default on) + tuning.cascades drive it.
-    const wantCSM = tuning.enabled !== false && tuning.csm !== false;
-    setMainLightCSM(wantCSM, Math.max(1, Math.min(4, (tuning.cascades | 0) || 3)));
-}
+// Shadow + POM scene-tuning helpers extracted to ./shadowTuning.js. The five
+// functions (requestLightShadowRefresh, configurePointLightShadow,
+// requestScenePointLightShadowRefresh, applyPomTuningToScene,
+// applyShadowTuningToScene) are bound from createShadowTuning() near the
+// worldEnvSystem setup above.
 
 function spawnLightActor(kind, { userData = null, position = null, scale = 8, includeScripts = true } = {}) {
     if (!scene || !camera) return null;
@@ -4160,113 +3996,10 @@ function setRayDebugEnabled(isEnabled) {
     }
 }
 
-function formatShadowDebugStatus() {
-    const lastPassSuffix = shadowDebugState.lastAppliedAt > 0
-        ? ` Last pass hit ${shadowDebugState.lastMeshCount} mesh${shadowDebugState.lastMeshCount === 1 ? '' : 'es'}, changed ${shadowDebugState.lastUpdatedCount}, armed ${shadowDebugState.lastLightCount} shadow light${shadowDebugState.lastLightCount === 1 ? '' : 's'}.`
-        : '';
-
-    if (shadowDebugState.forceAllMeshes) {
-        return `Auto force is on. New scene meshes get swept every ${Math.round(shadowDebugState.autoApplyIntervalMs)} ms.${lastPassSuffix}`;
-    }
-
-    if (shadowDebugState.lastAppliedAt > 0) {
-        return `Auto force is off.${lastPassSuffix}`;
-    }
-
-    return 'Auto force is off. Apply Now runs one scene-wide shadow pass without keeping it enabled.';
-}
-
-function updateShadowDebugUi() {
-    if (!shadowDebugUiRefs) return;
-
-    shadowDebugUiRefs.forceOffBtn?.classList.toggle('viewer-toggle-btn-active', !shadowDebugState.forceAllMeshes);
-    shadowDebugUiRefs.forceOnBtn?.classList.toggle('viewer-toggle-btn-active', shadowDebugState.forceAllMeshes);
-
-    if (shadowDebugUiRefs.status) {
-        shadowDebugUiRefs.status.textContent = formatShadowDebugStatus();
-    }
-}
-
-function isShadowForceExcludedObject(object) {
-    let current = object;
-    while (current) {
-        if (current.userData?.ignoreForcedSceneShadows) {
-            return true;
-        }
-        current = current.parent ?? null;
-    }
-
-    return object?.name === 'tire-skid-ribbon';
-}
-
-function forceAllSceneMeshShadows() {
-    if (!scene?.traverse) {
-        shadowDebugState.lastAppliedAt = performance.now();
-        shadowDebugState.lastMeshCount = 0;
-        shadowDebugState.lastUpdatedCount = 0;
-        shadowDebugState.lastLightCount = 0;
-        updateShadowDebugUi();
-        return {
-            meshCount: 0,
-            updatedCount: 0,
-            shadowLightCount: 0,
-        };
-    }
-
-    let meshCount = 0;
-    let updatedCount = 0;
-    let shadowLightCount = 0;
-
-    scene.traverse((object) => {
-        if (!object) return;
-
-        if (object.isMesh) {
-            if (isShadowForceExcludedObject(object)) {
-                return;
-            }
-
-            meshCount += 1;
-
-            if (!object.castShadow || !object.receiveShadow) {
-                updatedCount += 1;
-            }
-
-            object.castShadow = true;
-            object.receiveShadow = true;
-            return;
-        }
-
-        if (object.isDirectionalLight || object.isSpotLight || object.isPointLight) {
-            if (!object.castShadow) {
-                shadowLightCount += 1;
-            }
-            object.castShadow = true;
-        }
-    });
-
-    if (renderer?.shadowMap) {
-        renderer.shadowMap.enabled = true;
-    }
-
-    shadowDebugState.lastAppliedAt = performance.now();
-    shadowDebugState.lastMeshCount = meshCount;
-    shadowDebugState.lastUpdatedCount = updatedCount;
-    shadowDebugState.lastLightCount = shadowLightCount;
-    updateShadowDebugUi();
-
-    return {
-        meshCount,
-        updatedCount,
-        shadowLightCount,
-    };
-}
-
-function setForceAllSceneMeshShadowsEnabled(isEnabled) {
-    shadowDebugState.forceAllMeshes = !!isEnabled;
-    const result = shadowDebugState.forceAllMeshes ? forceAllSceneMeshShadows() : null;
-    updateShadowDebugUi();
-    return result;
-}
+// Shadow-debug helpers (formatShadowDebugStatus, updateShadowDebugUi,
+// isShadowForceExcludedObject, forceAllSceneMeshShadows,
+// setForceAllSceneMeshShadowsEnabled, tickForceAllSceneMeshShadows) extracted
+// to ./shadowDebug.js — bound from createShadowDebug() near shadowDebugState.
 
 function updatePerfModeUi() {
     if (!perfModeUiRefs) return;
@@ -4335,12 +4068,6 @@ const updateWorldEnvUi = _worldEnvSystem.updateWorldEnvUi;
 const setWorldEnvMaster = _worldEnvSystem.setWorldEnvMaster;
 const resetWorldEnvDefaults = _worldEnvSystem.resetWorldEnvDefaults;
 
-
-function tickForceAllSceneMeshShadows() {
-    if (!shadowDebugState.forceAllMeshes) return;
-    if ((performance.now() - shadowDebugState.lastAppliedAt) < shadowDebugState.autoApplyIntervalMs) return;
-    forceAllSceneMeshShadows();
-}
 
 // ──────────────────────────────────────────────────────────
 //  Physgun (GMod-style grab/push/pull/fling tool)
@@ -4470,98 +4197,26 @@ const isEditableElement = _isEditableElement;
 // === extracted: debugConsole (was lines 5985-6468 of original main.js) ===
 // === extracted: mobileControls (was lines 6469-6741 of original main.js) ===
 
-function getActorCoreInfo(actor) {
-    return actor?.userData?.actorCore ?? null;
-}
-
-function getActorCoreId(actor) {
-    const core = getActorCoreInfo(actor);
-    return core?.coreId || actor?.id || '';
-}
-
-function actorInheritsCore(actor) {
-    const core = getActorCoreInfo(actor);
-    return core?.inheritsRules === true && !!core.coreId && core.coreId !== actor?.id;
-}
-
-function getActorCoreSource(actor) {
-    const coreId = getActorCoreId(actor);
-    return coreId && coreId !== actor?.id ? getDynamicPropById(coreId) || actor : actor;
-}
-
-function serializeCoreVisualRules(actor) {
-    const mesh = getActorRenderObject(actor);
-    if (!mesh) return null;
-    return {
-        rootMaterial: serializeObjectMaterialState(mesh),
-        materialOverrides: serializeObjectMaterialOverrides(mesh),
-        components: serializeComponentTree(mesh),
-    };
-}
-
-function applyCoreVisualRulesToInstance(instanceActor, rules) {
-    const mesh = getActorRenderObject(instanceActor);
-    if (!mesh || !rules) return;
-    applyObjectMaterialState(mesh, rules.rootMaterial);
-    if (Array.isArray(rules.materialOverrides) && rules.materialOverrides.length > 0) {
-        applyObjectMaterialOverrides(mesh, rules.materialOverrides);
-    }
-    deserializeComponentTree(mesh, JSON.parse(JSON.stringify(rules.components || [])));
-    mesh.userData.hasMaterialOverrides = true;
-    mesh.updateMatrixWorld(true);
-    if (!gameplay.active) {
-        rebuildActorPhysics(instanceActor);
-    }
-}
-
-// Reused per-frame buckets for syncActorCoreInstances; module-scoped to avoid
-// per-frame allocation. Cleared at the top of each call.
-const _coreInstanceBuckets = new Map(); // coreId -> instance actor[]
-function syncActorCoreInstances() {
-    if (!sceneSystem?.actors?.size) return;
-
-    const buckets = _coreInstanceBuckets;
-    buckets.clear();
-
-    // Single pass: partition into cores (bucket keys) and instances (bucket values).
-    // Core actors get an empty bucket so we can prune stale entries below.
-    for (const actor of sceneSystem.actors) {
-        if (actorInheritsCore(actor)) {
-            const sourceId = getActorCoreSource(actor)?.id;
-            if (!sourceId) continue;
-            let list = buckets.get(sourceId);
-            if (!list) {
-                list = [];
-                buckets.set(sourceId, list);
-            }
-            list.push(actor);
-        } else if (!buckets.has(actor.id)) {
-            buckets.set(actor.id, null);
-        }
-    }
-
-    // Prune sync state for cores that no longer exist.
-    for (const coreId of actorCoreSyncState.keys()) {
-        if (!buckets.has(coreId)) actorCoreSyncState.delete(coreId);
-    }
-
-    // Apply rules per core that actually has instances linked to it.
-    for (const [coreId, linked] of buckets) {
-        if (!linked || linked.length === 0) continue;
-        const coreActor = getDynamicPropById(coreId);
-        if (!coreActor) continue;
-        const rules = serializeCoreVisualRules(coreActor);
-        if (!rules) continue;
-        const signature = JSON.stringify(rules);
-        const cached = actorCoreSyncState.get(coreId);
-        if (cached && cached.signature === signature) continue;
-        if (cached) cached.signature = signature;
-        else actorCoreSyncState.set(coreId, { signature });
-        for (let i = 0; i < linked.length; i++) {
-            applyCoreVisualRulesToInstance(linked[i], rules);
-        }
-    }
-}
+// Actor core/instance visual-inheritance system extracted to ./actorCore.js.
+// The signature cache + per-frame buckets are owned by the factory closure.
+// Instantiated here (right before _sceneActorUi, which consumes actorInheritsCore
+// + getActorCoreSource) so all aliases exist before any runtime call.
+const _actorCore = createActorCore({
+    gameplay,
+    getSceneSystem: () => sceneSystem,
+    getDynamicPropById: (...a) => getDynamicPropById(...a),
+    getActorRenderObject: (...a) => getActorRenderObject(...a),
+    rebuildActorPhysics: (...a) => rebuildActorPhysics(...a),
+    serializeObjectMaterialState: (...a) => serializeObjectMaterialState(...a),
+    serializeObjectMaterialOverrides: (...a) => serializeObjectMaterialOverrides(...a),
+    serializeComponentTree: (...a) => serializeComponentTree(...a),
+    applyObjectMaterialState: (...a) => applyObjectMaterialState(...a),
+    applyObjectMaterialOverrides: (...a) => applyObjectMaterialOverrides(...a),
+    deserializeComponentTree: (...a) => deserializeComponentTree(...a),
+});
+const actorInheritsCore = _actorCore.actorInheritsCore;
+const getActorCoreSource = _actorCore.getActorCoreSource;
+const syncActorCoreInstances = _actorCore.syncActorCoreInstances;
 
 
 // Scene-actor UI extracted to ../ui/sceneActorUi.js. Eager wiring (called
@@ -4716,6 +4371,7 @@ async function init() {
         const mesh = getActorRenderObject(actor);
         if (mesh && transformControl) transformControl.attach(mesh);
         transformControl?.setMode('translate');
+        updateCustomTransformGizmo();
         updateSceneActorDetailsUI();
     });
     document.getElementById('scene-actor-mode-rotate')?.addEventListener('click', () => {
@@ -4723,6 +4379,7 @@ async function init() {
         const mesh = getActorRenderObject(actor);
         if (mesh && transformControl) transformControl.attach(mesh);
         transformControl?.setMode('rotate');
+        updateCustomTransformGizmo();
         updateSceneActorDetailsUI();
     });
     document.getElementById('scene-actor-mode-scale')?.addEventListener('click', () => {
@@ -4730,6 +4387,7 @@ async function init() {
         const mesh = getActorRenderObject(actor);
         if (mesh && transformControl) transformControl.attach(mesh);
         transformControl?.setMode('scale');
+        updateCustomTransformGizmo();
         updateSceneActorDetailsUI();
     });
     document.getElementById('scene-actor-space-local')?.addEventListener('click', () => {
@@ -5073,6 +4731,7 @@ async function init() {
         if (blueprintState.active) {
             updateBlueprintDetailsUI();
         }
+        updateCustomTransformGizmo(); // refresh active-axis highlight live
         updateSceneActorDetailsUI();
     });
     transformControl.addEventListener('dragging-changed', (event) => {
@@ -5119,6 +4778,9 @@ async function init() {
     const customGizmoIdentityQuaternion = new THREE.Quaternion();
     const customGizmoShaftGeometry = new THREE.CylinderGeometry(0.012, 0.012, 1.0, 16);
     const customGizmoConeGeometry = new THREE.ConeGeometry(0.05, 0.16, 20);
+    const customGizmoRingGeometry = new THREE.TorusGeometry(0.7, 0.012, 12, 64);
+    const customGizmoScaleShaftGeometry = new THREE.CylinderGeometry(0.012, 0.012, 0.6, 16);
+    const customGizmoScaleBoxGeometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
     const hideNativeTransformControlMaterials = () => {
         transformHelper.traverse((node) => {
             if (!node.isMesh && !node.isLine) return;
@@ -5132,45 +4794,90 @@ async function init() {
         });
     };
     customTransformGizmo = new THREE.Group();
-    customTransformGizmo.name = 'CustomTransformTranslateGizmo';
+    customTransformGizmo.name = 'CustomTransformGizmo';
     customTransformGizmo.visible = false;
 
     const makeCustomGizmoMaterial = (color) => {
         // Lit standard material so the gizmo shades like the rest of the scene
-        // objects (tonemapped, fogged, depth-tested, shadowed). Emissive keeps
-        // the handles readable when a face is in shadow.
+        // objects (tonemapped, fogged, depth-tested, shadowed). Base color is
+        // MUTED (desaturated toward gray) when idle; when that axis is being
+        // manipulated we swap to the vivid color + ramp emissive (see highlight
+        // loop in updateCustomTransformGizmo).
+        const mutedColor = new THREE.Color(color).lerp(new THREE.Color(0x888888), 0.55);
+        const vividColor = new THREE.Color(color);
         const material = new THREE.MeshStandardMaterial({
-            color,
-            roughness: 0.5,
+            color: mutedColor.clone(),
+            roughness: 0.6,
             metalness: 0.0,
             emissive: color,
-            emissiveIntensity: 0.15,
+            emissiveIntensity: 0.05,
         });
         material.name = 'TransformGizmoLitMaterial';
+        material.userData.mutedColor = mutedColor;
+        material.userData.vividColor = vividColor;
         return material;
     };
 
+    // One sub-group per transform mode; only the active mode's group is shown.
+    const customGizmoTranslateGroup = new THREE.Group();
+    customGizmoTranslateGroup.name = 'CustomTranslateGizmo';
+    const customGizmoRotateGroup = new THREE.Group();
+    customGizmoRotateGroup.name = 'CustomRotateGizmo';
+    const customGizmoScaleGroup = new THREE.Group();
+    customGizmoScaleGroup.name = 'CustomScaleGizmo';
+    const customGizmoModeGroups = {
+        translate: customGizmoTranslateGroup,
+        rotate: customGizmoRotateGroup,
+        scale: customGizmoScaleGroup,
+    };
+    const customGizmoAxisMaterials = {}; // axis → shared material (all 3 modes)
+    const GIZMO_EMISSIVE_IDLE = 0.05;   // muted when idle
+    const GIZMO_EMISSIVE_ACTIVE = 1.4;  // vivid when that axis is manipulated
+
     for (const [axis, color] of Object.entries(GIZMO_AXIS_COLOR)) {
         const material = makeCustomGizmoMaterial(color);
-        const axisGroup = new THREE.Group();
-        axisGroup.name = `CustomTransform${axis}`;
-        axisGroup.rotation.set(...GIZMO_AXIS_ROTATION[axis]);
+        customGizmoAxisMaterials[axis] = material;
 
+        // --- Translate: shaft + cone arrowheads on both ends ---
+        const tAxis = new THREE.Group();
+        tAxis.name = `Translate${axis}`;
+        tAxis.rotation.set(...GIZMO_AXIS_ROTATION[axis]);
         const shaft = new THREE.Mesh(customGizmoShaftGeometry, material);
         shaft.name = `${axis}Shaft`;
-
         const positiveCone = new THREE.Mesh(customGizmoConeGeometry, material);
         positiveCone.name = `${axis}PositiveCone`;
         positiveCone.position.y = 0.58;
-
         const negativeCone = new THREE.Mesh(customGizmoConeGeometry, material);
         negativeCone.name = `${axis}NegativeCone`;
         negativeCone.position.y = -0.58;
         negativeCone.rotation.x = Math.PI;
+        tAxis.add(shaft, positiveCone, negativeCone);
+        customGizmoTranslateGroup.add(tAxis);
 
-        axisGroup.add(shaft, positiveCone, negativeCone);
-        customTransformGizmo.add(axisGroup);
+        // --- Rotate: a ring around each axis ---
+        const ring = new THREE.Mesh(customGizmoRingGeometry, material);
+        ring.name = `Rotate${axis}`;
+        // Torus lies in the XY plane (normal +Z). Orient its normal to the axis.
+        if (axis === 'X') ring.rotation.y = Math.PI / 2;
+        else if (axis === 'Y') ring.rotation.x = Math.PI / 2;
+        // Z: default orientation (normal already +Z)
+        customGizmoRotateGroup.add(ring);
+
+        // --- Scale: short shaft + box handle on the positive end ---
+        const sAxis = new THREE.Group();
+        sAxis.name = `Scale${axis}`;
+        sAxis.rotation.set(...GIZMO_AXIS_ROTATION[axis]);
+        const scaleShaft = new THREE.Mesh(customGizmoScaleShaftGeometry, material);
+        scaleShaft.name = `${axis}ScaleShaft`;
+        scaleShaft.position.y = 0.3;
+        const scaleBox = new THREE.Mesh(customGizmoScaleBoxGeometry, material);
+        scaleBox.name = `${axis}ScaleBox`;
+        scaleBox.position.y = 0.62;
+        sAxis.add(scaleShaft, scaleBox);
+        customGizmoScaleGroup.add(sAxis);
     }
+
+    customTransformGizmo.add(customGizmoTranslateGroup, customGizmoRotateGroup, customGizmoScaleGroup);
 
     customTransformGizmo.traverse((node) => {
         node.frustumCulled = false;
@@ -5185,14 +4892,32 @@ async function init() {
         if (!customTransformGizmo) return;
         hideNativeTransformControlMaterials();
         const object = transformControl?.object;
-        const shouldShow = !!(transformControl?.enabled && object && transformControl.mode === 'translate');
+        const mode = transformControl?.mode;
+        const shouldShow = !!(transformControl?.enabled && object && customGizmoModeGroups[mode]);
         customTransformGizmo.visible = shouldShow;
         transformHelper.visible = false;
+        // Show only the active mode's handles.
+        customGizmoTranslateGroup.visible = mode === 'translate';
+        customGizmoRotateGroup.visible = mode === 'rotate';
+        customGizmoScaleGroup.visible = mode === 'scale';
         if (!shouldShow) return;
+
+        // Brighten the axis currently being hovered/dragged. `axis` is one of
+        // X/Y/Z (single), XYZ/XYZE (combined center) or null (idle). Combined
+        // axes brighten all three.
+        const activeAxis = transformControl.axis;
+        for (const ax of ['X', 'Y', 'Z']) {
+            const mat = customGizmoAxisMaterials[ax];
+            if (!mat) continue;
+            const on = !!activeAxis && (activeAxis === ax || activeAxis.length > 1);
+            mat.emissiveIntensity = on ? GIZMO_EMISSIVE_ACTIVE : GIZMO_EMISSIVE_IDLE;
+            mat.color.copy(on ? mat.userData.vividColor : mat.userData.mutedColor);
+        }
 
         object.updateMatrixWorld();
         customTransformGizmo.position.setFromMatrixPosition(object.matrixWorld);
-        if (transformControl.space === 'local') {
+        // Scale handles are always local-oriented; rotate/translate follow space.
+        if (transformControl.space === 'local' || mode === 'scale') {
             object.getWorldQuaternion(tempQuaternionA);
             customTransformGizmo.quaternion.copy(tempQuaternionA);
         } else {
@@ -5216,6 +4941,10 @@ async function init() {
     };
     hideNativeTransformControlMaterials();
     updateCustomTransformGizmo();
+
+    // Within-gizmo click → drag the closest axis (translate) or ring (rotate)
+    // even when the cursor isn't exactly on a native handle. See gizmoAxisPicker.
+    installGizmoAxisPicker({ transformControl, camera, raycaster });
 
     // Wire extracted modules now that scene/camera/renderer/transformControl/sceneSystem
     // and DOM refs all exist. Must happen before any module-bound helper is called.
@@ -5515,7 +5244,7 @@ async function init() {
             if (postProcessRenderData?.volumetric?.enabled) {
                 postProcessNodes?.volumetric?.refreshFromCamera?.(camera);
             }
-            updateTaaIndicator(!!postProcessRenderData?.taa?.enabled);   // top-left HUD badge
+            updateGizmoAxisIndicator();   // top-left HUD badge: active gizmo axis
             const renderStart = performance.now();
             // Gizmo is a real unlit mesh in the main scene; nothing special to do.
             if (postProcessing && shouldUsePostProcessingPipeline()) {
@@ -6747,7 +6476,7 @@ function wireExtractedModules() {
 
     setupVehicleEngineAudio({
         scene, camera,
-        vehicleState, vehicleEngineAudio, runtimeAudio, runtimeHud, vehicleFx,
+        vehicleState, vehicleEngineAudio, runtimeAudio, vehicleFx,
         engineAudioDebugEl,
         VEHICLE_SETTINGS, TEST_SOUND_ID,
         getRuntimeHud, isDrivingVehicle, getActiveVehicleProp,

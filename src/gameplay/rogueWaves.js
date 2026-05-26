@@ -13,6 +13,7 @@
 // come through `deps`.
 import * as THREE from 'three';
 import { core } from '../runtime/appCore.js';
+import { unlockAward } from './awards.js';
 
 export const ROGUE_ENEMY_VARIANTS = {
     grunt:  { hpMul: 1.0, speedMul: 1.0,  cooldownMul: 1.0, scale: 1.0, tint: '#dc2626', xp: 1, score: 15 },
@@ -486,6 +487,8 @@ export function createRogueWaves(deps) {
         r.kills += 1;
         r.comboUntil = now + comboWindowMs(r.combo);
         if (r.combo > (r._bestCombo || 0)) r._bestCombo = r.combo;
+        unlockAward('doomArena', 'firstKill');
+        if (r.kills >= 100) unlockAward('doomArena', 'kills100');
 
         const isBomber = !!actor?.userData?.rogueBomber;
         const isElite = !!actor?.userData?.rogueElite;
@@ -634,6 +637,9 @@ export function createRogueWaves(deps) {
         const n = Math.max(0, wave | 0);
         if (!n || r._lastClearedWaveReward === n) return;
         r._lastClearedWaveReward = n;
+        if (n >= 5)  unlockAward('doomArena', 'wave5');
+        if (n >= 10) unlockAward('doomArena', 'wave10');
+        if (n >= 20) unlockAward('doomArena', 'wave20');
         const buffs = window.rogueBuffs || {};
         const heal = 0.04 + (buffs.waveHeal || 0);
         if (heal > 0) setPlayerHealth((gameplay.health ?? 1) + heal);

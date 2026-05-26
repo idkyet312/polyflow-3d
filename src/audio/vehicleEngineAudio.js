@@ -17,7 +17,7 @@ import {
 } from '../../vendor/engine-sound/sound_generator_worklet_wasm.js';
 
 // Module-scope deps populated by setupVehicleEngineAudio.
-let scene, camera, vehicleState, vehicleEngineAudio, runtimeAudio, runtimeHud,
+let scene, camera, vehicleState, vehicleEngineAudio, runtimeAudio,
     vehicleFx, engineAudioDebugEl,
     VEHICLE_SETTINGS, TEST_SOUND_ID,
     getRuntimeHud, isDrivingVehicle, getActiveVehicleProp,
@@ -27,7 +27,7 @@ let scene, camera, vehicleState, vehicleEngineAudio, runtimeAudio, runtimeHud,
 export function setupVehicleEngineAudio(deps) {
     ({
         scene, camera, vehicleState, vehicleEngineAudio, runtimeAudio,
-        runtimeHud, vehicleFx, engineAudioDebugEl,
+        vehicleFx, engineAudioDebugEl,
         VEHICLE_SETTINGS, TEST_SOUND_ID,
         getRuntimeHud, isDrivingVehicle, getActiveVehicleProp,
         gameplay, objectScriptState, playTestSoundStatus,

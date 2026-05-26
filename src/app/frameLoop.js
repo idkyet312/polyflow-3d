@@ -1,6 +1,8 @@
 // Per-frame gameplay loop pieces lifted from runtime.js. All hot — called
 // from the main animation tick. Pure: every dep injected, no module-scope
 // state.
+
+import { tickPlaytime } from '../gameplay/playtime.js';
 //
 // Owns:
 //   - updateShowcaseCamera: editor free-fly camera advance
@@ -237,6 +239,15 @@ export function createFrameLoop(deps) {
         updateDrugTycoonState(characterPosition, delta);
         updateShootingSimState(characterPosition, delta);
         const mesh = currentMesh();
+        // Per-game-mode playtime ticking — counts only while play is active.
+        // Drug Tycoon + Shooting Sim tick from their own updates (which gate on
+        // sampleType anyway); the rest get ticked here so the picker can show
+        // "time played" for every game.
+        const sampleType = mesh?.userData?.sampleType;
+        if (sampleType && gameplay.active
+                && sampleType !== 'drugTycoon' && sampleType !== 'shootingSim') {
+            tickPlaytime(sampleType, delta);
+        }
         if (mesh?.userData?.sampleType === 'doomArena') {
             updateRogueXpOrbs(characterPosition, delta);
         }

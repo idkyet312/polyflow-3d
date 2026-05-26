@@ -13,6 +13,8 @@
 // Tracks score, shots, hits, accuracy, streak, and best score (localStorage).
 import * as THREE from 'three';
 import { core } from '../runtime/appCore.js';
+import { tickPlaytime } from './playtime.js';
+import { unlockAward } from './awards.js';
 
 const FIRE_COOLDOWN_MS = 110;     // semi-auto cadence cap
 const HIT_RANGE = 200;            // max ray distance
@@ -491,6 +493,11 @@ export function createShootingSim(deps) {
             const mult = 1 + Math.min(1.0, (s.streak - 1) * 0.1);
             const total = Math.round(pts * mult);
             s.score += total;
+            unlockAward('shootingSim', 'firstHit');
+            if (s.score >= 100)  unlockAward('shootingSim', 'score100');
+            if (s.score >= 500)  unlockAward('shootingSim', 'score500');
+            if (s.score >= 1000) unlockAward('shootingSim', 'score1k');
+            if (s.score >= 2500) unlockAward('shootingSim', 'score2_5k');
             playDing(0.9);
             const col = pts >= 10 ? '#ffd24a' : pts >= 8 ? '#ff9a4a' : pts >= 5 ? '#7fd0ff' : '#9aa3b2';
             floatText(`+${total}${mult > 1 ? ` (x${mult.toFixed(1)})` : ''}`, hit.point.clone(), col);
@@ -552,6 +559,7 @@ export function createShootingSim(deps) {
     function updateShootingSimState(playerPos, delta = 0.016) {
         const { currentMesh } = core;
         if (currentMesh?.userData?.sampleType !== 'shootingSim') return;
+        if (gameplay.active) tickPlaytime('shootingSim', delta);
         installKeys();
         const s = ensureState();
         const layout = currentMesh.userData.shootingSimLevel || {};

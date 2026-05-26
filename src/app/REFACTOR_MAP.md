@@ -20,6 +20,95 @@ done 2026-05-18.
   death hook in `setShooterHealth` was decoupled to call
   `window.rogueWaves.*` instead of bare names.
 
+### Module 2 — Shadow / POM tuning → `src/app/shadowTuning.js`
+- **Status:** extracted, syntax-clean, behavior-preserving. ~100 lines moved
+  (runtime.js 6966 → 6887). `node --test` green (72 pass).
+- **Why it was safe:** five cohesive scene-traversal helpers
+  (`requestLightShadowRefresh`, `configurePointLightShadow`,
+  `requestScenePointLightShadowRefresh`, `applyPomTuningToScene`,
+  `applyShadowTuningToScene`). Zero shared scratch globals, no DOM. The
+  cross-module seams already went through dep-injection (worldEnvSystem,
+  levels, sceneActorUi all receive them as params), so only the definitions
+  moved — call sites unchanged.
+- **Pattern:** `createShadowTuning({deps})` factory, instantiated right after
+  the `worldEnvSystem` setup. `scene`/`renderer` read live via `core`;
+  `worldEnvState` + `perfModeEnabled` passed as **getters** (both
+  mutate/reassign post-construction); `setMainLightCSM` passed as a forwarder
+  (hoisted decl, defined further down).
+- **Seam:** destructured `const { ... } = createShadowTuning(...)` replaces the
+  five `function` decls. The lazy dep-passthroughs at the worldEnvSystem call
+  (`applyShadowTuningToScene: (...a) => ...`) resolve at invoke-time, after the
+  factory binding exists — no TDZ hazard (verified: worldEnvSystem only calls
+  them inside `applyWorldEnvState`, never at construction).
+
+### Module 3 — Unreal HUD / widget bridge → `src/app/hudBridge.js`
+- **Status:** extracted, syntax-clean, behavior-preserving. ~130 lines moved
+  (runtime.js 6887 → 6768). `node --test` green (72 pass).
+- **Why it was safe:** self-contained widget-API surface — the lazy `AHUD`
+  singleton, `getRuntimeHud`, `createExampleWidgets`, and the two global
+  installs (`window.WidgetAPI`, `window.UnrealWidgetAPI`). The previously
+  in-runtime weapon-HUD/damage helpers (`ensureWeaponHud`, `setWeaponHud`,
+  `showDamageIndicator`, `ensurePlayerHitOverlay`) were already extracted to
+  `weaponHud.js` / `playerCombat.js`, so this is the last of the HUD cluster.
+- **Pattern:** `createHudBridge({deps})` factory, instantiated right after the
+  `_playerCombat` block (needs `gameplay` + `setPlayerHealth`, both live by
+  then). `widgetManager` is read via getter — it's constructed mid-init, after
+  the bridge. The factory body installs both window APIs immediately; nothing
+  reads them before init so the slightly-later install is safe.
+- **Seam:** the example HUD overlay still publishes on `window.*`
+  (`window.exampleWidgets`, `window.gameHud`, `window.gameScore`) — that
+  contract is unchanged, so the score/visibility helpers left in runtime.js
+  (`addGameScore`, `setExampleWidgetsVisible`) keep reading them untouched.
+  Orphaned `AHUD`/`U*Widget` imports removed from runtime.js (now in hudBridge).
+- **Not moved:** `updateGameplayUI` — flagged as high-coupling (broad widget +
+  mobile + camera-button state). Defer; needs the camera/mobile-button cluster
+  split first.
+
+### Module 4 — Shadow-debug tooling → `src/app/shadowDebug.js`
+- **Status:** extracted, syntax-clean, behavior-preserving. ~110 lines moved
+  (runtime.js 6768 → 6672). `node --test` green (72 pass).
+- **Why it was safe:** cohesive "force all scene meshes to shadow" debug
+  feature — six helpers (`formatShadowDebugStatus`, `updateShadowDebugUi`,
+  `isShadowForceExcludedObject`, `forceAllSceneMeshShadows`,
+  `setForceAllSceneMeshShadowsEnabled`, `tickForceAllSceneMeshShadows`). Only
+  `scene`/`renderer` (via core) + two state objects. Cross-module consumers
+  (debug/console.js, wirePanelHandlers.js) already receive the functions as
+  injected deps, so call sites are unchanged.
+- **Pattern:** `createShadowDebug({deps})` factory, instantiated right after the
+  `shadowDebugState` const. `formatShadowDebugStatus` /
+  `isShadowForceExcludedObject` are factory-private (no external callers); the
+  other four are aliased to `const`s for the existing dep-pass blocks.
+- **Seam — shared state stays in runtime.js:** `shadowDebugState` (a `const`
+  object) and `shadowDebugUiRefs` (assigned mid-init) are injected **by
+  reference** into setupDebugConsole / wirePanelHandlers, so they must NOT move
+  into the factory closure. The helpers read them via getters instead — the
+  shared references keep resolving for every consumer.
+- **Note:** the *debug-ray* sibling cluster (`raycastWorld`,
+  `updateGameplayDebugRay`, `setRayDebugEnabled`, …) was left in place — it
+  depends on physgun (`physgunCameraRay`) + `getActorByBodyId` +
+  `updateRaycastDebugLine`, a wider surface. Candidate for a later pass.
+
+### Module 5 — Actor core/instance system → `src/app/actorCore.js`
+- **Status:** extracted, syntax-clean, behavior-preserving. ~95 lines moved
+  (runtime.js 6672 → 6601). `node --test` green (72 pass).
+- **Why it was safe:** cohesive prefab visual-inheritance system — seven
+  functions (`getActorCoreInfo`, `getActorCoreId`, `actorInheritsCore`,
+  `getActorCoreSource`, `serializeCoreVisualRules`,
+  `applyCoreVisualRulesToInstance`, `syncActorCoreInstances`) plus their private
+  state (`actorCoreSyncState` signature cache + `_coreInstanceBuckets`). All
+  inbound deps are serialize/apply helpers + `getDynamicPropById` —
+  dep-injected as forwarders.
+- **Pattern:** `createActorCore({deps})` factory, instantiated right before
+  `_sceneActorUi` (which consumes `actorInheritsCore` + `getActorCoreSource`).
+  `actorCoreSyncState` + buckets moved into the closure (nothing outside reads
+  them). Only the 3 externally-used functions are aliased; the other 4 are
+  factory-private.
+- **Seam:** `actorInheritsCore` / `getActorCoreSource` keep flowing into
+  sceneActorUi.js via the existing dep block — call sites unchanged.
+  `syncActorCoreInstances` still called from the frame loop via its alias.
+  Note: sceneHistory.js has its *own* local `getActorCoreInfo` copy — unrelated,
+  not shared, left alone.
+
 ## Established conventions for any future extraction
 
 1. Factory `createXxx({deps})` returning an API object (mirrors

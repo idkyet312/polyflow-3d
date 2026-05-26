@@ -18,6 +18,8 @@
 // hot edits and can be inspected from the console.
 import * as THREE from 'three';
 import { core } from '../runtime/appCore.js';
+import { tickPlaytime } from './playtime.js';
+import { unlockAward } from './awards.js';
 import * as ragdoll from './ragdoll.js';
 
 const SELL_RADIUS = 2.6;
@@ -78,6 +80,49 @@ const PH_FLOWER = 0.92;  // buds form + swell
 // (PH_FLOWER..1.0 = ripening: amber, resin glint, ready to harvest)
 const BUDS_PER_PLANT = 4;         // loose buds yielded per ripe plant
 const DRY_OUT_MS = 45000;          // an un-watered seed dies (wilts) after this
+// ---- seed shop (outside) -------------------------------------------------
+// Seeds are bought at the outdoor seed shop, NOT free. Three tiers, each
+// strictly better than the last: faster grow, more buds, higher base quality.
+// You plant from your current stock of the selected tier; an empty pot needs a
+// seed in inventory. plant.tier (0..2) is stamped at plant time and drives the
+// grow rate + harvest yield/quality.
+// Each tier also carries a `palette` — leaf/bud/bud-ripe base colours used by
+// applyPlantGrowth so Reggie grows green, Kush grows icy-teal, Exotic grows
+// purple. Existing ripening + sick/droop tints layer on top of these bases.
+// Note: bonus portions ABOVE the 1.0 baseline are doubled vs the original
+// rollout — Kush speed went from +0.25 → +0.50, Exotic +0.55 → +1.10, etc.
+// Reggie stays at the 1.0 baseline (it IS the baseline). qBonus is a pure
+// bonus so it doubles directly.
+const SEED_TIERS = [
+    {
+        key: 'reggie',  t: 'Reggie Seeds',  d: 'Cheap bag seed. Slow, scrappy yield.',
+        cost: 40,  speed: 1.00, yieldMult: 1.00, qBonus: 0.00, color: '#9bdc7a',
+        palette: { leaf: '#245f2d', leafRipe: '#4e7f35', bud: '#2f6d32', budRipe: '#6f7a32', stem: '#2d5d24' },
+    },
+    {
+        key: 'kush',    t: 'Kush Seeds',    d: 'Solid genetics. 1.5× speed, fatter buds.',
+        cost: 120, speed: 1.50, yieldMult: 1.60, qBonus: 0.24, color: '#7fd0ff',
+        palette: { leaf: '#1f5a4a', leafRipe: '#3aa67a', bud: '#2f8a5a', budRipe: '#6fc890', stem: '#22513f' },
+    },
+    {
+        key: 'exotic',  t: 'Exotic Seeds',  d: 'Top-shelf strain. 2.1× speed, huge yield.',
+        cost: 300, speed: 2.10, yieldMult: 2.30, qBonus: 0.50, color: '#e6a8ff',
+        palette: { leaf: '#3a2050', leafRipe: '#7a3aa6', bud: '#8a3ac8', budRipe: '#c870ff', stem: '#3a1f4a' },
+    },
+];
+const SEED_PAD_RADIUS = 2.8;       // interaction distance for the outdoor seed shop
+// ---- grow juice (pour-on speed boost, second outdoor shop) --------------
+// Buy a bottle at the juice shop, walk up to a planted plant, [E] to pour it
+// on — that one plant gets a grow-speed multiplier for the rest of its cycle.
+// One pour per plant; the boost clears at harvest. Tiered like seeds: stronger
+// juice = bigger boost = bigger price.
+// Bonus portion above 1.0 doubled vs original — Compost +0.6 → +1.2 etc.
+const JUICE_TIERS = [
+    { key: 'compost', t: 'Compost Tea',  d: 'Cheap brew. +120% grow speed.',          cost: 80,  speed: 2.20, color: '#8aa86a' },
+    { key: 'bloom',   t: 'Liquid Bloom', d: 'Lab-grade. +220% grow speed.',           cost: 220, speed: 3.20, color: '#7fd0ff' },
+    { key: 'elixir',  t: 'Hydro Elixir', d: 'Top-shelf nutes. +360% grow speed.',     cost: 500, speed: 4.60, color: '#e6a8ff' },
+];
+const JUICE_PAD_RADIUS = 2.8;      // interaction distance for the outdoor juice shop
 // ---- grow care challenge (thirst + pests) --------------------------------
 // A watered plant slowly dries (moisture 1→0). Below DRY_STRESS it stops
 // growing and loses health; re-water (E) to top it up. Plants also randomly get
@@ -86,7 +131,7 @@ const MOISTURE_DRAIN_PER_SEC = 1 / 55;   // full→empty in ~55s of growth
 const DRY_STRESS = 0.2;            // below this moisture, growth stalls + wilts
 const HEALTH_DRAIN_PER_SEC = 0.045;      // health lost while stressed (dry or pests)
 const HEALTH_RECOVER_PER_SEC = 0.02;     // health regained when happy
-const PEST_CHANCE_PER_SEC = 1 / 40;      // ~once every 40s a healthy plant can get pests
+const PEST_CHANCE_PER_SEC = 1 / 70;      // ~once every 70s a healthy plant can get pests
 const PEST_GROWTH_MULT = 0.35;     // growth speed while infested
 const SPRAY_COST = 25;             // $ per pest treatment
 const SPRAY_COOLDOWN_MS = 600;     // anti-spam on the spray action
@@ -186,6 +231,17 @@ export function createDrugTycoon(deps) {
             ammo: 0,              // pistol rounds
             hasBat: false,        // owns the baseball bat (melee, no ammo)
             nextSwingAt: 0,       // bat swing cooldown
+            // ---- seeds (bought outside, consumed when planting) ------------
+            seeds: [2, 0, 0],     // start with 2 cheap Reggie seeds; buy more/better at the shop
+            startingSeedsGranted: true,
+            seedTier: 0,          // tier planted next (highest owned auto-selects)
+            seedShopOpen: false,  // outdoor seed-shop overlay up
+            seedPos: new THREE.Vector3(),  // cached outdoor seed-shop pad position
+            // ---- grow juice (pour-on speed boost) --------------------------
+            juices: [0, 0, 0],    // owned bottles per JUICE_TIERS index
+            juiceTier: 0,         // tier poured next (highest owned auto-selects)
+            juiceShopOpen: false, // outdoor juice-shop overlay up
+            juicePos: new THREE.Vector3(),
             // ---- grow room -------------------------------------------------
             inRoom: false,        // player currently inside the grow room
             buds: 0,              // harvested loose buds (pre-bagging)
@@ -201,6 +257,32 @@ export function createDrugTycoon(deps) {
         };
     }
 
+    // Cache + tick yaw-only billboards on the active drug-tycoon level. The
+    // list is built once per level mesh (stamped on userData) by walking the
+    // graph for any object flagged userData.billboardY === true. Per-frame
+    // cost is just N * (atan2 + 1 rotation set) for tiny N (~5 signs).
+    const _bbVec = new THREE.Vector3();
+    function tickLevelBillboards(levelMesh) {
+        if (!levelMesh) return;
+        const { camera } = core;
+        if (!camera) return;
+        let list = levelMesh.userData._billboards;
+        if (!list) {
+            list = [];
+            levelMesh.traverse((obj) => {
+                if (obj?.userData?.billboardY) list.push(obj);
+            });
+            levelMesh.userData._billboards = list;
+        }
+        for (let i = 0; i < list.length; i++) {
+            const obj = list[i];
+            obj.getWorldPosition(_bbVec);
+            // Yaw so the sign's local +Z points at the camera, XZ-plane only.
+            const yaw = Math.atan2(camera.position.x - _bbVec.x, camera.position.z - _bbVec.z);
+            obj.rotation.set(0, yaw, 0);
+        }
+    }
+
     function ensureState() {
         if (!window.drugTycoon) window.drugTycoon = defaultState();
         const s = window.drugTycoon;
@@ -210,6 +292,27 @@ export function createDrugTycoon(deps) {
         s.events ||= {};
         if (typeof s.budsQ !== 'number') s.budsQ = 1;
         if (typeof s.nextEventAt !== 'number') s.nextEventAt = 0;
+        // Seed inventory (older saves predate the seed shop).
+        if (!Array.isArray(s.seeds) || s.seeds.length !== SEED_TIERS.length) {
+            s.seeds = SEED_TIERS.map((_, i) => (Array.isArray(s.seeds) ? (s.seeds[i] | 0) : 0));
+        }
+        if (typeof s.seedTier !== 'number') s.seedTier = 0;
+        if (!s.seedPos) s.seedPos = new THREE.Vector3();
+        // Grow-juice inventory (older saves predate the juice shop).
+        if (!Array.isArray(s.juices) || s.juices.length !== JUICE_TIERS.length) {
+            s.juices = JUICE_TIERS.map((_, i) => (Array.isArray(s.juices) ? (s.juices[i] | 0) : 0));
+        }
+        if (typeof s.juiceTier !== 'number') s.juiceTier = 0;
+        if (!s.juicePos) s.juicePos = new THREE.Vector3();
+        // One-time grant: pre-seed-shop saves never got the 2 starter Reggie
+        // seeds (and were stuck unable to plant). Hand them out once, then mark
+        // the save so a player who legitimately spent their seeds doesn't get
+        // refilled on every reload.
+        if (!s.startingSeedsGranted) {
+            const total = s.seeds.reduce((a, b) => a + (b | 0), 0);
+            if (total === 0) s.seeds[0] = 2;
+            s.startingSeedsGranted = true;
+        }
         return window.drugTycoon;
     }
 
@@ -221,6 +324,8 @@ export function createDrugTycoon(deps) {
         'cash', 'stash', 'stashQ', 'heat', 'busted', 'sales',
         'hasGun', 'ammo', 'hasBat', 'ordersFilled', 'buds', 'budsQ',
         'demand', 'hotColor', 'marketDay', 'startingCashGranted', 'startingCashGrantAmount',
+        'seedTier', '_budsHarvested', 'startingSeedsGranted',
+        'juiceTier',
     ];
     let _lastSaveAt = 0;
     function saveProgress() {
@@ -231,6 +336,8 @@ export function createDrugTycoon(deps) {
             for (const k of PERSIST_FIELDS) blob[k] = s[k];
             blob.up = { ...s.up };           // upgrade levels
             blob.baseUp = { ...s.baseUp };
+            blob.seeds = Array.isArray(s.seeds) ? s.seeds.slice() : [0, 0, 0];
+            blob.juices = Array.isArray(s.juices) ? s.juices.slice() : [0, 0, 0];
             localStorage.setItem(SAVE_KEY, JSON.stringify(blob));
         } catch (e) { /* private mode / quota — ignore */ }
         _lastSaveAt = performance.now?.() || Date.now();
@@ -250,6 +357,8 @@ export function createDrugTycoon(deps) {
             }
             if (blob.up && typeof blob.up === 'object') s.up = { ...s.up, ...blob.up };
             if (blob.baseUp && typeof blob.baseUp === 'object') s.baseUp = { ...s.baseUp, ...blob.baseUp };
+            if (Array.isArray(blob.seeds)) s.seeds = SEED_TIERS.map((_, i) => (blob.seeds[i] | 0));
+            if (Array.isArray(blob.juices)) s.juices = JUICE_TIERS.map((_, i) => (blob.juices[i] | 0));
         } catch (e) { /* corrupt save — keep defaults */ }
     }
     // Throttled autosave, called from the per-frame update.
@@ -533,7 +642,7 @@ export function createDrugTycoon(deps) {
         const s = window.drugTycoon;
         if (!s) return;
         // Only usable on the street (not in menus / grow room).
-        if (s.shopOpen || s.cooking || s.inRoom) return;
+        if (s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.inRoom) return;
         setPhone(!s.phoneOpen);
     }
     function ensurePhoneEl() {
@@ -590,7 +699,9 @@ export function createDrugTycoon(deps) {
     // explaining how to play this game mode. Lives entirely in this module.
     const HELP_TITLE = 'DRUG TYCOON — HOW TO PLAY';
     const HELP_LINES = [
-        '🌿 GROW: At home — [E] plant a seed, [E] water it. Soil dries out: keep re-watering [E] or growth stalls. 🐛 Pests strike randomly — hold Fire near the plant to spray ($25). Healthy plants yield more buds. [E] harvest when ripe, then drag buds into the bag (hold Fire) to package.',
+        '🌱 SEEDS: Plants need seeds! Buy them at the outdoor SEED SHOP [E] (the green kiosk on the street). Three tiers — Reggie (cheap, green), Kush (mid, icy-teal), Exotic (top-shelf, purple). Better seeds grow faster, yield more buds, and grade higher. The tier you last bought is the one you plant.',
+        '🧪 GROW JUICE: A second outdoor kiosk on the other side of the street. Three tiers of grow juice (Compost Tea / Liquid Bloom / Hydro Elixir). Buy a bottle, then hold Fire near a growing plant to pour it on — that plant grows 2.2×–4.6× faster for the rest of its cycle. One pour per plant; the boost clears at harvest.',
+        '🌿 GROW: At home — [E] plant a seed (consumes one from stock), [E] water it. Soil dries out: keep re-watering [E] or growth stalls. 🐛 Pests strike randomly — hold Fire near the plant to spray ($25). Healthy plants yield more buds. [E] harvest when ripe, then drag buds into the bag (hold Fire) to package.',
         '🍳 COOK: Outside at the green bench [E] — add reagents in the right order, then MIX. Higher purity = more cash.',
         '🧪 QUALITY: Plant health, grow lights, and recipe accuracy set grade. Better grade pays more and draws less heat.',
         '📱 ORDERS: Press [P] for your phone. Sell only to the customer whose shirt matches the order colour [E].',
@@ -670,6 +781,8 @@ export function createDrugTycoon(deps) {
             if (e.code === 'Escape' && window.drugTycoon?.helpOpen) hideHelp();
             if (e.code === 'Escape' && window.drugTycoon?.phoneOpen) setPhone(false);
             if (e.code === 'Escape' && window.drugTycoon?.shopOpen) closeShop();
+            if (e.code === 'Escape' && window.drugTycoon?.seedShopOpen) closeSeedShop();
+            if (e.code === 'Escape' && window.drugTycoon?.juiceShopOpen) closeJuiceShop();
             if (e.code === 'Escape' && window.drugTycoon?.cooking) closeCook();
             if (e.code === 'Escape' && window.drugTycoon?.baggingOpen) closeBagging();
         };
@@ -684,6 +797,8 @@ export function createDrugTycoon(deps) {
     function queueInteract() {
         const s = window.drugTycoon;
         if (s?.shopOpen) { closeShop(); return; }
+        if (s?.seedShopOpen) { closeSeedShop(); return; }
+        if (s?.juiceShopOpen) { closeJuiceShop(); return; }
         if (s?.cooking) { closeCook(); return; }
         if (s?.baggingOpen) { closeBagging(); return; }
         _interactQueued = true;
@@ -730,6 +845,8 @@ export function createDrugTycoon(deps) {
             `<div style="font-size:22px;color:#9dffa0;">$${Math.floor(s.cash).toLocaleString()}</div>`
             + `<div>Product: ${s.stash} / ${stashCap(s)}${s.stash > 0 ? ` · <span style="color:${grade.color};">${grade.name}</span> ${Math.round(s.stashQ * 100)}%` : ''}</div>`
             + (s.buds > 0 ? `<div style="color:#b6ff6a;">Buds: ${s.buds} · ${Math.round((s.budsQ || 1) * 100)}%</div>` : '')
+            + ((s.inRoom || totalSeeds(s) > 0) ? `<div style="color:${SEED_TIERS[pickPlantTier(s)]?.color || '#8aa0aa'};">🌱 Seeds: ${totalSeeds(s)}${pickPlantTier(s) >= 0 ? ` · ${SEED_TIERS[pickPlantTier(s)].t.replace(' Seeds', '')}` : ' — buy outside'}</div>` : '')
+            + ((s.inRoom || totalJuices(s) > 0) ? `<div style="color:${JUICE_TIERS[pickJuiceTier(s)]?.color || '#8aa0aa'};">🧪 Juice: ${totalJuices(s)}${pickJuiceTier(s) >= 0 ? ` · ${JUICE_TIERS[pickJuiceTier(s)].t}` : ''}</div>` : '')
             + (!s.inRoom ? `<div style="opacity:.92;">Market: <b style="color:${mk.c}">${mk.t}</b> <span style="opacity:.6;font-size:12px;">x${(s.demand || 1).toFixed(2)}</span></div>` : '')
             + ((s.rivals?.length || 0) > 0 && !s.inRoom ? `<div style="color:#ff8a8a;">Rivals nearby: ${s.rivals.length}</div>` : '')
             + (activeEventNames ? `<div style="color:#ffd24a;">Event: ${activeEventNames}</div>` : '')
@@ -1192,6 +1309,230 @@ export function createDrugTycoon(deps) {
         if (_shopEl?.parentNode) _shopEl.remove();
         _shopEl = null;
         if (s) s.shopOpen = false;
+        gameplay.roguePaused = false;
+        const { renderer } = core;
+        if (renderer?.domElement && !window.matchMedia?.('(pointer:coarse)')?.matches) {
+            const resume = () => {
+                renderer.domElement.removeEventListener('click', resume);
+                try { renderer.domElement.requestPointerLock?.(); } catch (e) {}
+            };
+            renderer.domElement.addEventListener('click', resume);
+        }
+    }
+
+    // ---- outdoor seed shop ----------------------------------------------
+    // A separate storefront on the street: buy weed seeds in three tiers before
+    // you can plant. Each tier strictly beats the last (grow speed + yield +
+    // potency). Buying also selects that tier as the one you'll plant next.
+    let _seedShopEl = null;
+    function openSeedShop() {
+        const s = ensureState();
+        if (s.seedShopOpen) return;
+        s.seedShopOpen = true;
+        gameplay.roguePaused = true;
+        try { document.exitPointerLock?.(); } catch (e) {}
+        renderSeedShop();
+    }
+    function buySeed(s, tier, qty = 1) {
+        const seed = SEED_TIERS[tier];
+        if (!seed) return;
+        const cost = seed.cost * qty;
+        if (s.cash < cost) return;
+        s.cash -= cost;
+        s.seeds[tier] = (s.seeds[tier] | 0) + qty;
+        s.seedTier = tier;          // plant the tier you just bought
+        if (tier === SEED_TIERS.length - 1) unlockAward('drugTycoon', 'exoticSeed');
+        renderSeedShop();
+        updateHud();
+        saveProgress();
+    }
+    function renderSeedShop() {
+        const s = ensureState();
+        if (_seedShopEl?.parentNode) _seedShopEl.remove();
+        const m = isMobileUi();
+        const cw = m ? 120 : 230, ch = m ? 150 : 280;
+        const pad = m ? '10px 8px' : '20px 16px';
+        const gap = m ? 10 : 20;
+        const tTitle = m ? 15 : 22, tDesc = m ? 10 : 14, tSub = m ? 9 : 13, tCost = m ? 13 : 18;
+
+        const overlay = document.createElement('div');
+        overlay.className = 'tycoon-overlay';
+        overlay.style.cssText = 'position:absolute;inset:0;z-index:1200;pointer-events:auto;'
+            + 'background:rgba(6,12,6,0.84);backdrop-filter:blur(3px);display:flex;'
+            + 'flex-direction:column;align-items:center;justify-content:center;'
+            + `padding:${m ? '8px' : '0'};box-sizing:border-box;overflow:auto;`
+            + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#eaffea;';
+
+        const title = document.createElement('div');
+        title.textContent = `🌱 SEED SHOP — $${Math.floor(s.cash).toLocaleString()}`;
+        title.style.cssText = `font:900 ${m ? 18 : 32}px/1.1 inherit;margin-bottom:${m ? 4 : 10}px;color:#b6ff6a;`
+            + 'text-shadow:0 0 18px rgba(120,255,80,0.5);';
+        overlay.appendChild(title);
+
+        const sub = document.createElement('div');
+        sub.textContent = 'Better seeds → faster grow, bigger yield, higher grade.';
+        sub.style.cssText = `font:600 ${m ? 10 : 14}px/1.3 inherit;opacity:.8;margin-bottom:${m ? 12 : 24}px;`;
+        overlay.appendChild(sub);
+
+        const row = document.createElement('div');
+        row.style.cssText = `display:flex;gap:${gap}px;flex-wrap:wrap;justify-content:center;max-width:96vw;`;
+        SEED_TIERS.forEach((seed, tier) => {
+            const owned = s.seeds[tier] | 0;
+            const afford = s.cash >= seed.cost;
+            const selected = (s.seedTier | 0) === tier;
+            const c = document.createElement('button');
+            c.style.cssText = `cursor:pointer;color:#eaffea;text-align:center;width:${cw}px;height:${ch}px;`
+                + `padding:${pad};border-radius:${m ? 12 : 16}px;box-sizing:border-box;`
+                + 'background:linear-gradient(160deg,rgba(16,44,22,0.96),rgba(6,20,10,0.96));'
+                + `border:3px solid ${selected ? seed.color : (afford ? 'rgba(150,255,120,0.5)' : 'rgba(120,120,120,0.4)')};`
+                + 'box-shadow:0 8px 30px rgba(0,0,0,0.5);transition:transform .12s;'
+                + (afford ? '' : 'opacity:.6;');
+            c.innerHTML = `<div style="font:900 ${tTitle}px/1.2 inherit;color:${seed.color};margin-bottom:${m ? 4 : 10}px;">${seed.t}</div>`
+                + `<div style="font:600 ${tDesc}px/1.3 inherit;opacity:.92;margin-bottom:${m ? 6 : 12}px;">${seed.d}</div>`
+                + `<div style="font:700 ${tSub}px/1.5 inherit;opacity:.85;">`
+                + `⚡ Grow ×${seed.speed.toFixed(2)}<br>🌿 Yield ×${seed.yieldMult.toFixed(2)}<br>⭐ Grade +${Math.round(seed.qBonus * 100)}%</div>`
+                + `<div style="margin-top:${m ? 6 : 12}px;font:800 ${tSub}px/1 inherit;color:#cdd6e3;">Owned: ${owned}${selected ? ' · ✓ planting' : ''}</div>`
+                + `<div style="margin-top:${m ? 4 : 8}px;font:900 ${tCost}px/1 inherit;color:${afford ? seed.color : '#ff8a8a'};">$${seed.cost.toLocaleString()}</div>`;
+            c.onmouseenter = () => { c.style.transform = 'translateY(-6px)'; };
+            c.onmouseleave = () => { c.style.transform = 'none'; };
+            c.onclick = (ev) => buySeed(s, tier, ev.shiftKey ? 5 : 1);
+            row.appendChild(c);
+        });
+        overlay.appendChild(row);
+
+        const hint = document.createElement('div');
+        hint.textContent = 'Click a seed to buy one (Shift+click = ×5). Selected tier is planted next.';
+        hint.style.cssText = `font:600 ${m ? 9 : 12}px/1.3 inherit;opacity:.7;margin-top:${m ? 10 : 18}px;`;
+        overlay.appendChild(hint);
+
+        const close = document.createElement('button');
+        close.textContent = m ? 'CLOSE' : 'CLOSE (Esc)';
+        close.style.cssText = `margin-top:${m ? 12 : 26}px;padding:${m ? '8px 22px' : '12px 30px'};cursor:pointer;`
+            + `font:800 ${m ? 13 : 18}px/1 inherit;color:#fff;border-radius:12px;`
+            + 'background:linear-gradient(160deg,#2f8a2a,#103a12);'
+            + 'border:2px solid rgba(150,255,120,0.5);';
+        close.onclick = () => closeSeedShop();
+        overlay.appendChild(close);
+
+        (document.getElementById('canvas-container') || document.body)?.appendChild(overlay);
+        _seedShopEl = overlay;
+    }
+    function closeSeedShop() {
+        const s = window.drugTycoon;
+        if (_seedShopEl?.parentNode) _seedShopEl.remove();
+        _seedShopEl = null;
+        if (s) s.seedShopOpen = false;
+        gameplay.roguePaused = false;
+        const { renderer } = core;
+        if (renderer?.domElement && !window.matchMedia?.('(pointer:coarse)')?.matches) {
+            const resume = () => {
+                renderer.domElement.removeEventListener('click', resume);
+                try { renderer.domElement.requestPointerLock?.(); } catch (e) {}
+            };
+            renderer.domElement.addEventListener('click', resume);
+        }
+    }
+
+    // ---- outdoor grow-juice shop ----------------------------------------
+    // Second outdoor storefront (across the street from the seed shop). Buy
+    // bottles of grow juice; pour one on a growing plant (hold Fire near it)
+    // to multiply its grow rate for the rest of the cycle.
+    let _juiceShopEl = null;
+    function openJuiceShop() {
+        const s = ensureState();
+        if (s.juiceShopOpen) return;
+        s.juiceShopOpen = true;
+        gameplay.roguePaused = true;
+        try { document.exitPointerLock?.(); } catch (e) {}
+        renderJuiceShop();
+    }
+    function buyJuice(s, tier, qty = 1) {
+        const juice = JUICE_TIERS[tier];
+        if (!juice) return;
+        const cost = juice.cost * qty;
+        if (s.cash < cost) return;
+        s.cash -= cost;
+        s.juices[tier] = (s.juices[tier] | 0) + qty;
+        s.juiceTier = tier;          // pour the tier you just bought
+        renderJuiceShop();
+        updateHud();
+        saveProgress();
+    }
+    function renderJuiceShop() {
+        const s = ensureState();
+        if (_juiceShopEl?.parentNode) _juiceShopEl.remove();
+        const m = isMobileUi();
+        const cw = m ? 120 : 230, ch = m ? 150 : 280;
+        const pad = m ? '10px 8px' : '20px 16px';
+        const gap = m ? 10 : 20;
+        const tTitle = m ? 15 : 22, tDesc = m ? 10 : 14, tSub = m ? 9 : 13, tCost = m ? 13 : 18;
+
+        const overlay = document.createElement('div');
+        overlay.className = 'tycoon-overlay';
+        overlay.style.cssText = 'position:absolute;inset:0;z-index:1200;pointer-events:auto;'
+            + 'background:rgba(6,10,14,0.84);backdrop-filter:blur(3px);display:flex;'
+            + 'flex-direction:column;align-items:center;justify-content:center;'
+            + `padding:${m ? '8px' : '0'};box-sizing:border-box;overflow:auto;`
+            + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#eaffff;';
+
+        const title = document.createElement('div');
+        title.textContent = `🧪 GROW JUICE — $${Math.floor(s.cash).toLocaleString()}`;
+        title.style.cssText = `font:900 ${m ? 18 : 32}px/1.1 inherit;margin-bottom:${m ? 4 : 10}px;color:#7fd0ff;`
+            + 'text-shadow:0 0 18px rgba(80,180,255,0.5);';
+        overlay.appendChild(title);
+
+        const sub = document.createElement('div');
+        sub.textContent = 'Pour on a growing plant (hold Fire near it). Boost lasts till harvest.';
+        sub.style.cssText = `font:600 ${m ? 10 : 14}px/1.3 inherit;opacity:.8;margin-bottom:${m ? 12 : 24}px;`;
+        overlay.appendChild(sub);
+
+        const row = document.createElement('div');
+        row.style.cssText = `display:flex;gap:${gap}px;flex-wrap:wrap;justify-content:center;max-width:96vw;`;
+        JUICE_TIERS.forEach((juice, tier) => {
+            const owned = s.juices[tier] | 0;
+            const afford = s.cash >= juice.cost;
+            const selected = (s.juiceTier | 0) === tier;
+            const c = document.createElement('button');
+            c.style.cssText = `cursor:pointer;color:#eaffff;text-align:center;width:${cw}px;height:${ch}px;`
+                + `padding:${pad};border-radius:${m ? 12 : 16}px;box-sizing:border-box;`
+                + 'background:linear-gradient(160deg,rgba(14,32,46,0.96),rgba(6,16,24,0.96));'
+                + `border:3px solid ${selected ? juice.color : (afford ? 'rgba(140,210,255,0.5)' : 'rgba(120,120,120,0.4)')};`
+                + 'box-shadow:0 8px 30px rgba(0,0,0,0.5);transition:transform .12s;'
+                + (afford ? '' : 'opacity:.6;');
+            c.innerHTML = `<div style="font:900 ${tTitle}px/1.2 inherit;color:${juice.color};margin-bottom:${m ? 4 : 10}px;">${juice.t}</div>`
+                + `<div style="font:600 ${tDesc}px/1.3 inherit;opacity:.92;margin-bottom:${m ? 6 : 12}px;">${juice.d}</div>`
+                + `<div style="font:700 ${tSub}px/1.5 inherit;opacity:.85;">⚡ Grow ×${juice.speed.toFixed(2)}</div>`
+                + `<div style="margin-top:${m ? 6 : 12}px;font:800 ${tSub}px/1 inherit;color:#cdd6e3;">Owned: ${owned}${selected ? ' · ✓ pouring' : ''}</div>`
+                + `<div style="margin-top:${m ? 4 : 8}px;font:900 ${tCost}px/1 inherit;color:${afford ? juice.color : '#ff8a8a'};">$${juice.cost.toLocaleString()}</div>`;
+            c.onmouseenter = () => { c.style.transform = 'translateY(-6px)'; };
+            c.onmouseleave = () => { c.style.transform = 'none'; };
+            c.onclick = (ev) => buyJuice(s, tier, ev.shiftKey ? 5 : 1);
+            row.appendChild(c);
+        });
+        overlay.appendChild(row);
+
+        const hint = document.createElement('div');
+        hint.textContent = 'Click a juice to buy one (Shift+click = ×5). Selected tier is poured next.';
+        hint.style.cssText = `font:600 ${m ? 9 : 12}px/1.3 inherit;opacity:.7;margin-top:${m ? 10 : 18}px;`;
+        overlay.appendChild(hint);
+
+        const close = document.createElement('button');
+        close.textContent = m ? 'CLOSE' : 'CLOSE (Esc)';
+        close.style.cssText = `margin-top:${m ? 12 : 26}px;padding:${m ? '8px 22px' : '12px 30px'};cursor:pointer;`
+            + `font:800 ${m ? 13 : 18}px/1 inherit;color:#fff;border-radius:12px;`
+            + 'background:linear-gradient(160deg,#1f5a8a,#0c2840);'
+            + 'border:2px solid rgba(140,210,255,0.5);';
+        close.onclick = () => closeJuiceShop();
+        overlay.appendChild(close);
+
+        (document.getElementById('canvas-container') || document.body)?.appendChild(overlay);
+        _juiceShopEl = overlay;
+    }
+    function closeJuiceShop() {
+        const s = window.drugTycoon;
+        if (_juiceShopEl?.parentNode) _juiceShopEl.remove();
+        _juiceShopEl = null;
+        if (s) s.juiceShopOpen = false;
         gameplay.roguePaused = false;
         const { renderer } = core;
         if (renderer?.domElement && !window.matchMedia?.('(pointer:coarse)')?.matches) {
@@ -2003,6 +2344,7 @@ export function createDrugTycoon(deps) {
         foliage.userData.leafMat = leafMat;
         foliage.userData.budMat = budMat;
         foliage.userData.pistilMat = pistilMat;
+        foliage.userData.stemMat = stemMat;
         const buds = [];                               // all bud meshes (recoloured ripe)
         const branches = [];                           // { node, emergeAt } for staged reveal
         foliage.userData.buds = buds;
@@ -2209,15 +2551,17 @@ export function createDrugTycoon(deps) {
         pistilMat.opacity = flower * (0.7 + 0.3 * ripe01);
         colMix(pistilMat.color, '#d9cfa4', '#b9773a', ripe01);  // creamy -> amber
 
-        // --- colour: deep green veg → lighter, then amber/purple ripe tints ---
-        // Healthy green in veg; a touch of yellowing + amber buds when ripe; if
-        // the plant suffered (low health) it skews sickly yellow-brown.
+        // --- colour: deep base → lighter ripe tint, with per-strain palette ---
+        // Healthy in veg; a touch of yellowing + amber buds when ripe; if the
+        // plant suffered (low health) it skews sickly yellow-brown. Palette is
+        // looked up from SEED_TIERS so Kush grows teal, Exotic grows purple.
+        const palette = (SEED_TIERS[plant.tier ?? 0] ?? SEED_TIERS[0]).palette;
         const sick = 1 - health;
-        colMix(leafMat.color, '#245f2d', '#4e7f35', ripe01 * 0.45);
+        colMix(leafMat.color, palette.leaf, palette.leafRipe, ripe01 * 0.45);
         if (sick > 0) colMix(leafMat.color, leafMat.color, '#8a7a2a', sick * 0.6);
         leafMat.emissive.set(ripe01 > 0 ? '#13260d' : '#000000');
         leafMat.emissiveIntensity = ripe01 * 0.08;
-        colMix(budMat.color, '#2f6d32', '#6f7a32', ripe01);
+        colMix(budMat.color, palette.bud, palette.budRipe, ripe01);
         budMat.emissive.set('#000000');
         colMix(budMat.emissive, '#000000', '#2f2608', ripe01);
         budMat.emissiveIntensity = ripe01 * 0.18;
@@ -2291,18 +2635,77 @@ export function createDrugTycoon(deps) {
         }
         s.plantsBuilt = true;
     }
+    // Tier the next plant will use: the player's selected tier if they own one,
+    // else the highest tier they have stock of. Returns -1 if no seeds at all.
+    function pickPlantTier(s) {
+        if (!Array.isArray(s.seeds)) return -1;
+        const sel = s.seedTier | 0;
+        if (sel >= 0 && sel < SEED_TIERS.length && s.seeds[sel] > 0) return sel;
+        for (let i = SEED_TIERS.length - 1; i >= 0; i--) {
+            if (s.seeds[i] > 0) return i;
+        }
+        return -1;
+    }
+    function totalSeeds(s) {
+        return Array.isArray(s.seeds) ? s.seeds.reduce((a, b) => a + (b | 0), 0) : 0;
+    }
+    // Same pattern as seeds, for grow juice.
+    function pickJuiceTier(s) {
+        if (!Array.isArray(s.juices)) return -1;
+        const sel = s.juiceTier | 0;
+        if (sel >= 0 && sel < JUICE_TIERS.length && s.juices[sel] > 0) return sel;
+        for (let i = JUICE_TIERS.length - 1; i >= 0; i--) {
+            if (s.juices[i] > 0) return i;
+        }
+        return -1;
+    }
+    function totalJuices(s) {
+        return Array.isArray(s.juices) ? s.juices.reduce((a, b) => a + (b | 0), 0) : 0;
+    }
+    function pourJuice(s, plant) {
+        if (!plant?.planted) return false;
+        if ((plant.juiceMult || 1) > 1) return false;     // already boosted
+        const tier = pickJuiceTier(s);
+        if (tier < 0) {
+            showPrompt('No grow juice — buy a bottle at the juice shop');
+            return false;
+        }
+        s.juices[tier] = Math.max(0, (s.juices[tier] | 0) - 1);
+        const juice = JUICE_TIERS[tier];
+        plant.juiceMult = juice.speed;
+        floatText(`+${juice.t} · ×${juice.speed.toFixed(1)} grow`, plant.mesh.position.clone().setY(plant.mesh.position.y + 1.4), juice.color);
+        updateHud();
+        saveProgress();
+        return true;
+    }
     function plantSeed(s, plant) {
-        if (plant.planted) return;
+        if (plant.planted) return false;
+        const tier = pickPlantTier(s);
+        if (tier < 0) {
+            showPrompt('No seeds — buy some at the seed shop outside');
+            return false;
+        }
+        s.seeds[tier] = Math.max(0, (s.seeds[tier] | 0) - 1);
+        const seed = SEED_TIERS[tier];
         const now = performance.now?.() || Date.now();
         plant.planted = true;
         plant.watered = false;
         plant.stage = 0;
         plant.progress = 0;
         plant.health = 1;
+        plant.tier = tier;                  // drives grow speed + harvest yield/quality
+        plant.juiceMult = 1;                // grow-juice boost (1 = none); pour at the shop
         plant.lastTick = now;
         plant.driedAt = now + DRY_OUT_MS;   // un-watered seeds wilt eventually
+        // Stem tint matches the strain (leaf/bud are re-tinted every applyPlantGrowth).
+        const stemMat = plant.mesh?.userData?.foliage?.userData?.stemMat;
+        if (stemMat) stemMat.color.set(seed.palette.stem);
         applyPlantGrowth(plant);
-        floatText('Seed planted — needs water', plant.mesh.position.clone().setY(plant.mesh.position.y + 1.2), '#cdd6e3');
+        floatText(`${seed.t.replace(' Seeds', '')} planted — needs water`, plant.mesh.position.clone().setY(plant.mesh.position.y + 1.2), seed.color);
+        unlockAward('drugTycoon', 'firstSeed');
+        updateHud();
+        saveProgress();
+        return true;
     }
     function waterPlant(s, plant) {
         if (!plant.planted) return;
@@ -2373,7 +2776,9 @@ export function createDrugTycoon(deps) {
                 // Growth halts when bone dry; pests merely slow it.
                 let rate = thirsty ? 0 : 1;
                 if (p.pest) rate *= PEST_GROWTH_MULT;
-                rate *= 1 + lights * 0.2;
+                rate *= 1 + lights * 0.4;                      // grow lights — doubled per-level bonus
+                rate *= SEED_TIERS[p.tier ?? 0]?.speed ?? 1;   // better seeds grow faster
+                rate *= p.juiceMult || 1;                       // grow-juice pour-on boost
                 p.progress = Math.min(1, p.progress + (dt * 1000 / PLANT_GROW_TOTAL_MS) * rate);
                 p.stage = Math.min(PLANT_STAGES, Math.floor(p.progress * PLANT_STAGES));
             }
@@ -2405,8 +2810,13 @@ export function createDrugTycoon(deps) {
     // Build the context prompt + run the E-interaction for the nearest plant.
     function plantPrompt(s, plant, interactR) {
         if (!plant.planted) {
+            const tier = pickPlantTier(s);
+            if (tier < 0) {
+                return '🌱 No seeds — buy them at the seed shop outside';
+            }
             if (interactR) plantSeed(s, plant);
-            return '[E] Plant a seed';
+            const seed = SEED_TIERS[tier];
+            return `[E] Plant ${seed.t.replace(' Seeds', '')} seed (have ${s.seeds[tier]})`;
         }
         if (!plant.watered) {
             if (interactR) waterPlant(s, plant);
@@ -2433,16 +2843,24 @@ export function createDrugTycoon(deps) {
             : (plant.progress < PH_FLOWER) ? 'Flowering' : 'Ripening';
         const lowWater = moist < 45 ? ' · [E] water' : '';
         if (interactR && moist < 100) waterPlant(s, plant);   // E always tops up
-        return `${phase} ${pct}% · 💧${moist}%${lowWater}`;
+        // Juice hint: ×N tag if already boosted, else "hold Fire to pour" if owned.
+        const boost = plant.juiceMult || 1;
+        const juiceTag = boost > 1
+            ? ` · 🧪 ×${boost.toFixed(1)}`
+            : (pickJuiceTier(s) >= 0 ? ' · 🧪 hold Fire to pour' : '');
+        return `${phase} ${pct}% · 💧${moist}%${lowWater}${juiceTag}`;
     }
     function harvestPlant(s, plant) {
         if (!plant.planted || (plant.progress ?? 0) < 1) return;
-        // Yield scales a little with how healthy the grow was (3..5 buds).
+        const seed = SEED_TIERS[plant.tier ?? 0] ?? SEED_TIERS[0];
+        // Yield scales with grow health AND the seed tier's yield multiplier.
         const health = clamp01(plant.health ?? 1);
-        const yield_ = Math.max(2, Math.round(BUDS_PER_PLANT * (0.6 + 0.6 * health)));
-        const q = clamp01(0.45 + health * 0.45 + (s.baseUp?.lights || 0) * 0.04);
+        const yield_ = Math.max(2, Math.round(BUDS_PER_PLANT * (0.6 + 0.6 * health) * seed.yieldMult));
+        // Quality: base + health + grow-lights + the seed tier's potency bonus.
+        const q = clamp01(0.45 + health * 0.45 + (s.baseUp?.lights || 0) * 0.08 + seed.qBonus);
         blendBudQuality(s, yield_, q);
         s.buds += yield_;
+        s._budsHarvested = (s._budsHarvested | 0) + yield_;   // award counter
         // Back to an empty pot — replant + rewater for the next crop.
         plant.planted = false;
         plant.watered = false;
@@ -2450,6 +2868,7 @@ export function createDrugTycoon(deps) {
         plant.progress = 0;
         plant.health = 1;
         plant.driedAt = 0;
+        plant.juiceMult = 1;       // pour-on boost is one-shot per plant
         applyPlantGrowth(plant);
         floatText(`+${yield_} buds ${Math.round(q * 100)}%`, plant.mesh.position.clone().setY(plant.mesh.position.y + 1.4), '#b6ff6a');
     }
@@ -3051,9 +3470,17 @@ export function createDrugTycoon(deps) {
     function updateDrugTycoonState(playerPos, delta = 0.016) {
         const { currentMesh } = core;
         if (currentMesh?.userData?.sampleType !== 'drugTycoon') return;
+        if (gameplay.active) tickPlaytime('drugTycoon', delta);
         installMobileBudDragEvents();
         installInteractKey();
         const s = ensureState();
+        // Yaw-only billboards (shop signs / cook label). Cached on the level
+        // mesh on first run, then a cheap loop each frame. Rotation is pure
+        // atan2 of camera→object on the XZ plane — no pitch, signs stay level.
+        tickLevelBillboards(currentMesh);
+        // Cumulative milestone awards — cheap polled checks.
+        if (s.cash >= 1000) unlockAward('drugTycoon', 'cash1k');
+        if ((s._budsHarvested | 0) >= 50) unlockAward('drugTycoon', 'buds50');
         processPendingBudReturns(s);
         maybeAutosave();   // throttled progress save (cash/upgrades/etc → localStorage)
         const layout = currentMesh.userData.drugTycoonLevel || {};
@@ -3069,6 +3496,8 @@ export function createDrugTycoon(deps) {
             s.started = true;
             if (Array.isArray(layout.cookStation)) s.cookPos.set(...layout.cookStation);
             if (Array.isArray(layout.upgradePad)) s.upgradePos.set(...layout.upgradePad);
+            if (Array.isArray(layout.seedShop)) s.seedPos.set(...layout.seedShop);
+            if (Array.isArray(layout.juiceShop)) s.juicePos.set(...layout.juiceShop);
             // The pistol is bought at the upgrade desk now — no free yard pickup.
             ensurePlants(s, layout);
             const target = maxBuyers(s);
@@ -3083,7 +3512,7 @@ export function createDrugTycoon(deps) {
         updatePlants(s, s.inRoom);
         advanceDayNight(s, dt);   // sun/sky animate even in menus / grow room
 
-        if (s.shopOpen || s.cooking || s.baggingOpen || s.helpOpen) { stopSiren(); if (s.phoneOpen) setPhone(false); if (_compassEl) _compassEl.style.display = 'none'; updateHud(); return; } // sim frozen in a menu
+        if (s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.baggingOpen || s.helpOpen) { stopSiren(); if (s.phoneOpen) setPhone(false); if (_compassEl) _compassEl.style.display = 'none'; updateHud(); return; } // sim frozen in a menu
         if (!playerPos) return;
         processRandomEvents(s, layout);
 
@@ -3108,6 +3537,19 @@ export function createDrugTycoon(deps) {
             }
             // Hold Fire next to an infested plant to spray the pests off it.
             if (gameplay.input?.fire && bestPlant?.pest) sprayPlant(s, bestPlant);
+            // Otherwise — hold Fire near a growing, non-pest, non-boosted plant
+            // to pour the currently-selected grow juice on it.
+            else if (gameplay.input?.fire
+                && bestPlant?.planted && bestPlant?.watered
+                && (bestPlant.progress ?? 0) < 1
+                && (bestPlant.juiceMult || 1) <= 1
+                && pickJuiceTier(s) >= 0) {
+                const now = performance.now?.() || Date.now();
+                if (now >= (bestPlant.nextPourAt || 0)) {
+                    bestPlant.nextPourAt = now + 700;
+                    pourJuice(s, bestPlant);
+                }
+            }
             const bench = layout.packagingBench;
             const dBench = Array.isArray(bench)
                 ? Math.hypot(bench[0] - playerPos.x, bench[2] - playerPos.z) : Infinity;
@@ -3216,6 +3658,13 @@ export function createDrugTycoon(deps) {
         const dHome = Array.isArray(home)
             ? Math.hypot(home[0] - playerPos.x, home[2] - playerPos.z) : Infinity;
 
+        // Outdoor seed shop.
+        const dSeed = layout.seedShop
+            ? Math.hypot(s.seedPos.x - playerPos.x, s.seedPos.z - playerPos.z) : Infinity;
+        // Outdoor grow-juice shop.
+        const dJuice = layout.juiceShop
+            ? Math.hypot(s.juicePos.x - playerPos.x, s.juicePos.z - playerPos.z) : Infinity;
+
         if (dHome < DOOR_RADIUS) {
             prompt = '[E] Enter house (grow room)';
             if (interact && Array.isArray(layout.growRoomSpawn)) {
@@ -3225,6 +3674,14 @@ export function createDrugTycoon(deps) {
                 updateHud();
                 return;
             }
+        } else if (dSeed < SEED_PAD_RADIUS) {
+            const owned = totalSeeds(s);
+            prompt = `🌱 [E] Seed shop${owned > 0 ? ` (${owned} seeds)` : ' — buy seeds to grow'}`;
+            if (interact) openSeedShop();
+        } else if (dJuice < JUICE_PAD_RADIUS) {
+            const owned = totalJuices(s);
+            prompt = `🧪 [E] Grow juice${owned > 0 ? ` (${owned} bottles)` : ' — boost plant grow speed'}`;
+            if (interact) openJuiceShop();
         } else if (dCook < STATION_RADIUS) {
             if (s.stash >= stashCap(s)) {
                 prompt = 'Stash full — go sell';
@@ -3308,7 +3765,10 @@ export function createDrugTycoon(deps) {
         s.sales += 1;
         s.heat = Math.min(160, s.heat + heatPerSale(s, soldQ));
         // Selling to the hot customer cools that demand slightly (you flooded it).
-        if (hot) s.demand = Math.max(MARKET_MIN, s.demand - HOT_SELL_DROP);
+        if (hot) {
+            s.demand = Math.max(MARKET_MIN, s.demand - HOT_SELL_DROP);
+            unlockAward('drugTycoon', 'hotSale');
+        }
 
         if (wp) {
             floatText(`+$${gross.toLocaleString()}`, wp.clone(), hot ? '#ffe066' : '#9dffa0');

@@ -2069,11 +2069,12 @@ export function createLevels(deps) {
         // `solid:true` gives the box player-blocking collision (used for house
         // walls so you can't walk through buildings). `actorSurface` keeps the
         // existing floor/roof walkable-collision behaviour.
-        const addBox = (name, size, position, material, { actorSurface = '', solid = false } = {}) => {
+        const addBox = (name, size, position, material, { actorSurface = '', solid = false, rotY = 0 } = {}) => {
             const geometry = new THREE.BoxGeometry(size[0], size[1], size[2]);
             const mesh = new THREE.Mesh(geometry, material);
             mesh.name = name;
             mesh.position.set(position[0], position[1], position[2]);
+            if (rotY) mesh.rotation.y = rotY;
             mesh.castShadow = true;
             mesh.receiveShadow = true;
             if (actorSurface) mesh.userData.doomMapSurface = actorSurface;
@@ -2326,6 +2327,212 @@ export function createLevels(deps) {
         const COOK = [-LOT + 2, -LOT + 5];
         addBox('tycoon-cook', [3.0, 1.0, 2.0], [COOK[0], 0.5, COOK[1]],
             flatMat('#0f3d22', { rough: 0.4, metal: 0.3, emissive: '#1f9c52', emissiveIntensity: 0.5 }), { solid: true });
+        // ---- text-sign helper -----------------------------------------
+        // Renders one or two lines of bold text into a CanvasTexture and
+        // returns a flat double-sided plane mesh you can park in front of a
+        // wall / on top of a kiosk. Emissive so it reads in night lighting.
+        // text:    main heading
+        // sub:     optional secondary line (smaller)
+        // bg/fg:   panel + text colour
+        const makeSignMesh = (text, {
+            sub = '',
+            width = 2.4,
+            height = 0.8,
+            bg = '#0a2410',
+            fg = '#b6ff6a',
+            sigil = '',                  // optional emoji-style prefix
+        } = {}) => {
+            const W = 512, H = Math.round(W * height / width);
+            const canvas = document.createElement('canvas');
+            canvas.width = W; canvas.height = H;
+            const ctx = canvas.getContext('2d');
+            // Rounded panel background.
+            ctx.fillStyle = bg;
+            const r = 24;
+            ctx.beginPath();
+            ctx.moveTo(r, 0);
+            ctx.lineTo(W - r, 0); ctx.quadraticCurveTo(W, 0, W, r);
+            ctx.lineTo(W, H - r); ctx.quadraticCurveTo(W, H, W - r, H);
+            ctx.lineTo(r, H);     ctx.quadraticCurveTo(0, H, 0, H - r);
+            ctx.lineTo(0, r);     ctx.quadraticCurveTo(0, 0, r, 0);
+            ctx.closePath(); ctx.fill();
+            // Inner border.
+            ctx.strokeStyle = fg;
+            ctx.lineWidth = 6;
+            ctx.stroke();
+            // Heading. Auto-shrink if it overflows the panel.
+            const main = sigil ? `${sigil} ${text}` : text;
+            ctx.fillStyle = fg;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            let fs = sub ? Math.floor(H * 0.42) : Math.floor(H * 0.58);
+            ctx.font = `900 ${fs}px "Trebuchet MS", system-ui, sans-serif`;
+            while (ctx.measureText(main).width > W - 40 && fs > 14) {
+                fs -= 2;
+                ctx.font = `900 ${fs}px "Trebuchet MS", system-ui, sans-serif`;
+            }
+            ctx.fillText(main, W / 2, sub ? H * 0.36 : H * 0.5);
+            if (sub) {
+                let ss = Math.floor(H * 0.24);
+                ctx.font = `700 ${ss}px "Trebuchet MS", system-ui, sans-serif`;
+                while (ctx.measureText(sub).width > W - 40 && ss > 10) {
+                    ss -= 2;
+                    ctx.font = `700 ${ss}px "Trebuchet MS", system-ui, sans-serif`;
+                }
+                ctx.fillStyle = '#eaffea';
+                ctx.fillText(sub, W / 2, H * 0.74);
+            }
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.minFilter = THREE.LinearFilter;
+            tex.magFilter = THREE.LinearFilter;
+            tex.anisotropy = 4;
+            tex.needsUpdate = true;
+            const mat = new THREE.MeshStandardMaterial({
+                map: tex,
+                emissive: new THREE.Color(fg),
+                emissiveMap: tex,
+                emissiveIntensity: 1.1,
+                roughness: 0.55,
+                metalness: 0.0,
+                side: THREE.DoubleSide,
+                transparent: false,
+            });
+            const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), mat);
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
+            return mesh;
+        };
+
+        // Both outdoor shops face the world centre (where the player spawns
+        // and the road runs), so the plaque + counter front always greet the
+        // approach instead of pointing at the perimeter wall. `faceY` makes
+        // the kiosk's local +Z (front face / plaque side) point at origin.
+        const faceOrigin = (kx, kz) => Math.atan2(-kx, -kz);
+        // Mark a mesh/group as a yaw-only billboard. Drug-tycoon's per-frame
+        // update walks the level scene and rotates each tagged object so its
+        // +Z always points at the camera (in the XZ plane only — no pitch).
+        // Used for the shop signs + cook label so the text never goes oblique.
+        const billboard = (obj) => { obj.userData.billboardY = true; return obj; };
+
+        // Seed shop kiosk (outside) — SE grass lot, opposite the cook bench.
+        // Boxy stall + a glowing readable sign mounted on top, plus a smaller
+        // "buy here" plaque on the front face of the kiosk.
+        const SEED = [LOT - 3, -LOT + 5];
+        const SEED_FACE = faceOrigin(SEED[0], SEED[1]);
+        addBox('tycoon-seedshop', [3.4, 2.4, 2.4], [SEED[0], 1.2, SEED[1]],
+            flatMat('#13351c', { rough: 0.55, emissive: '#3bd16a', emissiveIntensity: 0.45 }),
+            { solid: true, rotY: SEED_FACE });
+        // Big roof sign — single billboarded plane that yaws to face the
+        // player every frame, so it always reads clearly no matter where you
+        // approach from.
+        {
+            const sign = makeSignMesh('SEED SHOP', { sub: 'WEED SEEDS · 3 TIERS', width: 2.6, height: 0.9, sigil: '🌱' });
+            sign.position.set(SEED[0], 3.05, SEED[1]);
+            sign.name = 'tycoon-seedshop-sign';
+            billboard(sign);
+            root.add(sign);
+        }
+        // Front-face plaque — static, mounted on the kiosk's front face. Sits
+        // just in front of the rotated box along its facing direction so it
+        // doesn't z-fight, and inherits the kiosk's orientation (no billboard).
+        {
+            const plaque = makeSignMesh('BUY SEEDS', { sub: 'Walk up · press E', width: 1.8, height: 0.7, fg: '#cdeaff', bg: '#0a1e10' });
+            const off = 1.21;
+            plaque.position.set(SEED[0] + Math.sin(SEED_FACE) * off, 1.7, SEED[1] + Math.cos(SEED_FACE) * off);
+            plaque.rotation.y = SEED_FACE;
+            plaque.name = 'tycoon-seedshop-plaque';
+            root.add(plaque);
+        }
+        // Cook-station label — billboarded too.
+        {
+            const cookSign = makeSignMesh('COOK', { sub: 'Stash → product', width: 1.6, height: 0.6, fg: '#9dffa0', bg: '#0a2410' });
+            cookSign.position.set(COOK[0], 1.9, COOK[1]);
+            cookSign.name = 'tycoon-cook-sign';
+            billboard(cookSign);
+            root.add(cookSign);
+        }
+        // ---- grow-juice shop (the "other house", NE grass lot) -------------
+        // Across the street from the seed shop. Built in a single Group placed
+        // at JUICE + rotated so the counter front faces the world centre.
+        // All wall/roof/counter coords below are LOCAL to that group, so the
+        // facing rotation hits the whole building at once.
+        const JUICE = [LOT - 3, LOT - 5];
+        const JUICE_FACE = faceOrigin(JUICE[0], JUICE[1]);
+        const juiceWallMat = flatMat('#1a2a3a', { rough: 0.7 });
+        const juiceRoofMat = flatMat('#0c1a26', { rough: 0.5, emissive: '#3aa6d6', emissiveIntensity: 0.35 });
+        const juiceCounterMat = flatMat('#0e3548', { rough: 0.5, metal: 0.25, emissive: '#3aa6d6', emissiveIntensity: 0.5 });
+
+        const juiceGroup = new THREE.Group();
+        juiceGroup.name = 'tycoon-juiceshop-building';
+        juiceGroup.position.set(JUICE[0], 0, JUICE[1]);
+        juiceGroup.rotation.y = JUICE_FACE;
+        root.add(juiceGroup);
+
+        // Helper — adds a local box to the juice group AND registers a static
+        // collision body at the world-transformed position so physics still
+        // matches the rotated visuals.
+        const addJuicePart = (name, size, localPos, material, { solid = false } = {}) => {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(size[0], size[1], size[2]), material);
+            mesh.name = name;
+            mesh.position.set(localPos[0], localPos[1], localPos[2]);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            juiceGroup.add(mesh);
+            if (solid) {
+                // Bake the rotation into a world-space collider box. We rotate
+                // the bounding extents to keep the physics shape axis-aligned
+                // for the underlying static mesh actor, while the visual still
+                // tilts with the group.
+                juiceGroup.updateMatrixWorld(true);
+                const worldPos = mesh.getWorldPosition(new THREE.Vector3());
+                const sized = [size[0], size[1], size[2]];
+                // For a Y-rotation, swap X/Z extents if the rotation is closer
+                // to ±90° than 0/180°. JUICE_FACE depends on lot position;
+                // compute the better fit.
+                const c = Math.abs(Math.cos(JUICE_FACE));
+                const collider = (c < 0.5) ? [sized[2], sized[1], sized[0]] : sized;
+                const phys = new THREE.Mesh(new THREE.BoxGeometry(collider[0], collider[1], collider[2]), material);
+                phys.position.copy(worldPos);
+                phys.visible = false;
+                phys.name = `${name}-collider`;
+                root.add(phys);
+                const actor = makeSampleLevelMeshActor(phys.name, phys, {
+                    kind: 'imported', castShadow: false, receiveShadow: false, skipPhysicsCollision: true,
+                });
+                enableStaticMeshActorCollision(actor);
+            }
+            return mesh;
+        };
+
+        // Back + side walls fake a building footprint behind the counter (local coords).
+        addJuicePart('tycoon-juiceshop-backwall', [4.6, 3.2, 0.3], [0, 1.6, -1.8], juiceWallMat, { solid: true });
+        addJuicePart('tycoon-juiceshop-sidewall', [0.3, 3.2, 3.8], [2.15, 1.6, 0], juiceWallMat, { solid: true });
+        // Flat roof slab on top — emissive trim hints at neon underlighting.
+        addJuicePart('tycoon-juiceshop-roof', [4.8, 0.2, 4.0], [0, 3.3, 0], juiceRoofMat);
+        // The counter kiosk itself (solid for collision + interaction radius anchor).
+        addJuicePart('tycoon-juiceshop', [3.4, 1.6, 1.8], [0, 0.8, 0.6], juiceCounterMat, { solid: true });
+        // Overhead sign + plaque attach to ROOT (not the rotated juiceGroup) so
+        // the per-frame billboard tick can spin them freely. Their world
+        // positions sit above + in front of the rotated counter.
+        {
+            const sign = makeSignMesh('GROW JUICE', { sub: 'POUR-ON SPEED BOOST', width: 2.8, height: 0.9, sigil: '🧪', fg: '#7fd0ff', bg: '#0a1e2a' });
+            sign.position.set(JUICE[0], 3.6, JUICE[1]);
+            sign.name = 'tycoon-juiceshop-sign';
+            billboard(sign);
+            root.add(sign);
+        }
+        {
+            const plaque = makeSignMesh('BUY JUICE', { sub: 'Walk up · press E', width: 1.8, height: 0.7, fg: '#cdeaff', bg: '#0a1828' });
+            // Plaque hovers in front of the counter; the front of the counter
+            // is along the +localZ axis of juiceGroup, which is JUICE + 1.51 *
+            // (sin(JUICE_FACE), 0, cos(JUICE_FACE)) in world space. Static
+            // rotation matches the kiosk facing (no billboard — it's a wall sign).
+            const off = 1.51;
+            plaque.position.set(JUICE[0] + Math.sin(JUICE_FACE) * off, 1.4, JUICE[1] + Math.cos(JUICE_FACE) * off);
+            plaque.rotation.y = JUICE_FACE;
+            plaque.name = 'tycoon-juiceshop-plaque';
+            root.add(plaque);
+        }
         // Upgrades now live INSIDE the grow room (SE corner desk). Anchor mirrors
         // the grow-upgrade box built in buildGrowRoom.
         const UPG = [ROOM_ORIGIN[0] + ROOM_W * 0.5 - 2.4, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 2.4];
@@ -2337,6 +2544,8 @@ export function createLevels(deps) {
         root.userData.drugTycoonLevel = {
             playerSpawn: [0, 0.85, 0],
             cookStation: [COOK[0], 1.0, COOK[1]],
+            seedShop: [SEED[0], 1.0, SEED[1]],   // outdoor seed-shop kiosk
+            juiceShop: [JUICE[0], 1.0, JUICE[1]], // outdoor grow-juice kiosk (the "other house")
             upgradePad: [UPG[0], 1.0, UPG[1]],   // inside the grow room
             gunPickup: [GUN[0], 1.0, GUN[1]],
             streetRadius: HALF - 6,   // buyers/police wander the roads + lots
