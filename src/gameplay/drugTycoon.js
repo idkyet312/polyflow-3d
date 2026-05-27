@@ -1736,7 +1736,17 @@ export function createDrugTycoon(deps) {
             sun.color.copy(_tmpColor);
         }
         const { scene } = core;
-        if (scene) {
+        // If the level placed a procedural sky dome ("tycoon-skybox"), tint it
+        // by the day→night factor and leave scene.background alone. Otherwise
+        // fall back to the legacy solid-color background swap.
+        let skyDome = null;
+        if (scene) scene.traverse((o) => { if (!skyDome && o.name === 'tycoon-skybox') skyDome = o; });
+        if (skyDome?.material) {
+            _tmpColor.copy(_daySky).lerp(_nightSky, n);
+            skyDome.material.color.copy(_tmpColor);
+            // Boost dome brightness slightly in daytime, dim at night.
+            skyDome.material.opacity = 1.0;
+        } else if (scene) {
             if (!scene.background || !scene.background.isColor) {
                 scene.background = _daySky.clone();
             }
@@ -2258,14 +2268,54 @@ export function createDrugTycoon(deps) {
         const dx = target.x - mesh.position.x;
         const dz = target.z - mesh.position.z;
         const dist = Math.hypot(dx, dz);
-        if (dist < 0.4) return true;
+        if (dist < 0.4) { animateWalk(mesh, 0, dt); return true; }
         const step = Math.min(dist, speed * dt);
         mesh.position.x += (dx / dist) * step;
         mesh.position.z += (dz / dist) * step;
         mesh.position.y = layout.spawnY ?? 0; // person group origin = feet
         mesh.rotation.y = Math.atan2(dx, dz); // face travel direction
+        animateWalk(mesh, speed, dt);
         mesh.updateMatrixWorld(true);
         return false;
+    }
+
+    // Drive a simple 4-limb walk cycle on a person group (made by ragdoll.makePerson).
+    // Phase advances proportional to walk speed; legs swing front/back on X axis,
+    // arms swing opposite. When stopped (movingSpeed=0) limbs ease back to rest.
+    function animateWalk(mesh, movingSpeed, dt) {
+        const parts = mesh.userData?.parts;
+        if (!parts || parts.length < 6) return;
+        const ud = mesh.userData;
+        ud.walkPhase = (ud.walkPhase || 0) + (movingSpeed > 0 ? movingSpeed * 4.2 * dt : 0);
+        const phase = ud.walkPhase;
+        const amp = movingSpeed > 0 ? 0.6 : 0;
+        // Ease current amp toward target so stopping isn't a snap.
+        ud.walkAmp = (ud.walkAmp ?? 0) + (amp - (ud.walkAmp ?? 0)) * Math.min(1, dt * 8);
+        const a = ud.walkAmp;
+        const s = Math.sin(phase);
+        // parts: [torso, head, armL, armR, legL, legR]
+        const armL = parts[2], armR = parts[3], legL = parts[4], legR = parts[5];
+        // Rotate legs from the HIP (top of leg box), not the geometric centre.
+        // BoxGeometry rotates about its center, so offset position by the rotation
+        // around a virtual top-pivot at +halfH. Rest pose: leg center y = 0.45,
+        // legHalf = 0.425, top = 0.875. Same trick for arms (shoulder pivot).
+        const applyTopPivot = (limb, restY, halfH, angle) => {
+            if (!limb) return;
+            limb.rotation.x = angle;
+            const c = Math.cos(angle), si = Math.sin(angle);
+            // Move center so the TOP of the box stays at restY + halfH.
+            limb.position.y = restY + halfH - c * halfH;
+            limb.position.z = -si * halfH;
+        };
+        applyTopPivot(legL, 0.45, 0.425,  s * a);
+        applyTopPivot(legR, 0.45, 0.425, -s * a);
+        applyTopPivot(armL, 1.30, 0.31, -s * a * 0.8);
+        applyTopPivot(armR, 1.30, 0.31,  s * a * 0.8);
+        // Subtle bob on torso/head.
+        const bob = Math.abs(Math.sin(phase * 2)) * a * 0.015;
+        const torso = parts[0], head = parts[1];
+        if (torso) torso.position.y = 1.25 + bob;
+        if (head) head.position.y = 1.82 + bob;
     }
 
     // ---- grow room: teleport, plants, harvest --------------------------

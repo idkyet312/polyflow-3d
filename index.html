@@ -181,10 +181,12 @@
                                 <option value="shootingSim">Shooting Simulator</option>
                                 <option value="soccerField">Soccer Field</option>
                                 <option value="soccerFieldTerrain">Terrain</option>
+                                <option value="myCustom">My Custom Level</option>
                             </select>
                         </label>
                         <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
                             <button class="btn viewer-menu-btn" id="load-level">Load Level</button>
+                            <button class="btn viewer-menu-btn" id="save-custom-level">Save as My Custom Level</button>
                         </div>
                         <div class="viewer-menu-actions">
                             <button class="btn viewer-menu-btn" id="play-test-sound-btn">Test 3D Sound</button>
@@ -1498,6 +1500,7 @@
                         </div>
                         <button class="mobile-pause-btn mobile-pause-gfx-toggle" id="mobile-pause-gfx-toggle" type="button" aria-expanded="false">Graphics Settings</button>
                         <div class="mobile-pause-gfx" id="mobile-pause-gfx" hidden>
+                            <div class="mobile-pause-gfx-row"><span>Skybox</span><button class="mobile-gfx-tog" id="gfx-sky" type="button" data-on="1">On</button></div>
                             <div class="mobile-pause-gfx-row"><span>Bloom</span><button class="mobile-gfx-tog" id="gfx-bloom" type="button" data-on="1">On</button></div>
                             <div class="mobile-pause-gfx-row"><span>Ambient Light</span><button class="mobile-gfx-tog" id="gfx-ambient" type="button" data-on="0">Off</button></div>
                             <div class="mobile-pause-gfx-row"><span>Ambient Occlusion</span><button class="mobile-gfx-tog" id="gfx-ssao" type="button" data-on="1">On</button></div>

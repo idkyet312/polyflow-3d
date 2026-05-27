@@ -4310,7 +4310,41 @@ async function init() {
         e.stopPropagation();
         const levelId = document.getElementById('level-select')?.value || 'soccerField';
         mobileState.launchedFromGames = false;
+        if (levelId === 'myCustom') {
+            try {
+                const raw = localStorage.getItem('polyflow.customLevel.v1');
+                if (!raw) { alert('No custom level saved yet. Build a scene and click "Save as My Custom Level".'); return; }
+                const umap = JSON.parse(raw);
+                clearCurrentMesh();
+                currentMesh = new THREE.Group();
+                currentMesh.name = 'myCustomLevel';
+                scene.add(currentMesh);
+                Promise.resolve(loadWorldFromJSON(umap)).then(() => {
+                    refreshGameplayWorld();
+                    refreshSceneUI();
+                    updateLoadedAssetStats('My Custom Level', raw.length, currentMesh);
+                    enableOptimizationPipeline();
+                });
+            } catch (err) {
+                console.error('Custom level load failed:', err);
+                alert('Custom level load failed: ' + err.message);
+            }
+            return;
+        }
         loadSample(levelId);
+    });
+
+    document.getElementById('save-custom-level')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try {
+            const umap = exportWorldToJSON();
+            const json = JSON.stringify(umap);
+            localStorage.setItem('polyflow.customLevel.v1', json);
+            alert(`Saved ${umap.actors?.length || 0} actors as My Custom Level (${(json.length/1024).toFixed(1)} KB).`);
+        } catch (err) {
+            console.error('Custom level save failed:', err);
+            alert('Custom level save failed: ' + err.message);
+        }
     });
 
     browseModelBtn = document.getElementById('open-model-menu');

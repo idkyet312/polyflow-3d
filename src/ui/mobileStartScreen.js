@@ -222,6 +222,7 @@ function setGfxToggle(btn, on) {
 }
 function syncGraphicsSettings() {
     const s = worldEnvState;
+    setGfxToggle(document.getElementById('gfx-sky'), s.sky?.enabled);
     setGfxToggle(document.getElementById('gfx-bloom'), s.bloom?.enabled);
     setGfxToggle(document.getElementById('gfx-ambient'), s.ambient?.enabled);
     setGfxToggle(document.getElementById('gfx-ssao'), s.ssao?.enabled);
@@ -256,6 +257,7 @@ function wireGraphicsSettings() {
             applyWorldEnvState({ persist: true, switchSky: false });
         });
     };
+    bind('gfx-sky', () => worldEnvState.sky);
     bind('gfx-bloom', () => worldEnvState.bloom);
     bind('gfx-ambient', () => worldEnvState.ambient);
     bind('gfx-ssao', () => worldEnvState.ssao);

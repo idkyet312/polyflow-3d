@@ -2246,12 +2246,20 @@ export function createLevels(deps) {
             const lampMat = flatMat('#a34dff', { rough: 0.4, emissive: '#8f35ff', emissiveIntensity: 1.4 });
             [-7, 0, 7].forEach((lx, k) => {
                 addBox(`grow-lamp-${k}`, [3.2, 0.08, 1.35], [ox + lx, oy + H - WT - 0.12, oz - 4], lampMat);
-                const rect = new THREE.RectAreaLight(0xa34dff, 4.0, 3.6, 2.0);
+                const rect = new THREE.RectAreaLight(0xffffff, 12.0, 3.6, 2.0);
                 rect.position.set(ox + lx, oy + H - WT - 0.22, oz - 4);
                 rect.lookAt(ox + lx, oy, oz - 4);   // aim straight down at the plants
                 rect.name = `grow-rect-light-${k}`;
                 root.add(rect);
             });
+            // Bright white rect light hanging low in middle of room.
+            const whitePanelMat = flatMat('#ffffff', { rough: 0.3, emissive: '#ffffff', emissiveIntensity: 3.0 });
+            addBox('grow-white-panel', [4.0, 0.1, 2.2], [ox, oy + H - WT - 0.12, oz], whitePanelMat);
+            const whiteRect = new THREE.RectAreaLight(0xffffff, 20.0, 4.0, 2.2);
+            whiteRect.position.set(ox, oy + H - WT - 0.22, oz);
+            whiteRect.lookAt(ox, oy, oz);
+            whiteRect.name = 'grow-white-rect';
+            root.add(whiteRect);
             // Purple ambient fill across the WHOLE room — ambient lights every
             // surface equally, so this is what spreads the purple everywhere
             // (walls, pots, bench, door) instead of just under the lamps.
@@ -2561,13 +2569,174 @@ export function createLevels(deps) {
             bed: [ROOM_ORIGIN[0] - ROOM_W * 0.5 + 1.6, 1.0, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 2.2],
         };
 
-        // Daylight: a directional-style sun high above lighting the whole block.
+        // ---- Procedural cloudy skybox (large inverted sphere) -------------
+        // Canvas texture: vertical gradient (blue → pale) + soft white cloud
+        // blobs. Wraps the level so it reads as sky from any camera position.
+        const skyCanvas = document.createElement('canvas');
+        skyCanvas.width = 1024; skyCanvas.height = 512;
+        const skyCtx = skyCanvas.getContext('2d');
+        const grad = skyCtx.createLinearGradient(0, 0, 0, 512);
+        grad.addColorStop(0.0, '#6fa8d6');
+        grad.addColorStop(0.55, '#a7c8e0');
+        grad.addColorStop(1.0, '#dde7ee');
+        skyCtx.fillStyle = grad;
+        skyCtx.fillRect(0, 0, 1024, 512);
+        // Cloud blobs — overlapping soft white circles. Draw each cloud THREE
+        // times (at cx-1024, cx, cx+1024) so blobs that straddle the seam wrap
+        // around the texture cleanly — no hard line at u=0.
+        const drawBlob = (cx, cy, r) => {
+            const g = skyCtx.createRadialGradient(cx, cy, 0, cx, cy, r);
+            g.addColorStop(0, 'rgba(255,255,255,0.85)');
+            g.addColorStop(1, 'rgba(255,255,255,0)');
+            skyCtx.fillStyle = g;
+            skyCtx.beginPath();
+            skyCtx.arc(cx, cy, r, 0, Math.PI * 2);
+            skyCtx.fill();
+        };
+        const drawCloud = (cx, cy, scale) => {
+            for (let p = 0; p < 7; p++) {
+                const dx = (Math.random() - 0.5) * 90 * scale;
+                const dy = (Math.random() - 0.5) * 22 * scale;
+                const r = (24 + Math.random() * 26) * scale;
+                const x = cx + dx, y = cy + dy;
+                drawBlob(x, y, r);
+                drawBlob(x - 1024, y, r);
+                drawBlob(x + 1024, y, r);
+            }
+        };
+        for (let i = 0; i < 14; i++) {
+            drawCloud(Math.random() * 1024, 80 + Math.random() * 220, 0.8 + Math.random() * 0.9);
+        }
+        const skyTex = new THREE.CanvasTexture(skyCanvas);
+        skyTex.colorSpace = THREE.SRGBColorSpace;
+        skyTex.minFilter = THREE.LinearFilter;
+        skyTex.magFilter = THREE.LinearFilter;
+        skyTex.wrapS = THREE.RepeatWrapping;
+        skyTex.wrapT = THREE.ClampToEdgeWrapping;
+        skyTex.needsUpdate = true;
+        const skyDome = new THREE.Mesh(
+            new THREE.SphereGeometry(400, 64, 32),
+            new THREE.MeshBasicMaterial({ map: skyTex, side: THREE.BackSide, depthWrite: false, fog: false, toneMapped: false }),
+        );
+        skyDome.name = 'tycoon-skybox';
+        skyDome.renderOrder = -1;
+        skyDome.userData.skipPhysicsCollision = true;
+        skyDome.userData.skipLightmap = true;
+        root.add(skyDome);
+
+        // Daylight: warm sun high above lighting the whole block.
+        // No shadow on the sun — point-light cubemap shadows over a large area
+        // strobe with TAA + cost a lot. Day/night cycle still tints it.
         const sun = new THREE.PointLight(0xfff0d0, 14, 160, 1.2);
         sun.position.set(BLOCK * 0.25, WALL_H + 26, BLOCK * 0.2);
-        sun.castShadow = true;
-        configurePointLightShadow(sun);
+        sun.castShadow = false;
         sun.name = 'tycoon-sun';
         root.add(sun);
+        const dayAmbient = new THREE.AmbientLight(0xc8d8ee, 0.55);
+        dayAmbient.name = 'tycoon-day-ambient';
+        root.add(dayAmbient);
+        const dayHemi = new THREE.HemisphereLight(0xbfd6ee, 0x6a7060, 0.5);
+        dayHemi.name = 'tycoon-day-hemi';
+        root.add(dayHemi);
+
+        // ---- WEED SHOP storefront wraps the home house --------------------
+        // HOME = [-LOT, 0], faceY = +PI/2 so front (+Z local) = +X world.
+        const SHOP_X = HOME[0];
+        const SHOP_Z = HOME[1];
+        const SHOP_FRONT_X = SHOP_X + 10 * 0.5 + 0.05;  // just in front of house wall
+        // Dark facade panel covering the front of the home.
+        const facadeMat = flatMat('#1a1410', { rough: 0.85 });
+        addBox('weedshop-facade', [0.15, 6.2, 11], [SHOP_FRONT_X + 0.05, 3.1, SHOP_Z], facadeMat);
+        // Bright lit storefront windows (full-height glass either side of door).
+        const storefrontMat = flatMat('#6ab268', { rough: 0.25, metal: 0.1, emissive: '#3a8a48', emissiveIntensity: 0.6 });
+        addBox('weedshop-window-l', [0.06, 3.0, 3.2], [SHOP_FRONT_X + 0.12, 1.7, SHOP_Z - 3.2], storefrontMat);
+        addBox('weedshop-window-r', [0.06, 3.0, 3.2], [SHOP_FRONT_X + 0.12, 1.7, SHOP_Z + 3.2], storefrontMat);
+        // Dark window frames between glass and facade.
+        const frameMat = flatMat('#0a0806', { rough: 0.7 });
+        addBox('weedshop-frame-top', [0.18, 0.2, 11], [SHOP_FRONT_X + 0.08, 3.3, SHOP_Z], frameMat);
+        addBox('weedshop-frame-bot', [0.18, 0.2, 11], [SHOP_FRONT_X + 0.08, 0.15, SHOP_Z], frameMat);
+        // Door (open) — dark recess with warm interior glow behind.
+        const doorRecessMat = flatMat('#3a2818', { rough: 0.6, emissive: '#ffb060', emissiveIntensity: 1.4 });
+        addBox('weedshop-door', [0.06, 2.6, 1.6], [SHOP_FRONT_X + 0.13, 1.3, SHOP_Z], doorRecessMat);
+        // Interior point light spilling out through windows + door.
+        const shopInterior = new THREE.PointLight(0xfff0c8, 6, 10, 1.5);
+        shopInterior.position.set(SHOP_FRONT_X - 1.5, 2.2, SHOP_Z);
+        shopInterior.name = 'weedshop-interior';
+        root.add(shopInterior);
+        // Big neon "WEED SHOP" sign — bright green emissive panel above windows.
+        const signBgMat = flatMat('#0a1a0a', { rough: 0.6 });
+        addBox('weedshop-sign-bg', [0.18, 1.5, 8.5], [SHOP_FRONT_X + 0.1, 4.6, SHOP_Z], signBgMat);
+        // Text sign reads "WEED SHOP". Plane faces +X (out from front of shop).
+        const weedSignMesh = makeSignMesh('WEED SHOP', {
+            width: 7.5, height: 1.1, fg: '#9dffa0', bg: '#0a2410',
+        });
+        weedSignMesh.position.set(SHOP_FRONT_X + 0.5, 4.6, SHOP_Z);
+        weedSignMesh.rotation.y = Math.PI * 0.5;  // face +X
+        weedSignMesh.name = 'weedshop-sign-text';
+        root.add(weedSignMesh);
+        // Leaf icon (smaller bright square left of sign).
+        const shopLeafMat = flatMat('#5ce05a', { rough: 0.35, emissive: '#6ce06a', emissiveIntensity: 1.6 });
+        addBox('weedshop-leaf', [0.08, 0.9, 0.9], [SHOP_FRONT_X + 0.22, 4.6, SHOP_Z - 3.2], shopLeafMat);
+        // Two area lights wash the sign + spill onto the sidewalk.
+        const signLight1 = new THREE.PointLight(0x6cff7a, 4, 14, 1.6);
+        signLight1.position.set(SHOP_FRONT_X + 2.0, 4.6, SHOP_Z - 2);
+        signLight1.name = 'weedshop-sign-light-1';
+        root.add(signLight1);
+        const signLight2 = new THREE.PointLight(0x6cff7a, 4, 14, 1.6);
+        signLight2.position.set(SHOP_FRONT_X + 2.0, 4.6, SHOP_Z + 2);
+        signLight2.name = 'weedshop-sign-light-2';
+        root.add(signLight2);
+        // Ground spill — small green glow pool at shop entrance.
+        const spillLight = new THREE.PointLight(0x5cff8a, 2.5, 7, 1.8);
+        spillLight.position.set(SHOP_FRONT_X + 2.5, 0.4, SHOP_Z);
+        spillLight.name = 'weedshop-spill';
+        root.add(spillLight);
+
+        // ---- Palm trees along sidewalks ----------------------------------
+        const palmTrunkMat = flatMat('#3a2a1a', { rough: 0.95 });
+        const palmFrondMat = flatMat('#2f5a2a', { rough: 0.9, emissive: '#1a3a18', emissiveIntensity: 0.2 });
+        const addPalm = (px, pz) => {
+            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 4.2, 8), palmTrunkMat);
+            trunk.position.set(px, 2.1, pz);
+            trunk.castShadow = true; trunk.receiveShadow = true;
+            trunk.name = `tycoon-palm-trunk-${px}-${pz}`;
+            root.add(trunk);
+            // Fronds: 6 stretched boxes radiating from top.
+            for (let f = 0; f < 6; f++) {
+                const ang = (f / 6) * Math.PI * 2;
+                const frond = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.08, 0.6), palmFrondMat);
+                frond.position.set(px + Math.cos(ang) * 1.1, 4.2, pz + Math.sin(ang) * 1.1);
+                frond.rotation.set(0, -ang, -0.25);
+                frond.castShadow = true;
+                root.add(frond);
+            }
+        };
+        // Place palms at sidewalk edges, spaced along the N-S road.
+        [-28, -14, 14, 28].forEach((pz) => {
+            addPalm(-(ROAD_W * 0.5 + SW + 0.6), pz);
+            addPalm(  ROAD_W * 0.5 + SW + 0.6, pz);
+        });
+
+        // ---- Street lamps along the roads (warm pools) -------------------
+        const lampPoleMat = flatMat('#2a2a2e', { rough: 0.6, metal: 0.5 });
+        const lampHeadMat = flatMat('#ffe0a0', { rough: 0.4, emissive: '#ffd070', emissiveIntensity: 1.2 });
+        const addLamp = (lx, lz) => {
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 4.0, 8), lampPoleMat);
+            pole.position.set(lx, 2.0, lz);
+            pole.castShadow = true;
+            root.add(pole);
+            const head = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.25, 0.5), lampHeadMat);
+            head.position.set(lx, 4.05, lz);
+            root.add(head);
+            const lampLight = new THREE.PointLight(0xffd090, 4, 10, 1.6);
+            lampLight.position.set(lx, 3.9, lz);
+            lampLight.name = `tycoon-lamp-${lx}-${lz}`;
+            root.add(lampLight);
+        };
+        [-22, 0, 22].forEach((lz) => {
+            addLamp(-(ROAD_W * 0.5 + SW + 0.4), lz);
+            addLamp(  ROAD_W * 0.5 + SW + 0.4, lz);
+        });
 
         applySilPomLighting(root, sun.position.clone());
         return root;
