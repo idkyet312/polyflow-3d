@@ -2682,6 +2682,11 @@ export function createLevels(deps) {
             homeDoor: [HOME_DOOR[0], 0.85, HOME_DOOR[1]],   // outside, enters room
             growRoomSpawn: [ROOM_ORIGIN[0], 0.85, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 2],  // just inside south wall
             growExitDoor: [ROOM_ORIGIN[0], 0.85, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 1],   // at south wall, back to street
+            // Inside-shop customer anchors. shopInsideAnchor = welcome mat
+            // right inside the door. shopCounterCustomerSide = standing spot
+            // in front of the L-counter (the customer side of the register).
+            shopInsideAnchor: [ROOM_ORIGIN[0], 0.85, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 3.5],
+            shopCounterCustomerSide: [ROOM_ORIGIN[0] + 1.9, 0.85, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 4.6],
             growPots: POTS,
             packagingBench: [ROOM_ORIGIN[0] + BENCH_LOCAL[0] - 1.0, 1.0, ROOM_ORIGIN[2] + BENCH_LOCAL[1]],
             // Bed (SW corner) — sleep to skip the night. Matches buildGrowRoom.

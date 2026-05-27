@@ -222,6 +222,26 @@ const NARC_TELL_RADIUS = 5.0;     // they get twitchy this close
 // ---- bribe ---------------------------------------------------------------
 const BRIBE_COST_PER_HEAT = 3;    // $ per heat point cleared at the upgrade desk
 // ---- rivals / random events / base upgrades -----------------------------
+// ---- reputation ---------------------------------------------------------
+// Street rep 0..100. Drives how many customers come to your shop:
+//   <20  PARIAH   only 1 buyer wanders in
+//   <40  SHADY    2
+//   <60  KNOWN    3-4 (baseline)
+//   <80  RESPECTED 5-6
+//   >=80 LEGEND    7-8
+// Each sale builds rep (quality + hot sales build it faster); narcs, busts,
+// and trash product chip it away. Persisted in the save.
+const REP_START = 50;
+const REP_MAX = 100;
+const REP_MIN = 0;
+const REP_GAIN_BASE = 0.6;        // per unit sold of average product
+const REP_GAIN_QUALITY = 2.2;     // additive multiplier for quality 0..1
+const REP_GAIN_HOT = 1.6;         // extra rep for hitting the hot buyer
+const REP_GAIN_COMBO = 0.8;       // bonus when chain >= 3
+const REP_LOSS_NARC = 18;         // sold to undercover cop
+const REP_LOSS_BUST = 12;         // got pinched
+const REP_LOSS_TRASH = 4;         // sold trash-grade product (q<0.35)
+
 const RIVAL_SPEED = 1.85;
 const RIVAL_POACH_RADIUS = 2.2;
 const RIVAL_MUG_RADIUS = 2.0;
@@ -246,6 +266,7 @@ export function createDrugTycoon(deps) {
             cash: STARTING_CASH,
             startingCashGranted: true,
             startingCashGrantAmount: STARTING_CASH_GRANT,
+            rep: REP_START,       // street reputation 0..100, drives buyer count
             stash: 0,             // unsold product on hand
             stashQ: 1,            // running quality of product on hand (0..1)
             budsQ: 1,             // running quality of loose harvested buds
@@ -351,6 +372,7 @@ export function createDrugTycoon(deps) {
         s.events ||= {};
         if (typeof s.budsQ !== 'number') s.budsQ = 1;
         if (typeof s.nextEventAt !== 'number') s.nextEventAt = 0;
+        if (typeof s.rep !== 'number') s.rep = REP_START;
         // Seed inventory (older saves predate the seed shop).
         if (!Array.isArray(s.seeds) || s.seeds.length !== SEED_TIERS.length) {
             s.seeds = SEED_TIERS.map((_, i) => (Array.isArray(s.seeds) ? (s.seeds[i] | 0) : 0));
@@ -384,7 +406,7 @@ export function createDrugTycoon(deps) {
         'hasGun', 'ammo', 'hasBat', 'ordersFilled', 'buds', 'budsQ',
         'demand', 'hotColor', 'marketDay', 'startingCashGranted', 'startingCashGrantAmount',
         'seedTier', '_budsHarvested', 'startingSeedsGranted',
-        'juiceTier',
+        'juiceTier', 'rep',
     ];
     let _lastSaveAt = 0;
     function saveProgress() {
@@ -481,6 +503,25 @@ export function createDrugTycoon(deps) {
     // so a botched recipe still yields decent product once you've invested.
     function purityFloor(s) { return Math.min(0.6, s.up.speed * 0.15); }
     function stashCap(s) { return STASH_CAP + s.up.cap * 25 + (s.baseUp?.storage || 0) * 40; }
+    // ---- reputation tier + mutation helpers ----------------------------
+    function repTier(s) {
+        const r = clamp01((s.rep ?? REP_START) / 100) * 100;
+        if (r < 20) return { name: 'Pariah',    color: '#ff5555', target: 1 };
+        if (r < 40) return { name: 'Shady',     color: '#ff8a3a', target: 2 };
+        if (r < 60) return { name: 'Known',     color: '#cdd6e3', target: 4 };
+        if (r < 80) return { name: 'Respected', color: '#7fd0ff', target: 6 };
+        return        { name: 'Legend',    color: '#9dffa0', target: 8 };
+    }
+    function changeRep(s, delta, worldPos = null) {
+        const before = s.rep ?? REP_START;
+        s.rep = Math.max(REP_MIN, Math.min(REP_MAX, before + delta));
+        const diff = s.rep - before;
+        if (worldPos && Math.abs(diff) >= 1) {
+            const sign = diff > 0 ? '+' : '';
+            floatText(`${sign}${diff.toFixed(1)} rep`, worldPos.clone().setY(worldPos.y + 2.8), diff > 0 ? '#9dffa0' : '#ff7070');
+        }
+    }
+
     function qualityGrade(q) {
         q = clamp01(q);
         if (q >= 0.92) return { name: 'Designer', color: '#f6d365' };
@@ -533,7 +574,12 @@ export function createDrugTycoon(deps) {
         const security = Math.pow(0.92, s.baseUp?.security || 0);
         return Math.max(1, SELL_HEAT * Math.pow(0.8, s.up.stealth) * qualityHeat * security);
     }
-    function maxBuyers(s) { return 3 + s.up.buyers * 2 + (eventActive(s, 'buyerRush') ? 2 : 0); }
+    // Live buyer cap = rep tier target + upgrade kicker + event bonus.
+    // Reputation is the dominant lever (1 buyer at Pariah, 8 at Legend).
+    function maxBuyers(s) {
+        const base = repTier(s).target;
+        return base + s.up.buyers * 2 + (eventActive(s, 'buyerRush') ? 2 : 0);
+    }
     function maxRivals(s) {
         const base = s.sales >= 4 ? 1 : 0;
         const pressure = Math.floor(Math.max(0, s.sales - 10) / 12);
@@ -749,6 +795,21 @@ export function createDrugTycoon(deps) {
                     + `<span style="display:inline-flex;align-items:center;gap:5px;">🔥 <span style="display:inline-block;width:14px;height:14px;border-radius:3px;background:${hc};"></span> ${colorName(hc)}</span></div>`
                     + '</div>';
             })()
+            // ---- reputation block ---------------------------------------
+            + (() => {
+                const rt = repTier(s);
+                const r = Math.round(s.rep ?? REP_START);
+                const pct = Math.max(0, Math.min(100, r));
+                return '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #2b313c;">'
+                    + '<div style="font:800 11px/1 inherit;color:#7fd0ff;letter-spacing:.5px;margin-bottom:6px;">⭐ REPUTATION</div>'
+                    + `<div style="display:flex;justify-content:space-between;align-items:center;font:700 12px/1 inherit;color:#cdd6e3;">`
+                    + `<span>Status</span><span style="color:${rt.color};">${rt.name}</span></div>`
+                    + `<div style="height:8px;border-radius:4px;background:#2b313c;margin-top:7px;overflow:hidden;">`
+                    + `<div style="width:${pct}%;height:100%;background:${rt.color};"></div></div>`
+                    + `<div style="display:flex;justify-content:space-between;align-items:center;font:600 11px/1 inherit;color:#7c8696;margin-top:5px;">`
+                    + `<span>Customers waiting: ${rt.target}</span><span>${r}/100</span></div>`
+                    + '</div>';
+            })()
             + '<div style="text-align:center;font:600 11px/1.3 inherit;color:#566;margin-top:10px;">[P] to close</div>';
     }
     function hidePhone() { if (_phoneEl) _phoneEl.style.display = 'none'; }
@@ -765,6 +826,7 @@ export function createDrugTycoon(deps) {
         '🧪 QUALITY: Plant health, grow lights, and recipe accuracy set grade. Better grade pays more and draws less heat.',
         '📱 ORDERS: Press [P] for your phone. Sell only to the customer whose shirt matches the order colour [E].',
         '💰 SELL: Each deal pays out but raises your Wanted level (stars). Heat cools over time.',
+        '⭐ REPUTATION: Your street rep (Pariah → Shady → Known → Respected → Legend) decides how many customers come to your shop. Selling quality product builds rep fast; trash product, narc deals, and busts tank it. Check your phone for the live status.',
         '📈 MARKET: Prices swing daily (check the phone). The 🔥 hot buyer pays a bonus. Chain deals fast for a COMBO cash multiplier.',
         '🎲 EVENTS: Buyer rushes, pest blooms, raid tips, rival moves, and reputation buzz can hit anytime.',
         '🧍 RIVALS: Rival dealers poach buyers and can rob stash. Scare them off, or invest in security.',
@@ -910,6 +972,13 @@ export function createDrugTycoon(deps) {
             + ((s.rivals?.length || 0) > 0 && !s.inRoom ? `<div style="color:#ff8a8a;">Rivals nearby: ${s.rivals.length}</div>` : '')
             + (activeEventNames ? `<div style="color:#ffd24a;">Event: ${activeEventNames}</div>` : '')
             + (combo > 1 ? `<div style="color:#7fd0ff;">🔥 Combo x${combo.toFixed(2).replace(/0$/, '')}</div>` : '')
+            + (() => {
+                const rt = repTier(s);
+                const r = Math.round(s.rep ?? REP_START);
+                const blocks = Math.round((r / 100) * 10);
+                const bar = '█'.repeat(blocks) + '░'.repeat(10 - blocks);
+                return `<div style="color:${rt.c || rt.color};">Rep: <b>${rt.name}</b> <span style="opacity:.7;font-family:monospace;font-size:12px;">${bar}</span> <span style="opacity:.6;font-size:12px;">${r}</span></div>`;
+            })()
             + `<div style="color:${starColor};letter-spacing:1px;">Wanted: ${starString(stars)}${stars >= 1 ? '  ⚠ POLICE' : ''}</div>`
             + `<div style="opacity:.9;">${isNight(s) ? '🌙' : '☀️'} ${dayClock(s)}${isNight(s) ? ' <span style="color:#ff9a9a;font-size:12px;">· patrols out</span>' : ''}</div>`
             + (s.orderColor && !s.inRoom ? `<div style="opacity:.85;">Order: <span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:${s.orderColor};vertical-align:middle;"></span> ${colorName(s.orderColor)} <span style="opacity:.6;font-size:12px;">[P] phone</span></div>` : '')
@@ -1628,9 +1697,88 @@ export function createDrugTycoon(deps) {
         const ang = Math.random() * Math.PI * 2;
         placePerson(group, Math.cos(ang) * radius, layout.spawnY ?? 0, Math.sin(ang) * radius);
         const isNarc = Math.random() < NARC_CHANCE;
-        const npc = { mesh: group, target: randomStreetPoint(layout), wantsBuy: true, shirtColor, isNarc };
+        // The higher your rep, the more likely this buyer walks straight to
+        // your shop instead of just wandering the street. Narcs never head
+        // for the shop (they're "patrolling").
+        const repFrac = (s.rep ?? REP_START) / 100;
+        const wantsShop = !isNarc && Array.isArray(layout.homeDoor) && Math.random() < repFrac;
+        const target = wantsShop
+            ? shopQueuePoint(layout)
+            : randomStreetPoint(layout);
+        const npc = { mesh: group, target, wantsBuy: true, shirtColor, isNarc, wantsShop, queueing: false };
         s.npcs.push(npc);
         return npc;
+    }
+    // Per-frame buyer simulation: top up to rep-driven cap, despawn extras,
+    // and tick movement. Runs whether the player is outside on the street or
+    // inside the shop so buyers keep flowing to/from the counter either way.
+    function tickBuyers(s, layout, playerPos, dt) {
+        const cap = maxBuyers(s);
+        while (s.npcs.length < cap) spawnBuyer(s, layout);
+        while (s.npcs.length > cap) {
+            // Drop street wanderers first; never the active order buyer or
+            // someone already queueing (kicking customers looks bad).
+            let worstIdx = -1, worstD = -1;
+            for (let i = 0; i < s.npcs.length; i++) {
+                const n = s.npcs[i];
+                if (!n.mesh || n.shirtColor === s.orderColor || n.queueing) continue;
+                const d = Math.hypot(n.mesh.position.x - playerPos.x, n.mesh.position.z - playerPos.z);
+                if (d > worstD) { worstD = d; worstIdx = i; }
+            }
+            if (worstIdx < 0) break;
+            const dropped = s.npcs.splice(worstIdx, 1)[0];
+            try { core.scene?.remove(dropped.mesh); } catch (e) {}
+        }
+
+        const repFrac = (s.rep ?? REP_START) / 100;
+        for (const n of s.npcs) {
+            if (!n.mesh) continue;
+            const insideShop = n.where === 'inside';
+            // Visibility follows the player — only render the buyers that
+            // share the player's current location (street vs. shop interior).
+            n.mesh.visible = insideShop ? !!s.inRoom : !s.inRoom;
+            if (n.queueing) {
+                // Outside queue + a roll → step into the shop. Chance scales
+                // with rep (0% at Pariah, 60%/sec at Legend) so only the
+                // popular shops fill up with actual indoor customers.
+                if (!insideShop && Array.isArray(layout.shopCounterCustomerSide)
+                    && !n.isNarc && Math.random() < repFrac * 0.6 * dt) {
+                    const inside = layout.shopInsideAnchor || layout.growRoomSpawn;
+                    n.mesh.position.set(inside[0], inside[1] - 0.85, inside[2]);
+                    n.target = new THREE.Vector3(...layout.shopCounterCustomerSide);
+                    n.where = 'inside';
+                    n.queueing = false;
+                }
+                continue;
+            }
+            if (moveToward(n.mesh, n.target, NPC_WANDER_SPEED, dt, layout)) {
+                if (insideShop) {
+                    // Arrived at the counter — face the register and wait.
+                    n.queueing = true;
+                    if (n.mesh.rotation) n.mesh.rotation.y = Math.PI;
+                } else if (n.wantsShop) {
+                    n.queueing = true;
+                    if (n.mesh.rotation) n.mesh.rotation.y = Math.PI * 0.5;
+                } else if (!n.isNarc && Array.isArray(layout.homeDoor) && Math.random() < repFrac * 0.5) {
+                    // Street wanderer with rep tailwind: head to the shop.
+                    n.wantsShop = true;
+                    n.target = shopQueuePoint(layout);
+                } else {
+                    n.target = randomStreetPoint(layout);
+                }
+            }
+        }
+    }
+
+    // Pick a point right in front of the WEED SHOP door, with a small lateral
+    // jitter so multiple shoppers don't stack on the same spot. Buyers
+    // targeting this point line up as a small queue at the storefront.
+    function shopQueuePoint(layout) {
+        const d = layout.homeDoor;            // [doorX, y, doorZ], outward = +X
+        const y = layout.spawnY ?? 0;
+        const stepOut = 1.5 + Math.random() * 1.8;   // 1.5..3.3m off the door
+        const lateral = (Math.random() - 0.5) * 2.6; // ±1.3m sideways
+        return new THREE.Vector3(d[0] + stepOut, y, d[2] + lateral);
     }
     function spawnRivalDealer(s, layout) {
         const group = ragdoll.makePerson({
@@ -3484,6 +3632,11 @@ export function createDrugTycoon(deps) {
         if (!playerPos) return;
         processRandomEvents(s, layout);
 
+        // Buyers tick regardless of where the player is — shop visitors keep
+        // walking to the counter while you're inside, and street wanderers
+        // keep moving when you're outside.
+        tickBuyers(s, layout, playerPos, dt);
+
         // ---- inside the grow room: separate interaction set ------------
         if (s.inRoom) {
             stopSiren();                        // no sirens audible indoors
@@ -3531,11 +3684,39 @@ export function createDrugTycoon(deps) {
             const dUpgR = Array.isArray(upg)
                 ? Math.hypot(upg[0] - playerPos.x, upg[2] - playerPos.z) : Infinity;
 
+            // Sell to a customer who walked into the shop and queued at the
+            // counter. Same rules as the street sell — must match the phone
+            // order's shirt colour. Reads from the live npc list, only those
+            // whose `where === 'inside'` are physically here.
+            let bestInsideBuyer = null, bestInsideD = SELL_RADIUS;
+            for (const n of s.npcs) {
+                if (!n.mesh || !n.wantsBuy || n.where !== 'inside') continue;
+                const d = Math.hypot(n.mesh.position.x - playerPos.x, n.mesh.position.z - playerPos.z);
+                if (d < bestInsideD) { bestInsideD = d; bestInsideBuyer = n; }
+            }
             if (dExit < DOOR_RADIUS) {
                 promptR = '[E] Leave house';
                 if (interactR && Array.isArray(layout.homeDoor)) {
                     s.inRoom = false;
                     teleportPlayer([layout.homeDoor[0], layout.homeDoor[1], layout.homeDoor[2]]);
+                }
+            } else if (bestInsideBuyer) {
+                ensureOrder(s);
+                const isOrder = bestInsideBuyer.shirtColor === s.orderColor;
+                const narcTell = bestInsideBuyer.isNarc && bestInsideD < NARC_TELL_RADIUS;
+                const hot = !!s.hotColor && bestInsideBuyer.shirtColor === s.hotColor;
+                if (s.stash <= 0) {
+                    promptR = 'No product — go cook';
+                } else if (narcTell) {
+                    promptR = '⚠ Twitchy customer… looks like a setup. [E] risk it';
+                    if (interactR) sellTo(s, bestInsideBuyer);
+                } else if (!isOrder) {
+                    promptR = `Wrong customer — check phone [P] (want ${colorName(s.orderColor)})`;
+                } else {
+                    const cm = comboMult(s);
+                    const tag = `${hot ? '🔥 ' : ''}~$${(unitPrice(s, s.stashQ, hot) * (1 + s.up.batch) * cm) | 0}`;
+                    promptR = `[E] Serve ${colorName(bestInsideBuyer.shirtColor)} customer · ${tag}${cm > 1 ? ` (x${cm.toFixed(2).replace(/0$/, '')})` : ''}`;
+                    if (interactR) sellTo(s, bestInsideBuyer);
                 }
             } else if (dBed < 2.4) {
                 promptR = '[E] Sleep until morning';
@@ -3573,16 +3754,7 @@ export function createDrugTycoon(deps) {
         // Heat decays passively.
         if (s.heat > 0) s.heat = Math.max(0, s.heat - HEAT_DECAY_PER_SEC * dt);
 
-        // Top up buyers to the upgrade-driven cap.
-        while (s.npcs.length < maxBuyers(s)) spawnBuyer(s, layout);
-
-        // Wander buyers.
-        for (const n of s.npcs) {
-            if (!n.mesh) continue;
-            if (moveToward(n.mesh, n.target, NPC_WANDER_SPEED, dt, layout)) {
-                n.target = randomStreetPoint(layout);
-            }
-        }
+        // (buyer spawn/move logic moved into tickBuyers, called earlier)
         updateRivals(s, layout, playerPos, dt);
 
         // Night patrol cops: spawn + wander the streets after dark, chase on
@@ -3699,6 +3871,7 @@ export function createDrugTycoon(deps) {
         if (npc.isNarc) {
             s.heat = Math.min(160, s.heat + NARC_HEAT);
             s.combo = 0; s.comboUntil = 0;
+            changeRep(s, -REP_LOSS_NARC, wp);
             if (wp) {
                 floatText('🚨 SETUP! Undercover cop', wp.clone().setY(wp.y + 2.1), '#ff5555');
                 floatText('+heat', wp.clone(), '#ff7070');
@@ -3738,6 +3911,20 @@ export function createDrugTycoon(deps) {
             unlockAward('drugTycoon', 'hotSale');
         }
 
+        // ---- reputation: quality-weighted rep change ---------------------
+        // Trash product gives a small loss (you sold garbage, people remember).
+        // Everything from Shake up gives a positive bump scaled by quality and
+        // by quantity sold. Hot-buyer and ≥3 combo deals each add a flat bonus.
+        let repDelta;
+        if (soldQ < 0.35) {
+            repDelta = -REP_LOSS_TRASH;
+        } else {
+            repDelta = sellQty * (REP_GAIN_BASE + soldQ * REP_GAIN_QUALITY);
+            if (hot) repDelta += REP_GAIN_HOT;
+            if (s.combo >= 3) repDelta += REP_GAIN_COMBO;
+        }
+        changeRep(s, repDelta, wp);
+
         if (wp) {
             floatText(`+$${gross.toLocaleString()}`, wp.clone(), hot ? '#ffe066' : '#9dffa0');
             floatText(soldGrade.name, wp.clone().setY(wp.y + 1.2), soldGrade.color);
@@ -3775,8 +3962,9 @@ export function createDrugTycoon(deps) {
         try { clearPhysBuds(s); } catch (e) {}
         s.heat = 0;           // heat resets after a bust
         s.busted += 1;
-        if (cop?.mesh) {
-            const cp = cop.mesh.getWorldPosition(new THREE.Vector3());
+        const cp = cop?.mesh ? cop.mesh.getWorldPosition(new THREE.Vector3()) : null;
+        changeRep(s, -REP_LOSS_BUST, cp);
+        if (cp) {
             floatText(`BUSTED -$${fine} · lost stash`, cp.clone().setY(cp.y + 1.9), '#ff5555');
         }
         // Light health knock so it stings; never lethal.
