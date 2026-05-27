@@ -231,7 +231,7 @@ const BRIBE_COST_PER_HEAT = 3;    // $ per heat point cleared at the upgrade des
 //   >=80 LEGEND    7-8
 // Each sale builds rep (quality + hot sales build it faster); narcs, busts,
 // and trash product chip it away. Persisted in the save.
-const REP_START = 50;
+const REP_START = 0;
 const REP_MAX = 100;
 const REP_MIN = 0;
 const REP_GAIN_BASE = 0.6;        // per unit sold of average product
