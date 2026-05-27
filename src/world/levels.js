@@ -2306,6 +2306,125 @@ export function createLevels(deps) {
             const upgMat = flatMat('#2a2410', { rough: 0.5 });
             const ux = ox + W * 0.5 - 2.4, uz = oz + D * 0.5 - 2.4;
             addBox('grow-upgrade', [2.4, 1.0, 1.6], [ux, oy + 0.5, uz], upgMat, { solid: true });
+
+            // ---- shop dressing (south half, between entrance and plants) ----
+            // Make the interior read as an actual WEED SHOP storefront. Sales
+            // counter L-shape flanks the entry door, glass display cases line
+            // the west wall, jar shelves run along the east wall, posters on
+            // the back, welcome mat at the door. Purely cosmetic — none of
+            // these change gameplay anchors (bench / bed / upgrade desk / pots).
+            const woodWarmMat   = flatMat('#5a3a1f', { rough: 0.55 });   // counter wood
+            const woodTopMat    = flatMat('#2a1a0e', { rough: 0.35, emissive: '#0a0604', emissiveIntensity: 0.0 });
+            const glassMat      = flatMat('#bfe8ff', { rough: 0.05, metal: 0.4, emissive: '#5fc8ff', emissiveIntensity: 0.55 });
+            const jarLidMat     = flatMat('#161616', { rough: 0.5, metal: 0.4 });
+            const budGreenMat   = flatMat('#3fa852', { rough: 0.6, emissive: '#2a8040', emissiveIntensity: 0.35 });
+            const budPurpleMat  = flatMat('#8a52d4', { rough: 0.6, emissive: '#6a32b8', emissiveIntensity: 0.4 });
+            const budOrangeMat  = flatMat('#d4a850', { rough: 0.6, emissive: '#a07020', emissiveIntensity: 0.35 });
+            const matFloorMat   = flatMat('#1a3a20', { rough: 0.9, emissive: '#0a2a14', emissiveIntensity: 0.4 });
+            const registerMat   = flatMat('#16181c', { rough: 0.4, metal: 0.6 });
+            const registerScreenMat = flatMat('#6fffaa', { rough: 0.2, emissive: '#3aff90', emissiveIntensity: 1.6 });
+            const posterGreenMat = flatMat('#0a2410', { rough: 0.6, emissive: '#3fa852', emissiveIntensity: 0.9 });
+            const posterPurpleMat = flatMat('#1a0a2a', { rough: 0.6, emissive: '#8a52d4', emissiveIntensity: 0.9 });
+
+            // Welcome mat in front of the entrance door.
+            addBox('grow-welcome-mat', [2.6, 0.03, 1.4], [ox, oy + 0.015, exitZ - 1.2], matFloorMat);
+
+            // L-shape sales counter east of the entrance, parallel to + perpendicular
+            // to the south wall. Long leg runs north-south, short leg runs east-west.
+            const cLongX = ox + 3.2, cLongZ = oz + D * 0.5 - 4.6;
+            addBox('grow-counter-long', [1.2, 1.0, 3.4], [cLongX, oy + 0.5, cLongZ], woodWarmMat, { solid: true });
+            addBox('grow-counter-long-top', [1.3, 0.08, 3.5], [cLongX, oy + 1.04, cLongZ], woodTopMat);
+            const cShortX = ox + 1.8, cShortZ = oz + D * 0.5 - 3.0;
+            addBox('grow-counter-short', [1.6, 1.0, 1.2], [cShortX, oy + 0.5, cShortZ], woodWarmMat, { solid: true });
+            addBox('grow-counter-short-top', [1.7, 0.08, 1.3], [cShortX, oy + 1.04, cShortZ], woodTopMat);
+
+            // Cash register on the corner of the counter.
+            addBox('grow-register-base', [0.7, 0.4, 0.5], [cLongX, oy + 1.28, cLongZ - 1.2], registerMat);
+            addBox('grow-register-screen', [0.5, 0.32, 0.05], [cLongX - 0.1, oy + 1.52, cLongZ - 1.0], registerScreenMat);
+
+            // Three display jars on the long counter top.
+            const addJar = (jx, jz, budMat) => {
+                const jarBody = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.32, 16), glassMat);
+                jarBody.position.set(jx, oy + 1.24, jz);
+                jarBody.castShadow = true; jarBody.receiveShadow = true;
+                root.add(jarBody);
+                const jarBud = new THREE.Mesh(new THREE.IcosahedronGeometry(0.14, 0), budMat);
+                jarBud.position.set(jx, oy + 1.22, jz);
+                root.add(jarBud);
+                const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.06, 16), jarLidMat);
+                lid.position.set(jx, oy + 1.43, jz);
+                root.add(lid);
+            };
+            addJar(cLongX, cLongZ + 0.4, budGreenMat);
+            addJar(cLongX, cLongZ + 1.2, budPurpleMat);
+            addJar(cLongX - 0.05, cLongZ - 0.3, budOrangeMat);
+
+            // West-wall display case: a long glass-fronted cabinet with three
+            // shelves of jars. Sits flush against the west wall, south of the bed.
+            // Bed occupies bz - 1.7 .. bz + 1.7 (z = oz + D*0.5 - 2.2 ± 1.7), so
+            // case ends just north of it.
+            const dcX = ox - W * 0.5 + 1.0;
+            const dcZ = oz + 1.0;
+            addBox('grow-displaycase-back', [0.2, 2.6, 5.0], [dcX - 0.1, oy + 1.3, dcZ], woodWarmMat, { solid: true });
+            addBox('grow-displaycase-base', [1.0, 0.4, 5.0], [dcX + 0.4, oy + 0.2, dcZ], woodWarmMat);
+            addBox('grow-displaycase-shelf1', [1.0, 0.05, 5.0], [dcX + 0.4, oy + 1.0, dcZ], woodTopMat);
+            addBox('grow-displaycase-shelf2', [1.0, 0.05, 5.0], [dcX + 0.4, oy + 1.8, dcZ], woodTopMat);
+            addBox('grow-displaycase-glass', [0.04, 2.0, 5.0], [dcX + 0.92, oy + 1.4, dcZ], glassMat);
+            // Two jars per shelf, three shelves, alternating colours.
+            for (let row = 0; row < 3; row++) {
+                const jy = oy + 0.55 + row * 0.8;
+                for (let col = 0; col < 4; col++) {
+                    const jz = dcZ - 2.0 + col * 1.3;
+                    const bm = [budGreenMat, budPurpleMat, budOrangeMat][(row + col) % 3];
+                    const jb = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.28, 12), glassMat);
+                    jb.position.set(dcX + 0.4, jy, jz);
+                    root.add(jb);
+                    const jbud = new THREE.Mesh(new THREE.IcosahedronGeometry(0.11, 0), bm);
+                    jbud.position.set(dcX + 0.4, jy - 0.02, jz);
+                    root.add(jbud);
+                    const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.05, 12), jarLidMat);
+                    lid.position.set(dcX + 0.4, jy + 0.16, jz);
+                    root.add(lid);
+                }
+            }
+
+            // East-wall jar shelves (open). Between the entry and the upgrade
+            // desk / bench column on the east side. Three floating shelves.
+            const esX = ox + W * 0.5 - 0.7;
+            const esZ = oz + 2.0;
+            for (let s2 = 0; s2 < 3; s2++) {
+                const sy = oy + 1.0 + s2 * 0.8;
+                addBox(`grow-eshelf-${s2}`, [0.8, 0.06, 4.6], [esX - 0.4, sy, esZ], woodTopMat);
+                addBox(`grow-eshelf-bracket-${s2}`, [0.3, 0.06, 0.3], [esX - 0.4, sy - 0.1, esZ - 2.0], woodWarmMat);
+                addBox(`grow-eshelf-bracket-${s2}b`, [0.3, 0.06, 0.3], [esX - 0.4, sy - 0.1, esZ + 2.0], woodWarmMat);
+                for (let col = 0; col < 4; col++) {
+                    const jz = esZ - 1.8 + col * 1.2;
+                    const bm = [budGreenMat, budOrangeMat, budPurpleMat][(s2 * 2 + col) % 3];
+                    const jb = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.26, 12), glassMat);
+                    jb.position.set(esX - 0.4, sy + 0.16, jz);
+                    root.add(jb);
+                    const jbud = new THREE.Mesh(new THREE.IcosahedronGeometry(0.1, 0), bm);
+                    jbud.position.set(esX - 0.4, sy + 0.14, jz);
+                    root.add(jbud);
+                }
+            }
+
+            // Wall posters along the south wall, either side of the door.
+            addBox('grow-poster-l', [0.04, 1.4, 1.0], [ox - 3.0, oy + 1.8, exitZ - 0.15], posterGreenMat);
+            addBox('grow-poster-r', [0.04, 1.4, 1.0], [ox + 3.0, oy + 1.8, exitZ - 0.15], posterPurpleMat);
+
+            // Pendant lights above the counter — warm spots that read as shop lighting.
+            const pendantMat = flatMat('#ffd07a', { rough: 0.3, emissive: '#ffb050', emissiveIntensity: 2.2 });
+            for (let p = 0; p < 2; p++) {
+                const pz = cLongZ - 0.8 + p * 1.6;
+                addBox(`grow-pendant-${p}`, [0.3, 0.2, 0.3], [cLongX, oy + H - 1.2, pz], pendantMat);
+                const cord = flatMat('#1a1a1a', { rough: 0.9 });
+                addBox(`grow-pendant-cord-${p}`, [0.04, 1.1, 0.04], [cLongX, oy + H - 0.55, pz], cord);
+                const pendantLight = new THREE.PointLight(0xffb060, 2.4, 6, 1.8);
+                pendantLight.position.set(cLongX, oy + H - 1.4, pz);
+                pendantLight.name = `grow-pendant-light-${p}`;
+                root.add(pendantLight);
+            }
         };
         buildGrowRoom(...ROOM_ORIGIN);
 

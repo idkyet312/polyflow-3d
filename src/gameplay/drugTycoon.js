@@ -17,10 +17,69 @@
 // approach as the rogue HUD. State lives on window.drugTycoon so it survives
 // hot edits and can be inspected from the console.
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { core } from '../runtime/appCore.js';
 import { tickPlaytime } from './playtime.js';
 import { unlockAward } from './awards.js';
 import * as ragdoll from './ragdoll.js';
+import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
+
+const WEED_GLB_URL = (import.meta.env?.BASE_URL || '/') + 'Weed.glb';
+const WEED_GLB_HEIGHT = 0.47;       // raw GLB plant height in metres
+const WEED_TARGET_MAX_HEIGHT = 1.2; // mature in-game plant height in metres
+const WEED_BASE_SCALE = WEED_TARGET_MAX_HEIGHT / WEED_GLB_HEIGHT;
+let _weedPrototype = null;          // first instance, cloned for every plant
+let _weedPromise = null;
+function loadWeedPrototype() {
+    if (_weedPrototype) return Promise.resolve(_weedPrototype);
+    if (_weedPromise) return _weedPromise;
+    _weedPromise = new Promise((resolve) => {
+        new GLTFLoader().load(
+            WEED_GLB_URL,
+            (gltf) => {
+                // Use the GLB scene graph directly as the prototype. Convert
+                // every mesh's GLTF MeshStandardMaterial → DDGI node material
+                // (one ddgi-mat per source-mat, shared) so the plant joins the
+                // WebGPU node-material pipeline (SSR + DDGI) the rest of the
+                // level uses.
+                const matCache = new Map();
+                const proto = gltf.scene;
+                proto.traverse((o) => {
+                    if (!o.isMesh) return;
+                    o.castShadow = true;
+                    o.receiveShadow = true;
+                    const src = o.material;
+                    let ddgi = matCache.get(src);
+                    if (!ddgi) {
+                        ddgi = new DDGIMeshStandardNodeMaterial({
+                            color: src.color ? src.color.clone() : new THREE.Color('#3aa852'),
+                            roughness: src.roughness ?? 0.5,
+                            metalness: src.metalness ?? 0.0,
+                        });
+                        if (src.map) ddgi.map = src.map;
+                        if (src.normalMap) ddgi.normalMap = src.normalMap;
+                        if (src.emissive) ddgi.emissive = src.emissive.clone();
+                        ddgi.emissiveIntensity = src.emissiveIntensity ?? 0;
+                        ddgi.side = THREE.DoubleSide;
+                        matCache.set(src, ddgi);
+                    }
+                    o.material = ddgi;
+                });
+                _weedPrototype = proto;
+                resolve(proto);
+            },
+            undefined,
+            (err) => {
+                console.warn('[drugTycoon] Weed.glb load failed', err);
+                _weedPrototype = new THREE.Group();
+                resolve(_weedPrototype);
+            },
+        );
+    });
+    return _weedPromise;
+}
+// Kick off load at module init so the first plant has it ready.
+loadWeedPrototype();
 
 const SELL_RADIUS = 2.6;
 const STATION_RADIUS = 2.4;
@@ -2353,72 +2412,34 @@ export function createDrugTycoon(deps) {
         return leaf;
     }
 
-    // A realistic, bushy cannabis plant in a fabric grow bag (see reference):
-    // black fabric pot + soil that always stay, plus a `foliage` group — a tall
-    // central stalk with side BRANCHES angling up-and-out (denser/longer low,
-    // shorter near the top → Christmas-tree silhouette), each branch carrying
-    // fan leaves and a bud tip, topped by a main cola. Group origin = pot base.
+    // Plant = fabric grow-bag pot + soil + a foliage wrapper that holds a
+    // clone of the shared Weed.glb prototype. Growth scales the foliage group;
+    // the pot stays a fixed size so the plant looks like it's growing out of it.
     function makePlantMesh() {
         const g = new THREE.Group();
 
-        // Fabric grow bag (black cylinder, slightly tapered) + dark soil.
-        const pot = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.3, 0.26, 0.5, 24),
-            new THREE.MeshStandardMaterial({ color: '#1a1a1c', roughness: 1.0 }),
-        );
+        // Fabric grow bag + soil — match the rest of the room's DDGI shading.
+        const potMat  = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#1a1a1c'), roughness: 1.0, metalness: 0.0 });
+        const rimMat  = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#2a2a2d'), roughness: 1.0, metalness: 0.0 });
+        const soilMat = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#241a12'), roughness: 1.0, metalness: 0.0 });
+        const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.26, 0.5, 24), potMat);
         pot.position.y = 0.25;
         pot.castShadow = true; pot.receiveShadow = true;
-        // A subtle rolled rim so it reads as a fabric bag.
-        const rim = new THREE.Mesh(
-            new THREE.TorusGeometry(0.29, 0.035, 8, 24),
-            new THREE.MeshStandardMaterial({ color: '#2a2a2d', roughness: 1.0 }),
-        );
+        const rim = new THREE.Mesh(new THREE.TorusGeometry(0.29, 0.035, 8, 24), rimMat);
         rim.rotation.x = Math.PI / 2;
         rim.position.y = 0.5;
-        const soil = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.27, 0.27, 0.06, 24),
-            new THREE.MeshStandardMaterial({ color: '#241a12', roughness: 1 }),
-        );
+        const soil = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.27, 0.06, 24), soilMat);
         soil.position.y = 0.5;
         g.add(pot); g.add(rim); g.add(soil);
 
-        // Foliage group — everything that grows. Scaled/recoloured per stage.
+        // Foliage = scaled wrapper around the GLB clone. Sits on the soil line.
+        // (GLB pivot offset is corrected on the clone itself, inside attach()
+        // below, so the offset scales together with growth.)
         const foliage = new THREE.Group();
-        foliage.position.y = 0.52;                      // start at the soil line
-        const stemMat = new THREE.MeshStandardMaterial({ color: '#2d5d24', roughness: 0.9 });
-        const leafMat = new THREE.MeshStandardMaterial({ color: '#245f2d', roughness: 0.9 });
-        const budMat = new THREE.MeshStandardMaterial({ color: '#2f6d32', roughness: 0.85 });
-        // Pistils (the orange/white hairs on flowering buds) — own material so
-        // they can fade in + turn amber during ripening.
-        const pistilMat = new THREE.MeshStandardMaterial({ color: '#d9c27a', roughness: 0.6, transparent: true, opacity: 0 });
-        foliage.userData.leafMat = leafMat;
-        foliage.userData.budMat = budMat;
-        foliage.userData.pistilMat = pistilMat;
-        foliage.userData.stemMat = stemMat;
-        const buds = [];                               // all bud meshes (recoloured ripe)
-        const branches = [];                           // { node, emergeAt } for staged reveal
-        foliage.userData.buds = buds;
-        foliage.userData.branches = branches;
-
-        // Cotyledon sprout: the two tiny round seed-leaves that break soil first.
-        // Visible only during germination/seedling, then hidden as true growth
-        // takes over. Kept separate so the early plant doesn't look like a tree.
-        const sprout = new THREE.Group();
-        const sproutMat = new THREE.MeshStandardMaterial({ color: '#86c46a', roughness: 0.8 });
-        const stemlet = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.014, 0.08, 5), sproutMat);
-        stemlet.position.y = 0.04;
-        sprout.add(stemlet);
-        for (const sx of [-1, 1]) {
-            const leaf = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 6), sproutMat);
-            leaf.scale.set(1.3, 0.35, 0.8);
-            leaf.position.set(sx * 0.04, 0.085, 0);
-            sprout.add(leaf);
-        }
-        foliage.add(sprout);
-        foliage.userData.sprout = sprout;
-
-        // Pest swarm: a few little dark bugs that hover/jitter around the canopy
-        // when infested. Hidden by default; shown + animated while pest is true.
+        foliage.position.y = 0.52;
+        foliage.visible = false;
+        foliage.userData.glbAttached = false;
+        // Pest swarm (kept — bugs jitter around the canopy when infested).
         const pests = new THREE.Group();
         pests.visible = false;
         const bugMat = new THREE.MeshStandardMaterial({ color: '#3a2a18', roughness: 0.8 });
@@ -2434,80 +2455,29 @@ export function createDrugTycoon(deps) {
         foliage.add(pests);
         foliage.userData.pests = pests;
 
-        const STALK_H = 1.15;
-        const stalk = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.03, 0.07, STALK_H, 7),
-            stemMat,
-        );
-        stalk.position.y = STALK_H * 0.5;
-        stalk.castShadow = true;
-        foliage.add(stalk);
-        foliage.userData.stalk = stalk;
-
-        // Helper: a branch = a thin stem tilted out, with 2 fan leaves and a
-        // small bud at the tip. Built pointing +Y, then tilted by the caller.
-        const makeBranch = (length, leafScale) => {
-            const br = new THREE.Group();
-            const stem = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.012, 0.022, length, 5),
-                stemMat,
-            );
-            stem.position.y = length * 0.5;
-            br.add(stem);
-            // Two fan leaves partway and at the tip.
-            [0.5, 0.92].forEach((f, li) => {
-                const leaf = makeFanLeaf(leafMat);
-                leaf.position.y = length * f;
-                leaf.rotation.x = -0.7;
-                leaf.scale.setScalar(leafScale * (li === 0 ? 0.85 : 1));
-                br.add(leaf);
+        // Attach the GLB clone as soon as the prototype is ready. Until then
+        // the foliage group is empty + invisible (applyPlantGrowth flips that
+        // once content is present and the plant has progress > 0).
+        const attach = () => {
+            if (foliage.userData.glbAttached) return;
+            if (!_weedPrototype) return;
+            const clone = _weedPrototype.clone(true);
+            clone.traverse((o) => {
+                if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
             });
-            // Bud nugget at the tip + a few pistil hairs poking out.
-            const bud = new THREE.Mesh(new THREE.IcosahedronGeometry(0.035, 1), budMat);
-            bud.position.y = length + 0.04;
-            addPistils(bud, pistilMat, 4, 0.045);
-            br.add(bud);
-            buds.push(bud);
-            return br;
+            // Bake the world-scale-up multiplier so the GLB matches the old
+            // procedural plant's mature height. growth still drives the parent
+            // foliage scale, which composes with this constant.
+            // GLB's pivot sits ~0.15m above its lowest point — drop the clone
+            // so the plant root meets the soil (scales correctly with growth
+            // because it's inside the foliage wrapper).
+            clone.position.y = -0.15;
+            clone.scale.setScalar(WEED_BASE_SCALE);
+            foliage.add(clone);
+            foliage.userData.glbAttached = true;
         };
-
-        // Tiers of branches up the stalk: lower tiers longer + more numerous,
-        // upper tiers shorter → the tapered bushy silhouette. Lower tiers
-        // emerge earlier in the lifecycle (plants grow from the bottom up).
-        const tiers = [
-            { h: 0.26, count: 5, len: 0.46, tilt: 1.12, leaf: 0.95, emerge: 0.22 },
-            { h: 0.50, count: 5, len: 0.42, tilt: 0.98, leaf: 0.88, emerge: 0.30 },
-            { h: 0.72, count: 4, len: 0.34, tilt: 0.82, leaf: 0.78, emerge: 0.40 },
-            { h: 0.92, count: 4, len: 0.26, tilt: 0.66, leaf: 0.66, emerge: 0.50 },
-            { h: 1.08, count: 3, len: 0.19, tilt: 0.52, leaf: 0.55, emerge: 0.58 },
-        ];
-        tiers.forEach((tier, ti) => {
-            for (let i = 0; i < tier.count; i++) {
-                const az = (i / tier.count) * Math.PI * 2 + ti * 0.6;
-                const node = new THREE.Group();
-                node.position.y = tier.h;
-                node.rotation.y = az;
-                const br = makeBranch(tier.len, tier.leaf);
-                br.rotation.z = tier.tilt;             // angle the branch outward
-                node.add(br);
-                foliage.add(node);
-                // Stagger emergence within a tier so branches don't all pop at once.
-                branches.push({ node, emergeAt: tier.emerge + (i / tier.count) * 0.05 });
-            }
-        });
-
-        // Main top cola — the dense apical bud cluster, biggest of all.
-        const cola = new THREE.Mesh(
-            new THREE.IcosahedronGeometry(0.16, 1),
-            budMat,
-        );
-        cola.position.y = STALK_H + 0.02;
-        cola.scale.set(0.58, 1.05, 0.58);              // elongated cola shape
-        cola.name = 'cola';
-        addPistils(cola, pistilMat, 7, 0.09);
-        foliage.add(cola);
-        foliage.userData.cola = cola;
-        buds.push(cola);
+        if (_weedPrototype) attach();
+        else loadWeedPrototype().then(attach);
 
         g.add(foliage);
         g.userData.foliage = foliage;
@@ -2552,9 +2522,6 @@ export function createDrugTycoon(deps) {
     function applyPlantGrowth(plant) {
         const foliage = plant.mesh?.userData?.foliage;
         if (!foliage) return;
-        const ud = foliage.userData;
-        const leafMat = ud.leafMat, budMat = ud.budMat, pistilMat = ud.pistilMat;
-        const buds = ud.buds || [], branches = ud.branches || [];
         plant.mesh.visible = true;
 
         if (!plant.planted) { foliage.visible = false; return; }
@@ -2563,72 +2530,19 @@ export function createDrugTycoon(deps) {
         const p = clamp01(plant.progress);
         const health = clamp01(plant.health ?? 1);
 
-        // --- germination: just the cotyledon sprout, no stalk/branches yet ---
-        const germ = p < PH_SEED;
-        ud.sprout.visible = p < SPROUT_HIDE_PROGRESS;
-        ud.sprout.scale.setScalar(0.5 + smooth(ramp(Math.min(p, SPROUT_HIDE_PROGRESS), 0, SPROUT_HIDE_PROGRESS)) * 1.4);
-        ud.stalk.visible = p >= PH_GERM;
-        // Stalk rises out of the soil through germination→veg.
-        const stalkGrow = smooth(ramp(p, PH_GERM, PH_VEG));
-        ud.stalk.scale.set(0.6 + stalkGrow * 0.4, 0.05 + stalkGrow * 0.95, 0.6 + stalkGrow * 0.4);
+        // Single growth curve: tiny sprout → mature canopy. Health shrinks the
+        // mature size a little so sick plants look stunted.
+        const growth = smooth(p);
+        const scale = (0.05 + growth * 0.95) * (0.6 + 0.4 * health);
+        foliage.scale.setScalar(scale);
 
-        // --- overall canopy scale: ramps through veg, settles in flower ---
-        const veg = smooth(ramp(p, PH_SEED, PH_VEG));
-        const flower = smooth(ramp(p, PH_VEG, PH_FLOWER));
-        const ripe01 = smooth(ramp(p, PH_FLOWER, 1.0));   // 0..1 over ripening
-        const canopy = 0.22 + veg * 0.78 + flower * 0.18; // keep swelling a bit in flower
-        foliage.scale.setScalar((germ ? 0.16 + smooth(ramp(p, 0, PH_SEED)) * 0.1 : canopy) * (0.6 + 0.4 * health));
-
-        // --- branches emerge bottom-up as progress passes each threshold ---
-        for (const br of branches) {
-            const e = smooth(ramp(p, br.emergeAt, br.emergeAt + 0.12));
-            br.node.visible = e > 0.001;
-            br.node.scale.setScalar(e);
-        }
-
-        // --- buds: appear + swell only in flowering, biggest when ripe ---
-        const showBuds = p >= PH_VEG;
-        const budSwell = 0.25 + flower * 0.75 + ripe01 * 0.25;   // grow then fatten
-        for (const b of buds) {
-            b.visible = showBuds;
-            if (showBuds) {
-                const base = b.name === 'cola' ? 1 : 1;       // cola keeps its own elongation via parent scale
-                if (b.name === 'cola') b.scale.set(0.9 * budSwell, 1.6 * budSwell, 0.9 * budSwell);
-                else b.scale.setScalar(budSwell * base);
-            }
-        }
-        // Pistils fade in during flower, deepen to amber as it ripens.
-        pistilMat.opacity = flower * (0.7 + 0.3 * ripe01);
-        colMix(pistilMat.color, '#d9cfa4', '#b9773a', ripe01);  // creamy -> amber
-
-        // --- colour: deep base → lighter ripe tint, with per-strain palette ---
-        // Healthy in veg; a touch of yellowing + amber buds when ripe; if the
-        // plant suffered (low health) it skews sickly yellow-brown. Palette is
-        // looked up from SEED_TIERS so Kush grows teal, Exotic grows purple.
-        const palette = (SEED_TIERS[plant.tier ?? 0] ?? SEED_TIERS[0]).palette;
-        const sick = 1 - health;
-        colMix(leafMat.color, palette.leaf, palette.leafRipe, ripe01 * 0.45);
-        if (sick > 0) colMix(leafMat.color, leafMat.color, '#8a7a2a', sick * 0.6);
-        leafMat.emissive.set(ripe01 > 0 ? '#13260d' : '#000000');
-        leafMat.emissiveIntensity = ripe01 * 0.08;
-        colMix(budMat.color, palette.bud, palette.budRipe, ripe01);
-        budMat.emissive.set('#000000');
-        colMix(budMat.emissive, '#000000', '#2f2608', ripe01);
-        budMat.emissiveIntensity = ripe01 * 0.18;
-
-        // --- thirst: dry plants droop (foliage tilts) + leaves go grey-green ---
+        // Thirst → droop (foliage tilts to one side when parched).
         const moist = clamp01(plant.moisture ?? 1);
         const droop = (plant.watered && moist < DRY_STRESS) ? (1 - moist / DRY_STRESS) : 0;
-        foliage.rotation.z = droop * 0.18;     // wilt to one side when parched
-        if (droop > 0) colMix(leafMat.color, leafMat.color, '#6f7a3a', droop * 0.5);
+        foliage.rotation.z = droop * 0.18;
 
-        // --- pests: show + jitter the bug swarm, leaves get sickly spots ---
-        if (ud.pests) {
-            ud.pests.visible = !!plant.pest;
-            if (plant.pest) {
-                colMix(leafMat.color, leafMat.color, '#7a6a26', 0.35);
-            }
-        }
+        // Pest swarm visibility.
+        if (foliage.userData.pests) foliage.userData.pests.visible = !!plant.pest;
     }
     // Back-compat shim — older callers used applyPlantStage(plant).
     function applyPlantStage(plant) { applyPlantGrowth(plant); }
@@ -2747,9 +2661,6 @@ export function createDrugTycoon(deps) {
         plant.juiceMult = 1;                // grow-juice boost (1 = none); pour at the shop
         plant.lastTick = now;
         plant.driedAt = now + DRY_OUT_MS;   // un-watered seeds wilt eventually
-        // Stem tint matches the strain (leaf/bud are re-tinted every applyPlantGrowth).
-        const stemMat = plant.mesh?.userData?.foliage?.userData?.stemMat;
-        if (stemMat) stemMat.color.set(seed.palette.stem);
         applyPlantGrowth(plant);
         floatText(`${seed.t.replace(' Seeds', '')} planted — needs water`, plant.mesh.position.clone().setY(plant.mesh.position.y + 1.2), seed.color);
         unlockAward('drugTycoon', 'firstSeed');
@@ -2944,9 +2855,9 @@ export function createDrugTycoon(deps) {
         const g = new THREE.Group();
 
         const W = BAG_HALF[0] * 2, Hh = BAG_HALF[1] * 2, Dd = BAG_HALF[2] * 2;
-        const canvas = new THREE.MeshStandardMaterial({ color: '#1c1f24', roughness: 0.9 });     // black pack fabric
-        const accent = new THREE.MeshStandardMaterial({ color: '#33383f', roughness: 0.85 });    // grey trim/pockets
-        const buckle = new THREE.MeshStandardMaterial({ color: '#0a0a0a', roughness: 0.5, metalness: 0.4 });
+        const canvas = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#1c1f24'), roughness: 0.9, metalness: 0.0 });     // black pack fabric
+        const accent = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#33383f'), roughness: 0.85, metalness: 0.0 });    // grey trim/pockets
+        const buckle = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#0a0a0a'), roughness: 0.5, metalness: 0.4 });
 
         // Main body — rounded-ish slab, taller than wide like a real pack.
         const body = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, Hh, Dd * 0.7), canvas);
@@ -2984,9 +2895,16 @@ export function createDrugTycoon(deps) {
         g.add(handle);
 
         // Glowing green rim = the open top, the drop target (kept from the bag).
+        const rimMat = new DDGIMeshStandardNodeMaterial({
+            color: new THREE.Color('#9dffa0'),
+            emissive: new THREE.Color('#9dffa0'),
+            roughness: 0.4,
+            metalness: 0.0,
+        });
+        rimMat.emissiveIntensity = 1.4;
         const rim = new THREE.Mesh(
             new THREE.TorusGeometry(BAG_HALF[0] * 0.7, 0.05, 8, 20),
-            new THREE.MeshBasicMaterial({ color: 0x9dffa0, transparent: true, opacity: 0.85, toneMapped: false }),
+            rimMat,
         );
         rim.rotation.x = Math.PI / 2;
         rim.position.y = BAG_HALF[1];

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 2ndmay2343
+      - 23may26
   workflow_dispatch:
 
 permissions:
