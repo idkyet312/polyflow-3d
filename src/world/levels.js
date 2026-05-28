@@ -2307,6 +2307,23 @@ export function createLevels(deps) {
             const ux = ox + W * 0.5 - 2.4, uz = oz + D * 0.5 - 2.4;
             addBox('grow-upgrade', [2.4, 1.0, 1.6], [ux, oy + 0.5, uz], upgMat, { solid: true });
 
+            // ---- pill lab: stainless bench in the NE corner ----------------
+            // Clinical metal table + a glowing tray of dies. This is the indoor
+            // pill-press station (interact to open the multi-stage minigame).
+            const labX = ox + W * 0.5 - 2.4, labZ = oz - D * 0.5 + 2.6;
+            const labMetal = flatMat('#c2c8d0', { rough: 0.25, metal: 0.85 });
+            const labTopMat = flatMat('#9aa6b4', { rough: 0.18, metal: 0.9 });
+            addBox('pill-lab-base', [2.6, 1.0, 1.4], [labX, oy + 0.5, labZ], labMetal, { solid: true });
+            addBox('pill-lab-top',  [2.7, 0.12, 1.5], [labX, oy + 1.06, labZ], labTopMat);
+            // The press: a chunky column + ram head over the bench.
+            const pressMat = flatMat('#2b3340', { rough: 0.4, metal: 0.7 });
+            addBox('pill-lab-press-col', [0.5, 1.1, 0.5], [labX - 0.7, oy + 1.65, labZ], pressMat, { solid: true });
+            addBox('pill-lab-press-arm', [1.0, 0.22, 0.6], [labX - 0.35, oy + 2.05, labZ], pressMat);
+            addBox('pill-lab-press-ram', [0.4, 0.5, 0.4], [labX, oy + 1.7, labZ], pressMat);
+            // Glowing pink pill tray so the station reads as the drug lab.
+            const trayMat = flatMat('#ff7fd0', { rough: 0.3, emissive: '#ff4fb8', emissiveIntensity: 1.1 });
+            addBox('pill-lab-tray', [1.0, 0.06, 0.7], [labX + 0.7, oy + 1.12, labZ], trayMat);
+
             // ---- shop dressing (south half, between entrance and plants) ----
             // Make the interior read as an actual WEED SHOP storefront. Sales
             // counter L-shape flanks the entry door, glass display cases line
@@ -2691,6 +2708,9 @@ export function createLevels(deps) {
             packagingBench: [ROOM_ORIGIN[0] + BENCH_LOCAL[0] - 1.0, 1.0, ROOM_ORIGIN[2] + BENCH_LOCAL[1]],
             // Bed (SW corner) — sleep to skip the night. Matches buildGrowRoom.
             bed: [ROOM_ORIGIN[0] - ROOM_W * 0.5 + 1.6, 1.0, ROOM_ORIGIN[2] + ROOM_D * 0.5 - 2.2],
+            // Pill lab (NE corner) — indoor pill-press minigame. Matches the
+            // stainless bench built in buildGrowRoom.
+            pillLab: [ROOM_ORIGIN[0] + ROOM_W * 0.5 - 2.4, 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 2.6],
         };
 
         // ---- Procedural cloudy skybox (large inverted sphere) -------------

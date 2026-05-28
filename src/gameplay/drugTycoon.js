@@ -274,8 +274,10 @@ const EVENT_DURATION_MS = 45000;
 // has its own price multiplier and heat profile so higher-tier product pays
 // more but burns hotter.
 const PRODUCTS = {
+    // cook: true → made at the outdoor bench. Pills are pressed at the indoor
+    // pill lab instead, so cook:false keeps them off the bench.
     weed:  { name: 'Weed',  emoji: '🌿', color: '#9dffa0', priceMult: 1.0, heatMult: 1.0,  unlock: null,        cook: false },
-    pills: { name: 'Pills', emoji: '💊', color: '#ff7fd0', priceMult: 1.9, heatMult: 1.35, unlock: 'pillPress', cook: true },
+    pills: { name: 'Pills', emoji: '💊', color: '#ff7fd0', priceMult: 1.9, heatMult: 1.35, unlock: 'pillPress', cook: false },
     coke:  { name: 'Coke',  emoji: '❄️', color: '#cfe8ff', priceMult: 3.4, heatMult: 1.8,  unlock: 'cokeLab',   cook: true },
 };
 const PRODUCT_KEYS = ['weed', 'pills', 'coke'];
@@ -332,7 +334,9 @@ export function createDrugTycoon(deps) {
             // world refs (positions cached from the level layout)
             cookPos: new THREE.Vector3(),
             upgradePos: new THREE.Vector3(),
+            pillLabPos: new THREE.Vector3(),
             gunPos: new THREE.Vector3(),
+            pillGame: null,       // active pill-press minigame state (see openPillLab)
             npcs: [],             // { actor, mesh, target, wantsBuy }
             rivals: [],           // rival dealers competing for buyers / stash
             police: [],           // { actor, mesh }
@@ -435,6 +439,7 @@ export function createDrugTycoon(deps) {
         }
         if (typeof s.juiceTier !== 'number') s.juiceTier = 0;
         if (!s.juicePos) s.juicePos = new THREE.Vector3();
+        if (!s.pillLabPos) s.pillLabPos = new THREE.Vector3();
         // One-time grant: pre-seed-shop saves never got the 2 starter Reggie
         // seeds (and were stuck unable to plant). Hand them out once, then mark
         // the save so a player who legitimately spent their seeds doesn't get
@@ -602,6 +607,7 @@ export function createDrugTycoon(deps) {
         loadProgressInto(window.drugTycoon);
         try { ragdoll.removeAll(); } catch (e) {}
         closeCook();
+        closePillLab();
         closeShop();
         closeBagging();
         document.querySelectorAll('.tycoon-overlay').forEach((n) => n.remove());
@@ -1050,8 +1056,9 @@ export function createDrugTycoon(deps) {
         '🌱 SEEDS: Plants need seeds! Buy them at the outdoor SEED SHOP [E] (the green kiosk on the street). Three tiers — Reggie (cheap, green), Kush (mid, icy-teal), Exotic (top-shelf, purple). Better seeds grow faster, yield more buds, and grade higher. The tier you last bought is the one you plant.',
         '🧪 GROW JUICE: A second outdoor kiosk on the other side of the street. Three tiers of grow juice (Compost Tea / Liquid Bloom / Hydro Elixir). Buy a bottle, then hold Fire near a growing plant to pour it on — that plant grows 2.2×–4.6× faster for the rest of its cycle. One pour per plant; the boost clears at harvest.',
         '🌿 GROW: At home — [E] plant a seed (consumes one from stock), [E] water it. Soil dries out: keep re-watering [E] or growth stalls. 🐛 Pests strike randomly — hold Fire near the plant to spray ($25). Healthy plants yield more buds. [E] harvest when ripe, then drag buds into the bag (hold Fire) to package.',
-        '🍳 COOK LAB: The bench cooks the HARD stuff — pills and coke (NOT weed; weed is grown at home). Buy a Pill Press or Coke Lab at the upgrade desk first, then [E] the bench, add reagents in the right order, and MIX. Higher purity = more cash.',
-        '💊❄️ PRODUCT LINES: Pills and coke are cooked at the bench once unlocked. Each has its own cook puzzle (switch lines at the top of the cook panel). Pills pay ~1.9×, coke ~3.4× — but burn far more heat. Press [Q] on the street to choose which line you deal.',
+        '❄️ COKE BENCH: The outdoor bench cooks COKE (buy the Coke Lab at the upgrade desk first), then [E] the bench, add reagents in the right order, and MIX. Higher purity = more cash.',
+        '💊 PILL LAB: Buy a Pill Press at the upgrade desk, then use the stainless lab bench INSIDE your house [E]. Pills are pressed in a realistic 4-step craft: ⚖️ weigh the dose → 🌀 blend → 🛠️ press the tablets → 🔖 stamp. Nail each timing/precision check for high purity.',
+        '💊❄️ PRODUCT LINES: Pills (~1.9×) and coke (~3.4×) pay far more than weed — but burn far more heat. Press [Q] to choose which line you deal.',
         '📋 CONTRACTS: Your phone occasionally lists a fat one-shot contract — deliver N units of a specific product to a specific shirt colour before the day ends for a big cash bonus + rep. Normal sales to that customer count toward it.',
         '🧪 QUALITY: Plant health, grow lights, and recipe accuracy set grade. Better grade pays more and draws less heat.',
         '📱 ORDERS: Press [P] for your phone. Sell only to the customer whose shirt matches the order colour [E].',
@@ -1125,6 +1132,13 @@ export function createDrugTycoon(deps) {
     function installInteractKey() {
         if (_keyHandler || typeof window === 'undefined') return;
         _keyHandler = (e) => {
+            // The pill lab takes over E/Space + Esc while it's open. Every stage
+            // is a tap (mashing in the press stage benefits from key-repeat).
+            if (window.drugTycoon?.pillGame) {
+                if (e.code === 'Escape') { closePillLab(); return; }
+                if (e.code === 'KeyE' || e.code === 'Space') { pillAction(); return; }
+                return;
+            }
             if (e.repeat) return;
             if (e.code === 'KeyE') _interactQueued = true;
             if (e.code === 'KeyP') togglePhone();
@@ -1347,10 +1361,10 @@ export function createDrugTycoon(deps) {
         const s = ensureState();
         if (s.cooking || s.shopOpen) return;
         const cookable = cookableProducts(s);
-        // Bench only brews pills/coke. With neither unlocked, point the player
-        // at the upgrade desk (and remind them weed is grown, not cooked).
+        // Outdoor bench brews COKE (weed is grown; pills are pressed indoors).
+        // With the coke lab not unlocked, point the player at the upgrade desk.
         if (cookable.length === 0) {
-            showPrompt('Bench cooks pills/coke — buy a Pill Press or Coke Lab. Weed is grown at home.');
+            showPrompt('Bench cooks coke — buy a Coke Lab at the desk. Weed is grown, pills pressed indoors.');
             return;
         }
         // Lock the bench onto a cookable line with room; bail if all are full.
@@ -1509,6 +1523,322 @@ export function createDrugTycoon(deps) {
         if (_cookEl?.parentNode) _cookEl.remove();
         _cookEl = null;
         if (s) { s.cooking = false; s.recipe = []; }
+        gameplay.roguePaused = false;
+        const { renderer } = core;
+        if (renderer?.domElement && !window.matchMedia?.('(pointer:coarse)')?.matches) {
+            const resume = () => {
+                renderer.domElement.removeEventListener('click', resume);
+                try { renderer.domElement.requestPointerLock?.(); } catch (e) {}
+            };
+            renderer.domElement.addEventListener('click', resume);
+        }
+    }
+
+    // ---- pill lab: realistic multi-stage pill press --------------------
+    // A four-stage craft that mirrors real tablet manufacture:
+    //   1) WEIGH   — dose the active ingredient: stop a sweeping needle in the
+    //                target band (too little = weak, too much = hot/dirty).
+    //   2) BLEND   — granulate with binder + filler: hold to fill the blend
+    //                bar, release inside the green band (overshoot = clumpy).
+    //   3) PRESS   — compress in the die: mash to build tonnage to the target
+    //                window before the timer runs out (too soft = crumbly).
+    //   4) STAMP   — score + imprint: hit a moving marker in the sweet spot.
+    // Each stage returns 0..1; their average is the batch purity. Skill, not
+    // memorisation — every stage is a live timing/precision check.
+    const PILL_STAGES = ['weigh', 'blend', 'press', 'stamp'];
+    let _pillEl = null;
+    let _pillRaf = 0;
+
+    function openPillLab() {
+        const s = ensureState();
+        if (s.pillGame || s.cooking || s.shopOpen || s.baggingOpen) return;
+        if (!productUnlocked(s, 'pills')) {
+            showPrompt('Buy a Pill Press at the upgrade desk first');
+            return;
+        }
+        if (prodQty(s, 'pills') >= prodCap(s, 'pills')) {
+            showPrompt('Pill stash full — go sell');
+            return;
+        }
+        s.pillGame = {
+            stage: 0,
+            scores: [],            // per-stage 0..1
+            // weigh: needle sweeps 0..1; target band centred randomly.
+            needle: 0, needleDir: 1, needleSpeed: 0.95 + Math.random() * 0.25,
+            weighTarget: 0.45 + Math.random() * 0.25, weighBand: 0.12,
+            // blend: bar rises/falls on its own; tap to lock it in the band.
+            blend: 0, blendDir: 1, blendTarget: 0.55 + Math.random() * 0.25, blendBand: 0.11,
+            // press: tonnage built by mashing, decays; window timer.
+            press: 0, pressTarget: 0.8, pressDeadline: 0, pressStarted: false,
+            // stamp: marker sweeps; sweet spot centred randomly.
+            stamp: 0, stampDir: 1, stampSpeed: 1.15 + Math.random() * 0.3,
+            stampTarget: 0.4 + Math.random() * 0.3, stampBand: 0.14,
+            lastT: performance.now?.() || Date.now(),
+            done: false,
+        };
+        gameplay.roguePaused = true;
+        try { document.exitPointerLock?.(); } catch (e) {}
+        renderPillLab();
+        _pillRaf = requestAnimationFrame(tickPillLab);
+    }
+
+    // The single action button: advances/commits the current stage.
+    function pillAction() {
+        const s = window.drugTycoon;
+        const g = s?.pillGame;
+        if (!g || g.done) return;
+        const stage = PILL_STAGES[g.stage];
+        const now = performance.now?.() || Date.now();
+        if (stage === 'weigh') {
+            // Score by closeness of the needle to target (within band = high).
+            const off = Math.abs(g.needle - g.weighTarget);
+            const sc = clamp01(1 - off / g.weighBand);
+            commitPillStage(g, sc);
+            playSfx('hit', null, 0.4);
+        } else if (stage === 'blend') {
+            // Bar auto-rises then falls (a saw wave); tap to lock it in-band.
+            const off = Math.abs(g.blend - g.blendTarget);
+            const sc = clamp01(1 - off / g.blendBand);
+            commitPillStage(g, sc);
+            playSfx('hit', null, 0.4);
+        } else if (stage === 'press') {
+            // Each tap adds tonnage; the stage auto-commits when the timer ends.
+            if (!g.pressStarted) { g.pressStarted = true; g.pressDeadline = now + 3000; }
+            g.press = Math.min(1.15, g.press + 0.11);
+            playSfx('hit', null, 0.3);
+        } else if (stage === 'stamp') {
+            const off = Math.abs(g.stamp - g.stampTarget);
+            const sc = clamp01(1 - off / g.stampBand);
+            commitPillStage(g, sc);
+            playSfx('shot', null, 0.35);
+        }
+    }
+    function commitPillStage(g, score) {
+        g.scores.push(clamp01(score));
+        g.stage += 1;
+        // Reset per-stage transient timers for the next stage.
+        const now = performance.now?.() || Date.now();
+        g.lastT = now;
+        g.pressStarted = false;
+        if (g.stage >= PILL_STAGES.length) finishPillLab();
+        else renderPillLab();
+    }
+
+    function tickPillLab(t) {
+        const s = window.drugTycoon;
+        const g = s?.pillGame;
+        if (!g || g.done) { _pillRaf = 0; return; }
+        const now = performance.now?.() || Date.now();
+        const dt = Math.min(0.05, Math.max(0.001, (now - g.lastT) / 1000));
+        g.lastT = now;
+        const stage = PILL_STAGES[g.stage];
+        if (stage === 'weigh') {
+            g.needle += g.needleDir * g.needleSpeed * dt;
+            if (g.needle >= 1) { g.needle = 1; g.needleDir = -1; }
+            else if (g.needle <= 0) { g.needle = 0; g.needleDir = 1; }
+        } else if (stage === 'blend') {
+            // Bar rises and falls on its own (saw); tap to lock it in the band.
+            // Keyboard-friendly: no hold required.
+            g.blend += g.blendDir * 0.85 * dt;
+            if (g.blend >= 1.05) { g.blend = 1.05; g.blendDir = -1; }
+            else if (g.blend <= 0) { g.blend = 0; g.blendDir = 1; }
+        } else if (stage === 'press') {
+            // Tonnage bleeds off between taps; commit when the window closes.
+            g.press = Math.max(0, g.press - 0.42 * dt);
+            if (g.pressStarted && now >= g.pressDeadline) {
+                const off = Math.abs(g.press - g.pressTarget);
+                commitPillStage(g, clamp01(1 - off / 0.35));
+                playSfx('hit', null, 0.5);
+            }
+        } else if (stage === 'stamp') {
+            g.stamp += g.stampDir * g.stampSpeed * dt;
+            if (g.stamp >= 1) { g.stamp = 1; g.stampDir = -1; }
+            else if (g.stamp <= 0) { g.stamp = 0; g.stampDir = 1; }
+        }
+        renderPillLab(true);
+        _pillRaf = requestAnimationFrame(tickPillLab);
+    }
+
+    function bandStyle(center, band) {
+        const lo = Math.max(0, center - band) * 100;
+        const w = Math.min(100, band * 2 * 100);
+        return `left:${lo}%;width:${w}%;`;
+    }
+    function renderPillLab(liveUpdate = false) {
+        const s = ensureState();
+        const g = s.pillGame;
+        if (!g) return;
+        const stage = PILL_STAGES[g.stage];
+        // Live-update path: only refresh the moving indicators, not the whole
+        // DOM, so the loop stays cheap.
+        if (liveUpdate && _pillEl) {
+            const mk = _pillEl.querySelector('#pill-marker');
+            const fill = _pillEl.querySelector('#pill-fill');
+            if (stage === 'weigh' && mk) mk.style.left = `calc(${g.needle * 100}% - 2px)`;
+            else if (stage === 'blend' && fill) fill.style.width = `${Math.min(100, g.blend * 100)}%`;
+            else if (stage === 'press' && fill) fill.style.width = `${Math.min(100, g.press * 100)}%`;
+            else if (stage === 'stamp' && mk) mk.style.left = `calc(${g.stamp * 100}% - 2px)`;
+            const timer = _pillEl.querySelector('#pill-timer');
+            if (stage === 'press' && timer) {
+                const now = performance.now?.() || Date.now();
+                const rem = g.pressStarted ? Math.max(0, (g.pressDeadline - now) / 1000) : 3.0;
+                timer.textContent = `${rem.toFixed(1)}s`;
+            }
+            return;
+        }
+
+        if (_pillEl?.parentNode) _pillEl.remove();
+        const overlay = document.createElement('div');
+        overlay.className = 'tycoon-overlay';
+        overlay.style.cssText = 'position:absolute;inset:0;z-index:1200;pointer-events:auto;'
+            + 'background:rgba(10,4,12,0.86);backdrop-filter:blur(3px);display:flex;'
+            + 'flex-direction:column;align-items:center;justify-content:center;'
+            + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#ffe6f6;';
+
+        const titles = {
+            weigh: '⚖️ WEIGH THE DOSE',
+            blend: '🌀 BLEND & GRANULATE',
+            press: '🛠️ PRESS THE TABLETS',
+            stamp: '🔖 SCORE & STAMP',
+        };
+        const hints = {
+            weigh: 'Stop the needle inside the green band. Too little is weak — too much runs hot.',
+            blend: 'The mix rises and falls — tap to lock it inside the green band.',
+            press: 'Mash [E]/Space/click to build tonnage into the target window before time runs out.',
+            stamp: 'Hit the moving marker in the sweet spot for a clean imprint.',
+        };
+
+        const title = document.createElement('div');
+        title.textContent = `💊 PILL LAB — ${titles[stage]}`;
+        title.style.cssText = 'font:900 28px/1.1 inherit;margin-bottom:4px;color:#ff7fd0;text-shadow:0 0 18px rgba(255,90,200,0.5);';
+        overlay.appendChild(title);
+
+        const step = document.createElement('div');
+        step.textContent = `Step ${g.stage + 1} of ${PILL_STAGES.length}`;
+        step.style.cssText = 'font:700 13px/1 inherit;opacity:.7;margin-bottom:6px;';
+        overlay.appendChild(step);
+
+        const hint = document.createElement('div');
+        hint.textContent = hints[stage];
+        hint.style.cssText = 'font:600 14px/1.3 inherit;opacity:.85;margin-bottom:20px;max-width:520px;text-align:center;';
+        overlay.appendChild(hint);
+
+        // The play area: a 520px track with a green target band + a marker
+        // (weigh/stamp) or a fill bar (blend/press).
+        const track = document.createElement('div');
+        track.style.cssText = 'position:relative;width:520px;max-width:86vw;height:46px;border-radius:10px;'
+            + 'background:rgba(255,255,255,0.07);border:2px solid rgba(255,140,210,0.35);overflow:hidden;';
+
+        if (stage === 'weigh' || stage === 'stamp') {
+            const center = stage === 'weigh' ? g.weighTarget : g.stampTarget;
+            const band = stage === 'weigh' ? g.weighBand : g.stampBand;
+            const green = document.createElement('div');
+            green.style.cssText = `position:absolute;top:0;bottom:0;${bandStyle(center, band)}`
+                + 'background:rgba(120,255,150,0.35);border-left:2px solid #9dffa0;border-right:2px solid #9dffa0;';
+            track.appendChild(green);
+            const marker = document.createElement('div');
+            marker.id = 'pill-marker';
+            const pos = stage === 'weigh' ? g.needle : g.stamp;
+            marker.style.cssText = `position:absolute;top:-3px;bottom:-3px;width:4px;left:calc(${pos * 100}% - 2px);`
+                + 'background:#fff;box-shadow:0 0 10px #fff;';
+            track.appendChild(marker);
+        } else {
+            // blend / press: a fill bar + a target window overlay.
+            const center = stage === 'blend' ? g.blendTarget : g.pressTarget;
+            const band = stage === 'blend' ? g.blendBand : 0.18;
+            const green = document.createElement('div');
+            green.style.cssText = `position:absolute;top:0;bottom:0;${bandStyle(center, band)}`
+                + 'background:rgba(120,255,150,0.30);border-left:2px solid #9dffa0;border-right:2px solid #9dffa0;';
+            track.appendChild(green);
+            const fill = document.createElement('div');
+            fill.id = 'pill-fill';
+            const v = stage === 'blend' ? g.blend : g.press;
+            fill.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${Math.min(100, v * 100)}%;`
+                + 'background:linear-gradient(90deg,#ff7fd0,#ff4fb8);opacity:.7;';
+            track.appendChild(fill);
+        }
+        overlay.appendChild(track);
+
+        if (stage === 'press') {
+            const timer = document.createElement('div');
+            timer.id = 'pill-timer';
+            timer.textContent = '3.0s';
+            timer.style.cssText = 'font:800 16px/1 inherit;color:#ffd24a;margin-top:10px;';
+            overlay.appendChild(timer);
+        }
+
+        // Completed-stage pips.
+        const pips = document.createElement('div');
+        pips.style.cssText = 'display:flex;gap:8px;margin-top:18px;';
+        PILL_STAGES.forEach((st, i) => {
+            const done = i < g.scores.length;
+            const sc = done ? g.scores[i] : 0;
+            const c = done ? (sc >= 0.75 ? '#9dffa0' : sc >= 0.4 ? '#ffae00' : '#ff7070') : 'rgba(255,255,255,0.18)';
+            const pip = document.createElement('div');
+            pip.style.cssText = `width:54px;height:8px;border-radius:4px;background:${c};`;
+            pips.appendChild(pip);
+        });
+        overlay.appendChild(pips);
+
+        // Big action button (mouse + touch). For blend it's press-and-hold
+        // mirrored to gameplay.input.fire; for the rest it's a tap.
+        const btn = document.createElement('button');
+        const btnLabel = stage === 'press' ? 'PRESS! (mash)'
+            : stage === 'blend' ? 'LOCK BLEND'
+            : stage === 'weigh' ? 'LOCK DOSE'
+            : 'STAMP';
+        btn.textContent = btnLabel;
+        btn.style.cssText = 'margin-top:22px;cursor:pointer;padding:14px 34px;border-radius:12px;'
+            + 'font:900 18px/1 inherit;color:#1a0814;border:2px solid rgba(0,0,0,0.25);'
+            + 'background:linear-gradient(160deg,#ff7fd0,#ff4fb8);box-shadow:0 6px 22px rgba(0,0,0,0.45);';
+        btn.onclick = () => pillAction();
+        overlay.appendChild(btn);
+
+        const keyHint = document.createElement('div');
+        keyHint.textContent = '[E] / [Space] / click';
+        keyHint.style.cssText = 'margin-top:8px;font:600 11px/1 inherit;opacity:.5;';
+        overlay.appendChild(keyHint);
+
+        const cancel = document.createElement('button');
+        cancel.textContent = 'CANCEL (Esc)';
+        cancel.style.cssText = 'margin-top:12px;padding:8px 22px;cursor:pointer;font:700 14px/1 inherit;color:#fff;'
+            + 'border-radius:10px;background:rgba(90,30,30,0.8);border:2px solid rgba(255,140,140,0.4);';
+        cancel.onclick = () => closePillLab();
+        overlay.appendChild(cancel);
+
+        (document.getElementById('canvas-container') || document.body)?.appendChild(overlay);
+        _pillEl = overlay;
+    }
+
+    function finishPillLab() {
+        const s = ensureState();
+        const g = s.pillGame;
+        if (!g) return;
+        g.done = true;
+        const avg = g.scores.length ? g.scores.reduce((a, b) => a + b, 0) / g.scores.length : 0;
+        const q = Math.max(avg, purityFloor(s));
+        const room = prodCap(s, 'pills') - prodQty(s, 'pills');
+        const made = Math.max(0, Math.min(room, Math.round(batchYield(s) * (0.5 + 0.5 * q))));
+        addProduct(s, 'pills', made, q);
+        s.lastQ = q;
+        if (prodQty(s, s.sellProduct) <= 0 && made > 0) s.sellProduct = 'pills';
+        const where = s.pillLabPos || s.cookPos;
+        floatText(`💊 +${made} @ ${Math.round(q * 100)}%`, where, q >= 0.75 ? '#9dffa0' : '#ffae00');
+        playSfx('cash', null, 0.5);
+        closePillLab();
+        saveProgress();
+        updateHud();
+    }
+
+    function closePillLab() {
+        const s = window.drugTycoon;
+        if (_pillRaf) { cancelAnimationFrame(_pillRaf); _pillRaf = 0; }
+        if (_pillEl?.parentNode) _pillEl.remove();
+        _pillEl = null;
+        if (s) {
+            s.pillGame = null;
+            if (gameplay.input) gameplay.input.fire = false;   // clear any held blend
+        }
         gameplay.roguePaused = false;
         const { renderer } = core;
         if (renderer?.domElement && !window.matchMedia?.('(pointer:coarse)')?.matches) {
@@ -1695,7 +2025,7 @@ export function createDrugTycoon(deps) {
         pRow.style.cssText = `display:flex;gap:${gap}px;flex-wrap:wrap;justify-content:center;max-width:96vw;`;
         const production = [
             {
-                t: '💊 Pill Press', d: `Cook ${PRODUCTS.pills.name} — pays ${PRODUCTS.pills.priceMult}×, hotter`, cost: PILL_PRESS_PRICE,
+                t: '💊 Pill Press', d: `Press ${PRODUCTS.pills.name} at the indoor lab — pays ${PRODUCTS.pills.priceMult}×, hotter`, cost: PILL_PRESS_PRICE,
                 owned: () => s.hasPillPress, color: PRODUCTS.pills.color,
                 buy: () => { s.hasPillPress = true; },
             },
@@ -4076,6 +4406,7 @@ export function createDrugTycoon(deps) {
             s.started = true;
             if (Array.isArray(layout.cookStation)) s.cookPos.set(...layout.cookStation);
             if (Array.isArray(layout.upgradePad)) s.upgradePos.set(...layout.upgradePad);
+            if (Array.isArray(layout.pillLab)) { s.pillLabPos ||= new THREE.Vector3(); s.pillLabPos.set(...layout.pillLab); }
             if (Array.isArray(layout.seedShop)) s.seedPos.set(...layout.seedShop);
             if (Array.isArray(layout.juiceShop)) s.juicePos.set(...layout.juiceShop);
             // The pistol is bought at the upgrade desk now — no free yard pickup.
@@ -4093,7 +4424,7 @@ export function createDrugTycoon(deps) {
         updatePlants(s, s.inRoom);
         advanceDayNight(s, dt);   // sun/sky animate even in menus / grow room
 
-        if (s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.baggingOpen || s.helpOpen) { stopSiren(); if (s.phoneOpen) setPhone(false); if (_compassEl) _compassEl.style.display = 'none'; updateHud(); return; } // sim frozen in a menu
+        if (s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.pillGame || s.baggingOpen || s.helpOpen) { stopSiren(); if (s.phoneOpen) setPhone(false); if (_compassEl) _compassEl.style.display = 'none'; updateHud(); return; } // sim frozen in a menu
         if (!playerPos) return;
         processRandomEvents(s, layout);
         processBounties(s);
@@ -4149,6 +4480,9 @@ export function createDrugTycoon(deps) {
             const upg = layout.upgradePad;
             const dUpgR = Array.isArray(upg)
                 ? Math.hypot(upg[0] - playerPos.x, upg[2] - playerPos.z) : Infinity;
+            const pill = layout.pillLab;
+            const dPill = Array.isArray(pill)
+                ? Math.hypot(pill[0] - playerPos.x, pill[2] - playerPos.z) : Infinity;
 
             // Sell to a customer who walked into the shop and queued at the
             // counter. Same rules as the street sell — must match the phone
@@ -4187,6 +4521,15 @@ export function createDrugTycoon(deps) {
                     const swap = unlockedProducts(s).length > 1 ? ' [Q] switch' : '';
                     promptR = `[E] Serve ${pdef.emoji}${pdef.name} to ${colorName(bestInsideBuyer.shirtColor)} · ${tag}${cm > 1 ? ` (x${cm.toFixed(2).replace(/0$/, '')})` : ''}${swap}`;
                     if (interactR) sellTo(s, bestInsideBuyer);
+                }
+            } else if (dPill < 2.8) {
+                if (!productUnlocked(s, 'pills')) {
+                    promptR = '💊 Pill lab — buy a Pill Press at the desk to use';
+                } else if (prodQty(s, 'pills') >= prodCap(s, 'pills')) {
+                    promptR = 'Pill stash full — go sell';
+                } else {
+                    promptR = '💊 [E] Press pills';
+                    if (interactR) openPillLab();
                 }
             } else if (dBed < 2.4) {
                 promptR = '[E] Sleep until morning';
@@ -4307,7 +4650,7 @@ export function createDrugTycoon(deps) {
         } else if (dCook < STATION_RADIUS) {
             const cookable = cookableProducts(s);
             if (cookable.length === 0) {
-                prompt = '🧪 Cook lab — buy a Pill Press / Coke Lab at the desk (weed is grown at home)';
+                prompt = '❄️ Coke bench — buy a Coke Lab at the desk (weed grown, pills pressed indoors)';
                 if (interact) openCook();   // shows the same hint
             } else if (!cookable.some((k) => prodQty(s, k) < prodCap(s, k))) {
                 prompt = 'Stash full — go sell';
