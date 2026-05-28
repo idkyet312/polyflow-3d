@@ -250,6 +250,31 @@ const RANDOM_EVENT_MIN_MS = 30000;
 const RANDOM_EVENT_MAX_MS = 52000;
 const EVENT_DURATION_MS = 45000;
 
+// ---- product lines -------------------------------------------------------
+// 'weed' is grown only — plant→bud→bag→stash pipeline (s.stash). It is NOT
+// cookable at the bench (cook:false). 'pills' and 'coke' are unlocked by
+// purchasing equipment at the upgrade desk, then COOKED at the bench (their
+// own reagent puzzles) into their own side-stashes (s.prod[key]). Each line
+// has its own price multiplier and heat profile so higher-tier product pays
+// more but burns hotter.
+const PRODUCTS = {
+    weed:  { name: 'Weed',  emoji: '🌿', color: '#9dffa0', priceMult: 1.0, heatMult: 1.0,  unlock: null,        cook: false },
+    pills: { name: 'Pills', emoji: '💊', color: '#ff7fd0', priceMult: 1.9, heatMult: 1.35, unlock: 'pillPress', cook: true },
+    coke:  { name: 'Coke',  emoji: '❄️', color: '#cfe8ff', priceMult: 3.4, heatMult: 1.8,  unlock: 'cokeLab',   cook: true },
+};
+const PRODUCT_KEYS = ['weed', 'pills', 'coke'];
+const PILL_PRESS_PRICE = 1200;     // one-time unlock for the pill line
+const COKE_LAB_PRICE = 3000;       // one-time unlock for the coke line
+const PROD_STASH_CAP = 30;         // per side-stash carry cap (pills/coke)
+// ---- big-order bounties --------------------------------------------------
+// Occasionally the phone surfaces a fat one-shot order: move N units of a
+// specific product to a specific shirt colour before the in-game day ends.
+// Fill it for a flat cash bonus + a rep kick. One active at a time.
+const BOUNTY_MIN_DELAY_MS = 60000;   // earliest a new bounty can appear after the last
+const BOUNTY_MAX_DELAY_MS = 130000;
+const BOUNTY_PAY_PER_UNIT = 90;      // bonus cash per required unit (on top of the sale)
+const BOUNTY_REP_REWARD = 9;         // rep granted on completion
+
 export function createDrugTycoon(deps) {
     const {
         gameplay,
@@ -267,8 +292,17 @@ export function createDrugTycoon(deps) {
             startingCashGranted: true,
             startingCashGrantAmount: STARTING_CASH_GRANT,
             rep: REP_START,       // street reputation 0..100, drives buyer count
-            stash: 0,             // unsold product on hand
-            stashQ: 1,            // running quality of product on hand (0..1)
+            stash: 0,             // unsold WEED on hand (legacy field == weed line)
+            stashQ: 1,            // running quality of WEED on hand (0..1)
+            // ---- extra product lines (pills/coke) -------------------------
+            prod: { pills: { qty: 0, q: 1 }, coke: { qty: 0, q: 1 } },
+            hasPillPress: false,  // bought the pill press (unlocks pill cook)
+            hasCokeLab: false,    // bought the coke lab (unlocks coke cook)
+            sellProduct: 'weed',  // which line the player deals right now
+            cookProduct: 'weed',  // which line the cook bench is brewing
+            // ---- big-order bounty -----------------------------------------
+            bounty: null,         // { product, color, need, got, payout, expiresDay }
+            nextBountyAt: 0,
             budsQ: 1,             // running quality of loose harvested buds
             lastQ: 0,             // quality of the most recent batch (HUD)
             heat: 0,
@@ -394,7 +428,52 @@ export function createDrugTycoon(deps) {
             if (total === 0) s.seeds[0] = 2;
             s.startingSeedsGranted = true;
         }
+        // Extra product lines (older saves predate pills/coke).
+        if (!s.prod || typeof s.prod !== 'object') s.prod = {};
+        if (!s.prod.pills) s.prod.pills = { qty: 0, q: 1 };
+        if (!s.prod.coke) s.prod.coke = { qty: 0, q: 1 };
+        if (typeof s.hasPillPress !== 'boolean') s.hasPillPress = false;
+        if (typeof s.hasCokeLab !== 'boolean') s.hasCokeLab = false;
+        // Selected lines must always point at an unlocked product.
+        if (!PRODUCT_KEYS.includes(s.sellProduct) || !productUnlocked(s, s.sellProduct)) s.sellProduct = 'weed';
+        // Bench only brews cookable lines; default to the first unlocked one (or
+        // 'pills' as a placeholder if none yet — the bench prompt gates entry).
+        if (!PRODUCTS[s.cookProduct]?.cook || !productUnlocked(s, s.cookProduct)) {
+            s.cookProduct = cookableProducts(s)[0] || 'pills';
+        }
+        if (typeof s.nextBountyAt !== 'number') s.nextBountyAt = 0;
+        if (s.bounty && typeof s.bounty !== 'object') s.bounty = null;
         return window.drugTycoon;
+    }
+
+    // Is a product line available to the player? Weed always; pills/coke gate
+    // on the one-time equipment purchase.
+    function productUnlocked(s, key) {
+        const u = PRODUCTS[key]?.unlock;
+        if (!u) return true;
+        return u === 'pillPress' ? !!s.hasPillPress : u === 'cokeLab' ? !!s.hasCokeLab : false;
+    }
+    function unlockedProducts(s) { return PRODUCT_KEYS.filter((k) => productUnlocked(s, k)); }
+    // Lines you can brew at the bench: unlocked AND flagged cookable (weed is
+    // grown, not cooked, so it's excluded).
+    function cookableProducts(s) { return unlockedProducts(s).filter((k) => PRODUCTS[k]?.cook); }
+    // Unified accessor over weed (legacy s.stash) + side-stashes (s.prod[key]).
+    function prodQty(s, key) { return key === 'weed' ? s.stash : (s.prod?.[key]?.qty || 0); }
+    function prodQual(s, key) { return key === 'weed' ? (s.stashQ || 1) : (s.prod?.[key]?.q || 1); }
+    function prodCap(s, key) { return key === 'weed' ? stashCap(s) : PROD_STASH_CAP; }
+    function addProduct(s, key, qty, q) {
+        if (qty <= 0) return;
+        if (key === 'weed') { blendStashQuality(s, qty, q); s.stash += qty; return; }
+        const p = s.prod[key];
+        const total = p.qty + qty;
+        p.q = total > 0 ? (p.qty * p.q + qty * q) / total : q;
+        p.qty = total;
+    }
+    function takeProduct(s, key, qty) {
+        if (key === 'weed') { s.stash = Math.max(0, s.stash - qty); if (s.stash <= 0) s.stashQ = 1; return; }
+        const p = s.prod[key];
+        p.qty = Math.max(0, p.qty - qty);
+        if (p.qty <= 0) p.q = 1;
     }
 
     // ---- progress persistence (localStorage) ----------------------------
@@ -407,8 +486,30 @@ export function createDrugTycoon(deps) {
         'demand', 'hotColor', 'marketDay', 'startingCashGranted', 'startingCashGrantAmount',
         'seedTier', '_budsHarvested', 'startingSeedsGranted',
         'juiceTier', 'rep',
+        'prod', 'hasPillPress', 'hasCokeLab', 'sellProduct', 'cookProduct',
     ];
     let _lastSaveAt = 0;
+    // Plant snapshots strip the THREE mesh (rebuilt on load) and the
+    // performance.now()-relative timers (re-based on load so growth doesn't
+    // fast-forward or instantly wilt across a reload). Only the scalar
+    // lifecycle state is stored, in pot order.
+    function serializePlants(s) {
+        // Before the pots are built (e.g. a save fired right after resetState,
+        // when s.plants is still empty but a crop was loaded), keep the last
+        // known snapshot instead of clobbering it with an empty array.
+        if (!Array.isArray(s.plants) || s.plants.length === 0) {
+            return Array.isArray(s.plantsData) ? s.plantsData : [];
+        }
+        return s.plants.map((p) => ({
+            planted: !!p.planted, watered: !!p.watered,
+            progress: p.progress ?? 0, stage: p.stage ?? 0,
+            health: p.health ?? 1, moisture: p.moisture ?? 0,
+            pest: !!p.pest, tier: p.tier ?? 0, juiceMult: p.juiceMult ?? 1,
+            // Remaining dry-out time (ms) for an un-watered seed; re-based on load.
+            dryRemain: (p.planted && !p.watered && p.driedAt)
+                ? Math.max(0, p.driedAt - (performance.now?.() || Date.now())) : 0,
+        }));
+    }
     function saveProgress() {
         const s = window.drugTycoon;
         if (!s) return;
@@ -419,6 +520,8 @@ export function createDrugTycoon(deps) {
             blob.baseUp = { ...s.baseUp };
             blob.seeds = Array.isArray(s.seeds) ? s.seeds.slice() : [0, 0, 0];
             blob.juices = Array.isArray(s.juices) ? s.juices.slice() : [0, 0, 0];
+            // Growing plants persist so a half-grown crop survives a reload.
+            blob.plantsData = serializePlants(s);
             localStorage.setItem(SAVE_KEY, JSON.stringify(blob));
         } catch (e) { /* private mode / quota — ignore */ }
         _lastSaveAt = performance.now?.() || Date.now();
@@ -440,6 +543,8 @@ export function createDrugTycoon(deps) {
             if (blob.baseUp && typeof blob.baseUp === 'object') s.baseUp = { ...s.baseUp, ...blob.baseUp };
             if (Array.isArray(blob.seeds)) s.seeds = SEED_TIERS.map((_, i) => (blob.seeds[i] | 0));
             if (Array.isArray(blob.juices)) s.juices = JUICE_TIERS.map((_, i) => (blob.juices[i] | 0));
+            // Saved plant lifecycle — ensurePlants() restores it onto the rebuilt pots.
+            if (Array.isArray(blob.plantsData)) s.plantsData = blob.plantsData;
         } catch (e) { /* corrupt save — keep defaults */ }
     }
     // Throttled autosave, called from the per-frame update.
@@ -533,12 +638,13 @@ export function createDrugTycoon(deps) {
     // Price scales with the quality of the product being sold (0..1 → 0.5x..2x)
     // AND the live market demand (0.6x..1.6x). The optional `hot` flag adds the
     // hot-colour bonus when dealing to the day's high-demand customer.
-    function unitPrice(s, q = s.stashQ, hot = false) {
+    function unitPrice(s, q = s.stashQ, hot = false, product = 'weed') {
         const dem = s.demand || 1;
         const bonus = hot ? (1 + HOT_BONUS) : 1;
         const rush = eventActive(s, 'buyerRush') ? 1.15 : 1;
         const rep = eventActive(s, 'repBoost') && q >= 0.75 ? 1.18 : 1;
-        return Math.round(SELL_PRICE * (0.5 + 1.5 * clamp01(q)) * dem * bonus * rush * rep);
+        const pmult = PRODUCTS[product]?.priceMult || 1;
+        return Math.round(SELL_PRICE * pmult * (0.5 + 1.5 * clamp01(q)) * dem * bonus * rush * rep);
     }
 
     // ---- dynamic market: demand random-walks once per in-game day -------
@@ -569,10 +675,11 @@ export function createDrugTycoon(deps) {
         if (!comboActive(s)) return 1;
         return Math.min(COMBO_MAX, 1 + s.combo * COMBO_STEP);
     }
-    function heatPerSale(s, q = s.stashQ) {
+    function heatPerSale(s, q = s.stashQ, product = 'weed') {
         const qualityHeat = 1.18 - clamp01(q) * 0.35;
         const security = Math.pow(0.92, s.baseUp?.security || 0);
-        return Math.max(1, SELL_HEAT * Math.pow(0.8, s.up.stealth) * qualityHeat * security);
+        const pheat = PRODUCTS[product]?.heatMult || 1;
+        return Math.max(1, SELL_HEAT * Math.pow(0.8, s.up.stealth) * qualityHeat * security * pheat);
     }
     // Live buyer cap = rep tier target + upgrade kicker + event bonus.
     // Reputation is the dominant lever (1 buyer at Pariah, 8 at Legend).
@@ -604,25 +711,45 @@ export function createDrugTycoon(deps) {
     // The ideal batch is BASE then the three ADDITIVES in order. Adding the
     // right reagent at the right step builds quality; wrong/duplicate reagents
     // dock it. Quality (0..1) then scales both batch yield and sell price.
-    const COOK_STEPS = [
-        { key: 'base',    t: 'Pseudo (base)',  color: '#7fd0ff' },
-        { key: 'acetone', t: 'Acetone',        color: '#ffe066' },
-        { key: 'lithium', t: 'Lithium',        color: '#c0c4cc' },
-        { key: 'ammonia', t: 'Ammonia',        color: '#9dff8a' },
-    ];
-    const RECIPE_LEN = COOK_STEPS.length;
+    // Each product line has its own reagent order. The ideal batch adds the
+    // listed reagents in sequence; the cook UI offers that line's full palette
+    // every step and the order is the skill.
+    const COOK_RECIPES = {
+        weed: [
+            { key: 'base',    t: 'Trim',     color: '#7fd0ff' },
+            { key: 'cure',    t: 'Cure',     color: '#ffe066' },
+            { key: 'flush',   t: 'Flush',    color: '#c0c4cc' },
+            { key: 'press',   t: 'Press',    color: '#9dff8a' },
+        ],
+        pills: [
+            { key: 'binder',  t: 'Binder',   color: '#ff7fd0' },
+            { key: 'active',  t: 'Active',   color: '#ffe066' },
+            { key: 'dye',     t: 'Dye',      color: '#7fd0ff' },
+            { key: 'stamp',   t: 'Stamp',    color: '#c0c4cc' },
+        ],
+        coke: [
+            { key: 'paste',   t: 'Paste',    color: '#cfe8ff' },
+            { key: 'solvent', t: 'Solvent',  color: '#ffe066' },
+            { key: 'wash',    t: 'Acid wash', color: '#9dff8a' },
+            { key: 'crystal', t: 'Crystallise', color: '#c0c4cc' },
+        ],
+    };
+    // Active step set for whatever the bench is brewing.
+    function cookSteps(s) { return COOK_RECIPES[s.cookProduct] || COOK_RECIPES.weed; }
+    function recipeLen(s) { return cookSteps(s).length; }
 
     function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
     // Score a finished recipe: each reagent placed in its correct slot is worth
     // 1/N quality; a wrong reagent in a slot contributes nothing and the final
     // quality is the fraction of correct placements.
-    function scoreRecipe(recipe) {
+    function scoreRecipe(recipe, steps) {
+        const len = steps.length;
         let correct = 0;
-        for (let i = 0; i < RECIPE_LEN; i++) {
-            if (recipe[i] === COOK_STEPS[i].key) correct++;
+        for (let i = 0; i < len; i++) {
+            if (recipe[i] === steps[i].key) correct++;
         }
-        return correct / RECIPE_LEN;
+        return correct / len;
     }
 
     // Quality blends into the on-hand stash weighted by quantities, so a great
@@ -709,6 +836,59 @@ export function createDrugTycoon(deps) {
         updateHud();
     }
 
+    // ---- big-order bounties --------------------------------------------
+    // A fat one-shot contract on the phone: move N units of a specific product
+    // to a specific shirt colour before the in-game day rolls over. One active
+    // at a time. Pays a flat cash bonus (on top of the normal sale) + rep.
+    function bountyActive(s) {
+        return !!(s.bounty && Math.floor(s._daysElapsed ?? 0) <= s.bounty.expiresDay);
+    }
+    function scheduleNextBounty(s) {
+        const now = performance.now?.() || Date.now();
+        s.nextBountyAt = now + BOUNTY_MIN_DELAY_MS + Math.random() * (BOUNTY_MAX_DELAY_MS - BOUNTY_MIN_DELAY_MS);
+    }
+    function rollBounty(s) {
+        // Only offer products the player can actually make.
+        const avail = unlockedProducts(s);
+        const product = avail[(Math.random() * avail.length) | 0];
+        const color = SHIRT_TONES[(Math.random() * SHIRT_TONES.length) | 0];
+        // Need scales with batch size so it's a few good deals, not a grind.
+        const need = (3 + ((Math.random() * 4) | 0)) * (1 + s.up.batch);
+        const payout = need * BOUNTY_PAY_PER_UNIT * (PRODUCTS[product]?.priceMult || 1);
+        s.bounty = {
+            product, color, need, got: 0,
+            payout: Math.round(payout),
+            expiresDay: Math.floor(s._daysElapsed ?? 0),  // due end of the current day
+        };
+        showPrompt(`📋 New contract: ${need}× ${PRODUCTS[product].name} to ${colorName(color)} today — $${s.bounty.payout.toLocaleString()}`);
+    }
+    function processBounties(s) {
+        const now = performance.now?.() || Date.now();
+        // Expire a missed contract when the day flips past its due day.
+        if (s.bounty && Math.floor(s._daysElapsed ?? 0) > s.bounty.expiresDay) {
+            showPrompt('📋 Contract expired.');
+            s.bounty = null;
+            scheduleNextBounty(s);
+        }
+        if (!s.nextBountyAt) { scheduleNextBounty(s); return; }
+        if (!s.bounty && now >= s.nextBountyAt) rollBounty(s);
+    }
+    function progressBounty(s, product, shirtColor, qty, wp) {
+        if (!bountyActive(s)) return;
+        const b = s.bounty;
+        if (b.product !== product || b.color !== shirtColor) return;
+        b.got += qty;
+        if (b.got >= b.need) {
+            s.cash += b.payout;
+            changeRep(s, BOUNTY_REP_REWARD, wp);
+            if (wp) floatText(`📋 CONTRACT DONE +$${b.payout.toLocaleString()}`, wp.clone().setY(wp.y + 3.4), '#ffe066');
+            s.bounty = null;
+            scheduleNextBounty(s);
+        } else if (wp) {
+            floatText(`📋 ${b.got}/${b.need}`, wp.clone().setY(wp.y + 3.4), '#cfe8ff');
+        }
+    }
+
     // ---- phone order: the buyer (by shirt colour) you must deliver to ----
     // Human-readable names for the shirt palette, shown on the phone.
     const COLOR_NAMES = {
@@ -749,6 +929,19 @@ export function createDrugTycoon(deps) {
         // Only usable on the street (not in menus / grow room).
         if (s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.inRoom) return;
         setPhone(!s.phoneOpen);
+    }
+    // [Q] cycles which unlocked product line you deal next.
+    function cycleSellProduct() {
+        const s = window.drugTycoon;
+        if (!s) return;
+        if (s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.inRoom) return;
+        const avail = unlockedProducts(s);
+        if (avail.length < 2) return;
+        const i = avail.indexOf(s.sellProduct);
+        s.sellProduct = avail[(i + 1) % avail.length];
+        const d = PRODUCTS[s.sellProduct];
+        showPrompt(`Dealing ${d.emoji} ${d.name}`);
+        updateHud();
     }
     function ensurePhoneEl() {
         if (_phoneEl?.parentNode) return _phoneEl;
@@ -810,6 +1003,23 @@ export function createDrugTycoon(deps) {
                     + `<span>Customers waiting: ${rt.target}</span><span>${r}/100</span></div>`
                     + '</div>';
             })()
+            // ---- active big-order contract ------------------------------
+            + (() => {
+                if (!bountyActive(s)) return '';
+                const b = s.bounty;
+                const pd = PRODUCTS[b.product];
+                const pct = Math.max(0, Math.min(100, (b.got / b.need) * 100));
+                return '<div style="margin-top:12px;padding-top:10px;border-top:1px solid #2b313c;">'
+                    + '<div style="font:800 11px/1 inherit;color:#ffe066;letter-spacing:.5px;margin-bottom:6px;">📋 CONTRACT</div>'
+                    + `<div style="font:700 12px/1.3 inherit;color:#eef3ff;">${b.need}× ${pd.emoji} ${pd.name} → `
+                    + `<span style="display:inline-block;width:12px;height:12px;border-radius:3px;background:${b.color};vertical-align:middle;"></span> ${colorName(b.color)}</div>`
+                    + `<div style="height:8px;border-radius:4px;background:#2b313c;margin-top:7px;overflow:hidden;">`
+                    + `<div style="width:${pct}%;height:100%;background:#ffe066;"></div></div>`
+                    + `<div style="display:flex;justify-content:space-between;align-items:center;font:600 11px/1 inherit;color:#7c8696;margin-top:5px;">`
+                    + `<span>${b.got}/${b.need} delivered</span><span style="color:#9dffa0;">+$${b.payout.toLocaleString()}</span></div>`
+                    + '<div style="font:600 10px/1.3 inherit;color:#ff9a9a;margin-top:4px;">Due by end of day</div>'
+                    + '</div>';
+            })()
             + '<div style="text-align:center;font:600 11px/1.3 inherit;color:#566;margin-top:10px;">[P] to close</div>';
     }
     function hidePhone() { if (_phoneEl) _phoneEl.style.display = 'none'; }
@@ -822,7 +1032,9 @@ export function createDrugTycoon(deps) {
         '🌱 SEEDS: Plants need seeds! Buy them at the outdoor SEED SHOP [E] (the green kiosk on the street). Three tiers — Reggie (cheap, green), Kush (mid, icy-teal), Exotic (top-shelf, purple). Better seeds grow faster, yield more buds, and grade higher. The tier you last bought is the one you plant.',
         '🧪 GROW JUICE: A second outdoor kiosk on the other side of the street. Three tiers of grow juice (Compost Tea / Liquid Bloom / Hydro Elixir). Buy a bottle, then hold Fire near a growing plant to pour it on — that plant grows 2.2×–4.6× faster for the rest of its cycle. One pour per plant; the boost clears at harvest.',
         '🌿 GROW: At home — [E] plant a seed (consumes one from stock), [E] water it. Soil dries out: keep re-watering [E] or growth stalls. 🐛 Pests strike randomly — hold Fire near the plant to spray ($25). Healthy plants yield more buds. [E] harvest when ripe, then drag buds into the bag (hold Fire) to package.',
-        '🍳 COOK: Outside at the green bench [E] — add reagents in the right order, then MIX. Higher purity = more cash.',
+        '🍳 COOK LAB: The bench cooks the HARD stuff — pills and coke (NOT weed; weed is grown at home). Buy a Pill Press or Coke Lab at the upgrade desk first, then [E] the bench, add reagents in the right order, and MIX. Higher purity = more cash.',
+        '💊❄️ PRODUCT LINES: Pills and coke are cooked at the bench once unlocked. Each has its own cook puzzle (switch lines at the top of the cook panel). Pills pay ~1.9×, coke ~3.4× — but burn far more heat. Press [Q] on the street to choose which line you deal.',
+        '📋 CONTRACTS: Your phone occasionally lists a fat one-shot contract — deliver N units of a specific product to a specific shirt colour before the day ends for a big cash bonus + rep. Normal sales to that customer count toward it.',
         '🧪 QUALITY: Plant health, grow lights, and recipe accuracy set grade. Better grade pays more and draws less heat.',
         '📱 ORDERS: Press [P] for your phone. Sell only to the customer whose shirt matches the order colour [E].',
         '💰 SELL: Each deal pays out but raises your Wanted level (stars). Heat cools over time.',
@@ -899,6 +1111,7 @@ export function createDrugTycoon(deps) {
             if (e.code === 'KeyE') _interactQueued = true;
             if (e.code === 'KeyP') togglePhone();
             if (e.code === 'KeyH') toggleHelp();
+            if (e.code === 'KeyQ') cycleSellProduct();
             if (e.code === 'Escape' && window.drugTycoon?.helpOpen) hideHelp();
             if (e.code === 'Escape' && window.drugTycoon?.phoneOpen) setPhone(false);
             if (e.code === 'Escape' && window.drugTycoon?.shopOpen) closeShop();
@@ -964,7 +1177,21 @@ export function createDrugTycoon(deps) {
         ].filter(Boolean).join(' · ');
         el.innerHTML =
             `<div style="font-size:22px;color:#9dffa0;">$${Math.floor(s.cash).toLocaleString()}</div>`
-            + `<div>Product: ${s.stash} / ${stashCap(s)}${s.stash > 0 ? ` · <span style="color:${grade.color};">${grade.name}</span> ${Math.round(s.stashQ * 100)}%` : ''}</div>`
+            + (() => {
+                // One line per unlocked product line; the selected line is marked
+                // and shows its grade. Weed always shown (carry cap is its own).
+                const lines = unlockedProducts(s).map((k) => {
+                    const d = PRODUCTS[k];
+                    const qty = prodQty(s, k);
+                    const sel = k === s.sellProduct;
+                    const g = qualityGrade(prodQual(s, k));
+                    const arrow = sel ? '▶ ' : '   ';
+                    const gradeStr = qty > 0 ? ` · <span style="color:${g.color};">${g.name}</span> ${Math.round(prodQual(s, k) * 100)}%` : '';
+                    return `<div style="color:${sel ? d.color : '#cdd6e3'};${sel ? 'font-weight:700;' : 'opacity:.8;'}">${arrow}${d.emoji} ${d.name}: ${qty} / ${prodCap(s, k)}${gradeStr}</div>`;
+                }).join('');
+                const hint = unlockedProducts(s).length > 1 ? '<div style="opacity:.5;font-size:11px;">[Q] switch deal line</div>' : '';
+                return lines + hint;
+            })()
             + (s.buds > 0 ? `<div style="color:#b6ff6a;">Buds: ${s.buds} · ${Math.round((s.budsQ || 1) * 100)}%</div>` : '')
             + ((s.inRoom || totalSeeds(s) > 0) ? `<div style="color:${SEED_TIERS[pickPlantTier(s)]?.color || '#8aa0aa'};">🌱 Seeds: ${totalSeeds(s)}${pickPlantTier(s) >= 0 ? ` · ${SEED_TIERS[pickPlantTier(s)].t.replace(' Seeds', '')}` : ' — buy outside'}</div>` : '')
             + ((s.inRoom || totalJuices(s) > 0) ? `<div style="color:${JUICE_TIERS[pickJuiceTier(s)]?.color || '#8aa0aa'};">🧪 Juice: ${totalJuices(s)}${pickJuiceTier(s) >= 0 ? ` · ${JUICE_TIERS[pickJuiceTier(s)].t}` : ''}</div>` : '')
@@ -1057,8 +1284,9 @@ export function createDrugTycoon(deps) {
         return el;
     }
     function pickObjective(s, playerPos) {
+        const holding = unlockedProducts(s).some((k) => prodQty(s, k) > 0);
         // Order buyer (matching shirt) takes priority if you have product.
-        if (s.stash > 0 && s.orderColor) {
+        if (holding && s.orderColor) {
             let best = null, bestD = Infinity;
             for (const n of s.npcs) {
                 if (!n.mesh || !n.wantsBuy || n.shirtColor !== s.orderColor) continue;
@@ -1067,8 +1295,10 @@ export function createDrugTycoon(deps) {
             }
             if (best) return { pos: best.mesh.position, label: `${colorName(s.orderColor)} buyer`, color: s.orderColor };
         }
-        // No product → head to the cook station.
-        if (s.stash <= 0 && s.cookPos) return { pos: s.cookPos, label: 'Cook station', color: '#9dffa0' };
+        // Out of product: point at the cook bench only if a cookable line
+        // (pills/coke) has room. Weed has no street objective — it's grown.
+        const canCook = cookableProducts(s).some((k) => prodQty(s, k) < prodCap(s, k));
+        if (!holding && canCook && s.cookPos) return { pos: s.cookPos, label: 'Cook lab', color: '#ff7fd0' };
         return null;
     }
     function updateCompass(s, playerPos) {
@@ -1098,7 +1328,20 @@ export function createDrugTycoon(deps) {
     function openCook() {
         const s = ensureState();
         if (s.cooking || s.shopOpen) return;
-        if (s.stash >= stashCap(s)) { showPrompt('Stash full — go sell'); return; }
+        const cookable = cookableProducts(s);
+        // Bench only brews pills/coke. With neither unlocked, point the player
+        // at the upgrade desk (and remind them weed is grown, not cooked).
+        if (cookable.length === 0) {
+            showPrompt('Bench cooks pills/coke — buy a Pill Press or Coke Lab. Weed is grown at home.');
+            return;
+        }
+        // Lock the bench onto a cookable line with room; bail if all are full.
+        if (!PRODUCTS[s.cookProduct]?.cook || !cookable.includes(s.cookProduct)) s.cookProduct = cookable[0];
+        if (prodQty(s, s.cookProduct) >= prodCap(s, s.cookProduct)) {
+            const open = cookable.find((k) => prodQty(s, k) < prodCap(s, k));
+            if (!open) { showPrompt('Stash full — go sell'); return; }
+            s.cookProduct = open;
+        }
         s.cooking = true;
         s.recipe = [];
         gameplay.roguePaused = true;           // reuse the sim-pause flag
@@ -1108,9 +1351,12 @@ export function createDrugTycoon(deps) {
     function renderCook() {
         const s = ensureState();
         if (_cookEl?.parentNode) _cookEl.remove();
-        const step = s.recipe.length;          // 0..RECIPE_LEN
-        const done = step >= RECIPE_LEN;
-        const liveQ = Math.max(scoreRecipe(s.recipe), purityFloor(s)); // quality if mixed now
+        const steps = cookSteps(s);
+        const len = steps.length;
+        const pdef = PRODUCTS[s.cookProduct];
+        const step = s.recipe.length;          // 0..len
+        const done = step >= len;
+        const liveQ = Math.max(scoreRecipe(s.recipe, steps), purityFloor(s)); // quality if mixed now
 
         const overlay = document.createElement('div');
         overlay.className = 'tycoon-overlay';
@@ -1119,9 +1365,31 @@ export function createDrugTycoon(deps) {
             + 'flex-direction:column;align-items:center;justify-content:center;'
             + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#eaffea;';
 
+        // ---- product picker: switch which line the bench brews -----------
+        const cookable = cookableProducts(s);
+        if (cookable.length > 1) {
+            const picker = document.createElement('div');
+            picker.style.cssText = 'display:flex;gap:10px;margin-bottom:18px;';
+            cookable.forEach((k) => {
+                const d = PRODUCTS[k];
+                const sel = k === s.cookProduct;
+                const full = prodQty(s, k) >= prodCap(s, k);
+                const b = document.createElement('button');
+                b.style.cssText = 'cursor:pointer;padding:8px 16px;border-radius:10px;font:800 15px/1 inherit;'
+                    + `color:${sel ? '#0a140e' : d.color};`
+                    + (sel ? `background:linear-gradient(160deg,${d.color},${d.color}cc);border:2px solid rgba(0,0,0,0.25);`
+                           : `background:rgba(255,255,255,0.05);border:2px solid ${d.color}66;`)
+                    + (full && !sel ? 'opacity:.45;' : '');
+                b.textContent = `${d.emoji} ${d.name}${full ? ' (full)' : ''}`;
+                b.onclick = () => { if (full && !sel) return; s.cookProduct = k; s.recipe = []; renderCook(); };
+                picker.appendChild(b);
+            });
+            overlay.appendChild(picker);
+        }
+
         const title = document.createElement('div');
-        title.textContent = done ? 'READY TO MIX' : `COOK — step ${step + 1} of ${RECIPE_LEN}`;
-        title.style.cssText = 'font:900 30px/1.1 inherit;margin-bottom:6px;color:#9dffa0;'
+        title.textContent = done ? `${pdef.emoji} READY TO MIX` : `${pdef.emoji} ${pdef.name.toUpperCase()} — step ${step + 1} of ${len}`;
+        title.style.cssText = `font:900 30px/1.1 inherit;margin-bottom:6px;color:${pdef.color};`
             + 'text-shadow:0 0 18px rgba(60,255,120,0.5);';
         overlay.appendChild(title);
 
@@ -1135,10 +1403,10 @@ export function createDrugTycoon(deps) {
         // Slots: show what's been added and the upcoming empty slot.
         const slots = document.createElement('div');
         slots.style.cssText = 'display:flex;gap:10px;margin-bottom:22px;';
-        for (let i = 0; i < RECIPE_LEN; i++) {
+        for (let i = 0; i < len; i++) {
             const added = s.recipe[i];
-            const def = COOK_STEPS.find((c) => c.key === added);
-            const ok = added === COOK_STEPS[i].key;
+            const def = steps.find((c) => c.key === added);
+            const ok = added === steps[i].key;
             const cell = document.createElement('div');
             cell.style.cssText = 'width:120px;height:54px;border-radius:10px;display:flex;'
                 + 'align-items:center;justify-content:center;font:800 14px/1.1 inherit;'
@@ -1155,7 +1423,7 @@ export function createDrugTycoon(deps) {
         if (!done) {
             const row = document.createElement('div');
             row.style.cssText = 'display:flex;gap:14px;flex-wrap:wrap;justify-content:center;max-width:90vw;';
-            COOK_STEPS.forEach((r) => {
+            steps.forEach((r) => {
                 const b = document.createElement('button');
                 b.style.cssText = 'cursor:pointer;width:150px;padding:16px 12px;border-radius:12px;'
                     + 'font:800 17px/1.2 inherit;color:#0a140e;box-sizing:border-box;'
@@ -1204,15 +1472,18 @@ export function createDrugTycoon(deps) {
     }
     function finishCook() {
         const s = ensureState();
-        const q = Math.max(scoreRecipe(s.recipe), purityFloor(s));
+        const key = s.cookProduct;
+        const q = Math.max(scoreRecipe(s.recipe, cookSteps(s)), purityFloor(s));
         // Yield scales 50%..100% of the upgrade-driven batch by quality.
-        const room = stashCap(s) - s.stash;
+        const room = prodCap(s, key) - prodQty(s, key);
         const made = Math.max(0, Math.min(room, Math.round(batchYield(s) * (0.5 + 0.5 * q))));
-        blendStashQuality(s, made, q);
-        s.stash += made;
+        addProduct(s, key, made, q);
         s.lastQ = q;
+        // Auto-arm the freshly cooked line for dealing if you weren't holding any.
+        if (prodQty(s, s.sellProduct) <= 0 && made > 0) s.sellProduct = key;
         closeCook();
-        floatText(`+${made} @ ${Math.round(q * 100)}%`, s.cookPos, q >= 0.75 ? '#9dffa0' : '#ffae00');
+        const pe = PRODUCTS[key].emoji;
+        floatText(`${pe} +${made} @ ${Math.round(q * 100)}%`, s.cookPos, q >= 0.75 ? '#9dffa0' : '#ffae00');
         updateHud();
     }
     function closeCook() {
@@ -1394,6 +1665,55 @@ export function createDrugTycoon(deps) {
             wRow.appendChild(c);
         });
         overlay.appendChild(wRow);
+
+        // ---- production: unlock new product lines (pills / coke) ----------
+        const pTitle = document.createElement('div');
+        pTitle.textContent = 'PRODUCTION';
+        pTitle.style.cssText = `font:900 ${m ? 14 : 20}px/1 inherit;margin:${m ? 12 : 26}px 0 ${m ? 6 : 12}px;color:#ff7fd0;`
+            + 'text-shadow:0 0 14px rgba(255,130,210,0.4);';
+        overlay.appendChild(pTitle);
+
+        const pRow = document.createElement('div');
+        pRow.style.cssText = `display:flex;gap:${gap}px;flex-wrap:wrap;justify-content:center;max-width:96vw;`;
+        const production = [
+            {
+                t: '💊 Pill Press', d: `Cook ${PRODUCTS.pills.name} — pays ${PRODUCTS.pills.priceMult}×, hotter`, cost: PILL_PRESS_PRICE,
+                owned: () => s.hasPillPress, color: PRODUCTS.pills.color,
+                buy: () => { s.hasPillPress = true; },
+            },
+            {
+                t: '❄️ Coke Lab', d: `Cook ${PRODUCTS.coke.name} — pays ${PRODUCTS.coke.priceMult}×, very hot`, cost: COKE_LAB_PRICE,
+                owned: () => s.hasCokeLab, color: PRODUCTS.coke.color,
+                buy: () => { s.hasCokeLab = true; },
+            },
+        ];
+        production.forEach((w) => {
+            const isOwned = w.owned();
+            const afford = !isOwned && s.cash >= w.cost;
+            const c = document.createElement('button');
+            c.style.cssText = `cursor:pointer;color:#ffe6f6;text-align:center;width:${wch}px;height:${ch}px;`
+                + `padding:${pad};border-radius:${m ? 10 : 14}px;box-sizing:border-box;`
+                + 'background:linear-gradient(160deg,rgba(48,12,40,0.95),rgba(24,6,20,0.95));'
+                + `border:2px solid ${(afford || isOwned) ? 'rgba(255,130,210,0.6)' : 'rgba(120,120,120,0.4)'};`
+                + 'box-shadow:0 8px 30px rgba(0,0,0,0.5);transition:transform .12s;'
+                + ((afford || isOwned) ? '' : 'opacity:.55;');
+            c.innerHTML = `<div style="font:800 ${tTitle}px/1.2 inherit;color:${w.color};margin-bottom:${m ? 4 : 10}px;">${w.t}</div>`
+                + `<div style="font:600 ${tDesc}px/1.3 inherit;opacity:.92;margin-bottom:${m ? 6 : 12}px;">${w.d}</div>`
+                + `<div style="font:700 ${tSub}px/1 inherit;opacity:.8;">${isOwned ? 'UNLOCKED' : 'one-time'}</div>`
+                + `<div style="margin-top:${m ? 6 : 14}px;font:800 ${tCost}px/1 inherit;color:${isOwned ? '#9dffa0' : (afford ? w.color : '#ff8a8a')};">${isOwned ? '✓ Owned' : '$' + w.cost.toLocaleString()}</div>`;
+            c.onmouseenter = () => { c.style.transform = 'translateY(-6px)'; };
+            c.onmouseleave = () => { c.style.transform = 'none'; };
+            c.onclick = () => {
+                if (w.owned() || s.cash < w.cost) return;
+                s.cash -= w.cost;
+                w.buy();
+                renderShop();
+                updateHud();
+                saveProgress();   // persist after unlocking a product line
+            };
+            pRow.appendChild(c);
+        });
+        overlay.appendChild(pRow);
 
         // ---- bribe: pay cash to clear heat / drop the wanted level --------
         if (s.heat > 1) {
@@ -2726,8 +3046,10 @@ export function createDrugTycoon(deps) {
     function ensurePlants(s, layout) {
         if (s.plantsBuilt) return;
         const { scene } = core;
+        const now = performance.now?.() || Date.now();
         const pots = Array.isArray(layout.growPots) ? layout.growPots : [];
-        for (const pot of pots) {
+        const saved = Array.isArray(s.plantsData) ? s.plantsData : null;
+        pots.forEach((pot, i) => {
             const mesh = makePlantMesh();
             mesh.position.set(pot[0], pot[1], pot[2]); // group origin = pot base
             scene?.add(mesh);
@@ -2742,9 +3064,25 @@ export function createDrugTycoon(deps) {
                 pest: false,        // active infestation (slows growth, drains health)
                 nextSprayAt: 0,     // spray-action cooldown
             };
+            // Restore a saved crop into this pot (re-basing the time-relative
+            // fields to "now" so a reload neither fast-forwards nor wilts it).
+            const d = saved?.[i];
+            if (d && d.planted) {
+                plant.planted = true;
+                plant.watered = !!d.watered;
+                plant.progress = Math.min(1, Math.max(0, d.progress || 0));
+                plant.stage = d.stage | 0;
+                plant.health = typeof d.health === 'number' ? d.health : 1;
+                plant.moisture = typeof d.moisture === 'number' ? d.moisture : (plant.watered ? 1 : 0);
+                plant.pest = !!d.pest;
+                plant.tier = d.tier | 0;
+                plant.juiceMult = d.juiceMult || 1;
+                plant.lastTick = now;   // resume growth clock from load time
+                plant.driedAt = (!plant.watered && d.dryRemain > 0) ? now + d.dryRemain : 0;
+            }
             applyPlantGrowth(plant);
             s.plants.push(plant);
-        }
+        });
         s.plantsBuilt = true;
     }
     // Tier the next plant will use: the player's selected tier if they own one,
@@ -3631,6 +3969,7 @@ export function createDrugTycoon(deps) {
         if (s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.baggingOpen || s.helpOpen) { stopSiren(); if (s.phoneOpen) setPhone(false); if (_compassEl) _compassEl.style.display = 'none'; updateHud(); return; } // sim frozen in a menu
         if (!playerPos) return;
         processRandomEvents(s, layout);
+        processBounties(s);
 
         // Buyers tick regardless of where the player is — shop visitors keep
         // walking to the counter while you're inside, and street wanderers
@@ -3702,10 +4041,13 @@ export function createDrugTycoon(deps) {
                 }
             } else if (bestInsideBuyer) {
                 ensureOrder(s);
+                let pk = s.sellProduct;
+                if (prodQty(s, pk) <= 0) { pk = unlockedProducts(s).find((k) => prodQty(s, k) > 0) || pk; s.sellProduct = pk; }
+                const pdef = PRODUCTS[pk];
                 const isOrder = bestInsideBuyer.shirtColor === s.orderColor;
                 const narcTell = bestInsideBuyer.isNarc && bestInsideD < NARC_TELL_RADIUS;
                 const hot = !!s.hotColor && bestInsideBuyer.shirtColor === s.hotColor;
-                if (s.stash <= 0) {
+                if (prodQty(s, pk) <= 0) {
                     promptR = 'No product — go cook';
                 } else if (narcTell) {
                     promptR = '⚠ Twitchy customer… looks like a setup. [E] risk it';
@@ -3714,8 +4056,9 @@ export function createDrugTycoon(deps) {
                     promptR = `Wrong customer — check phone [P] (want ${colorName(s.orderColor)})`;
                 } else {
                     const cm = comboMult(s);
-                    const tag = `${hot ? '🔥 ' : ''}~$${(unitPrice(s, s.stashQ, hot) * (1 + s.up.batch) * cm) | 0}`;
-                    promptR = `[E] Serve ${colorName(bestInsideBuyer.shirtColor)} customer · ${tag}${cm > 1 ? ` (x${cm.toFixed(2).replace(/0$/, '')})` : ''}`;
+                    const tag = `${hot ? '🔥 ' : ''}~$${(unitPrice(s, prodQual(s, pk), hot, pk) * (1 + s.up.batch) * cm) | 0}`;
+                    const swap = unlockedProducts(s).length > 1 ? ' [Q] switch' : '';
+                    promptR = `[E] Serve ${pdef.emoji}${pdef.name} to ${colorName(bestInsideBuyer.shirtColor)} · ${tag}${cm > 1 ? ` (x${cm.toFixed(2).replace(/0$/, '')})` : ''}${swap}`;
                     if (interactR) sellTo(s, bestInsideBuyer);
                 }
             } else if (dBed < 2.4) {
@@ -3823,10 +4166,15 @@ export function createDrugTycoon(deps) {
             prompt = `🧪 [E] Grow juice${owned > 0 ? ` (${owned} bottles)` : ' — boost plant grow speed'}`;
             if (interact) openJuiceShop();
         } else if (dCook < STATION_RADIUS) {
-            if (s.stash >= stashCap(s)) {
+            const cookable = cookableProducts(s);
+            if (cookable.length === 0) {
+                prompt = '🧪 Cook lab — buy a Pill Press / Coke Lab at the desk (weed is grown at home)';
+                if (interact) openCook();   // shows the same hint
+            } else if (!cookable.some((k) => prodQty(s, k) < prodCap(s, k))) {
                 prompt = 'Stash full — go sell';
             } else {
-                prompt = '[E] Cook a batch';
+                const names = cookable.map((k) => PRODUCTS[k].emoji + PRODUCTS[k].name).join('/');
+                prompt = `[E] Cook ${names}`;
                 if (interact) openCook();
             }
         } else {
@@ -3839,11 +4187,17 @@ export function createDrugTycoon(deps) {
             }
             if (best) {
                 ensureOrder(s);
+                // Deal the currently-selected line; auto-fall-back to any line
+                // you're actually holding so [Q] isn't mandatory.
+                let pk = s.sellProduct;
+                if (prodQty(s, pk) <= 0) { pk = unlockedProducts(s).find((k) => prodQty(s, k) > 0) || pk; s.sellProduct = pk; }
+                const pdef = PRODUCTS[pk];
+                const qHold = prodQual(s, pk);
                 const isOrder = best.shirtColor === s.orderColor;
                 // Narc tell: within range they act shifty — warn the player.
                 const narcTell = best.isNarc && bestD < NARC_TELL_RADIUS;
                 const hot = !!s.hotColor && best.shirtColor === s.hotColor;
-                if (s.stash <= 0) {
+                if (prodQty(s, pk) <= 0) {
                     prompt = 'No product — go cook';
                 } else if (narcTell) {
                     prompt = '⚠ This one keeps glancing around… looks like a setup. [E] risk it';
@@ -3852,8 +4206,9 @@ export function createDrugTycoon(deps) {
                     prompt = `Wrong customer — check phone [P] (want ${colorName(s.orderColor)})`;
                 } else {
                     const cm = comboMult(s);
-                    const tag = `${hot ? '🔥 ' : ''}~$${(unitPrice(s, s.stashQ, hot) * (1 + s.up.batch) * cm) | 0}`;
-                    prompt = `[E] Deal to ${colorName(best.shirtColor)} customer · ${tag}${cm > 1 ? ` (x${cm.toFixed(2).replace(/0$/, '')})` : ''}`;
+                    const tag = `${hot ? '🔥 ' : ''}~$${(unitPrice(s, qHold, hot, pk) * (1 + s.up.batch) * cm) | 0}`;
+                    const swap = unlockedProducts(s).length > 1 ? ' [Q] switch' : '';
+                    prompt = `[E] Deal ${pdef.emoji}${pdef.name} to ${colorName(best.shirtColor)} · ${tag}${cm > 1 ? ` (x${cm.toFixed(2).replace(/0$/, '')})` : ''}${swap}`;
                     if (interact) sellTo(s, best);
                 }
             }
@@ -3886,12 +4241,16 @@ export function createDrugTycoon(deps) {
             return;
         }
 
-        const sellQty = Math.min(s.stash, 1 + s.up.batch); // sell a small bundle
+        // Deal the selected line; fall back to anything in stock.
+        let pk = s.sellProduct;
+        if (prodQty(s, pk) <= 0) pk = unlockedProducts(s).find((k) => prodQty(s, k) > 0) || pk;
+        s.sellProduct = pk;
+        const pdef = PRODUCTS[pk];
+        const sellQty = Math.min(prodQty(s, pk), 1 + s.up.batch); // sell a small bundle
         if (sellQty <= 0) return;
-        const soldQ = s.stashQ || 1;
+        const soldQ = prodQual(s, pk);
         const soldGrade = qualityGrade(soldQ);
-        s.stash -= sellQty;
-        if (s.stash <= 0) s.stashQ = 1;
+        takeProduct(s, pk, sellQty);
 
         // ---- combo: chained quick deals stack a cash multiplier ----------
         const now = performance.now?.() || Date.now();
@@ -3901,10 +4260,10 @@ export function createDrugTycoon(deps) {
 
         // ---- market + hot-colour pricing ---------------------------------
         const hot = !!s.hotColor && npc.shirtColor === s.hotColor;
-        const gross = Math.round(sellQty * unitPrice(s, soldQ, hot) * cm);
+        const gross = Math.round(sellQty * unitPrice(s, soldQ, hot, pk) * cm);
         s.cash += gross;
         s.sales += 1;
-        s.heat = Math.min(160, s.heat + heatPerSale(s, soldQ));
+        s.heat = Math.min(160, s.heat + heatPerSale(s, soldQ, pk));
         // Selling to the hot customer cools that demand slightly (you flooded it).
         if (hot) {
             s.demand = Math.max(MARKET_MIN, s.demand - HOT_SELL_DROP);
@@ -3926,8 +4285,8 @@ export function createDrugTycoon(deps) {
         changeRep(s, repDelta, wp);
 
         if (wp) {
-            floatText(`+$${gross.toLocaleString()}`, wp.clone(), hot ? '#ffe066' : '#9dffa0');
-            floatText(soldGrade.name, wp.clone().setY(wp.y + 1.2), soldGrade.color);
+            floatText(`${pdef.emoji} +$${gross.toLocaleString()}`, wp.clone(), hot ? '#ffe066' : pdef.color);
+            floatText(`${pdef.name} · ${soldGrade.name}`, wp.clone().setY(wp.y + 1.2), soldGrade.color);
             if (cm > 1) floatText(`COMBO x${cm.toFixed(2).replace(/0$/, '')}`, wp.clone().setY(wp.y + 2.5), '#7fd0ff');
             if (hot) floatText('🔥 HOT BUYER', wp.clone().setY(wp.y + 1.6), '#ffe066');
             else {
@@ -3938,6 +4297,9 @@ export function createDrugTycoon(deps) {
         }
         // A satisfying combo kick on the camera.
         if (cm > 1 && gameplay.hitFeedback) gameplay.hitFeedback.shake = Math.max(gameplay.hitFeedback.shake || 0, 0.12 + cm * 0.05);
+
+        // ---- big-order bounty progress -----------------------------------
+        progressBounty(s, pk, npc.shirtColor, sellQty, wp);
 
         // Buyer leaves, a fresh one wanders in.
         try { core.scene?.remove(npc.mesh); } catch (e) {}
@@ -3953,10 +4315,11 @@ export function createDrugTycoon(deps) {
     function bustPlayer(s, cop) {
         const fine = Math.min(s.cash, BUST_FINE);
         s.cash -= fine;
-        // Lose ALL product you're holding: sellable stash, loose buds, and any
-        // physics buds out on the bench.
+        // Lose ALL product you're holding: every product line, loose buds, and
+        // any physics buds out on the bench.
         s.stash = 0;
         s.stashQ = 1;
+        if (s.prod) { s.prod.pills = { qty: 0, q: 1 }; s.prod.coke = { qty: 0, q: 1 }; }
         s.buds = 0;
         s.budsQ = 1;
         try { clearPhysBuds(s); } catch (e) {}
