@@ -85,7 +85,9 @@
       "Bash(curl -sS https://idkyet312.github.io/polyflow-3d/)",
       "Bash(curl -sS -I https://idkyet312.github.io/polyflow-3d/)",
       "Bash(gh workflow *)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "Bash(node -e \"const buf = require\\('fs'\\).readFileSync\\('Weed.glb'\\); console.log\\('size', buf.length\\); const jsonLen = buf.readUInt32LE\\(12\\); const json = buf.slice\\(20, 20+jsonLen\\).toString\\('utf8'\\); const j = JSON.parse\\(json\\); console.log\\('images', JSON.stringify\\(j.images\\)\\); console.log\\('textures', JSON.stringify\\(j.textures\\)\\); console.log\\('bufferViews', j.bufferViews?.length\\); console.log\\('materials', JSON.stringify\\(j.materials, null, 2\\).slice\\(0,1500\\)\\);\")",
+      "Bash(node --check src/gameplay/drugTycoon.js)"
     ],
     "additionalDirectories": [
       "e:\\JOBS\\polyflow-3d"
