@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "gh-pages -d dist",
+    "deploy": "node scripts/deploy.mjs",
     "multiplayer:server": "node server/multiplayer-server.js",
     "check:arch": "node scripts/check-architecture.mjs",
     "test": "node scripts/check-architecture.mjs && node --test tests/*.test.js"
