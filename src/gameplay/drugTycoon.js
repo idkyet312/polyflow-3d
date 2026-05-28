@@ -95,6 +95,22 @@ const BUST_FINE = 250;            // cash lost when busted
 const NPC_WANDER_SPEED = 1.6;
 const POLICE_SPEED = 3.2;
 const PATROL_SPEED = 2.0;          // night cops on patrol (slower than a chase)
+// ---- armed cops ----------------------------------------------------------
+// At higher wanted levels cops draw weapons and fire at the player from a
+// distance (non-lethal — health is floored like a bust). A tazer comes out at
+// 3 stars (short range, low damage, briefly slows you); a sidearm at 4+ stars
+// (longer range, more damage). Cops only fire when roughly facing the player
+// within range, on a per-cop cooldown.
+const COP_TAZER_STAR = 3;          // cops start carrying tazers at this star level
+const COP_GUN_STAR = 4;            // cops upgrade to sidearms at this star level
+const COP_TAZER_RANGE = 9;         // tazer firing distance
+const COP_TAZER_DAMAGE = 0.12;     // player health lost per tazer hit
+const COP_TAZER_COOLDOWN_MS = 2200;
+const COP_GUN_RANGE = 22;          // sidearm firing distance
+const COP_GUN_DAMAGE = 0.2;        // player health lost per bullet
+const COP_GUN_COOLDOWN_MS = 1500;
+const COP_FIRE_MIN_RANGE = 2.6;    // don't shoot point-blank — bust instead
+const COP_HEALTH_FLOOR = 0.2;      // cop fire never drops player below this
 // Day/night cycle. timeOfDay runs 0..1 over DAY_LENGTH_SEC. Night is the
 // window [NIGHT_START, NIGHT_END) (wrapping past 1.0 back to 0).
 const DAY_LENGTH_SEC = 180;        // one full day-night cycle
@@ -579,6 +595,8 @@ export function createDrugTycoon(deps) {
         detachHeldGun();
         for (const t of _tracers) { try { scene?.remove(t.line); } catch (e) {} }
         _tracers.length = 0;
+        for (const f of _copFlashes) { try { scene?.remove(f.spr); } catch (e) {} }
+        _copFlashes.length = 0;
         window.drugTycoon = defaultState();
         // Restore saved economy/progression so a level (re)load keeps progress.
         loadProgressInto(window.drugTycoon);
@@ -2380,6 +2398,28 @@ export function createDrugTycoon(deps) {
             return;
         }
 
+        if (type === 'tazer') {
+            // Electric crackle: a buzzy square tone gated by a fast tremolo.
+            const o = ctx.createOscillator();
+            o.type = 'square';
+            o.frequency.setValueAtTime(90, now);
+            o.frequency.linearRampToValueAtTime(140, now + 0.18);
+            const trem = ctx.createOscillator();
+            trem.type = 'square';
+            trem.frequency.value = 55;            // fast on/off = crackle
+            const tremGain = ctx.createGain();
+            tremGain.gain.value = 0.5;
+            const g = ctx.createGain();
+            g.gain.setValueAtTime(0.0, now);
+            g.gain.linearRampToValueAtTime(0.18 * vol, now + 0.01);
+            g.gain.exponentialRampToValueAtTime(0.0008, now + 0.2);
+            trem.connect(tremGain).connect(g.gain);
+            o.connect(g).connect(out);
+            o.start(now); o.stop(now + 0.22);
+            trem.start(now); trem.stop(now + 0.22);
+            return;
+        }
+
         // Noise burst (shared by 'shot' and 'hit').
         const dur = type === 'shot' ? 0.16 : 0.10;
         const buf = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * dur), ctx.sampleRate);
@@ -2561,7 +2601,15 @@ export function createDrugTycoon(deps) {
             // Spot the player nearby (or any time heat is already high) → chase.
             if (cd < PATROL_SPOT_RADIUS || wantedStars(s) >= 1) cop.alerted = true;
             if (cop.alerted) {
-                moveToward(cop.mesh, playerVec, POLICE_SPEED, dt, layout);
+                const weapon = copWeaponForStars(wantedStars(s));
+                const wpnRange = weapon === 'gun' ? COP_GUN_RANGE : weapon === 'tazer' ? COP_TAZER_RANGE : 0;
+                if (weapon && cd <= wpnRange && cd > COP_FIRE_MIN_RANGE) {
+                    cop.mesh.rotation.y = Math.atan2(playerPos.x - cop.mesh.position.x, playerPos.z - cop.mesh.position.z);
+                    animateWalk(cop.mesh, 0, dt);
+                    copFireAt(s, cop, weapon, playerPos);
+                } else {
+                    moveToward(cop.mesh, playerVec, POLICE_SPEED, dt, layout);
+                }
                 if (cd < BUST_RADIUS) bustPlayer(s, cop);
             } else {
                 if (moveToward(cop.mesh, cop.target, PATROL_SPEED, dt, layout)) {
@@ -2614,11 +2662,11 @@ export function createDrugTycoon(deps) {
 
     // Muzzle tracer: a quick fading line from the gun to the hit point.
     const _tracers = [];
-    function spawnTracer(from, to) {
+    function spawnTracer(from, to, color = 0xfff3a0) {
         const { scene } = core;
         if (!scene) return;
         const geo = new THREE.BufferGeometry().setFromPoints([from.clone(), to.clone()]);
-        const mat = new THREE.LineBasicMaterial({ color: 0xfff3a0, transparent: true, opacity: 0.9 });
+        const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 });
         const line = new THREE.Line(geo, mat);
         line.renderOrder = 9;
         scene.add(line);
@@ -2786,6 +2834,84 @@ export function createDrugTycoon(deps) {
                 s.demand = Math.min(MARKET_MAX, (s.demand || 1) + 0.05);
                 startEvent(s, 'rivalTruce', 30000);
                 floatText('Rivals back off', best.mesh.position.clone().setY(2.4), '#ffd24a');
+            }
+        }
+    }
+
+    // ---- armed cops: which weapon (if any) a cop carries at this star level.
+    function copWeaponForStars(stars) {
+        if (stars >= COP_GUN_STAR) return 'gun';
+        if (stars >= COP_TAZER_STAR) return 'tazer';
+        return null;
+    }
+    // Non-lethal damage to the player — floored so cop fire stings but never
+    // kills (mirrors the bust health knock). Adds hit feedback + a hurt tint.
+    function hurtPlayer(amount) {
+        const cur = (gameplay.health ?? 1);
+        const next = Math.max(COP_HEALTH_FLOOR, cur - amount);
+        try { setPlayerHealth(next); } catch (e) {}
+        if (gameplay.hitFeedback) gameplay.hitFeedback.shake = Math.max(gameplay.hitFeedback.shake || 0, 0.4);
+    }
+    // A cop takes a shot at the player. Tracer + flash sprite at the cop's
+    // muzzle + SFX; tazers zap (short range, low damage), sidearms crack
+    // (longer range, more damage). Cooldown is per-cop.
+    const _copMuzzle = new THREE.Vector3();
+    const _copToPlayer = new THREE.Vector3();
+    function copFireAt(s, cop, weapon, playerPos) {
+        const now = performance.now?.() || Date.now();
+        if (now < (cop.nextFireAt || 0)) return;
+        const isTaz = weapon === 'tazer';
+        const range = isTaz ? COP_TAZER_RANGE : COP_GUN_RANGE;
+        const cm = cop.mesh;
+        const d = Math.hypot(cm.position.x - playerPos.x, cm.position.z - playerPos.z);
+        if (d > range || d < COP_FIRE_MIN_RANGE) return;
+
+        // Face the player and fire.
+        cop.nextFireAt = now + (isTaz ? COP_TAZER_COOLDOWN_MS : COP_GUN_COOLDOWN_MS);
+        cm.rotation.y = Math.atan2(playerPos.x - cm.position.x, playerPos.z - cm.position.z);
+
+        _copMuzzle.set(cm.position.x, (cm.position.y || 0) + 1.2, cm.position.z);
+        const { camera } = core;
+        // Aim at the player's head (camera) if available, else chest height.
+        if (camera) camera.getWorldPosition(_copToPlayer);
+        else _copToPlayer.set(playerPos.x, _copMuzzle.y, playerPos.z);
+        const end = _copToPlayer.clone();
+        spawnTracer(_copMuzzle, end, isTaz ? 0x66e0ff : 0xfff3a0);
+        copMuzzleFlash(_copMuzzle, isTaz);
+        playSfx(isTaz ? 'tazer' : 'shot', _copMuzzle.clone(), isTaz ? 0.7 : 0.85);
+
+        hurtPlayer(isTaz ? COP_TAZER_DAMAGE : COP_GUN_DAMAGE);
+        floatText(isTaz ? '⚡ ZAPPED' : '🔫 SHOT', end.clone().setY(end.y + 0.3), isTaz ? '#66e0ff' : '#ff7070');
+    }
+    // A small one-shot flash sprite at a world position (for cop fire). Reuses
+    // the player muzzle texture; fades via the tracer cleanup timer.
+    function copMuzzleFlash(pos, isTaz) {
+        const { scene } = core;
+        if (!scene) return;
+        if (!_flashTex) _flashTex = makeFlashTexture();
+        const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: _flashTex, transparent: true, depthTest: false, depthWrite: false,
+            blending: THREE.AdditiveBlending, toneMapped: false,
+            color: isTaz ? 0x66e0ff : 0xffd27a,
+        }));
+        spr.scale.setScalar(0.5 + Math.random() * 0.2);
+        spr.position.copy(pos);
+        spr.renderOrder = 11;
+        scene.add(spr);
+        _copFlashes.push({ spr, born: performance.now?.() || Date.now() });
+    }
+    const _copFlashes = [];
+    function updateCopFlashes() {
+        const { scene } = core;
+        const now = performance.now?.() || Date.now();
+        for (let i = _copFlashes.length - 1; i >= 0; i--) {
+            const f = _copFlashes[i];
+            const age = now - f.born;
+            if (age > 80) {
+                try { scene?.remove(f.spr); f.spr.material.dispose(); } catch (e) {}
+                _copFlashes.splice(i, 1);
+            } else {
+                f.spr.material.opacity = 1 - age / 80;
             }
         }
     }
@@ -3962,6 +4088,7 @@ export function createDrugTycoon(deps) {
 
         updateTracers();
         updateMuzzleFlash();
+        updateCopFlashes();
         setPlantsVisible(s, s.inRoom);
         updatePlants(s, s.inRoom);
         advanceDayNight(s, dt);   // sun/sky animate even in menus / grow room
@@ -4110,11 +4237,23 @@ export function createDrugTycoon(deps) {
             const wantCops = copsForStars(stars);
             while (s.police.length < wantCops) spawnPolice(s, layout);
             const chaseSpeed = chaseSpeedForStars(stars);
+            const weapon = copWeaponForStars(stars);   // null / 'tazer' / 'gun'
             const playerVec = _tmpProj.set(playerPos.x, layout.spawnY ?? 0, playerPos.z);
             for (const cop of s.police) {
                 if (!cop.mesh) continue;
-                moveToward(cop.mesh, playerVec, chaseSpeed, dt, layout);
                 const cd = Math.hypot(cop.mesh.position.x - playerPos.x, cop.mesh.position.z - playerPos.z);
+                // Armed cops hold their ground at firing range and shoot; once
+                // in firing range they stop closing so they keep peppering you.
+                const wpnRange = weapon === 'gun' ? COP_GUN_RANGE : weapon === 'tazer' ? COP_TAZER_RANGE : 0;
+                const inFiringRange = weapon && cd <= wpnRange && cd > COP_FIRE_MIN_RANGE;
+                if (inFiringRange) {
+                    // Face the player but hold position; take shots on cooldown.
+                    cop.mesh.rotation.y = Math.atan2(playerPos.x - cop.mesh.position.x, playerPos.z - cop.mesh.position.z);
+                    animateWalk(cop.mesh, 0, dt);
+                    copFireAt(s, cop, weapon, playerPos);
+                } else {
+                    moveToward(cop.mesh, playerVec, chaseSpeed, dt, layout);
+                }
                 if (cd < BUST_RADIUS) { bustPlayer(s, cop); }
             }
         } else {
