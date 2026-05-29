@@ -6594,6 +6594,7 @@ function wireExtractedModules() {
         MOBILE_MOVE_THRESHOLD, MOBILE_MOVE_RADIUS_FACTOR, MOBILE_LOOK_SENSITIVITY,
         PLAYER_SETTINGS,
         isDrivingVehicle, setCameraMode, runMouseAction, exitVehicle, enterVehicle,
+        getNearbyVehicle,
         applyGameplayCameraRotation, applyShowcaseCameraRotation,
         getActiveVehicleProp,
         handleMobileExitPlay,

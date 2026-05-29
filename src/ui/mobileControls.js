@@ -41,7 +41,7 @@ function getMobileButtonSpec() {
             rightAction: !!window.drugTycoon?.hasGun,
             rightLabel: 'Fire',
             action2: true,
-            action2Label: 'E',
+            action2Label: isDrivingVehicle?.() ? 'Exit' : getNearbyVehicle?.() ? 'Enter' : 'E',
         };
     }
 
@@ -89,6 +89,7 @@ let MOBILE_MOVE_THRESHOLD, MOBILE_MOVE_RADIUS_FACTOR, MOBILE_LOOK_SENSITIVITY,
 
 // Functions from main.js
 let isDrivingVehicle, setCameraMode, runMouseAction, exitVehicle, enterVehicle,
+    getNearbyVehicle,
     applyGameplayCameraRotation, applyShowcaseCameraRotation, getActiveVehicleProp,
     handleMobileExitPlay;
 
@@ -112,6 +113,7 @@ export function setupMobileControls(deps) {
         runMouseAction,
         exitVehicle,
         enterVehicle,
+        getNearbyVehicle,
         applyGameplayCameraRotation,
         applyShowcaseCameraRotation,
         getActiveVehicleProp,
@@ -194,9 +196,13 @@ export function setupMobileControls(deps) {
 
     mobileAction2Btn?.addEventListener('pointerdown', (event) => {
         if (event.button !== 0 && event.pointerType === 'mouse') return;
-        // Drug Tycoon repurposes Action 2 as the interact (E) button.
+        // Drug Tycoon repurposes Action 2 as the interact (E) button. But it
+        // doubles as enter/exit car: if driving or stood next to a vehicle,
+        // the button boards/leaves the car (same as PC E); else it interacts.
         if (inDrugTycoon()) {
             event.preventDefault();
+            if (isDrivingVehicle?.()) { exitVehicle(); return; }
+            if (getNearbyVehicle?.()) { enterVehicle(); return; }
             window.drugTycoonApi?.queueInteract?.();
             return;
         }
