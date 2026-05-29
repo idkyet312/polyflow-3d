@@ -23,6 +23,8 @@ export function createFrameLoop(deps) {
         tempVectorA, tempVectorB, tempVectorC, tempVectorD, tempVectorE, tempVectorF,
         copyJoltVector,
         isDrivingVehicle,
+        getActiveVehicleProp,
+        getActorRenderObject,
         updateVehicleGameplay,
         silenceVehicleEngineAudio, updateEngineAudioDebugOverlay,
         syncCameraToCharacter,
@@ -147,6 +149,25 @@ export function createFrameLoop(deps) {
     function updateGameplay(delta) {
         if (isDrivingVehicle()) {
             updateVehicleGameplay(delta);
+            // The player's physics character is parked while driving, so the
+            // gameplay "subject position" would freeze and chunk streaming /
+            // tycoon sim would stop following you. Drive the tycoon update from
+            // the CAR's position instead — the player effectively rides along as
+            // an invisible, non-colliding point so chunks keep spawning around
+            // wherever you drive.
+            const carProp = getActiveVehicleProp?.();
+            const carMesh = carProp && getActorRenderObject?.(carProp);
+            if (carMesh) {
+                const carPos = tempVectorA.copy(carMesh.position);
+                // Keep the player character co-located with the car so anything
+                // reading character.GetPosition() (respawn, audio, AI) stays sane.
+                if (physics.character && physics.Jolt) {
+                    const jp = new physics.Jolt.RVec3(carPos.x, carPos.y, carPos.z);
+                    physics.character.SetPosition(jp);
+                    physics.Jolt.destroy(jp);
+                }
+                updateDrugTycoonState(carPos, delta);
+            }
             return;
         }
 

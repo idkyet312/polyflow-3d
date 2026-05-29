@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MeshBasicNodeMaterial, SpriteNodeMaterial } from 'three/webgpu';
 
 export const VEHICLE_FX_SETTINGS = {
     maxParticles: 520,
@@ -52,7 +53,11 @@ function createSkidRibbon(maxSegments, baseOpacity) {
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4));
     geometry.setIndex(indices);
     geometry.setDrawRange(0, 0);
-    const material = new THREE.MeshBasicMaterial({
+    // Node material (NOT MeshBasicMaterial): the WebGPU node pipeline doesn't
+    // honour 4-component (RGBA) vertex colours + transparency on the legacy
+    // basic material, so skid marks rendered as opaque BLACK squares. The node
+    // material reads the per-vertex alpha correctly → faint translucent marks.
+    const material = new MeshBasicNodeMaterial({
         color: 0xffffff,
         vertexColors: true,
         transparent: true,
@@ -202,7 +207,10 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
 
         let particle = state.particles.find((entry) => entry.life <= 0);
         if (!particle && state.particles.length < VEHICLE_FX_SETTINGS.maxParticles) {
-            const material = new THREE.SpriteMaterial({
+            // SpriteNodeMaterial (NOT the legacy SpriteMaterial): the WebGPU node
+            // pipeline doesn't honour the gradient texture's alpha on the legacy
+            // sprite material, so dust/smoke rendered as opaque BLACK squares.
+            const material = new SpriteNodeMaterial({
                 map: state.textures[kind] || state.textures.smoke,
                 transparent: true,
                 depthWrite: false,
@@ -258,7 +266,11 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
         if (ribbon) ribbon.hasLast = false;
     }
 
+    // Master off-switch for all vehicle surface FX (dust/smoke/skid). Disabled
+    // for now while the node-material particle look is being sorted out.
+    const FX_ENABLED = false;
     function emitSurfaceEffects(delta, data) {
+        if (!FX_ENABLED) return;
         if (!data.grounded) return;
 
         const speed = Math.abs(data.forwardSpeed);
@@ -297,7 +309,7 @@ export function createVehicleFx({ getScene, vehicleSettings }) {
                     0.55 + Math.random() * 0.55
                 );
             }
-            if (skidAmount > 0.05) {
+            if (skidAmount > 0.05 && !data.noTracks) {
                 extendSkidRibbon(wheelKey, wheelPos, data.flatForward, 0.35 + skidAmount * 0.5);
             } else {
                 breakSkidRibbon(wheelKey);

@@ -2131,8 +2131,8 @@ export function createLevels(deps) {
             // Curbs: thin raised visual lips at the lot edge (no collision, so
             // the player crosses roads freely — a 0.2m curb would wall in a
             // capsule character at every intersection).
-            addBox(`tycoon-curb-ns-${s}`, [0.2, 0.12, BLOCK], [s * (half + SW), 0.06, 0], curbMat);
-            addBox(`tycoon-curb-ew-${s}`, [BLOCK, 0.12, 0.2], [0, 0.06, s * (half + SW)], curbMat);
+            addBox(`tycoon-curb-ns-${s}`, [0.2, 0.03, BLOCK], [s * (half + SW), 0.015, 0], curbMat);
+            addBox(`tycoon-curb-ew-${s}`, [BLOCK, 0.03, 0.2], [0, 0.015, s * (half + SW)], curbMat);
         });
 
         // ---- houses around the four corner lots ------------------------
@@ -2207,10 +2207,12 @@ export function createLevels(deps) {
         addHouse( LOT,  LOT, 8, 7, 5, Math.PI * 1.75);
         // "Your house" — west lot, the green house with a prominent door.
         // faceY = +PI/2 maps the local +Z front to world +X, so the door faces
-        // the centre road (east) where HOME_DOOR sits.
-        const HOME = [-LOT, 0];
+        // the centre road (east) where HOME_DOOR sits. Offset off z=0 so the
+        // body (8 wide along Z) clears the E-W road + sidewalk (~±6.5) instead
+        // of straddling it.
+        const HOME = [-LOT, 12];
         addHouse(HOME[0], HOME[1], 8, 10, 5.5, Math.PI * 0.5, { home: true });
-        addHouse( LOT,    0, 7, 9, 5, -Math.PI * 0.5);  // east lot
+        addHouse( LOT,   -12, 7, 9, 5, -Math.PI * 0.5);  // east lot, offset clear of the road
 
         // Door interaction point: just outside the home's front face. With
         // faceY +PI/2 the front (+Z) maps to world +X, so it's at HOME.x + d/2.
@@ -2692,6 +2694,9 @@ export function createLevels(deps) {
             juiceShop: [JUICE[0], 1.0, JUICE[1]], // outdoor grow-juice kiosk (the "other house")
             upgradePad: [UPG[0], 1.0, UPG[1]],   // inside the grow room
             gunPickup: [GUN[0], 1.0, GUN[1]],
+            // Drivable car parked behind the home house (west side, away from
+            // the +X-facing door). Dropped from a little above so it settles.
+            carSpawn: [HOME[0] - 8, 1.5, HOME[1]],
             streetRadius: HALF - 6,   // buyers/police wander the roads + lots
             mapHalf: HALF,            // half block size; cops spawn at this edge
             spawnY: 0,
@@ -2784,7 +2789,7 @@ export function createLevels(deps) {
         root.add(dayHemi);
 
         // ---- WEED SHOP storefront wraps the home house --------------------
-        // HOME = [-LOT, 0], faceY = +PI/2 so front (+Z local) = +X world.
+        // HOME = [-LOT, 12], faceY = +PI/2 so front (+Z local) = +X world.
         const SHOP_X = HOME[0];
         const SHOP_Z = HOME[1];
         const SHOP_FRONT_X = SHOP_X + 10 * 0.5 + 0.05;  // just in front of house wall
@@ -2877,9 +2882,12 @@ export function createLevels(deps) {
             lampLight.name = `tycoon-lamp-${lx}-${lz}`;
             root.add(lampLight);
         };
-        [-22, 0, 22].forEach((lz) => {
-            addLamp(-(ROAD_W * 0.5 + SW + 0.4), lz);
-            addLamp(  ROAD_W * 0.5 + SW + 0.4, lz);
+        // Lamps line the N-S road's sidewalks. Skip z=0 — it sits in the E-W
+        // cross road; use offsets clear of the intersection instead.
+        const lampX = ROAD_W * 0.5 + SW + 0.4;
+        [-26, -12, 12, 26].forEach((lz) => {
+            addLamp(-lampX, lz);
+            addLamp(  lampX, lz);
         });
 
         applySilPomLighting(root, sun.position.clone());

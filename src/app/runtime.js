@@ -1667,7 +1667,7 @@ const _actorSpawn = createActorSpawn({
     markDDGISkipCapture, updateGameplayUI,
     cloneDisposableObject, createDynamicPropActor, ensureScriptHandles,
     getDynamicPropById, setActorColor, setActorComponentFlags,
-    syncPropScriptState,
+    syncPropScriptState, createDrivableCarVisual,
 });
 const spawnDrivableCar = _actorSpawn.spawnDrivableCar;
 const createDynamicPrimitiveBody = _actorSpawn.createDynamicPrimitiveBody;
@@ -5933,6 +5933,8 @@ const _frameLoop = createFrameLoop({
     tempVectorA, tempVectorB, tempVectorC, tempVectorD, tempVectorE, tempVectorF,
     copyJoltVector,
     isDrivingVehicle,
+    getActiveVehicleProp: (...a) => getActiveVehicleProp(...a),
+    getActorRenderObject: (...a) => getActorRenderObject(...a),
     updateVehicleGameplay: (...a) => updateVehicleGameplay(...a),
     silenceVehicleEngineAudio,
     updateEngineAudioDebugOverlay,
@@ -6438,6 +6440,18 @@ function wireExtractedModules() {
             gameplay,
             physics,
             setPlayerHealth,
+            // Actor helpers for runtime map-chunk streaming (same static-collision
+            // path the level builder uses for its meshes).
+            createDynamicPropActor: (...a) => createDynamicPropActor(...a),
+            setActorComponentFlags: (...a) => setActorComponentFlags(...a),
+            rebuildActorPhysics: (...a) => rebuildActorPhysics(...a),
+            getActorRenderObject: (...a) => getActorRenderObject(...a),
+            destroyDynamicPhysicsProp: (...a) => destroyDynamicPhysicsProp(...a),
+            getSceneSystem: () => sceneSystem,
+            // Drivable car parked behind the home house.
+            spawnDrivableCar: (...a) => spawnDrivableCar(...a),
+            setActorWorldPositionExact: (...a) => setActorWorldPositionExact(...a),
+            getActorBody: (...a) => getActorBody(...a),
         });
         updateDrugTycoonState = dt.updateDrugTycoonState;
     }

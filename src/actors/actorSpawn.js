@@ -20,7 +20,7 @@ export function createActorSpawn(deps) {
         // injected (originally destructured imports in runtime.js):
         cloneDisposableObject, createDynamicPropActor, ensureScriptHandles,
         getDynamicPropById, setActorColor, setActorComponentFlags,
-        syncPropScriptState,
+        syncPropScriptState, createDrivableCarVisual,
     } = deps;
 
     function spawnDrivableCar(options = {}) {

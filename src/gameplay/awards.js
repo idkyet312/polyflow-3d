@@ -13,10 +13,21 @@ const STORAGE_KEY = 'polyflow.awards.v1';
 export const AWARD_CATALOG = {
     drugTycoon: [
         { key: 'firstSeed',   icon: '🌱', label: 'Plant your first seed' },
-        { key: 'cash1k',      icon: '💰', label: 'Bank $1,000 in cash' },
+        { key: 'firstSale',   icon: '🤝', label: 'Make your first sale' },
         { key: 'buds50',      icon: '🌿', label: 'Harvest 50 buds total' },
         { key: 'hotSale',     icon: '🔥', label: 'Sell to the day\'s hot buyer' },
-        { key: 'exoticSeed',  icon: '🏆', label: 'Buy an Exotic seed' },
+        { key: 'firstCook',   icon: '⚗️', label: 'Cook your first batch' },
+        { key: 'exoticSeed',  icon: '🌟', label: 'Buy an Exotic seed' },
+        { key: 'combo5',      icon: '⚡', label: 'Hit a x2.5 sale combo' },
+        { key: 'cash1k',      icon: '💵', label: 'Bank $1,000' },
+        { key: 'cash10k',     icon: '💰', label: 'Bank $10,000' },
+        { key: 'cash100k',    icon: '🤑', label: 'Bank $100,000' },
+        { key: 'pillPress',   icon: '💊', label: 'Unlock the pill press' },
+        { key: 'cokeLab',     icon: '❄️', label: 'Unlock the coke lab' },
+        { key: 'contract',    icon: '📋', label: 'Fill a big-order contract' },
+        { key: 'vipCustomer', icon: '⭐', label: 'Grow a VIP regular customer' },
+        { key: 'legend',      icon: '👑', label: 'Reach Legend reputation' },
+        { key: 'survive7',    icon: '🏆', label: 'Survive 7 days' },
     ],
     doomArena: [
         { key: 'firstKill', icon: '🔫', label: 'First kill' },

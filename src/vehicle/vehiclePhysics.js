@@ -363,6 +363,7 @@ export function createVehiclePhysics(deps) {
             averageCompression,
             verticalSpeed: linearVelocity.y,
             rearWheelWorldPositions,
+            noTracks: !!vehicle.userData?.noTracks,   // cars flagged to leave no skid marks
         });
 
         const uprightCorrection = tempVectorA.copy(vehicleUp).cross(upVector).multiplyScalar(-VEHICLE_SETTINGS.uprightTorque * (grounded ? 1 : 0.05));
