@@ -251,6 +251,35 @@ const LOYALTY_TIERS = [
 ];
 const LOYALTY_TRASH_DROP = 2;     // tiers lost when you sell a loyal customer trash
 const LOYALTY_TRASH_HEAT = 8;     // heat from an angry regular badmouthing you
+// ---- crew: VIP regulars can be hired as auto-dealers --------------------
+// A maxed-loyalty (VIP) customer trusts you enough to push product for you.
+// Hire one and they roam the streets, auto-selling your stash for cash minus
+// a wage cut, adding a little heat. They can get busted and vanish.
+const CREW_HIRE_LOYALTY = LOYALTY_TIERS.length - 1; // VIP tier index required
+const CREW_HIRE_COST = 1500;       // up-front hire fee
+const CREW_MAX = 4;                // how many dealers you can run at once
+const CREW_SELL_INTERVAL_MS = 9000; // a dealer moves a bundle this often
+const CREW_WAGE_CUT = 0.30;        // fraction of each sale the dealer keeps
+const CREW_SELL_QTY = 2;           // units a dealer moves per sale
+const CREW_HEAT_PER_SALE = 2.5;    // heat each dealer sale adds
+const CREW_BUST_CHANCE = 0.04;     // per-sale chance a dealer gets busted + lost
+const CREW_SPEED = 1.7;            // dealer wander speed
+// ---- crew leveling ------------------------------------------------------
+// Dealers earn 1 XP per sale and rank up through these tiers. Each rank sells
+// faster + bigger, keeps a smaller wage cut, and is harder to bust. The cap
+// (hat) recolours by rank so you can read a crew's level at a glance.
+const CREW_RANKS = [
+    { name: 'Runner',  xp: 0,  qty: 1, intervalMult: 1.00, wageCut: 0.30, bustMult: 1.00, cap: 0x2ec27a },
+    { name: 'Dealer',  xp: 8,  qty: 2, intervalMult: 0.90, wageCut: 0.27, bustMult: 0.85, cap: 0x4fd0ff },
+    { name: 'Pusher',  xp: 22, qty: 3, intervalMult: 0.78, wageCut: 0.23, bustMult: 0.65, cap: 0xffe066 },
+    { name: 'Slinger', xp: 45, qty: 4, intervalMult: 0.66, wageCut: 0.19, bustMult: 0.45, cap: 0xff9a3c },
+    { name: 'Kingpin',  xp: 80, qty: 6, intervalMult: 0.55, wageCut: 0.15, bustMult: 0.28, cap: 0xff5a8a },
+];
+function crewRankIndex(xp) {
+    let r = 0;
+    for (let i = 0; i < CREW_RANKS.length; i++) if ((xp || 0) >= CREW_RANKS[i].xp) r = i;
+    return r;
+}
 // ---- bribe ---------------------------------------------------------------
 const BRIBE_COST_PER_HEAT = 3;    // $ per heat point cleared at the upgrade desk
 // ---- rivals / random events / base upgrades -----------------------------
@@ -278,6 +307,18 @@ const RIVAL_SPEED = 1.85;
 const RIVAL_POACH_RADIUS = 2.2;
 const RIVAL_MUG_RADIUS = 2.0;
 const RIVAL_EVENT_COOLDOWN_MS = 14000;
+// ---- armed rivals --------------------------------------------------------
+// Once you're notorious (high heat) rivals start packing. Armed rivals stop
+// poaching and instead hunt the player: close to firing range and shoot
+// (non-lethal, floored like cop fire). Drop them for a cash bounty.
+const RIVAL_ARM_HEAT = 60;          // heat at/above which new rivals may be armed
+const RIVAL_ARM_CHANCE = 0.5;       // chance an eligible rival spawns armed
+const RIVAL_GUN_RANGE = 18;         // how far an armed rival will shoot
+const RIVAL_GUN_MIN_RANGE = 2.4;    // closer than this they mug instead of shoot
+const RIVAL_GUN_DAMAGE = 0.16;      // player health per rival bullet
+const RIVAL_GUN_COOLDOWN_MS = 1700; // per-rival fire cadence
+const RIVAL_CHASE_SPEED = 2.6;      // armed rivals move faster when hunting
+const RIVAL_KILL_BOUNTY = 250;      // cash for dropping an armed rival
 const RANDOM_EVENT_MIN_MS = 30000;
 const RANDOM_EVENT_MAX_MS = 52000;
 const EVENT_DURATION_MS = 45000;
@@ -294,7 +335,7 @@ const PRODUCTS = {
     // pill lab instead, so cook:false keeps them off the bench.
     weed:  { name: 'Weed',  emoji: '🌿', color: '#9dffa0', priceMult: 1.0, heatMult: 1.0,  unlock: null,        cook: false },
     pills: { name: 'Pills', emoji: '💊', color: '#ff7fd0', priceMult: 1.9, heatMult: 1.35, unlock: 'pillPress', cook: false },
-    coke:  { name: 'Coke',  emoji: '❄️', color: '#cfe8ff', priceMult: 3.4, heatMult: 1.8,  unlock: 'cokeLab',   cook: true },
+    coke:  { name: 'Coke',  emoji: '❄️', color: '#cfe8ff', priceMult: 3.4, heatMult: 1.8,  unlock: 'cokeLab',   cook: false },
 };
 const PRODUCT_KEYS = ['weed', 'pills', 'coke'];
 const PILL_PRESS_PRICE = 1200;     // one-time unlock for the pill line
@@ -323,6 +364,9 @@ const DELIVERY_PAY_PER_METRE = 2.2;  // extra cash per metre of straight-line di
 const DELIVERY_REP_REWARD = 14;      // rep on completion (more than a shirt bounty)
 const DELIVERY_RADIUS = 7;           // how close the car must get to the beacon
 const DELIVERY_MIN_DELAY_MS = 25000; // earliest a fresh delivery can be offered
+// The car is bought (not free): owning it parks a drivable car behind the
+// house AND unlocks the long-distance delivery contracts.
+const CAR_PRICE = 2500;
 
 export function createDrugTycoon(deps) {
     const {
@@ -407,10 +451,12 @@ export function createDrugTycoon(deps) {
             cookPos: new THREE.Vector3(),
             upgradePos: new THREE.Vector3(),
             pillLabPos: new THREE.Vector3(),
+            cokeLabPos: new THREE.Vector3(),
             gunPos: new THREE.Vector3(),
-            pillGame: null,       // active pill-press minigame state (see openPillLab)
+            pillGame: null,       // active pill/coke minigame state (see openPillLab)
             npcs: [],             // { actor, mesh, target, wantsBuy }
             rivals: [],           // rival dealers competing for buyers / stash
+            crew: [],             // hired VIP dealers { color, mesh, target, nextSaleAt }
             police: [],           // { actor, mesh }
             started: false,
             shopOpen: false,
@@ -431,6 +477,7 @@ export function createDrugTycoon(deps) {
             comboUntil: 0,        // timestamp the streak expires
             events: {},           // timed random event flags
             nextEventAt: 0,
+            hasCar: false,        // bought the car (parks a drivable car + unlocks deliveries)
             hasGun: false,        // player owns the pistol
             gunPickupMesh: null,  // floating pickup on the pedestal
             nextShotAt: 0,        // shoot cooldown
@@ -495,6 +542,7 @@ export function createDrugTycoon(deps) {
         s.baseUp ||= { lights: 0, security: 0, storage: 0, autoWater: 0 };
         s.baseUp = { lights: 0, security: 0, storage: 0, autoWater: 0, ...s.baseUp };
         s.rivals ||= [];
+        s.crew ||= [];
         s.events ||= {};
         if (typeof s.budsQ !== 'number') s.budsQ = 1;
         if (typeof s.nextEventAt !== 'number') s.nextEventAt = 0;
@@ -512,6 +560,7 @@ export function createDrugTycoon(deps) {
         if (typeof s.juiceTier !== 'number') s.juiceTier = 0;
         if (!s.juicePos) s.juicePos = new THREE.Vector3();
         if (!s.pillLabPos) s.pillLabPos = new THREE.Vector3();
+        if (!s.cokeLabPos) s.cokeLabPos = new THREE.Vector3();
         // One-time grant: pre-seed-shop saves never got the 2 starter Reggie
         // seeds (and were stuck unable to plant). Hand them out once, then mark
         // the save so a player who legitimately spent their seeds doesn't get
@@ -527,6 +576,7 @@ export function createDrugTycoon(deps) {
         if (!s.prod.coke) s.prod.coke = { qty: 0, q: 1 };
         if (typeof s.hasPillPress !== 'boolean') s.hasPillPress = false;
         if (typeof s.hasCokeLab !== 'boolean') s.hasCokeLab = false;
+        if (typeof s.hasCar !== 'boolean') s.hasCar = false;
         // Selected lines must always point at an unlocked product.
         if (!PRODUCT_KEYS.includes(s.sellProduct) || !productUnlocked(s, s.sellProduct)) s.sellProduct = 'weed';
         // Bench only brews cookable lines; default to the first unlocked one (or
@@ -587,7 +637,7 @@ export function createDrugTycoon(deps) {
         'demand', 'hotColor', 'marketDay', 'startingCashGranted', 'startingCashGrantAmount',
         'seedTier', '_budsHarvested', 'startingSeedsGranted',
         'juiceTier', 'rep', 'dayNum',
-        'prod', 'hasPillPress', 'hasCokeLab', 'sellProduct', 'cookProduct',
+        'prod', 'hasPillPress', 'hasCokeLab', 'hasCar', 'sellProduct', 'cookProduct',
     ];
     let _lastSaveAt = 0;
     // Plant snapshots strip the THREE mesh (rebuilt on load) and the
@@ -621,6 +671,9 @@ export function createDrugTycoon(deps) {
             blob.baseUp = { ...s.baseUp };
             blob.life = { ...s.life };       // lifetime totals
             blob.loyalty = { ...s.loyalty }; // customer regulars by shirt colour
+            // Hired dealers persist with their rank progress; the meshes are
+            // re-spawned on load (see ensureCrewMeshes).
+            blob.crewColors = (s.crew || []).map((c) => ({ color: c.color, xp: c.xp || 0, earned: c.earned || 0 }));
             blob.seeds = Array.isArray(s.seeds) ? s.seeds.slice() : [0, 0, 0];
             blob.juices = Array.isArray(s.juices) ? s.juices.slice() : [0, 0, 0];
             // Growing plants persist so a half-grown crop survives a reload.
@@ -646,6 +699,9 @@ export function createDrugTycoon(deps) {
             if (blob.baseUp && typeof blob.baseUp === 'object') s.baseUp = { ...s.baseUp, ...blob.baseUp };
             if (blob.life && typeof blob.life === 'object') s.life = { ...s.life, ...blob.life };
             if (blob.loyalty && typeof blob.loyalty === 'object') s.loyalty = { ...blob.loyalty };
+            // Stash the saved crew colours; meshes are built once the level
+            // exists (ensureCrewMeshes, called from the per-frame update).
+            if (Array.isArray(blob.crewColors)) s.pendingCrew = blob.crewColors.slice();
             if (Array.isArray(blob.seeds)) s.seeds = SEED_TIERS.map((_, i) => (blob.seeds[i] | 0));
             if (Array.isArray(blob.juices)) s.juices = JUICE_TIERS.map((_, i) => (blob.juices[i] | 0));
             // Saved plant lifecycle — ensurePlants() restores it onto the rebuilt pots.
@@ -674,6 +730,7 @@ export function createDrugTycoon(deps) {
         if (s) {
             for (const n of s.npcs) { try { scene?.remove(n.mesh); } catch (e) {} }
             for (const r of s.rivals || []) { try { scene?.remove(r.mesh); } catch (e) {} }
+            for (const c of s.crew || []) { try { scene?.remove(c.mesh); } catch (e) {} }
             for (const p of s.police) { try { scene?.remove(p.mesh); } catch (e) {} }
             for (const c of s.patrol || []) { try { scene?.remove(c.mesh); } catch (e) {} }
         }
@@ -1277,8 +1334,8 @@ export function createDrugTycoon(deps) {
         '🌱 SEEDS: Plants need seeds! Buy them at the outdoor SEED SHOP [E] (the green kiosk on the street). Three tiers — Reggie (cheap, green), Kush (mid, icy-teal), Exotic (top-shelf, purple). Better seeds grow faster, yield more buds, and grade higher. The tier you last bought is the one you plant.',
         '🧪 GROW JUICE: A second outdoor kiosk on the other side of the street. Three tiers of grow juice (Compost Tea / Liquid Bloom / Hydro Elixir). Buy a bottle, then hold Fire near a growing plant to pour it on — that plant grows 2.2×–4.6× faster for the rest of its cycle. One pour per plant; the boost clears at harvest.',
         '🌿 GROW: At home — [E] plant a seed (consumes one from stock), [E] water it. Soil dries out: keep re-watering [E] or growth stalls. 🐛 Pests strike randomly — hold Fire near the plant to spray ($25). Healthy plants yield more buds. [E] harvest when ripe, then drag buds into the bag (hold Fire) to package.',
-        '❄️ COKE BENCH: The outdoor bench cooks COKE (buy the Coke Lab at the upgrade desk first), then [E] the bench, add reagents in the right order, and MIX. Higher purity = more cash.',
-        '💊 PILL LAB: Buy a Pill Press at the upgrade desk, then use the stainless lab bench INSIDE your house [E]. Pills are pressed in a realistic 4-step craft: ⚖️ weigh the dose → 🌀 blend → 🛠️ press the tablets → 🔖 stamp. Nail each timing/precision check for high purity.',
+        '❄️ COKE LAB: Buy a Coke Lab at the upgrade desk, then use the glassware bench INSIDE your house [E] (NW corner). Coke is cooked in a 4-step craft: ⚗️ measure the base → 🧪 dissolve & wash → 🔥 cook the rock → 🔪 cut & bag. Nail each timing/precision check for high purity.',
+        '💊 PILL LAB: Buy a Pill Press at the upgrade desk, then use the stainless lab bench INSIDE your house [E] (NE corner). Pills are pressed in a 4-step craft: ⚖️ weigh the dose → 🌀 blend → 🛠️ press the tablets → 🔖 stamp. Nail each timing/precision check for high purity.',
         '💊❄️ PRODUCT LINES: Pills (~1.9×) and coke (~3.4×) pay far more than weed — but burn far more heat. Press [Q] to choose which line you deal.',
         '📋 CONTRACTS: Your phone occasionally lists a fat one-shot contract — deliver N units of a specific product to a specific shirt colour before the day ends for a big cash bonus + rep. Normal sales to that customer count toward it.',
         '🧪 QUALITY: Plant health, grow lights, and recipe accuracy set grade. Better grade pays more and draws less heat.',
@@ -1287,12 +1344,14 @@ export function createDrugTycoon(deps) {
         '⭐ REPUTATION: Your street rep (Pariah → Shady → Known → Respected → Legend) decides how many customers come to your shop. Selling quality product builds rep fast; trash product, narc deals, and busts tank it. Check your phone for the live status.',
         '📈 MARKET: Prices swing daily (check the phone). The 🔥 hot buyer pays a bonus. Chain deals fast for a COMBO cash multiplier.',
         '🎲 EVENTS: Buyer rushes, pest blooms, raid tips, rival moves, and reputation buzz can hit anytime.',
-        '🧍 RIVALS: Rival dealers poach buyers and can rob stash. Scare them off, or invest in security.',
+        '🧍 RIVALS: Rival dealers poach buyers and can rob stash. Scare them off, or invest in security. 🔫 Get notorious (high heat) and armed rivals start hunting you — they chase and shoot. Gun them down (or bat them) for a $250 bounty each.',
         '🚨 NARCS: Some buyers are undercover — they glance around nervously up close. Sell to one and your heat spikes hard. Read the tell.',
         '⭐ HEAT: More stars = more cops. Busted = lose all product + a fine, wake up home next morning. Bribe the cops at the desk to clear heat fast.',
         '🌙 NIGHT: After 21:00 patrols roam the streets. Sleep in bed [E] to skip to morning.',
         '🔫 WEAPONS: Buy a pistol, ammo, or a bat at the upgrade desk in the room. Fire to shoot/swing.',
         '🏠 BASE: Buy grow lights, security, hidden storage, and auto-water at the desk.',
+        '🚗 CAR: Buy the car at the upgrade desk ($2,500). It parks behind the house (drive with [E] to get in) and unlocks 🚚 long-distance DELIVERY contracts — drive N units of a product to a far drop-off marker for a big distance-scaled payout + rep.',
+        '🤝 CREW: Build a customer up to ★ VIP loyalty (16+ clean deals to the same shirt colour), then walk up and [E] hire them as a dealer ($1,500). Hired dealers (green cap) roam the streets and auto-sell your stash for cash — minus their 30% wage cut — adding a little heat. They can get busted on a hot block. Run up to 4 at once for passive income while you grow and cook. ⬆ Dealers RANK UP as they sell (Runner → Dealer → Pusher → Slinger → Kingpin) — higher ranks sell faster + in bigger bundles, keep a smaller wage cut, and are much harder to bust. Their cap colour shows their rank.',
     ];
 
     let _helpBtnEl = null;
@@ -1455,7 +1514,16 @@ export function createDrugTycoon(deps) {
             + ((s.inRoom || totalSeeds(s) > 0) ? `<div style="color:${SEED_TIERS[pickPlantTier(s)]?.color || '#8aa0aa'};">🌱 Seeds: ${totalSeeds(s)}${pickPlantTier(s) >= 0 ? ` · ${SEED_TIERS[pickPlantTier(s)].t.replace(' Seeds', '')}` : ' — buy outside'}</div>` : '')
             + ((s.inRoom || totalJuices(s) > 0) ? `<div style="color:${JUICE_TIERS[pickJuiceTier(s)]?.color || '#8aa0aa'};">🧪 Juice: ${totalJuices(s)}${pickJuiceTier(s) >= 0 ? ` · ${JUICE_TIERS[pickJuiceTier(s)].t}` : ''}</div>` : '')
             + (!s.inRoom ? `<div style="opacity:.92;">Market: <b style="color:${mk.c}">${mk.t}</b> <span style="opacity:.6;font-size:12px;">x${(s.demand || 1).toFixed(2)}</span></div>` : '')
-            + ((s.rivals?.length || 0) > 0 && !s.inRoom ? `<div style="color:#ff8a8a;">Rivals nearby: ${s.rivals.length}</div>` : '')
+            + ((s.rivals?.length || 0) > 0 && !s.inRoom ? (() => {
+                const armed = s.rivals.filter((r) => r.armed).length;
+                return armed > 0
+                    ? `<div style="color:#ff5a5a;font-weight:700;">🔫 Armed rivals: ${armed}${s.rivals.length > armed ? ` (+${s.rivals.length - armed})` : ''}</div>`
+                    : `<div style="color:#ff8a8a;">Rivals nearby: ${s.rivals.length}</div>`;
+            })() : '')
+            + ((s.crew?.length || 0) > 0 ? (() => {
+                const top = s.crew.reduce((a, c) => Math.max(a, c.rank || 0), 0);
+                return `<div style="color:#2ec27a;font-weight:700;">🤝 Crew: ${s.crew.length}/${CREW_MAX} · top ${CREW_RANKS[top].name}</div>`;
+            })() : '')
             + (activeEventNames ? `<div style="color:#ffd24a;">Event: ${activeEventNames}</div>` : '')
             + (combo > 1 ? `<div style="color:#7fd0ff;">🔥 Combo x${combo.toFixed(2).replace(/0$/, '')}</div>` : '')
             + (() => {
@@ -1834,21 +1902,53 @@ export function createDrugTycoon(deps) {
     // Each stage returns 0..1; their average is the batch purity. Skill, not
     // memorisation — every stage is a live timing/precision check.
     const PILL_STAGES = ['weigh', 'blend', 'press', 'stamp'];
+    // Per-product theming for the shared timing minigame. 'pills' presses
+    // tablets; 'coke' cooks/cuts/whips/cuts the rock — same four mechanics,
+    // different flavour text + colour so the indoor coke lab feels distinct.
+    const LAB_THEME = {
+        pills: {
+            emoji: '💊', name: 'PILL LAB', accent: '#ff7fd0', accent2: '#ff4fb8', bg: 'rgba(10,4,12,0.86)',
+            titles: { weigh: '⚖️ WEIGH THE DOSE', blend: '🌀 BLEND & GRANULATE', press: '🛠️ PRESS THE TABLETS', stamp: '🔖 SCORE & STAMP' },
+            hints: {
+                weigh: 'Stop the needle inside the green band. Too little is weak — too much runs hot.',
+                blend: 'The mix rises and falls — tap to lock it inside the green band.',
+                press: 'Mash [E]/Space/click to build tonnage into the target window before time runs out.',
+                stamp: 'Hit the moving marker in the sweet spot for a clean imprint.',
+            },
+            btns: { weigh: 'LOCK DOSE', blend: 'LOCK BLEND', press: 'PRESS! (mash)', stamp: 'STAMP' },
+        },
+        coke: {
+            emoji: '❄️', name: 'COKE LAB', accent: '#7fd0ff', accent2: '#4fb8ff', bg: 'rgba(4,8,14,0.86)',
+            titles: { weigh: '⚗️ MEASURE THE BASE', blend: '🧪 DISSOLVE & WASH', press: '🔥 COOK THE ROCK', stamp: '🔪 CUT & BAG' },
+            hints: {
+                weigh: 'Stop the needle inside the green band — measure the coca base just right.',
+                blend: 'The wash rises and falls — tap to lock it inside the green band.',
+                press: 'Mash [E]/Space/click to hold the cook temperature in the window before it scorches.',
+                stamp: 'Hit the moving blade in the sweet spot for a clean cut.',
+            },
+            btns: { weigh: 'LOCK BASE', blend: 'LOCK WASH', press: 'COOK! (mash)', stamp: 'CUT' },
+        },
+    };
     let _pillEl = null;
     let _pillRaf = 0;
 
-    function openPillLab() {
+    // Open the indoor timing minigame for `product` ('pills' or 'coke').
+    function openPillLab(product = 'pills') {
         const s = ensureState();
         if (s.pillGame || s.cooking || s.shopOpen || s.baggingOpen) return;
-        if (!productUnlocked(s, 'pills')) {
-            showPrompt('Buy a Pill Press at the upgrade desk first');
+        const theme = LAB_THEME[product] || LAB_THEME.pills;
+        if (!productUnlocked(s, product)) {
+            showPrompt(product === 'coke'
+                ? 'Buy a Coke Lab at the upgrade desk first'
+                : 'Buy a Pill Press at the upgrade desk first');
             return;
         }
-        if (prodQty(s, 'pills') >= prodCap(s, 'pills')) {
-            showPrompt('Pill stash full — go sell');
+        if (prodQty(s, product) >= prodCap(s, product)) {
+            showPrompt(`${theme.emoji} ${PRODUCTS[product].name} stash full — go sell`);
             return;
         }
         s.pillGame = {
+            product,
             stage: 0,
             scores: [],            // per-stage 0..1
             // weigh: needle sweeps 0..1; target band centred randomly.
@@ -1975,30 +2075,21 @@ export function createDrugTycoon(deps) {
             return;
         }
 
+        const theme = LAB_THEME[g.product] || LAB_THEME.pills;
         if (_pillEl?.parentNode) _pillEl.remove();
         const overlay = document.createElement('div');
         overlay.className = 'tycoon-overlay';
         overlay.style.cssText = 'position:absolute;inset:0;z-index:1200;pointer-events:auto;'
-            + 'background:rgba(10,4,12,0.86);backdrop-filter:blur(3px);display:flex;'
+            + `background:${theme.bg};backdrop-filter:blur(3px);display:flex;`
             + 'flex-direction:column;align-items:center;justify-content:center;'
-            + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#ffe6f6;';
+            + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#eef6ff;';
 
-        const titles = {
-            weigh: '⚖️ WEIGH THE DOSE',
-            blend: '🌀 BLEND & GRANULATE',
-            press: '🛠️ PRESS THE TABLETS',
-            stamp: '🔖 SCORE & STAMP',
-        };
-        const hints = {
-            weigh: 'Stop the needle inside the green band. Too little is weak — too much runs hot.',
-            blend: 'The mix rises and falls — tap to lock it inside the green band.',
-            press: 'Mash [E]/Space/click to build tonnage into the target window before time runs out.',
-            stamp: 'Hit the moving marker in the sweet spot for a clean imprint.',
-        };
+        const titles = theme.titles;
+        const hints = theme.hints;
 
         const title = document.createElement('div');
-        title.textContent = `💊 PILL LAB — ${titles[stage]}`;
-        title.style.cssText = 'font:900 28px/1.1 inherit;margin-bottom:4px;color:#ff7fd0;text-shadow:0 0 18px rgba(255,90,200,0.5);';
+        title.textContent = `${theme.emoji} ${theme.name} — ${titles[stage]}`;
+        title.style.cssText = `font:900 28px/1.1 inherit;margin-bottom:4px;color:${theme.accent};text-shadow:0 0 18px ${theme.accent}88;`;
         overlay.appendChild(title);
 
         const step = document.createElement('div');
@@ -2015,7 +2106,7 @@ export function createDrugTycoon(deps) {
         // (weigh/stamp) or a fill bar (blend/press).
         const track = document.createElement('div');
         track.style.cssText = 'position:relative;width:520px;max-width:86vw;height:46px;border-radius:10px;'
-            + 'background:rgba(255,255,255,0.07);border:2px solid rgba(255,140,210,0.35);overflow:hidden;';
+            + `background:rgba(255,255,255,0.07);border:2px solid ${theme.accent}59;overflow:hidden;`;
 
         if (stage === 'weigh' || stage === 'stamp') {
             const center = stage === 'weigh' ? g.weighTarget : g.stampTarget;
@@ -2042,7 +2133,7 @@ export function createDrugTycoon(deps) {
             fill.id = 'pill-fill';
             const v = stage === 'blend' ? g.blend : g.press;
             fill.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${Math.min(100, v * 100)}%;`
-                + 'background:linear-gradient(90deg,#ff7fd0,#ff4fb8);opacity:.7;';
+                + `background:linear-gradient(90deg,${theme.accent},${theme.accent2});opacity:.7;`;
             track.appendChild(fill);
         }
         overlay.appendChild(track);
@@ -2071,14 +2162,10 @@ export function createDrugTycoon(deps) {
         // Big action button (mouse + touch). For blend it's press-and-hold
         // mirrored to gameplay.input.fire; for the rest it's a tap.
         const btn = document.createElement('button');
-        const btnLabel = stage === 'press' ? 'PRESS! (mash)'
-            : stage === 'blend' ? 'LOCK BLEND'
-            : stage === 'weigh' ? 'LOCK DOSE'
-            : 'STAMP';
-        btn.textContent = btnLabel;
+        btn.textContent = theme.btns[stage];
         btn.style.cssText = 'margin-top:22px;cursor:pointer;padding:14px 34px;border-radius:12px;'
-            + 'font:900 18px/1 inherit;color:#1a0814;border:2px solid rgba(0,0,0,0.25);'
-            + 'background:linear-gradient(160deg,#ff7fd0,#ff4fb8);box-shadow:0 6px 22px rgba(0,0,0,0.45);';
+            + 'font:900 18px/1 inherit;color:#0a141a;border:2px solid rgba(0,0,0,0.25);'
+            + `background:linear-gradient(160deg,${theme.accent},${theme.accent2});box-shadow:0 6px 22px rgba(0,0,0,0.45);`;
         btn.onclick = () => pillAction();
         overlay.appendChild(btn);
 
@@ -2103,16 +2190,18 @@ export function createDrugTycoon(deps) {
         const g = s.pillGame;
         if (!g) return;
         g.done = true;
+        const product = g.product || 'pills';
+        const theme = LAB_THEME[product] || LAB_THEME.pills;
         const avg = g.scores.length ? g.scores.reduce((a, b) => a + b, 0) / g.scores.length : 0;
         const q = Math.max(avg, purityFloor(s));
-        const room = prodCap(s, 'pills') - prodQty(s, 'pills');
+        const room = prodCap(s, product) - prodQty(s, product);
         const made = Math.max(0, Math.min(room, Math.round(batchYield(s) * (0.5 + 0.5 * q))));
-        addProduct(s, 'pills', made, q);
+        addProduct(s, product, made, q);
         if (made > 0) award('firstCook');
         s.lastQ = q;
-        if (prodQty(s, s.sellProduct) <= 0 && made > 0) s.sellProduct = 'pills';
-        const where = s.pillLabPos || s.cookPos;
-        floatText(`💊 +${made} @ ${Math.round(q * 100)}%`, where, q >= 0.75 ? '#9dffa0' : '#ffae00');
+        if (prodQty(s, s.sellProduct) <= 0 && made > 0) s.sellProduct = product;
+        const where = (product === 'coke' ? s.cokeLabPos : s.pillLabPos) || s.cookPos;
+        floatText(`${theme.emoji} +${made} @ ${Math.round(q * 100)}%`, where, q >= 0.75 ? '#9dffa0' : '#ffae00');
         playSfx('cash', null, 0.5);
         closePillLab();
         saveProgress();
@@ -2351,6 +2440,41 @@ export function createDrugTycoon(deps) {
             pRow.appendChild(c);
         });
         overlay.appendChild(pRow);
+
+        // ---- vehicle: buy the car (parks it home + unlocks deliveries) ----
+        const vTitle = document.createElement('div');
+        vTitle.textContent = 'VEHICLE';
+        vTitle.style.cssText = `font:900 ${m ? 14 : 20}px/1 inherit;margin:${m ? 12 : 26}px 0 ${m ? 6 : 12}px;color:#9dffa0;`
+            + 'text-shadow:0 0 14px rgba(60,255,120,0.4);';
+        overlay.appendChild(vTitle);
+
+        const vRow = document.createElement('div');
+        vRow.style.cssText = `display:flex;gap:${gap}px;flex-wrap:wrap;justify-content:center;max-width:96vw;`;
+        {
+            const isOwned = s.hasCar;
+            const afford = !isOwned && s.cash >= CAR_PRICE;
+            const c = document.createElement('button');
+            c.style.cssText = `cursor:pointer;color:#eaffea;text-align:center;width:${wch}px;height:${ch}px;`
+                + `padding:${pad};border-radius:${m ? 10 : 14}px;box-sizing:border-box;`
+                + 'background:linear-gradient(160deg,rgba(18,48,28,0.95),rgba(8,24,14,0.95));'
+                + `border:2px solid ${(afford || isOwned) ? 'rgba(120,255,160,0.6)' : 'rgba(120,120,120,0.4)'};`
+                + 'box-shadow:0 8px 30px rgba(0,0,0,0.5);transition:transform .12s;'
+                + ((afford || isOwned) ? '' : 'opacity:.55;');
+            c.innerHTML = `<div style="font:800 ${tTitle}px/1.2 inherit;color:#9dffa0;margin-bottom:${m ? 4 : 10}px;">🚗 Car</div>`
+                + `<div style="font:600 ${tDesc}px/1.3 inherit;opacity:.92;margin-bottom:${m ? 6 : 12}px;">Parks behind the house. Unlocks long-distance delivery contracts.</div>`
+                + `<div style="font:700 ${tSub}px/1 inherit;opacity:.8;">${isOwned ? 'OWNED' : 'one-time'}</div>`
+                + `<div style="margin-top:${m ? 6 : 14}px;font:800 ${tCost}px/1 inherit;color:${isOwned ? '#9dffa0' : (afford ? '#9dffa0' : '#ff8a8a')};">${isOwned ? '✓ Owned' : '$' + CAR_PRICE.toLocaleString()}</div>`;
+            c.onmouseenter = () => { c.style.transform = 'translateY(-6px)'; };
+            c.onmouseleave = () => { c.style.transform = 'none'; };
+            c.onclick = () => {
+                if (s.hasCar || s.cash < CAR_PRICE) return;
+                buyCar(s);
+                renderShop();
+                updateHud();
+            };
+            vRow.appendChild(c);
+        }
+        overlay.appendChild(vRow);
 
         // ---- bribe: pay cash to clear heat / drop the wanted level --------
         if (s.heat > 1) {
@@ -2704,7 +2828,12 @@ export function createDrugTycoon(deps) {
                     && !n.isNarc && Math.random() < repFrac * 0.6 * dt) {
                     const inside = layout.shopInsideAnchor || layout.growRoomSpawn;
                     n.mesh.position.set(inside[0], inside[1] - 0.85, inside[2]);
-                    n.target = new THREE.Vector3(...layout.shopCounterCustomerSide);
+                    // Queue slot: stand SLOT_GAP behind whoever's already inside
+                    // so customers form a line at the register instead of all
+                    // piling onto the same counter spot ("2 people in 1").
+                    const slot = s.npcs.filter((o) => o !== n && o.where === 'inside').length;
+                    n.queueSlot = slot;
+                    n.target = counterQueuePoint(layout, slot);
                     n.where = 'inside';
                     n.queueing = false;
                 }
@@ -2739,6 +2868,23 @@ export function createDrugTycoon(deps) {
                 }
             }
         }
+
+        // Re-pack the indoor queue: order inside buyers by distance to the
+        // register (slot 0 = nearest) and re-assign each its slot point so
+        // when the front customer is served, the rest shuffle forward.
+        if (Array.isArray(layout.shopCounterCustomerSide)) {
+            const c = layout.shopCounterCustomerSide;
+            const inside = s.npcs.filter((n) => n.where === 'inside' && n.mesh);
+            inside.sort((a, b) =>
+                ((a.mesh.position.z - c[2]) ** 2 + (a.mesh.position.x - c[0]) ** 2)
+                - ((b.mesh.position.z - c[2]) ** 2 + (b.mesh.position.x - c[0]) ** 2));
+            inside.forEach((n, slot) => {
+                if (n.queueSlot === slot) return;   // already in the right place
+                n.queueSlot = slot;
+                n.target = counterQueuePoint(layout, slot);
+                n.queueing = false;   // walk to the new (forward) slot
+            });
+        }
     }
 
     // Pick a point right in front of the WEED SHOP door, with a small lateral
@@ -2751,10 +2897,22 @@ export function createDrugTycoon(deps) {
         const lateral = (Math.random() - 0.5) * 2.6; // ±1.3m sideways
         return new THREE.Vector3(d[0] + stepOut, y, d[2] + lateral);
     }
+    // Slot 0 stands at the register; each higher slot lines up SLOT_GAP behind
+    // it (toward the room's south wall, -Z), so inside buyers form a queue.
+    const QUEUE_SLOT_GAP = 1.1;
+    function counterQueuePoint(layout, slot) {
+        const c = layout.shopCounterCustomerSide;   // [x, y, z], register front
+        const y = layout.spawnY ?? 0;
+        // Tiny stable lateral stagger so the line isn't a perfect single file.
+        const lateral = (slot % 2 === 0 ? 1 : -1) * 0.25 * (slot > 0 ? 1 : 0);
+        return new THREE.Vector3(c[0] + lateral, y, c[2] - slot * QUEUE_SLOT_GAP);
+    }
     function spawnRivalDealer(s, layout) {
+        // Notorious players draw armed rivals: a dark jacket marks the shooters.
+        const armed = (s.heat || 0) >= RIVAL_ARM_HEAT && Math.random() < RIVAL_ARM_CHANCE;
         const group = ragdoll.makePerson({
             skinColor: randomFrom(SKIN_TONES),
-            shirtColor: '#7f1d1d',
+            shirtColor: armed ? '#3a0d0d' : '#7f1d1d',
             pantsColor: '#151515',
         });
         const radius = (layout.streetRadius ?? 16) * 1.05;
@@ -2765,11 +2923,15 @@ export function createDrugTycoon(deps) {
             target: randomStreetPoint(layout),
             wantsBuy: false,
             isRival: true,
+            armed,                // armed rivals hunt + shoot instead of poaching
             nextPoachAt: 0,
             nextMugAt: 0,
+            nextFireAt: 0,
         };
+        if (armed) group.scale.multiplyScalar(1.04);   // slightly bigger silhouette
         s.rivals.push(rival);
-        floatText('Rival dealer hit the block', group.position.clone().setY(2), '#ff8a8a');
+        floatText(armed ? '🔫 Armed rival hit the block' : 'Rival dealer hit the block',
+            group.position.clone().setY(2), armed ? '#ff5a5a' : '#ff8a8a');
         return rival;
     }
     function spawnPolice(s, layout) {
@@ -2840,12 +3002,159 @@ export function createDrugTycoon(deps) {
         return '';
     }
 
+    // ---- crew: hired VIP dealers ---------------------------------------
+    // Spawn the visible body for one hired dealer (shirt = their old buyer
+    // colour, with a green armband cue) and register it in s.crew.
+    function spawnCrewMember(s, layout, color, xp = 0, earned = 0) {
+        const group = ragdoll.makePerson({
+            skinColor: randomFrom(SKIN_TONES),
+            shirtColor: color,
+            pantsColor: '#22331f',
+        });
+        const p = randomStreetPoint(layout);
+        placePerson(group, p.x, layout.spawnY ?? 0, p.z);
+        const rank = crewRankIndex(xp);
+        // Cap recolours by rank so a crew's level reads at a glance.
+        let cap = null;
+        try {
+            const capColor = CREW_RANKS[rank].cap;
+            cap = new THREE.Mesh(
+                new THREE.BoxGeometry(0.4, 0.16, 0.4),
+                new THREE.MeshStandardMaterial({ color: capColor, emissive: capColor, emissiveIntensity: 0.5 }),
+            );
+            cap.position.set(0, 2.02, 0);
+            group.add(cap);
+        } catch (e) {}
+        const now = performance.now?.() || Date.now();
+        const member = {
+            color, mesh: group, cap, isCrew: true,
+            xp, rank,
+            target: randomStreetPoint(layout),
+            nextSaleAt: now + CREW_SELL_INTERVAL_MS * (0.5 + Math.random()),
+            earned,
+        };
+        s.crew.push(member);
+        return member;
+    }
+    // Repaint a crew member's cap to match their current rank colour.
+    function recolorCrewCap(m) {
+        if (!m.cap?.material) return;
+        const c = CREW_RANKS[m.rank].cap;
+        try { m.cap.material.color.setHex(c); m.cap.material.emissive.setHex(c); } catch (e) {}
+    }
+    // Rebuild crew bodies from a save. Newer saves store {color,xp,earned};
+    // older ones stored bare colour strings — handle both.
+    function ensureCrewMeshes(s, layout) {
+        if (!Array.isArray(s.pendingCrew) || !s.pendingCrew.length) return;
+        const list = s.pendingCrew.slice(0, CREW_MAX);
+        s.pendingCrew = null;
+        for (const c of list) {
+            if (typeof c === 'string') spawnCrewMember(s, layout, c);
+            else spawnCrewMember(s, layout, c.color, c.xp || 0, c.earned || 0);
+        }
+    }
+    // Can the player hire the buyer they're standing next to?
+    function canHireBuyer(s, npc) {
+        if (!npc || npc.isNarc) return false;
+        if ((s.crew?.length || 0) >= CREW_MAX) return false;
+        const tier = s.loyalty?.[npc.shirtColor]?.tier || 0;
+        return tier >= CREW_HIRE_LOYALTY;
+    }
+    function hireBuyer(s, layout, npc) {
+        if (s.cash < CREW_HIRE_COST || !canHireBuyer(s, npc)) return;
+        s.cash -= CREW_HIRE_COST;
+        const color = npc.shirtColor;
+        // Remove the buyer from the live list (they join the payroll).
+        try { core.scene?.remove(npc.mesh); } catch (e) {}
+        const ix = s.npcs.indexOf(npc);
+        if (ix >= 0) s.npcs.splice(ix, 1);
+        if (s.orderColor === color) pickOrder(s);
+        spawnCrewMember(s, layout, color);
+        const wp = new THREE.Vector3(npc.mesh?.position.x || 0, 2.2, npc.mesh?.position.z || 0);
+        floatText(`🤝 Hired ${colorName(color)} dealer`, wp, '#2ec27a');
+        playSfx('cash', null, 0.5);
+        updateHud();
+        saveProgress();
+    }
+    // Crew roam + auto-sell your stash for cash (minus their wage cut). They
+    // can occasionally get busted and vanish.
+    function updateCrew(s, layout, dt) {
+        if (!s.crew?.length) return;
+        const now = performance.now?.() || Date.now();
+        for (const m of [...s.crew]) {
+            if (!m.mesh) continue;
+            m.mesh.visible = true;   // visible on the street (hidden while indoors)
+            if (moveToward(m.mesh, m.target, CREW_SPEED, dt, layout)) {
+                m.target = randomStreetPoint(layout);
+            }
+            const rank = CREW_RANKS[m.rank || 0];
+            if (now < m.nextSaleAt) continue;
+            m.nextSaleAt = now + CREW_SELL_INTERVAL_MS * rank.intervalMult * (0.7 + Math.random() * 0.6);
+            // Pick a product the player actually has in stock.
+            const pk = unlockedProducts(s).find((k) => prodQty(s, k) > 0);
+            if (!pk) continue;   // nothing to push
+            const qty = Math.min(prodQty(s, pk), rank.qty);
+            const q = prodQual(s, pk);
+            takeProduct(s, pk, qty);
+            const gross = Math.round(qty * unitPrice(s, q, false, pk));
+            const cut = Math.round(gross * rank.wageCut);
+            const net = gross - cut;
+            s.cash += net;
+            m.earned += net;
+            s.heat = Math.min(160, s.heat + CREW_HEAT_PER_SALE);
+            s.today.earned += net;
+            s.today.units += qty;
+            s.today.sales += 1;
+            const wp = m.mesh.getWorldPosition(new THREE.Vector3()).setY(2.1);
+            floatText(`+$${net}`, wp, '#9dffa0');
+            playSfx('cash', wp.clone(), 0.3);
+            // XP + rank-up: each sale earns 1 XP; promotion repaints the cap.
+            m.xp = (m.xp || 0) + 1;
+            const newRank = crewRankIndex(m.xp);
+            if (newRank > (m.rank || 0)) {
+                m.rank = newRank;
+                recolorCrewCap(m);
+                floatText(`⬆ ${colorName(m.color)} → ${CREW_RANKS[newRank].name}`, wp.clone().setY(2.6), CREW_RANKS[newRank].cap ? '#ffe066' : '#9dffa0');
+                playSfx('cash', wp.clone(), 0.6);
+            }
+            // Heat-scaled bust risk, reduced by rank.
+            const bustRisk = CREW_BUST_CHANCE * rank.bustMult * (1 + s.heat / 120);
+            if (Math.random() < bustRisk) {
+                try { core.scene?.remove(m.mesh); } catch (e) {}
+                const ci = s.crew.indexOf(m);
+                if (ci >= 0) s.crew.splice(ci, 1);
+                s.today.busts += 1;
+                floatText(`🚓 ${colorName(m.color)} dealer busted`, wp.clone().setY(2.4), '#ff7070');
+                playSfx('hit', wp.clone());
+            }
+        }
+        maybeAutosave();
+    }
+
     function updateRivals(s, layout, playerPos, dt) {
         while (s.rivals.length < maxRivals(s)) spawnRivalDealer(s, layout);
         const now = performance.now?.() || Date.now();
         const security = s.baseUp?.security || 0;
         for (const rival of [...s.rivals]) {
             if (!rival.mesh) continue;
+
+            // ---- armed rival: hunt the player and shoot ------------------
+            if (rival.armed && playerPos) {
+                const rm = rival.mesh;
+                const pd = Math.hypot(rm.position.x - playerPos.x, rm.position.z - playerPos.z);
+                // Close to firing range, then hold and shoot.
+                if (pd > RIVAL_GUN_RANGE * 0.85) {
+                    rival.target = { x: playerPos.x, y: rm.position.y, z: playerPos.z };
+                    moveToward(rm, rival.target, RIVAL_CHASE_SPEED, dt, layout);
+                } else {
+                    rm.rotation.y = Math.atan2(playerPos.x - rm.position.x, playerPos.z - rm.position.z);
+                    if (pd <= RIVAL_GUN_RANGE && pd > RIVAL_GUN_MIN_RANGE) {
+                        rivalFireAt(s, rival, playerPos);
+                    }
+                }
+                continue;   // armed rivals don't poach buyers
+            }
+
             if (moveToward(rival.mesh, rival.target, RIVAL_SPEED, dt, layout)) {
                 rival.target = randomStreetPoint(layout);
             }
@@ -3573,12 +3882,23 @@ export function createDrugTycoon(deps) {
         window.drugTycoonSpawnCarInChunk = spawnCarInChunkCenter;
     }
 
-    // The player's starter car: parked behind the home house. Spawned once.
+    // The player's car: parked behind the home house once BOUGHT. Spawned once.
+    // Owning it also unlocks the long-distance delivery contracts.
     function ensurePlayerCar(s, layout) {
-        if (s._carActor) return;
+        if (!s.hasCar || s._carActor) return;
         const pos = Array.isArray(layout.carSpawn) ? layout.carSpawn : [0, 1.5, 0];
         const car = spawnCarAt(pos, { label: 'Car' });
         if (car) { s._carActor = car; window._tycoonCar = car; }
+    }
+    // Buy + park the car (called from the upgrade shop). Idempotent.
+    function buyCar(s, layout) {
+        if (s.hasCar || s.cash < CAR_PRICE) return;
+        s.cash -= CAR_PRICE;
+        s.hasCar = true;
+        ensurePlayerCar(s, layout || core.currentMesh?.userData?.drugTycoonLevel || {});
+        floatText('🚗 Car bought — deliveries unlocked', s.upgradePos || new THREE.Vector3(), '#9dffa0');
+        playSfx('cash', null, 0.6);
+        saveProgress();
     }
 
     let _heldGun = null;
@@ -3729,10 +4049,16 @@ export function createDrugTycoon(deps) {
             playSfx('hit', end);
             floatText('DOWN', end.clone().setY(end.y + 0.4), '#ff7070');
             // Remove from the live list it belonged to.
+            const wasArmed = !!best.armed;
             const kind = removeLivePerson(s, best);
             if (kind === 'rival') {
                 s.heat = Math.min(160, s.heat + 12);
-                floatText('Rival dropped', end.clone().setY(end.y + 0.8), '#ffd24a');
+                if (wasArmed) {
+                    s.cash += RIVAL_KILL_BOUNTY;
+                    floatText(`Armed rival dropped +$${RIVAL_KILL_BOUNTY}`, end.clone().setY(end.y + 0.8), '#9dffa0');
+                } else {
+                    floatText('Rival dropped', end.clone().setY(end.y + 0.8), '#ffd24a');
+                }
             }
         }
     }
@@ -3766,11 +4092,17 @@ export function createDrugTycoon(deps) {
             ragdoll.ragdollify(best.mesh, { x: dir.x * BAT_IMPULSE, y: 4.0, z: dir.z * BAT_IMPULSE });
             playSfx('hit', best.mesh.getWorldPosition(new THREE.Vector3()));
             floatText('WHACK', best.mesh.getWorldPosition(new THREE.Vector3()).setY(2.0), '#ffd24a');
+            const wasArmed = !!best.armed;
             const kind = removeLivePerson(s, best);
             if (kind === 'rival') {
                 s.demand = Math.min(MARKET_MAX, (s.demand || 1) + 0.05);
                 startEvent(s, 'rivalTruce', 30000);
-                floatText('Rivals back off', best.mesh.position.clone().setY(2.4), '#ffd24a');
+                if (wasArmed) {
+                    s.cash += RIVAL_KILL_BOUNTY;
+                    floatText(`Armed rival dropped +$${RIVAL_KILL_BOUNTY}`, best.mesh.position.clone().setY(2.4), '#9dffa0');
+                } else {
+                    floatText('Rivals back off', best.mesh.position.clone().setY(2.4), '#ffd24a');
+                }
             }
         }
     }
@@ -3819,6 +4151,28 @@ export function createDrugTycoon(deps) {
 
         hurtPlayer(isTaz ? COP_TAZER_DAMAGE : COP_GUN_DAMAGE);
         floatText(isTaz ? '⚡ ZAPPED' : '🔫 SHOT', end.clone().setY(end.y + 0.3), isTaz ? '#66e0ff' : '#ff7070');
+    }
+    // Armed rival fires at the player — same non-lethal model as cop sidearms
+    // (red tracer), floored damage. Per-rival cooldown lives on rival.nextFireAt.
+    const _rivMuzzle = new THREE.Vector3();
+    const _rivToPlayer = new THREE.Vector3();
+    function rivalFireAt(s, rival, playerPos) {
+        const now = performance.now?.() || Date.now();
+        if (now < (rival.nextFireAt || 0)) return;
+        const rm = rival.mesh;
+        const d = Math.hypot(rm.position.x - playerPos.x, rm.position.z - playerPos.z);
+        if (d > RIVAL_GUN_RANGE || d < RIVAL_GUN_MIN_RANGE) return;
+        rival.nextFireAt = now + RIVAL_GUN_COOLDOWN_MS;
+
+        _rivMuzzle.set(rm.position.x, (rm.position.y || 0) + 1.2, rm.position.z);
+        const { camera } = core;
+        if (camera) camera.getWorldPosition(_rivToPlayer);
+        else _rivToPlayer.set(playerPos.x, _rivMuzzle.y, playerPos.z);
+        spawnTracer(_rivMuzzle, _rivToPlayer.clone(), 0xff5a5a);
+        copMuzzleFlash(_rivMuzzle, false);
+        playSfx('shot', _rivMuzzle.clone(), 0.8);
+        hurtPlayer(RIVAL_GUN_DAMAGE);
+        floatText('🔫 Rival fire', _rivToPlayer.clone().setY(_rivToPlayer.y + 0.3), '#ff5a5a');
     }
     // A small one-shot flash sprite at a world position (for cop fire). Reuses
     // the player muzzle texture; fades via the tracer cleanup timer.
@@ -5079,6 +5433,7 @@ export function createDrugTycoon(deps) {
             if (Array.isArray(layout.cookStation)) s.cookPos.set(...layout.cookStation);
             if (Array.isArray(layout.upgradePad)) s.upgradePos.set(...layout.upgradePad);
             if (Array.isArray(layout.pillLab)) { s.pillLabPos ||= new THREE.Vector3(); s.pillLabPos.set(...layout.pillLab); }
+            if (Array.isArray(layout.cokeLab)) { s.cokeLabPos ||= new THREE.Vector3(); s.cokeLabPos.set(...layout.cokeLab); }
             if (Array.isArray(layout.seedShop)) s.seedPos.set(...layout.seedShop);
             if (Array.isArray(layout.juiceShop)) s.juicePos.set(...layout.juiceShop);
             // The pistol is bought at the upgrade desk now — no free yard pickup.
@@ -5127,6 +5482,13 @@ export function createDrugTycoon(deps) {
             stopSiren();                        // no sirens audible indoors
             if (s.phoneOpen) setPhone(false);   // pocket the phone indoors
             if (_compassEl) _compassEl.style.display = 'none';
+            // Crew work the streets — hide them (and pause their sale timers)
+            // while the player is in the off-map grow room.
+            for (const c of s.crew || []) {
+                if (!c.mesh) continue;
+                c.mesh.visible = false;
+                c.nextSaleAt = Math.max(c.nextSaleAt, (performance.now?.() || Date.now()) + 1000);
+            }
             const interactR = consumeInteract();
             let promptR = '';
             // Bag + physics buds live + tick every frame so thrown buds keep
@@ -5171,6 +5533,9 @@ export function createDrugTycoon(deps) {
             const pill = layout.pillLab;
             const dPill = Array.isArray(pill)
                 ? Math.hypot(pill[0] - playerPos.x, pill[2] - playerPos.z) : Infinity;
+            const coke = layout.cokeLab;
+            const dCoke = Array.isArray(coke)
+                ? Math.hypot(coke[0] - playerPos.x, coke[2] - playerPos.z) : Infinity;
 
             // Sell to a customer who walked into the shop and queued at the
             // counter. Same rules as the street sell — must match the phone
@@ -5217,7 +5582,16 @@ export function createDrugTycoon(deps) {
                     promptR = 'Pill stash full — go sell';
                 } else {
                     promptR = '💊 [E] Press pills';
-                    if (interactR) openPillLab();
+                    if (interactR) openPillLab('pills');
+                }
+            } else if (dCoke < 2.8) {
+                if (!productUnlocked(s, 'coke')) {
+                    promptR = '❄️ Coke lab — buy a Coke Lab at the desk to use';
+                } else if (prodQty(s, 'coke') >= prodCap(s, 'coke')) {
+                    promptR = 'Coke stash full — go sell';
+                } else {
+                    promptR = '❄️ [E] Cook coke';
+                    if (interactR) openPillLab('coke');
                 }
             } else if (dBed < 2.4) {
                 promptR = '[E] Sleep until morning';
@@ -5257,6 +5631,8 @@ export function createDrugTycoon(deps) {
 
         // (buyer spawn/move logic moved into tickBuyers, called earlier)
         updateRivals(s, layout, playerPos, dt);
+        ensureCrewMeshes(s, layout);   // rebuild hired dealers from a save
+        updateCrew(s, layout, dt);     // crew roam + auto-sell your stash
 
         // Night patrol cops: spawn + wander the streets after dark, chase on
         // sight (or when heat is already high).
@@ -5338,8 +5714,9 @@ export function createDrugTycoon(deps) {
         } else if (dCook < STATION_RADIUS) {
             const cookable = cookableProducts(s);
             if (cookable.length === 0) {
-                prompt = '❄️ Coke bench — buy a Coke Lab at the desk (weed grown, pills pressed indoors)';
-                if (interact) openCook();   // shows the same hint
+                // Weed is grown; pills + coke are now made indoors at their own
+                // lab benches. Nothing to do at the outdoor bench anymore.
+                prompt = 'Product is made indoors — 💊 pills + ❄️ coke at the home labs';
             } else if (!cookable.some((k) => prodQty(s, k) < prodCap(s, k))) {
                 prompt = 'Stash full — go sell';
             } else {
@@ -5367,19 +5744,25 @@ export function createDrugTycoon(deps) {
                 // Narc tell: within range they act shifty — warn the player.
                 const narcTell = best.isNarc && bestD < NARC_TELL_RADIUS;
                 const hot = !!s.hotColor && best.shirtColor === s.hotColor;
-                if (prodQty(s, pk) <= 0) {
-                    prompt = 'No product — go cook';
-                } else if (narcTell) {
+                const hireable = canHireBuyer(s, best);
+                if (narcTell) {
                     prompt = '⚠ This one keeps glancing around… looks like a setup. [E] risk it';
                     if (interact) sellTo(s, best);
-                } else if (!isOrder) {
-                    prompt = `Wrong customer — check phone [P] (want ${colorName(s.orderColor)})`;
-                } else {
+                } else if (isOrder && prodQty(s, pk) > 0) {
                     const cm = comboMult(s);
                     const tag = `${hot ? '🔥 ' : ''}~$${(unitPrice(s, qHold, hot, pk) * (1 + s.up.batch) * cm) | 0}`;
                     const swap = unlockedProducts(s).length > 1 ? ' [Q] switch' : '';
                     prompt = `[E] Deal ${pdef.emoji}${pdef.name} to ${colorName(best.shirtColor)} · ${tag}${cm > 1 ? ` (x${cm.toFixed(2).replace(/0$/, '')})` : ''}${swap}`;
                     if (interact) sellTo(s, best);
+                } else if (hireable) {
+                    // A maxed-loyalty VIP you can put on payroll. (Only offered
+                    // when you're not mid-deal with them on an order.)
+                    prompt = `★ VIP ${colorName(best.shirtColor)} — [E] hire as dealer ($${CREW_HIRE_COST.toLocaleString()}) · ${s.crew.length}/${CREW_MAX}`;
+                    if (interact) hireBuyer(s, layout, best);
+                } else if (prodQty(s, pk) <= 0) {
+                    prompt = 'No product — go cook';
+                } else if (!isOrder) {
+                    prompt = `Wrong customer — check phone [P] (want ${colorName(s.orderColor)})`;
                 }
             }
         }
@@ -5573,7 +5956,7 @@ export function createDrugTycoon(deps) {
     // ---- window surface -------------------------------------------------
     if (typeof window !== 'undefined') {
         window.drugTycoonApi = {
-            ensureState, resetState, updateDrugTycoonState, openCook, closeCook, openShop, closeShop, openBagging, closeBagging, togglePhone, toggleHelp, queueInteract, getHowToPlay,
+            ensureState, resetState, updateDrugTycoonState, openCook, closeCook, openShop, closeShop, openBagging, closeBagging, togglePhone, toggleHelp, queueInteract, cycleSellProduct, getHowToPlay,
             saveProgress, clearProgress,
         };
         window.resetDrugTycoonState = resetState;

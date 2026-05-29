@@ -120,8 +120,16 @@ export function createInputHandlers(deps) {
                 return;
             }
             if (event.button === 0) {
-                gameplay.input.fire = event.type === 'mousedown';
-                if (event.type === 'mousedown') gameplay.input.firePressed = true;
+                // Drug Tycoon: left-click only "fires" when it has a purpose —
+                // armed (gun/bat) or inside the grow room (spray pests / pour
+                // juice / drag buds all read input.fire). Unarmed on the street
+                // a click does nothing, so it can't accidentally shoot/throw.
+                const ts = (typeof window !== 'undefined') && window.drugTycoon;
+                const tycoonNoFire = ts && !ts.hasGun && !ts.hasBat && !ts.inRoom;
+                if (!tycoonNoFire) {
+                    gameplay.input.fire = event.type === 'mousedown';
+                    if (event.type === 'mousedown') gameplay.input.firePressed = true;
+                }
                 event.preventDefault();
             }
             if (event.type === 'mousedown') {

@@ -34,12 +34,13 @@ function getMobileButtonSpec() {
     }
     const sampleType = core.currentMesh?.userData?.sampleType;
 
-    // Drug Tycoon: just movement + the E interact button. The gun adds Fire.
+    // Drug Tycoon: movement + the E interact button. The action button fires
+    // when armed; otherwise it cycles the dealt product line (PC [Q]).
     if (sampleType === 'drugTycoon') {
         return {
             jump: false,
-            rightAction: !!window.drugTycoon?.hasGun,
-            rightLabel: 'Fire',
+            rightAction: true,
+            rightLabel: 'Q',
             action2: true,
             action2Label: isDrivingVehicle?.() ? 'Exit' : getNearbyVehicle?.() ? 'Enter' : 'E',
         };
@@ -169,9 +170,17 @@ export function setupMobileControls(deps) {
             mobileRightActionBtn.setPointerCapture?.(event.pointerId);
             return;
         }
-        // Engine weapon OR the Drug Tycoon pistol: hold to fire, suppress the
-        // default right mouse action so no ball is thrown while armed.
-        if (gameplay.active && (gameplay.weapon?.type || (inDrugTycoon() && window.drugTycoon?.hasGun) || inShootingSim())) {
+        // Drug Tycoon: the top-right action button always cycles the dealt
+        // product line — same as pressing [Q] on PC (firing is via the
+        // look/tap zone). Armed or not, this button is [Q].
+        if (gameplay.active && inDrugTycoon()) {
+            event.preventDefault();
+            window.drugTycoonApi?.cycleSellProduct?.();
+            return;
+        }
+        // Engine weapon: hold to fire, suppress the default right mouse action
+        // so no ball is thrown while armed.
+        if (gameplay.active && (gameplay.weapon?.type || inShootingSim())) {
             event.preventDefault();
             gameplay.input.fire = true;
             gameplay.input.firePressed = true;

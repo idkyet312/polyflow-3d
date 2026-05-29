@@ -2326,6 +2326,23 @@ export function createLevels(deps) {
             const trayMat = flatMat('#ff7fd0', { rough: 0.3, emissive: '#ff4fb8', emissiveIntensity: 1.1 });
             addBox('pill-lab-tray', [1.0, 0.06, 0.7], [labX + 0.7, oy + 1.12, labZ], trayMat);
 
+            // ---- coke lab: glassware bench in the NW corner -----------------
+            // Indoor coke-cook station (interact to open the timing minigame).
+            // Mirrors the pill lab on the opposite (−X) side of the back wall:
+            // a stainless bench with a flask stand + glowing icy tray.
+            const cokeX = ox - W * 0.5 + 2.4, cokeZ = oz - D * 0.5 + 2.6;
+            addBox('coke-lab-base', [2.6, 1.0, 1.4], [cokeX, oy + 0.5, cokeZ], labMetal, { solid: true });
+            addBox('coke-lab-top',  [2.7, 0.12, 1.5], [cokeX, oy + 1.06, cokeZ], labTopMat);
+            // Flask stand: a frame holding a glowing flask over a burner.
+            const standMat = flatMat('#2b3340', { rough: 0.4, metal: 0.7 });
+            addBox('coke-lab-stand-col', [0.16, 1.0, 0.16], [cokeX + 0.7, oy + 1.6, cokeZ], standMat, { solid: true });
+            addBox('coke-lab-stand-arm', [0.7, 0.12, 0.16], [cokeX + 0.42, oy + 1.95, cokeZ], standMat);
+            const flaskMat = flatMat('#bfe8ff', { rough: 0.05, metal: 0.3, emissive: '#5fc8ff', emissiveIntensity: 0.7 });
+            addBox('coke-lab-flask', [0.42, 0.5, 0.42], [cokeX + 0.25, oy + 1.45, cokeZ], flaskMat, { solid: true });
+            // Glowing icy tray of cut product so the station reads as the coke lab.
+            const cokeTrayMat = flatMat('#7fd0ff', { rough: 0.3, emissive: '#4fb8ff', emissiveIntensity: 1.1 });
+            addBox('coke-lab-tray', [1.0, 0.06, 0.7], [cokeX - 0.7, oy + 1.12, cokeZ], cokeTrayMat);
+
             // ---- shop dressing (south half, between entrance and plants) ----
             // Make the interior read as an actual WEED SHOP storefront. Sales
             // counter L-shape flanks the entry door, glass display cases line
@@ -2716,6 +2733,9 @@ export function createLevels(deps) {
             // Pill lab (NE corner) — indoor pill-press minigame. Matches the
             // stainless bench built in buildGrowRoom.
             pillLab: [ROOM_ORIGIN[0] + ROOM_W * 0.5 - 2.4, 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 2.6],
+            // Coke lab (NW corner) — indoor coke-cook minigame. Matches the
+            // glassware bench built in buildGrowRoom (mirror of the pill lab).
+            cokeLab: [ROOM_ORIGIN[0] - ROOM_W * 0.5 + 2.4, 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 2.6],
         };
 
         // ---- Procedural cloudy skybox (large inverted sphere) -------------
