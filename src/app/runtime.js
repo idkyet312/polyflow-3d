@@ -187,7 +187,6 @@ registerDebug('eventBus', eventBus);
 registerDebug('gameplaySystems', gameplaySystems);
 registerDebug('services', services);
 import { createRogueWaves } from '../gameplay/rogueWaves.js';
-import { createDrugTycoon } from '../gameplay/drugTycoon.js';
 import { createShootingSim } from '../gameplay/shootingSim.js';
 import {
     installUePrototypeMethods,
@@ -4982,7 +4981,7 @@ async function init() {
 
     // Wire extracted modules now that scene/camera/renderer/transformControl/sceneSystem
     // and DOM refs all exist. Must happen before any module-bound helper is called.
-    wireExtractedModules();
+    await wireExtractedModules();
 
     syncTransformControlState();
 
@@ -6393,7 +6392,7 @@ document.getElementById('bp-actor-file-input')?.addEventListener('change', (e) =
 // =============================================================================
 // Wire extracted modules to engine state (called from init() once globals exist)
 // =============================================================================
-function wireExtractedModules() {
+async function wireExtractedModules() {
     // appCore is now bound eagerly at module load (see top of file); no
     // late re-bind here.
 
@@ -6436,6 +6435,7 @@ function wireExtractedModules() {
     // Drug Tycoon (self-contained tycoon mode, own level). Same factory pattern
     // as rogueWaves; only the per-frame driver is wired into the frame loop.
     {
+        const { createDrugTycoon } = await import('../gameplay/drugTycoon.js');
         const dt = createDrugTycoon({
             gameplay,
             physics,
@@ -6604,6 +6604,7 @@ function wireExtractedModules() {
         setCameraMode, setMobileMenuOpen, loadSample, setPerfModeEnabled,
         applyWorldEnvState, resetMobileInputState,
         requestGameplayPointerLock: () => renderer?.domElement?.requestPointerLock?.(),
+        applyMobileModeState,
     });
 
     setupSceneSerialization({

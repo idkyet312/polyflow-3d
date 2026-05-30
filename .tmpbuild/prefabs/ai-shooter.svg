@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Shooter AI">
+  <rect width="640" height="480" fill="#111418"/>
+  <circle cx="320" cy="248" r="150" fill="#450a0a" opacity=".72"/>
+  <circle cx="320" cy="248" r="150" fill="none" stroke="#ef4444" stroke-width="18"/>
+  <path d="M420 188l88-50" stroke="#fecaca" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="532" cy="124" r="22" fill="#ff2d2d"/>
+  <circle cx="560" cy="108" r="10" fill="#fecaca"/>
+  <circle cx="320" cy="148" r="38" fill="#f87171"/>
+  <path d="M242 342c6-86 38-136 78-136s72 50 78 136" fill="#dc2626" stroke="#fee2e2" stroke-width="12"/>
+  <path d="M246 254h150" stroke="#1f2937" stroke-width="26" stroke-linecap="round"/>
+  <path d="M398 254h62" stroke="#fee2e2" stroke-width="12" stroke-linecap="round"/>
+  <path d="M198 386h244" stroke="#ef4444" stroke-width="16" stroke-linecap="round"/>
+</svg>

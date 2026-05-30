@@ -1,0 +1,1577 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolyFlow 3D | The Zapier for 3D Assets</title>
+    <meta name="description" content="Automate your 3D pipeline with WebGPU-accelerated retopology and texture baking.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+    <!-- PWA: installable web app (Add to Home Screen / Android) -->
+    <link rel="manifest" href="./manifest.webmanifest">
+    <meta name="theme-color" content="#0d0f14">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Drug Tycoon">
+    <link rel="apple-touch-icon" href="./icon-192.png">
+  <script type="module" crossorigin src="/polyflow-3d/assets/index-ylekL0Xy.js"></script>
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/rolldown-runtime-Dw2cE7zH.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-physics-CDP_mWDH.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-realtime-D6NTfwfh.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-three-DBnxpZKO.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/vendor-ui-Bo0z8Au-.js">
+  <link rel="modulepreload" crossorigin href="/polyflow-3d/assets/playtime-BoFTZjrZ.js">
+  <link rel="stylesheet" crossorigin href="/polyflow-3d/assets/index-sSjE-AR4.css">
+</head>
+
+<body>
+    <main>
+        <div class="app-hidden-data" aria-hidden="true">
+            <span id="asset-name">No file selected</span>
+            <span id="tri-count">0</span>
+            <span id="tri-diff"></span>
+            <span id="file-size">0 MB</span>
+            <span id="file-diff"></span>
+            <span id="webgpu-speedup">--</span>
+        </div>
+
+        <div class="workspace">
+            <aside id="scene-ui-panel" class="scene-ui-panel" aria-label="Scene Graph">
+                <section class="scene-side-card scene-side-card-fill">
+                    <div class="scene-ui-header">
+                        <div class="scene-ui-title">Scene Hierarchy</div>
+                        <div class="scene-ui-subtitle" id="scene-ui-count">0 Actors</div>
+                    </div>
+                    <div id="scene-ui-list" class="scene-ui-list">
+                        <!-- Actor items will be injected here -->
+                    </div>
+                </section>
+                <section id="scene-actor-details" class="scene-side-card scene-actor-details-card">
+                    <div class="scene-actor-details-head">
+                        <div class="scene-ui-title scene-actor-details-heading">Actor Details</div>
+                        <div class="scene-ui-subtitle scene-actor-details-meta" id="scene-actor-details-type">Select actor</div>
+                    </div>
+                    <div id="scene-actor-details-empty" class="scene-ui-subtitle scene-actor-details-empty">Select actor in scene or hierarchy.</div>
+                    <div id="scene-actor-details-body" class="scene-actor-details-body" hidden>
+                        <div id="scene-actor-details-name" class="scene-ui-item-name scene-actor-details-name"></div>
+                        <div class="viewer-menu-actions scene-actor-details-actions">
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-translate">Move</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-rotate">Rotate</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-mode-scale">Scale</button>
+                        </div>
+                        <div class="viewer-menu-actions scene-actor-details-actions">
+                            <button class="btn viewer-menu-btn" id="scene-actor-space-local">Local</button>
+                            <button class="btn viewer-menu-btn" id="scene-actor-space-world">World</button>
+                        </div>
+                        <div class="scene-actor-transform-box">
+                            <div class="scene-actor-details-row">
+                                <span class="scene-actor-details-label">Loc</span>
+                                <input type="number" id="scene-actor-loc-x" class="ui-input" step="0.1">
+                                <input type="number" id="scene-actor-loc-y" class="ui-input" step="0.1">
+                                <input type="number" id="scene-actor-loc-z" class="ui-input" step="0.1">
+                            </div>
+                            <div class="scene-actor-details-row">
+                                <span class="scene-actor-details-label">Rot</span>
+                                <input type="number" id="scene-actor-rot-x" class="ui-input" step="5">
+                                <input type="number" id="scene-actor-rot-y" class="ui-input" step="5">
+                                <input type="number" id="scene-actor-rot-z" class="ui-input" step="5">
+                            </div>
+                            <div class="scene-actor-details-row">
+                                <span class="scene-actor-details-label">Scale</span>
+                                <input type="number" id="scene-actor-scl-x" class="ui-input" step="0.1" min="0.01">
+                                <input type="number" id="scene-actor-scl-y" class="ui-input" step="0.1" min="0.01">
+                                <input type="number" id="scene-actor-scl-z" class="ui-input" step="0.1" min="0.01">
+                            </div>
+                        </div>
+                        <div id="scene-actor-ddgi-section" class="scene-actor-ddgi-card" hidden>
+                            <div class="scene-ui-subtitle scene-actor-ddgi-title">DDGI Volume</div>
+                            <div class="scene-actor-ddgi-hint">Scale actor to resize coverage. Probe cell size updates from current volume size.</div>
+                            <div class="scene-actor-details-row scene-actor-details-row-wide">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Probe Dims</span>
+                                <input type="number" id="scene-actor-ddgi-dim-x" class="ui-input" min="2" step="1">
+                                <input type="number" id="scene-actor-ddgi-dim-y" class="ui-input" min="2" step="1">
+                                <input type="number" id="scene-actor-ddgi-dim-z" class="ui-input" min="2" step="1">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-wide">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Coverage</span>
+                                <input type="number" id="scene-actor-ddgi-size-x" class="ui-input" readonly>
+                                <input type="number" id="scene-actor-ddgi-size-y" class="ui-input" readonly>
+                                <input type="number" id="scene-actor-ddgi-size-z" class="ui-input" readonly>
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Total</span>
+                                <input type="number" id="scene-actor-ddgi-total" class="ui-input" readonly>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Cell Size</span>
+                                <input type="number" id="scene-actor-ddgi-cell" class="ui-input" readonly>
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Intensity</span>
+                                <input type="number" id="scene-actor-ddgi-intensity" class="ui-input" min="0" max="16" step="0.1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Hysteresis</span>
+                                <input type="number" id="scene-actor-ddgi-hysteresis" class="ui-input" min="0" max="0.999" step="0.01">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Normal Bias</span>
+                                <input type="number" id="scene-actor-ddgi-normal-bias" class="ui-input" min="0" max="2" step="0.01">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Bake N</span>
+                                <input type="number" id="scene-actor-ddgi-probes-per-frame" class="ui-input" min="1" max="120" step="1">
+                            </div>
+                        </div>
+                        <div id="scene-actor-light-section" class="scene-actor-light-card" hidden>
+                            <div class="scene-ui-subtitle scene-actor-light-title">Light</div>
+                            <div class="scene-actor-light-hint">Controls direct lighting and DDGI contribution for this light actor.</div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Color</span>
+                                <input type="color" id="scene-actor-light-color" class="ui-input scene-actor-light-color" value="#fff1c2">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Intensity</span>
+                                <input type="number" id="scene-actor-light-intensity" class="ui-input" min="0" max="100" step="0.1">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Range</span>
+                                <input type="number" id="scene-actor-light-distance" class="ui-input" min="0" max="500" step="0.1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Decay</span>
+                                <input type="number" id="scene-actor-light-decay" class="ui-input" min="0" max="8" step="0.1">
+                            </div>
+                            <div id="scene-actor-light-spot-row" class="scene-actor-details-row scene-actor-details-row-split" hidden>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Angle</span>
+                                <input type="number" id="scene-actor-light-angle" class="ui-input" min="1" max="89" step="1">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Penumbra</span>
+                                <input type="number" id="scene-actor-light-penumbra" class="ui-input" min="0" max="1" step="0.01">
+                            </div>
+                            <div class="scene-actor-details-row scene-actor-details-row-split">
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Shadow</span>
+                                <select id="scene-actor-light-shadow" class="ui-input">
+                                    <option value="on">On</option>
+                                    <option value="off">Off</option>
+                                </select>
+                                <span class="scene-actor-details-label scene-actor-details-label-wide">Type</span>
+                                <input type="text" id="scene-actor-light-kind" class="ui-input" readonly>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </aside>
+            <div id="canvas-container">
+                <div id="taa-indicator" aria-hidden="true">TAA: —</div>
+                <div class="viewer-menu" aria-label="Viewer controls">
+                    <div class="viewer-menu-card">
+                        <div class="viewer-menu-label">Camera Mode</div>
+                        <div class="viewer-toggle-group">
+                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active"
+                                id="camera-showcase">Showcase</button>
+                            <button class="btn viewer-toggle-btn" id="camera-play">Play</button>
+                        </div>
+                        <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
+                            <button class="btn viewer-menu-btn" id="mobile-preview-on" type="button">Mobile On</button>
+                        </div>
+                    </div>
+
+                    <div class="viewer-menu-card">
+                        <div class="viewer-menu-label">Actors</div>
+                        <div class="viewer-menu-actions">
+                            <button class="btn btn-primary viewer-menu-btn" id="open-actor-editor">Add Actor</button>
+                            <button class="btn viewer-menu-btn" id="load-actor-btn">⬆ Load Actor</button>
+                            <button class="btn viewer-menu-btn" id="load-prefab-btn">Load Prefab</button>
+                        </div>
+                        <label class="viewer-input-stack" for="level-select" style="margin-top: 0.55rem;">
+                            <span class="viewer-input-label">Level</span>
+                            <select class="viewer-text-input" id="level-select">
+                                <option value="fpsStarter">Sample Level</option>
+                                <option value="brickRoom">Brick Room (POM Demo)</option>
+                                <option value="doomTest">Doom Test Arena</option>
+                                <option value="doomArena" selected>Rogue Waves</option>
+                                <option value="drugTycoon">Drug Tycoon</option>
+                                <option value="shootingSim">Shooting Simulator</option>
+                                <option value="soccerField">Soccer Field</option>
+                                <option value="soccerFieldTerrain">Terrain</option>
+                                <option value="myCustom">My Custom Level</option>
+                            </select>
+                        </label>
+                        <div class="viewer-menu-actions" style="margin-top: 0.55rem;">
+                            <button class="btn viewer-menu-btn" id="load-level">Load Level</button>
+                            <button class="btn viewer-menu-btn" id="save-custom-level">Save as My Custom Level</button>
+                        </div>
+                        <div class="viewer-menu-actions">
+                            <button class="btn viewer-menu-btn" id="play-test-sound-btn">Test 3D Sound</button>
+                        </div>
+                        <div class="viewer-inline-note" id="play-test-sound-status">Plays a short test cue at the selected actor or just ahead of the camera.</div>
+                        <div class="viewer-inline-note">Create a new actor or load a saved .actor file. Importing props,
+                            multiplayer, and input scripting now live under Menu Sections.</div>
+                        <input type="file" id="actor-file-input" accept=".actor,.json" style="display: none;">
+                    </div>
+
+                    <div class="viewer-modal" id="prefab-browser" hidden>
+                        <div class="viewer-modal-card viewer-prefab-browser-card" role="dialog" aria-modal="true"
+                            aria-labelledby="prefab-browser-title">
+                            <div class="viewer-modal-eyebrow">Prefab Browser</div>
+                            <h2 class="viewer-modal-title" id="prefab-browser-title">Load Prefab</h2>
+                            <div class="prefab-browser-grid" id="prefab-browser-grid"></div>
+                            <div class="viewer-inline-note prefab-browser-status" id="prefab-browser-status">Loading prefabs...</div>
+                            <button class="btn viewer-modal-cancel" id="prefab-browser-close" type="button">Close</button>
+                        </div>
+                    </div>
+
+                    <div class="viewer-modal" id="actor-editor" hidden>
+                        <div class="viewer-modal-card viewer-actor-editor-card" role="dialog" aria-modal="true"
+                            aria-labelledby="actor-editor-title">
+                            <div class="viewer-modal-eyebrow">Actor Authoring</div>
+                            <h2 class="viewer-modal-title" id="actor-editor-title">Add Actor</h2>
+                            <p class="viewer-modal-copy">Create a Godot-like actor instance with a node root and
+                                explicit render, collision, and script components.</p>
+                            <div class="viewer-script-editor-target" id="actor-editor-summary">Type: Sphere Actor</div>
+                            <div class="viewer-actor-editor-grid">
+                                <label class="viewer-code-field" for="actor-kind-select">
+                                    <span class="viewer-code-field-label">Actor Type</span>
+                                    <select id="actor-kind-select" class="viewer-text-input">
+                                        <option value="sphere">Sphere Actor</option>
+                                        <option value="cube">Cube Actor</option>
+                                        <option value="pointLight">Point Light Actor</option>
+                                        <option value="spotLight">Spot Light Actor</option>
+                                        <option value="rectLight">Rect Area Light Actor</option>
+                                        <option value="vehicle">Vehicle Actor</option>
+                                        <option value="imported">Imported Actor</option>
+                                        <option value="capsule">Simple AI Actor</option>
+                                        <option value="ddgiVolume">DDGI Volume</option>
+                                    </select>
+                                </label>
+                                <label class="viewer-code-field" for="actor-label-input">
+                                    <span class="viewer-code-field-label">Display Name</span>
+                                    <input id="actor-label-input" class="viewer-text-input" type="text"
+                                        spellcheck="false" placeholder="Sandbox Actor">
+                                </label>
+                                <label class="viewer-code-field" for="actor-scale-input">
+                                    <span class="viewer-code-field-label">Scale / Radius</span>
+                                    <input id="actor-scale-input" class="viewer-text-input" type="number" min="0.1"
+                                        max="40" step="0.1" value="0.5">
+                                </label>
+                                <label class="viewer-code-field" for="actor-color-input">
+                                    <span class="viewer-code-field-label">
+                                        <input id="actor-color-enabled" type="checkbox" style="margin-right: 0.4rem; vertical-align: middle;">
+                                        Custom Color
+                                    </span>
+                                    <input id="actor-color-input" class="viewer-text-input" type="color" value="#888888"
+                                        style="height: 32px; padding: 2px; cursor: pointer;" disabled>
+                                </label>
+                                <label class="viewer-code-field" for="actor-imported-template-select">
+                                    <span class="viewer-code-field-label">Imported Source</span>
+                                    <select id="actor-imported-template-select" class="viewer-text-input">
+                                        <option value="">No imported source available</option>
+                                    </select>
+                                </label>
+                                <label class="viewer-code-field" for="actor-vehicle-body-template-select">
+                                    <span class="viewer-code-field-label">Vehicle Body Source</span>
+                                    <select id="actor-vehicle-body-template-select" class="viewer-text-input">
+                                        <option value="">Default Sedan</option>
+                                    </select>
+                                </label>
+                                <label class="viewer-code-field" for="actor-vehicle-wheel-template-select">
+                                    <span class="viewer-code-field-label">Vehicle Wheel Source</span>
+                                    <select id="actor-vehicle-wheel-template-select" class="viewer-text-input">
+                                        <option value="">Default Wheel</option>
+                                    </select>
+                                </label>
+                            </div>
+                            <div class="viewer-actor-components">
+                                <div class="viewer-prop-library-label">Components</div>
+                                <label class="viewer-checkbox-row" for="actor-component-render">
+                                    <input type="checkbox" id="actor-component-render" checked disabled>
+                                    <span>Render Mesh component is required for this first actor editor slice.</span>
+                                </label>
+                                <label class="viewer-checkbox-row" for="actor-component-collision">
+                                    <input type="checkbox" id="actor-component-collision" checked>
+                                    <span>Add collision so the actor blocks traces and gameplay like a static world object.</span>
+                                </label>
+                                <label class="viewer-checkbox-row" for="actor-component-physics">
+                                    <input type="checkbox" id="actor-component-physics" checked>
+                                    <span>Enable simulated physics so the actor becomes a movable rigid body.</span>
+                                </label>
+                                <label class="viewer-checkbox-row" for="actor-component-scripts">
+                                    <input type="checkbox" id="actor-component-scripts" checked>
+                                    <span>Add a Script Host component so tick and collision code can be authored for
+                                        this actor.</span>
+                                </label>
+                            </div>
+                            <div class="viewer-inline-note viewer-script-editor-status" id="actor-editor-status">Sphere
+                                actors create a render node and collision body by default.</div>
+                            <div class="viewer-modal-actions">
+                                <button class="btn btn-primary viewer-menu-btn" id="actor-editor-create"
+                                    type="button">Create Actor</button>
+                                <button class="btn viewer-menu-btn" id="actor-editor-open-script" type="button">Create
+                                    And Edit Script</button>
+                            </div>
+                            <button class="btn viewer-modal-cancel" id="actor-editor-cancel"
+                                type="button">Close</button>
+                        </div>
+                    </div>
+
+                    <div class="viewer-menu-card" id="blueprint-editor-panel" style="display: none;">
+                        <div class="viewer-menu-actions" style="margin-bottom: 12px;">
+                            <button class="btn viewer-menu-btn" id="btn-exit-blueprint"
+                                style="background: rgba(255,255,255,0.1);">← Back to Level</button>
+                        </div>
+                        <div class="viewer-menu-label" id="blueprint-actor-name"
+                            style="margin-bottom: 12px; color: #fff;">Blueprint Actor</div>
+                        <div class="viewer-menu-actions" style="margin-bottom: 12px;">
+                            <button class="btn btn-primary viewer-menu-btn" id="btn-edit-actor-script">Edit Scripts
+                                (Tick/Collision)</button>
+                        </div>
+
+                        <div class="viewer-menu-label" style="font-size: 11px;">Components</div>
+                        <div id="selected-actor-components"
+                            style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px;">
+                            <!-- Components injected here -->
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Transform:</div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 4px; margin-bottom: 4px;">
+                            <button class="btn viewer-menu-btn" id="btn-bp-translate"
+                                style="padding: 4px 8px; flex: 1; font-size: 11px; background: rgba(112,0,255,0.4);">Move
+                                (W)</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-rotate"
+                                style="padding: 4px 8px; flex: 1; font-size: 11px;">Rotate (E)</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-scale"
+                                style="padding: 4px 8px; flex: 1; font-size: 11px;">Scale (R)</button>
+                        </div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 4px; margin-bottom: 12px;">
+                            <button class="btn viewer-menu-btn" id="btn-bp-space-local"
+                                style="padding: 4px 8px; flex: 1; font-size: 11px; background: rgba(112,0,255,0.4);">Local</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-space-world"
+                                style="padding: 4px 8px; flex: 1; font-size: 11px;">World</button>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Details (Local Transform):</div>
+                        <div id="bp-transform-details"
+                            style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; background: rgba(0,0,0,0.2); padding: 6px; border-radius: 4px;">
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Loc</span>
+                                <input type="number" id="bp-loc-x" class="ui-input" step="0.1"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-loc-y" class="ui-input" step="0.1"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-loc-z" class="ui-input" step="0.1"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Rot</span>
+                                <input type="number" id="bp-rot-x" class="ui-input" step="5"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-rot-y" class="ui-input" step="5"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-rot-z" class="ui-input" step="5"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 4px;">
+                                <span style="font-size: 10px; width: 40px; color: #aaa;">Scale</span>
+                                <input type="number" id="bp-scl-x" class="ui-input" step="0.1"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-scl-y" class="ui-input" step="0.1"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                                <input type="number" id="bp-scl-z" class="ui-input" step="0.1"
+                                    style="flex:1; font-size: 10px; padding: 2px;">
+                            </div>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-bottom: 4px;">Component Details:</div>
+                        <div class="bp-material-editor">
+                            <div class="bp-material-target" id="bp-material-target">Target: select a mesh component.</div>
+                            <div class="viewer-inline-note bp-material-status" id="bp-material-status">Select a mesh component to edit base color, emissive glow, reflectivity, opacity, and surface response.</div>
+                            <div class="bp-material-grid" id="bp-material-grid">
+                                <label class="bp-material-row" for="bp-material-color">
+                                    <span class="bp-material-label">Base Color</span>
+                                    <input type="color" id="bp-material-color" class="bp-material-color-input" value="#888888">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-material-emissive">
+                                    <span class="bp-material-label">Emissive</span>
+                                    <input type="color" id="bp-material-emissive" class="bp-material-color-input" value="#000000">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-material-roughness">
+                                    <span class="bp-material-label">Roughness</span>
+                                    <input type="range" id="bp-material-roughness" class="bp-material-range" min="0" max="1" step="0.01" value="0.50">
+                                    <input type="number" id="bp-material-roughness-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.50">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-metalness">
+                                    <span class="bp-material-label">Metalness</span>
+                                    <input type="range" id="bp-material-metalness" class="bp-material-range" min="0" max="1" step="0.01" value="0.00">
+                                    <input type="number" id="bp-material-metalness-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-emissive-intensity">
+                                    <span class="bp-material-label">Glow Power</span>
+                                    <input type="range" id="bp-material-emissive-intensity" class="bp-material-range" min="0" max="8" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-emissive-intensity-number" class="viewer-text-input bp-material-number" min="0" max="8" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-opacity">
+                                    <span class="bp-material-label">Opacity</span>
+                                    <input type="range" id="bp-material-opacity" class="bp-material-range" min="0" max="1" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-opacity-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-alpha-test">
+                                    <span class="bp-material-label">Alpha Test</span>
+                                    <input type="range" id="bp-material-alpha-test" class="bp-material-range" min="0" max="1" step="0.01" value="0.00">
+                                    <input type="number" id="bp-material-alpha-test-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-env-intensity">
+                                    <span class="bp-material-label">Env Light</span>
+                                    <input type="range" id="bp-material-env-intensity" class="bp-material-range" min="0" max="4" step="0.01" value="1.00">
+                                    <input type="number" id="bp-material-env-intensity-number" class="viewer-text-input bp-material-number" min="0" max="4" step="0.01" value="1.00">
+                                </label>
+                                <label class="bp-material-row" for="bp-material-side">
+                                    <span class="bp-material-label">Render Side</span>
+                                    <select id="bp-material-side" class="viewer-text-input bp-material-select">
+                                        <option value="front">Front</option>
+                                        <option value="double">Double</option>
+                                        <option value="back">Back</option>
+                                    </select>
+                                    <span></span>
+                                </label>
+                            </div>
+                            <div class="viewer-inline-note bp-material-hint">Selected mesh updates live. Apply To Actor stamps the current settings across every mesh under this actor before saving.</div>
+                            <div class="viewer-menu-actions bp-material-actions">
+                                <button class="btn viewer-menu-btn" id="btn-bp-apply-material-selected" style="padding: 6px; font-size: 11px;">Apply To Selected</button>
+                                <button class="btn viewer-menu-btn" id="btn-bp-apply-material-actor" style="padding: 6px; font-size: 11px;">Apply To Actor</button>
+                            </div>
+                            <div class="bp-material-grid" id="bp-light-grid" hidden>
+                                <label class="bp-material-row" for="bp-light-color">
+                                    <span class="bp-material-label">Color</span>
+                                    <input type="color" id="bp-light-color" class="bp-material-color-input" value="#fff2cc">
+                                    <span></span>
+                                </label>
+                                <label class="bp-material-row" for="bp-light-intensity">
+                                    <span class="bp-material-label">Intensity</span>
+                                    <input type="range" id="bp-light-intensity" class="bp-material-range" min="0" max="20" step="0.1" value="6.0">
+                                    <input type="number" id="bp-light-intensity-number" class="viewer-text-input bp-material-number" min="0" max="20" step="0.1" value="6.0">
+                                </label>
+                                <label class="bp-material-row" for="bp-light-distance">
+                                    <span class="bp-material-label">Distance</span>
+                                    <input type="range" id="bp-light-distance" class="bp-material-range" min="0" max="100" step="0.1" value="18.0">
+                                    <input type="number" id="bp-light-distance-number" class="viewer-text-input bp-material-number" min="0" max="100" step="0.1" value="18.0">
+                                </label>
+                                <label class="bp-material-row" for="bp-light-decay">
+                                    <span class="bp-material-label">Decay</span>
+                                    <input type="range" id="bp-light-decay" class="bp-material-range" min="0" max="4" step="0.1" value="2.0">
+                                    <input type="number" id="bp-light-decay-number" class="viewer-text-input bp-material-number" min="0" max="4" step="0.1" value="2.0">
+                                </label>
+                                <label class="bp-material-row bp-light-spot-row" for="bp-light-angle">
+                                    <span class="bp-material-label">Cone Angle</span>
+                                    <input type="range" id="bp-light-angle" class="bp-material-range" min="1" max="120" step="1" value="30">
+                                    <input type="number" id="bp-light-angle-number" class="viewer-text-input bp-material-number" min="1" max="120" step="1" value="30">
+                                </label>
+                                <label class="bp-material-row bp-light-spot-row" for="bp-light-penumbra">
+                                    <span class="bp-material-label">Penumbra</span>
+                                    <input type="range" id="bp-light-penumbra" class="bp-material-range" min="0" max="1" step="0.01" value="0.35">
+                                    <input type="number" id="bp-light-penumbra-number" class="viewer-text-input bp-material-number" min="0" max="1" step="0.01" value="0.35">
+                                </label>
+                                <div class="bp-material-row bp-light-spot-row">
+                                    <span class="bp-material-label">Target</span>
+                                    <div class="bp-light-target-grid">
+                                        <input type="number" id="bp-light-target-x" class="viewer-text-input bp-material-number" step="0.1" value="0">
+                                        <input type="number" id="bp-light-target-y" class="viewer-text-input bp-material-number" step="0.1" value="-1.5">
+                                        <input type="number" id="bp-light-target-z" class="viewer-text-input bp-material-number" step="0.1" value="0">
+                                    </div>
+                                    <span></span>
+                                </div>
+                                <label class="viewer-checkbox-row bp-light-shadow-row" for="bp-light-cast-shadow">
+                                    <input type="checkbox" id="bp-light-cast-shadow" checked>
+                                    <span>Cast Shadow</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-bottom: 8px;">Add Child Components:</div>
+                        <div class="viewer-menu-actions"
+                            style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-cube" style="padding: 6px;">Add
+                                Cube</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-sphere" style="padding: 6px;">Add
+                                Sphere</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-collision-box"
+                                style="padding: 6px;">Add Collision Box</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-light" style="padding: 6px;">Add Point
+                                Light</button>
+                            <button class="btn viewer-menu-btn" id="btn-add-comp-spot-light" style="padding: 6px;">Add Spot
+                                Light</button>
+                            <button class="btn viewer-menu-btn" id="btn-delete-comp"
+                                style="padding: 6px; border-color: rgba(255,50,50,0.3);">Delete Selected</button>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-top: 12px; margin-bottom: 4px;">Physics:</div>
+                        <div class="bp-material-grid" style="margin-bottom: 12px;">
+                            <label class="bp-material-row" for="bp-physics-mass">
+                                <span class="bp-material-label">Mass</span>
+                                <input type="number" id="bp-physics-mass" class="viewer-text-input bp-material-number" min="0.01" max="100000" step="0.5" value="12">
+                                <span></span>
+                            </label>
+                            <label class="bp-material-row" for="bp-physics-friction">
+                                <span class="bp-material-label">Friction</span>
+                                <input type="number" id="bp-physics-friction" class="viewer-text-input bp-material-number" min="0" max="2" step="0.05" value="0.5">
+                                <span></span>
+                            </label>
+                            <label class="bp-material-row" for="bp-physics-restitution">
+                                <span class="bp-material-label">Bounce</span>
+                                <input type="number" id="bp-physics-restitution" class="viewer-text-input bp-material-number" min="0" max="1" step="0.05" value="0.3">
+                                <span></span>
+                            </label>
+                            <button class="btn btn-primary viewer-menu-btn" id="btn-bp-apply-physics" style="padding: 6px;">Apply Physics</button>
+                        </div>
+
+                        <div class="viewer-inline-note" style="margin-top: 12px; margin-bottom: 4px;">Actor File:</div>
+                        <div class="viewer-menu-actions" style="display: flex; gap: 8px;">
+                            <button class="btn btn-primary viewer-menu-btn" id="btn-bp-save-actor"
+                                style="padding: 6px; flex: 1;">⬇ Save Actor</button>
+                            <button class="btn viewer-menu-btn" id="btn-bp-load-actor" style="padding: 6px; flex: 1;">⬆
+                                Load Actor</button>
+                            <input type="file" id="bp-actor-file-input" accept=".actor,.json" style="display: none;">
+                        </div>
+                    </div>
+
+                    <details class="viewer-menu-card viewer-menu-sections-card viewer-terrain-card">
+                        <summary class="viewer-menu-sections-summary">
+                            <span class="viewer-menu-label viewer-menu-sections-label">Terrain Floor</span>
+                            <span class="viewer-menu-sections-value" id="terrain-summary-value">Grid · Grey</span>
+                        </summary>
+                        <div class="viewer-menu-sections-body">
+                            <div class="viewer-inline-note">Color, texture, and grass for the world floor.</div>
+
+                            <div class="viewer-menu-label" style="margin-top: 0.4rem;">Mode</div>
+                            <select id="terrain-mode" class="viewer-text-input">
+                                <option value="grid">UE Grid</option>
+                                <option value="solid">Solid Color</option>
+                                <option value="grass">Grass Texture (PBR)</option>
+                                <option value="custom">Custom Image…</option>
+                            </select>
+
+                            <div class="viewer-slider-group" style="margin-top: 0.6rem;">
+                                <div class="viewer-slider-label">Tint</div>
+                                <input id="terrain-color" type="color" value="#ffffff" class="viewer-text-input" style="height:32px; padding:2px;">
+                            </div>
+
+                            <div class="viewer-slider-group">
+                                <div class="viewer-slider-label">Texture Repeat</div>
+                                <input id="terrain-repeat" type="range" min="1" max="80" step="1" value="28">
+                                <div class="viewer-slider-value" id="terrain-repeat-value">28</div>
+                            </div>
+
+                            <div class="viewer-slider-group">
+                                <div class="viewer-slider-label">Roughness</div>
+                                <input id="terrain-roughness" type="range" min="0" max="1" step="0.01" value="0.85">
+                                <div class="viewer-slider-value" id="terrain-roughness-value">0.85</div>
+                            </div>
+
+                            <div class="viewer-menu-actions" style="margin-top:0.4rem;">
+                                <button class="btn viewer-menu-btn" id="terrain-load-image">⬆ Load Image…</button>
+                                <input type="file" id="terrain-image-input" accept="image/*" style="display:none;">
+                            </div>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Sculpt</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="terrain-sculpt-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="terrain-sculpt-on">On</button>
+                                    </div>
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Tool</div>
+                                    <select id="terrain-sculpt-tool" class="viewer-text-input">
+                                        <option value="raise">Raise / Lower</option>
+                                        <option value="smooth">Smooth</option>
+                                        <option value="flatten">Flatten</option>
+                                        <option value="paint">Paint Texture</option>
+                                        <option value="foliage">Paint Foliage</option>
+                                        <option value="erase-foliage">Erase Foliage</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Brush Radius</div>
+                                        <input id="terrain-sculpt-radius" type="range" min="1" max="18" step="0.5" value="5">
+                                        <div class="viewer-slider-value" id="terrain-sculpt-radius-value">5.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Strength</div>
+                                        <input id="terrain-sculpt-strength" type="range" min="0.01" max="0.8" step="0.01" value="0.18">
+                                        <div class="viewer-slider-value" id="terrain-sculpt-strength-value">0.18</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Flatten Height</div>
+                                        <input id="terrain-flatten-height" type="range" min="-3" max="3" step="0.1" value="0">
+                                        <div class="viewer-slider-value" id="terrain-flatten-height-value">0.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Paint Color</div>
+                                        <input id="terrain-paint-color" type="color" value="#5f8f35" class="viewer-text-input" style="height:32px; padding:2px;">
+                                    </div>
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Foliage Type</div>
+                                    <select id="terrain-foliage-type" class="viewer-text-input">
+                                        <option value="grass">Grass</option>
+                                        <option value="tree">Basic Tree</option>
+                                        <option value="bush">Bush</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Foliage Density</div>
+                                        <input id="terrain-foliage-density" type="range" min="5" max="300" step="5" value="80">
+                                        <div class="viewer-slider-value" id="terrain-foliage-density-value">80</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Left drag paints. Shift reverses raise or erases foliage.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Grass</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="grass-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="grass-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Base Color</div>
+                                        <input id="grass-base-color" type="color" value="#2f5a1c" class="viewer-text-input" style="height:32px; padding:2px;">
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Tip Color</div>
+                                        <input id="grass-tip-color" type="color" value="#a8d96b" class="viewer-text-input" style="height:32px; padding:2px;">
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Wind Strength</div>
+                                        <input id="grass-wind" type="range" min="0" max="1" step="0.01" value="0.18">
+                                        <div class="viewer-slider-value" id="grass-wind-value">0.18</div>
+                                    </div>
+
+                                    <div class="viewer-menu-label" style="margin-top: 0.4rem;">Sprite</div>
+                                    <div class="viewer-menu-actions" style="display:flex; gap:8px;">
+                                        <button class="btn viewer-menu-btn" id="grass-sprite-load">⬆ Load Sprite…</button>
+                                        <button class="btn viewer-menu-btn" id="grass-sprite-clear">Clear</button>
+                                        <input type="file" id="grass-sprite-input" accept="image/*" style="display:none;">
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Sprite Tint Mix</div>
+                                        <input id="grass-sprite-tint" type="range" min="0" max="1" step="0.01" value="0.4">
+                                        <div class="viewer-slider-value" id="grass-sprite-tint-value">0.40</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Alpha Cutoff</div>
+                                        <input id="grass-alpha-cutoff" type="range" min="0" max="1" step="0.01" value="0.5">
+                                        <div class="viewer-slider-value" id="grass-alpha-cutoff-value">0.50</div>
+                                    </div>
+                                    <div class="viewer-inline-note" id="grass-sprite-status">Use a transparent PNG. Bottom of image = blade base, top = tip.</div>
+                                </div>
+                            </details>
+                        </div>
+                    </details>
+
+                    <details class="viewer-menu-card viewer-menu-sections-card viewer-world-env-card">
+                        <summary class="viewer-menu-sections-summary">
+                            <span class="viewer-menu-label viewer-menu-sections-label">World Environment</span>
+                            <span class="viewer-menu-sections-value" id="we-summary-value">Sky · GI · FX</span>
+                        </summary>
+                        <div class="viewer-menu-sections-body">
+                            <div class="viewer-inline-note">Godot-style WorldEnvironment. Enable or disable each subsystem and tune key values. Settings persist across reloads.</div>
+
+                            <div class="viewer-menu-label" style="margin-top: 0.4rem;">Master</div>
+                            <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-master-on">All On</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-off">All Off</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-perf">Performance</button>
+                                <button class="btn viewer-toggle-btn" id="we-master-debug-off">Debug Off</button>
+                            </div>
+                            <div class="viewer-inline-note" id="we-master-status">Everything enabled. Performance turns off SSGI / Fog / Bloom in one click.</div>
+
+                            <details class="viewer-menu-section" open>
+                                <summary class="viewer-menu-section-summary">Background / Sky</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-sky-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-sky-on">On</button>
+                                    </div>
+                                    <label class="viewer-input-label" for="we-sky-preset">Preset</label>
+                                    <select id="we-sky-preset" class="viewer-text-input">
+                                        <option value="sunny-sky">Sunny Sky</option>
+                                        <option value="studio">Studio</option>
+                                        <option value="urban-street">Urban Street</option>
+                                        <option value="forest-trail">Forest Trail</option>
+                                        <option value="golden-sunset">Golden Sunset</option>
+                                    </select>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Sky Blurriness</div>
+                                        <input id="we-sky-blurriness" type="range" min="0" max="1" step="0.01" value="0.05">
+                                        <div class="viewer-slider-value" id="we-sky-blurriness-value">0.05</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Ambient Light</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-ambient-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ambient-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-ambient-intensity" type="range" min="0" max="3" step="0.05" value="1.0">
+                                        <div class="viewer-slider-value" id="we-ambient-intensity-value">1.00</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Hemisphere Light</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-hemi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-hemi-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-hemi-intensity" type="range" min="0" max="3" step="0.05" value="1.5">
+                                        <div class="viewer-slider-value" id="we-hemi-intensity-value">1.50</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Sun (Directional)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-sun-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-sun-on">On</button>
+                                    </div>
+                                    <label class="viewer-checkbox-row" for="we-sun-shadow">
+                                        <input type="checkbox" id="we-sun-shadow" checked>
+                                        <span>Cast Shadow</span>
+                                    </label>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-sun-intensity" type="range" min="0" max="6" step="0.05" value="2.5">
+                                        <div class="viewer-slider-value" id="we-sun-intensity-value">2.50</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Tonemap</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">ACES Filmic tonemap is always active. Adjust exposure to taste.</div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Exposure</div>
+                                        <input id="we-tonemap-exposure" type="range" min="0.1" max="2.5" step="0.01" value="1.00">
+                                        <div class="viewer-slider-value" id="we-tonemap-exposure-value">1.00</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Anti-Aliasing (Temporal)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-aa-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-aa-on">On</button>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Resolution Boost</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-render-resolution-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-render-resolution-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Raises internal render resolution above the default DPR cap. Biggest image-quality gain in the current forward path, but expensive.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Render Resolution</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Scale</div>
+                                        <input type="range" id="we-render-resolution-scale" min="1" max="1.75" step="0.05" value="1.15">
+                                        <div class="viewer-slider-value" id="we-render-resolution-scale-value">1.15</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Max DPR</div>
+                                        <input type="range" id="we-render-resolution-max-dpr" min="1" max="3" step="0.05" value="2.50">
+                                        <div class="viewer-slider-value" id="we-render-resolution-max-dpr-value">2.50</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Final internal resolution = min(device DPR * scale, max DPR) while Resolution Boost is on.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Adaptive Quality</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-adaptive-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-adaptive-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Auto-lowers effects (SSGI → SSAO → bloom → fewer lights) when FPS drops, and restores them when it recovers. Good for weaker GPUs / mobile.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Glow / Bloom</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-bloom-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-bloom-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Strength</div>
+                                        <input id="we-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.5">
+                                        <div class="viewer-slider-value" id="we-bloom-strength-value">0.50</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Radius</div>
+                                        <input id="we-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.35">
+                                        <div class="viewer-slider-value" id="we-bloom-radius-value">0.35</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Threshold</div>
+                                        <input id="we-bloom-threshold" type="range" min="0" max="4" step="0.01" value="2.20">
+                                        <div class="viewer-slider-value" id="we-bloom-threshold-value">2.20</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Ambient Occlusion (GTAO)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-ssao-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssao-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Strength</div>
+                                        <input type="range" id="we-ssao-intensity" min="0" max="1" step="0.05" value="0.85">
+                                        <div class="viewer-slider-value" id="we-ssao-intensity-value">0.85</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Radius</div>
+                                        <input type="range" id="we-ssao-radius" min="0.1" max="2" step="0.05" value="0.5">
+                                        <div class="viewer-slider-value" id="we-ssao-radius-value">0.5</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Contact-shadow darkening in creases. Performance mode pauses it.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Screen Space Reflections (SSR)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssr-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ssr-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input type="range" id="we-ssr-intensity" min="0" max="1.5" step="0.05" value="0.95">
+                                        <div class="viewer-slider-value" id="we-ssr-intensity-value">0.95</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Distance</div>
+                                        <input type="range" id="we-ssr-max-distance" min="1" max="24" step="0.5" value="16">
+                                        <div class="viewer-slider-value" id="we-ssr-max-distance-value">16.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Thickness</div>
+                                        <input type="range" id="we-ssr-thickness" min="0.05" max="1.5" step="0.05" value="0.65">
+                                        <div class="viewer-slider-value" id="we-ssr-thickness-value">0.65</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Quality</div>
+                                        <input type="range" id="we-ssr-quality" min="0.1" max="1" step="0.05" value="0.85">
+                                        <div class="viewer-slider-value" id="we-ssr-quality-value">0.85</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Reflects only visible screen pixels. Performance mode pauses it.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group" style="margin-top:10px;">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-probe-off">Probe Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-probe-on">Probe On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probe Intensity</div>
+                                        <input type="range" id="we-probe-intensity" min="0" max="2" step="0.05" value="1">
+                                        <div class="viewer-slider-value" id="we-probe-intensity-value">1.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probe Radius</div>
+                                        <input type="range" id="we-probe-radius" min="5" max="200" step="1" value="40">
+                                        <div class="viewer-slider-value" id="we-probe-radius-value">40</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Sphere reflection probe fills SSR misses (off-screen / sky) from the environment map, sphere-parallax corrected. Requires SSR On.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Screen Space GI (SSGI)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ssgi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-ssgi-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Screen-space bounce light over the current view. Performance mode pauses it.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Fog (Volumetric)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-fog-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-fog-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Density</div>
+                                        <input id="we-fog-density" type="range" min="0" max="0.05" step="0.001" value="0.012">
+                                        <div class="viewer-slider-value" id="we-fog-density-value">0.012</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Layer Opacity</div>
+                                        <input id="we-fog-opacity" type="range" min="0" max="0.2" step="0.001" value="0.055">
+                                        <div class="viewer-slider-value" id="we-fog-opacity-value">0.055</div>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Volumetric Lighting (Sun Scatter)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-vol-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-vol-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Density</div>
+                                        <input id="we-vol-density" type="range" min="0" max="0.15" step="0.001" value="0.02">
+                                        <div class="viewer-slider-value" id="we-vol-density-value">0.020</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Height Falloff</div>
+                                        <input id="we-vol-height" type="range" min="0" max="0.4" step="0.005" value="0.08">
+                                        <div class="viewer-slider-value" id="we-vol-height-value">0.080</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Sun Scatter</div>
+                                        <input id="we-vol-sun" type="range" min="0" max="5" step="0.05" value="1.2">
+                                        <div class="viewer-slider-value" id="we-vol-sun-value">1.20</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Anisotropy</div>
+                                        <input id="we-vol-aniso" type="range" min="0" max="0.95" step="0.01" value="0.72">
+                                        <div class="viewer-slider-value" id="we-vol-aniso-value">0.72</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Analytic directional sun in-scatter + height fog (look toward the sun for the glow). Composited before bloom. No shadow shafts in this pass.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Global Illumination (DDGI)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-ddgi-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note">DDGI starts on so new colored objects can contribute bounce; use Performance mode to pause it.</div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Live Bake</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-live-bake-off">Off</button>
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-live-bake-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bake Every N</div>
+                                        <input id="we-ddgi-bake-every-n" type="range" min="1" max="16" step="1" value="4">
+                                        <div class="viewer-slider-value" id="we-ddgi-bake-every-n-value">4</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Intensity</div>
+                                        <input id="we-ddgi-intensity" type="range" min="0" max="16" step="0.05" value="12.0">
+                                        <div class="viewer-slider-value" id="we-ddgi-intensity-value">12.0</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Specular GI</div>
+                                        <input id="we-ddgi-specular" type="range" min="0" max="4" step="0.05" value="0">
+                                        <div class="viewer-slider-value" id="we-ddgi-specular-value">0.0</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Specular GI feeds probe radiance into the reflection BRDF — rough/glossy off-screen reflections the env map can't give. Probes are low-res, so it's blurry by design.</div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Light Intensity</div>
+                                        <input id="we-ddgi-light-intensity" type="range" min="0" max="8" step="0.05" value="0.35">
+                                        <div class="viewer-slider-value" id="we-ddgi-light-intensity-value">0.35</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Probe Debug</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-probe-debug-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-probe-debug-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Ray Debug</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-ray-debug-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-ray-debug-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Solid Test</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-solid-test-off">Off</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-solid-test-on">On</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">View</div>
+                                        <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                            <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-ddgi-view-lit">Lit</button>
+                                            <button class="btn viewer-toggle-btn" id="we-ddgi-view-contribution">DDGI Only</button>
+                                        </div>
+                                    </div>
+                                    <div class="viewer-inline-note">Solid Test bypasses probes and injects fixed amber GI so you can verify the receive path independently of probe capture.</div>
+                                    <div class="viewer-inline-note">DDGI Only replaces the lit scene with the indirect-light contribution so you can inspect exactly what bounce is adding.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Shadows</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-shadows-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-shadows-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bias</div>
+                                        <input id="we-shadows-bias" type="range" min="-0.05" max="0.05" step="0.0001" value="0">
+                                        <div class="viewer-slider-value" id="we-shadows-bias-value">0.0000</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Normal Bias</div>
+                                        <input id="we-shadows-normal-bias" type="range" min="-2" max="2" step="0.01" value="0">
+                                        <div class="viewer-slider-value" id="we-shadows-normal-bias-value">0.00</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">PCF Radius</div>
+                                        <input id="we-shadows-radius" type="range" min="0" max="16" step="0.1" value="7.9">
+                                        <div class="viewer-slider-value" id="we-shadows-radius-value">7.9</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Map Size</div>
+                                        <input id="we-shadows-map-size" type="range" min="128" max="4096" step="128" value="512">
+                                        <div class="viewer-slider-value" id="we-shadows-map-size-value">512</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Bias and Normal Bias fight self-shadow seams (raise to fix) and peter-panning (lower to fix). PCF Radius softens edges. Map Size trades GPU memory for sharpness; each step doubles memory on point lights.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Light Culling</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-lightcull-off">Off</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-lightcull-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Max Active Lights</div>
+                                        <input id="we-lightcull-max" type="range" min="1" max="64" step="1" value="16">
+                                        <div class="viewer-slider-value" id="we-lightcull-max-value">16</div>
+                                    </div>
+                                    <div class="viewer-inline-note">Keeps only the N most important point/spot lights lit each frame (by brightness ÷ distance²). The sun, ambient and hemisphere lights are never culled. Big FPS win in light-heavy scenes.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Parallax (POM)</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-pom-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="we-pom-on">On</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Height Intensity</div>
+                                        <input id="we-pom-intensity" type="range" min="0" max="0.2" step="0.001" value="0.04">
+                                        <div class="viewer-slider-value" id="we-pom-intensity-value">0.040</div>
+                                    </div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn" id="we-pom-quality-low">Low</button>
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="we-pom-quality-medium">Medium</button>
+                                        <button class="btn viewer-toggle-btn" id="we-pom-quality-high">High</button>
+                                    </div>
+                                    <div class="viewer-inline-note">Parallax Occlusion Mapping fakes 3D depth on flat surfaces. Requires a per-material heightMap. Quality cycles 8/16/32 ray-march steps; High is ~3× cost of Low. Disabled automatically by perf mode.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Baked Lighting</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Resolution</div>
+                                        <input id="we-bake-res" type="range" min="16" max="2048" step="16" value="16">
+                                        <div class="viewer-slider-value" id="we-bake-res-value">16</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Samples</div>
+                                        <input id="we-bake-samples" type="range" min="4" max="1000" step="4" value="4">
+                                        <div class="viewer-slider-value" id="we-bake-samples-value">4</div>
+                                    </div>
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn viewer-menu-btn" id="we-bake-run">Bake Lightmaps</button>
+                                        <button class="btn viewer-menu-btn" id="we-bake-clear">Clear</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="we-bake-status">CPU lightmap bake. Large scenes are guarded to avoid browser freezes.</div>
+                                </div>
+                            </details>
+
+                            <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                                <button class="btn viewer-menu-btn" id="we-reset-defaults">Reset to Defaults</button>
+                            </div>
+                        </div>
+                    </details>
+
+                    <details class="viewer-menu-card viewer-menu-sections-card">
+                        <summary class="viewer-menu-sections-summary">
+                            <span class="viewer-menu-label viewer-menu-sections-label">Menu Sections</span>
+                            <span class="viewer-menu-sections-value">Open tools</span>
+                        </summary>
+                        <div class="viewer-menu-sections-body">
+                            <div class="viewer-inline-note">Secondary tools stay tucked away here so the main overlay
+                                only shows camera actions and actor creation.</div>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Load Level / Model</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn btn-primary viewer-menu-btn" id="open-model-menu">Browse
+                                            Files</button>
+                                    </div>
+                                    <input type="file" id="file-input" accept=".glb,.gltf,.obj,.fbx"
+                                        style="display: none;">
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Scenes</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn btn-primary viewer-menu-btn" id="save-scene-btn">Save Scene
+                                            (.umap)</button>
+                                        <button class="btn viewer-menu-btn" id="load-scene-btn">Load Scene</button>
+                                    </div>
+                                    <div class="viewer-menu-actions" style="margin-top: 0.4rem;">
+                                        <button class="btn viewer-menu-btn" id="save-scene-folder-btn">Save Scene Folder</button>
+                                        <button class="btn viewer-menu-btn" id="load-scene-folder-btn">Load Scene Folder</button>
+                                    </div>
+                                    <div class="viewer-inline-note">A scene folder keeps source assets next to the .umap so loads stay fast even with many imported props.</div>
+                                    <input type="file" id="scene-file-input" accept=".umap,.json"
+                                        style="display: none;">
+                                    <input type="file" id="scene-folder-input" webkitdirectory directory multiple
+                                        style="display: none;">
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Actor Imports</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-menu-actions">
+                                        <button class="btn viewer-menu-btn" id="import-prop-menu">Import Prop</button>
+                                        <button class="btn viewer-menu-btn viewer-menu-btn-secondary"
+                                            id="reset-prop-import-default" hidden>Ask Next</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="prop-import-default-status">Create actor
+                                        instances with render, collision, and script components. Imported actor sources
+                                        still ask for a collision mode.</div>
+                                    <div class="viewer-prop-library" id="imported-prop-library" hidden>
+                                        <div class="viewer-prop-library-label">Imported Actor Sources</div>
+                                        <div class="viewer-prop-list" id="imported-prop-list"></div>
+                                    </div>
+                                    <input type="file" id="prop-file-input" accept=".glb,.gltf,.obj,.fbx"
+                                        style="display: none;">
+                                    <input type="file" id="vehicle-template-import-input" accept=".glb,.gltf,.obj,.fbx"
+                                        style="display: none;">
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Post Process Volume</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Godot-style global grading plus one editable box volume that overrides bloom and exposure when the camera enters it.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="post-process-target-global">Global</button>
+                                        <button class="btn viewer-toggle-btn" id="post-process-target-volume">Volume</button>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Exposure</div>
+                                        <input id="post-process-exposure" type="range" min="0.1" max="2.5" step="0.01" value="1.00">
+                                        <div class="viewer-slider-value" id="post-process-exposure-value">1.00</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Strength</div>
+                                        <input id="post-process-bloom-strength" type="range" min="0" max="3" step="0.01" value="0.28">
+                                        <div class="viewer-slider-value" id="post-process-bloom-strength-value">0.28</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Radius</div>
+                                        <input id="post-process-bloom-radius" type="range" min="0" max="2" step="0.01" value="0.35">
+                                        <div class="viewer-slider-value" id="post-process-bloom-radius-value">0.35</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Bloom Threshold</div>
+                                        <input id="post-process-bloom-threshold" type="range" min="0" max="2" step="0.01" value="1.10">
+                                        <div class="viewer-slider-value" id="post-process-bloom-threshold-value">1.10</div>
+                                    </div>
+                                    <div class="viewer-slider-group">
+                                        <div class="viewer-slider-label">Blend Speed</div>
+                                        <input id="post-process-blend-speed" type="range" min="0.1" max="10" step="0.1" value="2.5">
+                                        <div class="viewer-slider-value" id="post-process-blend-speed-value">2.5</div>
+                                    </div>
+                                    <div class="viewer-input-stack viewer-post-process-volume-stack">
+                                        <label class="viewer-input-label" for="post-process-priority">Volume Priority</label>
+                                        <input class="viewer-text-input" id="post-process-priority" type="number" step="1" value="0">
+                                        <label class="viewer-input-label" for="post-process-size-x">Volume Size</label>
+                                        <div class="viewer-post-process-size-grid">
+                                            <input class="viewer-text-input" id="post-process-size-x" type="number" min="0.5" step="0.5" value="12">
+                                            <input class="viewer-text-input" id="post-process-size-y" type="number" min="0.5" step="0.5" value="6">
+                                            <input class="viewer-text-input" id="post-process-size-z" type="number" min="0.5" step="0.5" value="12">
+                                        </div>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="post-process-place-volume">Place At Camera</button>
+                                        <button class="btn viewer-menu-btn" id="post-process-remove-volume">Remove Volume</button>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="post-process-toggle-bounds">Show Bounds</button>
+                                        <button class="btn viewer-menu-btn viewer-menu-btn-secondary" id="post-process-apply-settings">Apply Settings</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="post-process-status">Global defaults are active. Place a volume to override bloom and exposure inside a region.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Debug Shadows</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Force every live mesh in the scene to cast and receive shadows. Useful when imported actors come in with shadow flags off.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="debug-force-mesh-shadows-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="debug-force-mesh-shadows-on">On</button>
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary viewer-post-process-actions">
+                                        <button class="btn viewer-menu-btn" id="debug-apply-mesh-shadows">Apply Now</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="debug-shadow-status">Auto force is off. Apply Now runs one scene-wide shadow pass without keeping it enabled.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Performance</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Turns off screen-space GI, volumetric fog, and post-process bloom for a fast-path render. Defaults stay unchanged — flip this when you need higher FPS in showcase or while authoring.</div>
+                                    <div class="viewer-toggle-group viewer-post-process-toggle-group">
+                                        <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="perf-mode-off">Off</button>
+                                        <button class="btn viewer-toggle-btn" id="perf-mode-on">On</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="perf-mode-status">Performance mode off. Full SSGI + fog + post-process active.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Multiplayer</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-input-stack">
+                                        <label class="viewer-input-label" for="multiplayer-server-url">Server
+                                            URL</label>
+                                        <input class="viewer-text-input" id="multiplayer-server-url" type="text"
+                                            spellcheck="false" placeholder="https://your-server.example">
+                                        <label class="viewer-input-label" for="multiplayer-room">Room</label>
+                                        <input class="viewer-text-input" id="multiplayer-room" type="text"
+                                            spellcheck="false" placeholder="sandbox">
+                                    </div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                                        <button class="btn btn-primary viewer-menu-btn"
+                                            id="multiplayer-connect">Connect</button>
+                                        <button class="btn viewer-menu-btn viewer-menu-btn-secondary"
+                                            id="multiplayer-disconnect">Disconnect</button>
+                                    </div>
+                                    <div class="viewer-status-row">
+                                        <span class="viewer-status-item">Status</span>
+                                        <span class="viewer-status-value" id="multiplayer-status">Offline</span>
+                                    </div>
+                                    <div class="viewer-status-row viewer-status-row-secondary">
+                                        <span class="viewer-status-item">Players</span>
+                                        <span class="viewer-status-value" id="multiplayer-player-count">1 local</span>
+                                    </div>
+                                    <div class="viewer-inline-note">First pass syncs player and active vehicle presence
+                                        only. World edits and props stay local.</div>
+                                </div>
+                            </details>
+
+                            <details class="viewer-menu-section">
+                                <summary class="viewer-menu-section-summary">Input Actions</summary>
+                                <div class="viewer-menu-section-body">
+                                    <div class="viewer-inline-note">Configure left and right play-mode input scripts in
+                                        a single minimal editor.</div>
+                                    <div class="viewer-menu-actions viewer-menu-actions-secondary">
+                                        <button class="btn viewer-menu-btn" id="open-input-actions">Open</button>
+                                    </div>
+                                    <div class="viewer-inline-note" id="mouse-action-status">Loading input actions...
+                                    </div>
+                                </div>
+                            </details>
+                        </div>
+                    </details>
+
+                    <div class="viewer-modal" id="input-actions-editor" hidden>
+                        <div class="viewer-modal-card viewer-script-editor-card" role="dialog" aria-modal="true"
+                            aria-labelledby="input-actions-title">
+                            <div class="viewer-modal-eyebrow">Input Actions</div>
+                            <h2 class="viewer-modal-title" id="input-actions-title">Edit Input Action</h2>
+                            <p class="viewer-modal-copy">Play mode only. Switch between left and right mouse triggers
+                                and edit one action at a time.</p>
+                            <div class="viewer-toggle-group viewer-input-actions-toggle-group">
+                                <button class="btn viewer-toggle-btn viewer-toggle-btn-active" id="input-action-left"
+                                    type="button">Left Mouse</button>
+                                <button class="btn viewer-toggle-btn" id="input-action-right" type="button">Right
+                                    Mouse</button>
+                            </div>
+                            <div class="viewer-script-editor-mode" id="input-actions-mode">Trigger: Left Mouse Button
+                            </div>
+                            <label class="viewer-code-field" for="input-action-editor-input">
+                                <span class="viewer-code-field-label">Action Script</span>
+                                <textarea id="input-action-editor-input" class="viewer-code-textarea" rows="8"
+                                    spellcheck="false"></textarea>
+                            </label>
+                            <div class="viewer-code-hint">Available in code: World, GetWorld(), GameMode,
+                                PlayerController, Pawn, Character, GameInstance, FVector, FRotator,
+                                UPrimitiveComponent, CreateWidget(), HUD, event, button, mode, plus raw globals like
+                                THREE, scene, camera, gameplay, physics, spawnDynamicPrimitive(), and spawnImportedProp().
+                            </div>
+                            <div class="viewer-inline-note viewer-script-editor-status"
+                                id="input-actions-editor-status">Input actions are loaded from local draft storage.
+                            </div>
+                            <div class="viewer-modal-actions">
+                                <button class="btn btn-primary viewer-menu-btn" id="apply-mouse-actions"
+                                    type="button">Apply</button>
+                                <button class="btn viewer-menu-btn" id="reset-mouse-actions" type="button">Reset
+                                    Defaults</button>
+                            </div>
+                            <button class="btn viewer-modal-cancel" id="input-actions-close"
+                                type="button">Close</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="debug-stats-overlay" id="debug-stats-overlay" aria-live="polite"></div>
+                <div class="engine-audio-debug" id="engine-audio-debug" aria-live="polite" hidden>Engine: --</div>
+
+                <div class="debug-console" id="debug-console" hidden>
+                    <div class="debug-console-header">
+                        <div>
+                            <div class="debug-console-eyebrow">Developer Console</div>
+                            <div class="debug-console-title">Runtime Commands</div>
+                        </div>
+                        <div class="debug-console-shortcut">`</div>
+                    </div>
+                    <div class="debug-console-output" id="debug-console-output" role="log" aria-live="polite"></div>
+                    <label class="debug-console-input-row" for="debug-console-input">
+                        <span class="debug-console-prompt">&gt;</span>
+                        <input id="debug-console-input" class="debug-console-input" type="text" autocomplete="off"
+                            spellcheck="false" placeholder="Type stat unit, stat physics, or stat gpu">
+                    </label>
+                    <div class="debug-console-footer" id="debug-console-footer">Enter runs the command. Arrow up/down
+                        navigates history. ` closes the console.</div>
+                </div>
+
+                <div id="processing-overlay">
+                    <h2 id="processing-title">Processing Asset</h2>
+                    <div class="loader-container">
+                        <div class="loader-bar" id="loader-bar"></div>
+                    </div>
+                    <div class="processing-step" id="processing-step">Initializing WebGPU kernels...</div>
+                </div>
+
+                <div class="viewer-modal" id="prop-collision-prompt" hidden>
+                    <div class="viewer-modal-card" role="dialog" aria-modal="true"
+                        aria-labelledby="prop-collision-title">
+                        <div class="viewer-modal-eyebrow">Imported Prop Collision</div>
+                        <h2 class="viewer-modal-title" id="prop-collision-title">Choose a collision mode</h2>
+                        <p class="viewer-modal-copy" id="prop-collision-copy">Pick a collision mode for this imported
+                            prop.</p>
+                        <label class="viewer-checkbox-row" for="prop-collision-remember">
+                            <input type="checkbox" id="prop-collision-remember">
+                            <span>Use this mode for this prop and future prop imports this session.</span>
+                        </label>
+                        <div class="viewer-modal-actions">
+                            <button class="btn viewer-menu-btn" id="prop-collision-simple">Simple Collision</button>
+                            <button class="btn btn-primary viewer-menu-btn" id="prop-collision-complex">Complex
+                                Collision</button>
+                        </div>
+                        <button class="btn viewer-modal-cancel" id="prop-collision-cancel">Cancel Import</button>
+                    </div>
+                </div>
+
+                <div class="viewer-context-menu" id="object-script-menu" hidden>
+                    <button class="viewer-context-menu-item" id="object-script-action-tick" type="button">Add Code on
+                        Tick</button>
+                    <button class="viewer-context-menu-item" id="object-script-action-collision" type="button">Add Code
+                        on Collision</button>
+                </div>
+
+                <div class="viewer-modal" id="object-script-editor" hidden>
+                    <div class="viewer-modal-card viewer-script-editor-card" role="dialog" aria-modal="true"
+                        aria-labelledby="object-script-editor-title">
+                        <div class="viewer-modal-eyebrow">Showcase Actor Script</div>
+                        <h2 class="viewer-modal-title" id="object-script-editor-title">Attach Script to Actor</h2>
+                        <p class="viewer-modal-copy">Right-clicked authored actors in Showcase mode can run per-actor
+                            Unreal-style lifecycle scripts with BeginPlay, Tick, OnHit, and EndPlay.</p>
+                        <div class="viewer-script-editor-target" id="object-script-editor-target">No prop selected</div>
+                        <label class="viewer-script-editor-mode" for="object-script-editor-mode">
+                            <span class="viewer-script-editor-mode-label">Script Event</span>
+                            <select id="object-script-editor-mode" class="viewer-script-event-select">
+                                <option value="tick">Tick</option>
+                                <option value="collision">Collision</option>
+                            </select>
+                        </label>
+                        <label class="viewer-checkbox-row" id="object-script-tick-toggle-row"
+                            for="object-script-tick-toggle" hidden>
+                            <input type="checkbox" id="object-script-tick-toggle">
+                            <span>Enable this object's tick event in Play mode.</span>
+                        </label>
+                        <label class="viewer-code-field" for="object-script-editor-input">
+                            <span class="viewer-code-field-label">Actor Script</span>
+                            <textarea id="object-script-editor-input" class="viewer-code-textarea" rows="8"
+                                spellcheck="false"></textarea>
+                        </label>
+                        <div class="viewer-code-hint">Preferred UE-style API: BeginPlay(), Tick(), OnHit(), EndPlay(),
+                            World, GameMode, PlayerController, Pawn, Character, GameInstance, GetWorld(), FVector,
+                            FRotator, UPrimitiveComponent, UAudioComponent, HUD, CreateWidget(), WidgetAPI, and
+                            UnrealWidgetAPI. Raw globals like THREE, scene, camera, gameplay, physics,
+                            spawnDynamicPrimitive(), and spawnImportedProp() still work.</div>
+                        <div class="viewer-inline-note viewer-script-editor-status" id="object-script-editor-status">
+                            Pick a prop in Showcase mode to attach code.</div>
+                        <div class="viewer-modal-actions">
+                            <button class="btn btn-primary viewer-menu-btn" id="object-script-editor-apply"
+                                type="button">Apply Code</button>
+                            <button class="btn viewer-menu-btn" id="object-script-editor-clear" type="button">Clear
+                                Code</button>
+                        </div>
+                        <button class="btn viewer-modal-cancel" id="object-script-editor-cancel"
+                            type="button">Close</button>
+                    </div>
+                </div>
+
+                <div class="play-hud">
+                    <div class="play-status" id="gameplay-status">Play mode is ready. Load a model to explore imported
+                        assets too.</div>
+                    <div class="play-hint" id="play-hint">Play is available immediately. Load a sample or drop a model
+                        anytime to explore imported geometry too.</div>
+                </div>
+
+                <div id="crosshair" aria-hidden="true"></div>
+
+                <button class="btn desktop-mobile-toggle" id="desktop-mobile-toggle" type="button">Mobile UI</button>
+                <div class="desktop-version-badge" aria-label="Desktop app version">v0.0.1</div>
+
+                <div class="mobile-start-screen" id="mobile-start-screen" aria-label="Mobile start">
+                    <div class="mobile-start-split" id="mobile-start-split">
+                        <button class="mobile-start-choice mobile-start-games" id="mobile-start-games" type="button">
+                            <span>Games</span>
+                        </button>
+                        <button class="mobile-start-choice mobile-start-engine" id="mobile-start-engine" type="button">
+                            <span>Engine</span>
+                        </button>
+                    </div>
+                    <div class="mobile-game-widget" id="mobile-game-widget" aria-label="Game select">
+                        <div class="mobile-game-widget-top">
+                            <button class="mobile-game-back" id="mobile-game-back" type="button">Back</button>
+                            <div class="mobile-game-widget-title">Games</div>
+                        </div>
+                        <div class="mobile-game-list" id="mobile-game-list"></div>
+                    </div>
+                </div>
+
+                <div class="mobile-pause-menu" id="mobile-pause-menu" aria-label="Paused">
+                    <div class="mobile-pause-card">
+                        <div class="mobile-pause-title">Paused</div>
+                        <button class="mobile-pause-btn" id="mobile-pause-continue" type="button">Continue</button>
+                        <button class="mobile-pause-btn mobile-pause-info-toggle" id="mobile-pause-info-toggle" type="button" aria-expanded="false">Info</button>
+                        <div class="mobile-pause-info" id="mobile-pause-info" hidden>
+                            <div class="mobile-pause-info-title" id="mobile-pause-info-title"></div>
+                            <div class="mobile-pause-info-lines" id="mobile-pause-info-lines"></div>
+                        </div>
+                        <div class="mobile-pause-quality">
+                            <div class="mobile-pause-quality-title">Quality</div>
+                            <div class="mobile-pause-quality-row" aria-label="Quality">
+                                <button class="mobile-pause-quality-btn is-active" id="mobile-quality-low" type="button">Low</button>
+                                <button class="mobile-pause-quality-btn" id="mobile-quality-med" type="button">Med</button>
+                                <button class="mobile-pause-quality-btn" id="mobile-quality-high" type="button">High</button>
+                            </div>
+                        </div>
+                        <div class="mobile-pause-quality mobile-pause-ui-mode">
+                            <div class="mobile-pause-quality-title">UI Mode</div>
+                            <div class="mobile-pause-quality-row mobile-pause-ui-row" aria-label="UI Mode">
+                                <button class="mobile-pause-quality-btn" id="mobile-ui-desktop" type="button">Desktop</button>
+                                <button class="mobile-pause-quality-btn" id="mobile-ui-mobile" type="button">Mobile</button>
+                            </div>
+                        </div>
+                        <button class="mobile-pause-btn mobile-pause-gfx-toggle" id="mobile-pause-gfx-toggle" type="button" aria-expanded="false">Graphics Settings</button>
+                        <div class="mobile-pause-gfx" id="mobile-pause-gfx" hidden>
+                            <div class="mobile-pause-gfx-row"><span>Skybox</span><button class="mobile-gfx-tog" id="gfx-sky" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Bloom</span><button class="mobile-gfx-tog" id="gfx-bloom" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Ambient Light</span><button class="mobile-gfx-tog" id="gfx-ambient" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Ambient Occlusion</span><button class="mobile-gfx-tog" id="gfx-ssao" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Reflections (SSR)</span><button class="mobile-gfx-tog" id="gfx-ssr" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Temporal AA</span><button class="mobile-gfx-tog" id="gfx-taa" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Shadows</span><button class="mobile-gfx-tog" id="gfx-shadows" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Fog</span><button class="mobile-gfx-tog" id="gfx-fog" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Adaptive Quality</span><button class="mobile-gfx-tog" id="gfx-adaptive" type="button" data-on="0">Off</button></div>
+                            <div class="mobile-pause-gfx-row"><span>Light Cull</span><button class="mobile-gfx-tog" id="gfx-lightcull" type="button" data-on="1">On</button></div>
+                            <div class="mobile-pause-gfx-row mobile-pause-gfx-slider"><span>Max Lights</span><input type="range" id="gfx-maxlights" min="1" max="48" step="1" value="16"><span id="gfx-maxlights-val">16</span></div>
+                        </div>
+                        <button class="mobile-pause-btn mobile-pause-exit" id="mobile-pause-exit" type="button">Exit to Games</button>
+                    </div>
+                </div>
+
+                <div class="mobile-rotate-notice" id="mobile-rotate-notice" aria-live="polite">
+                    <div class="mobile-rotate-inner">
+                        <div class="mobile-rotate-icon" aria-hidden="true">⟳</div>
+                        <div class="mobile-rotate-title">Turn horizontal to play</div>
+                        <div class="mobile-rotate-sub">Rotate your device to landscape.</div>
+                        <button class="btn mobile-chip" id="mobile-rotate-menu" type="button">Menu / Level</button>
+                    </div>
+                </div>
+
+                <div class="mobile-ui" aria-label="Mobile controls">
+                    <div class="mobile-version-badge" aria-label="App version">v0.0.1</div>
+                    <div class="mobile-topbar">
+                        <button class="btn mobile-chip" id="mobile-menu-toggle" type="button">Menu</button>
+                        <button class="btn mobile-chip" id="mobile-mode-toggle" type="button">Play</button>
+                    </div>
+                    <button class="btn mobile-exit-play" id="mobile-exit-play" type="button"
+                        aria-label="Exit play mode">X</button>
+
+                    <div class="mobile-dock">
+                        <div class="mobile-pad mobile-move-pad" id="mobile-move-pad" aria-label="Move pad">
+                            <span class="mobile-pad-label">Move</span>
+                            <span class="mobile-thumb" id="mobile-move-thumb" aria-hidden="true"></span>
+                        </div>
+
+                        <div class="mobile-pad mobile-look-pad" id="mobile-look-pad" aria-label="Look pad">
+                            <span class="mobile-pad-label">Look</span>
+                            <span class="mobile-thumb" id="mobile-look-thumb" aria-hidden="true"></span>
+                        </div>
+                    </div>
+
+                    <button class="btn mobile-action-btn mobile-right-action-fab" id="mobile-right-action" type="button"
+                        hidden>Action</button>
+                    <button class="btn mobile-action-btn mobile-action2-fab" id="mobile-action2" type="button"
+                        hidden>Action 2</button>
+                    <button class="btn mobile-action-btn mobile-jump-fab" id="mobile-jump" type="button"
+                        hidden>Jump</button>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+</body>
+
+</html>

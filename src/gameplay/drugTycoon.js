@@ -18,20 +18,53 @@
 // hot edits and can be inspected from the console.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 import { core } from '../runtime/appCore.js';
 import { tickPlaytime } from './playtime.js';
 import { unlockAward, AWARD_CATALOG } from './awards.js';
 import * as ragdoll from './ragdoll.js';
 import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
+import { convertLoadedObjectMaterials } from '../io/objectLoader.js';
 import { createMapStreaming, buildTrafficCarMesh } from './mapStreaming.js';
 
 const WEED_GLB_URL = (import.meta.env?.BASE_URL || '/') + 'Weed.glb';
+const WALKING_FBX_URL = (import.meta.env?.BASE_URL || '/') + 'models/Emmy/Walking.fbx';
+const WALKING_TEXTURE_BASE_URL = (import.meta.env?.BASE_URL || '/') + 'models/Emmy/';
 const WEED_GLB_HEIGHT = 0.47;       // raw GLB plant height in metres
 const WEED_TARGET_MAX_HEIGHT = 1.2; // mature in-game plant height in metres
 const WEED_BASE_SCALE = WEED_TARGET_MAX_HEIGHT / WEED_GLB_HEIGHT;
+const WALKING_BUYER_HEIGHT = 1.82;
+const WALKING_BUYER_Y_OFFSET = -0.9;
+const WALKING_BUYER_BASE_TINT = new THREE.Color('#000000');
 let _weedPrototype = null;          // first instance, cloned for every plant
 let _weedPromise = null;
+let _walkingBuyerPrototype = null;
+let _walkingBuyerPromise = null;
+let _walkingTextureSets = null;
+const WALKING_BUYER_FBX_WARNING_PREFIXES = [
+    'THREE.FBXLoader: SpecularFactor map is not supported in three.js, skipping texture.',
+    'THREE.FBXLoader: ShininessExponent map is not supported in three.js, skipping texture.',
+    'THREE.FBXLoader: Vertex has more than 4 skinning weights assigned to vertex. Deleting additional weights.',
+];
+
+function suppressWalkingBuyerFbxWarnings() {
+    const originalWarn = console.warn;
+    const filteredWarn = (...args) => {
+        const message = typeof args?.[0] === 'string' ? args[0] : '';
+        if (WALKING_BUYER_FBX_WARNING_PREFIXES.some((prefix) => message.startsWith(prefix))) return;
+        originalWarn.apply(console, args);
+    };
+    console.warn = filteredWarn;
+    let restored = false;
+    return () => {
+        if (restored) return;
+        restored = true;
+        if (console.warn === filteredWarn) console.warn = originalWarn;
+    };
+}
+
 function loadWeedPrototype() {
     if (_weedPrototype) return Promise.resolve(_weedPrototype);
     if (_weedPromise) return _weedPromise;
@@ -82,6 +115,215 @@ function loadWeedPrototype() {
 }
 // Kick off load at module init so the first plant has it ready.
 loadWeedPrototype();
+
+function loadWalkingTextureSets() {
+    if (_walkingTextureSets) return _walkingTextureSets;
+    const loader = new THREE.TextureLoader();
+    const loadTex = (name, { color = false } = {}) => {
+        const tex = loader.load(WALKING_TEXTURE_BASE_URL + name);
+        tex.name = name;
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = color ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+        return tex;
+    };
+    _walkingTextureSets = [0, 1].map((idx) => ({
+        map: loadTex(`diffuse_packed${idx}.png`, { color: true }),
+        normalMap: loadTex(`normal_packed${idx}.png`),
+    }));
+    return _walkingTextureSets;
+}
+
+function applyWalkingTextureSet(material, textureIndex = 0) {
+    if (!material) return material;
+    const textureSets = loadWalkingTextureSets();
+    const textureSet = textureSets[Math.min(textureSets.length - 1, Math.max(0, textureIndex))] || null;
+    if (material.color) material.color.set(0xffffff);
+    if (textureSet?.map) {
+        material.map = textureSet.map;
+        material.map.colorSpace = THREE.SRGBColorSpace;
+    }
+    if (textureSet?.normalMap) {
+        material.normalMap = textureSet.normalMap;
+        material.normalMap.colorSpace = THREE.NoColorSpace;
+    }
+    material.roughness = 1.0;
+    material.metalness = 0.0;
+    if (material.emissive) material.emissive.set(0x000000);
+    material.emissiveIntensity = 0;
+    if ('envMapIntensity' in material) material.envMapIntensity = 0;
+    material.needsUpdate = true;
+    return material;
+}
+
+function loadWalkingBuyerPrototype() {
+    if (_walkingBuyerPrototype) return Promise.resolve(_walkingBuyerPrototype);
+    if (_walkingBuyerPromise) return _walkingBuyerPromise;
+    _walkingBuyerPromise = new Promise((resolve) => {
+        const restoreWarn = suppressWalkingBuyerFbxWarnings();
+        new FBXLoader().load(
+            WALKING_FBX_URL,
+            (fbx) => {
+                restoreWarn();
+                convertLoadedObjectMaterials(fbx);
+                fbx.traverse((o) => {
+                    if (!o.isMesh) return;
+                    o.castShadow = true;
+                    o.receiveShadow = true;
+                    o.material = Array.isArray(o.material)
+                        ? o.material.map((m, index) => applyWalkingTextureSet(m, index))
+                        : applyWalkingTextureSet(o.material, 0);
+                });
+                const box = new THREE.Box3().setFromObject(fbx);
+                const size = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+                _walkingBuyerPrototype = {
+                    root: fbx,
+                    clips: fbx.animations || [],
+                    box: box.clone(),
+                    size: size.clone(),
+                    center,
+                };
+                resolve(_walkingBuyerPrototype);
+            },
+            undefined,
+            (err) => {
+                restoreWarn();
+                console.warn('[drugTycoon] models/Emmy/Walking.fbx load failed', err);
+                _walkingBuyerPrototype = { root: null, clips: [], box: new THREE.Box3(), size: new THREE.Vector3(), center: new THREE.Vector3() };
+                resolve(_walkingBuyerPrototype);
+            },
+        );
+    });
+    return _walkingBuyerPromise;
+}
+loadWalkingBuyerPrototype();
+
+function setProxyPersonVisible(group, visible) {
+    const parts = group?.userData?.parts;
+    if (!parts?.length) return;
+    for (const part of parts) {
+        if (!part) continue;
+        part.visible = visible;
+        part.castShadow = visible;
+        part.receiveShadow = visible;
+    }
+}
+
+function makeWalkingBuyerBlackMaterial(side = THREE.FrontSide, color = WALKING_BUYER_BASE_TINT) {
+    const mat = new DDGIMeshStandardNodeMaterial({
+        color: new THREE.Color(color),
+        roughness: 1.0,
+        metalness: 0.0,
+    });
+    if (mat.emissive) mat.emissive.set(0x000000);
+    mat.emissiveIntensity = 0;
+    if ('envMapIntensity' in mat) mat.envMapIntensity = 0;
+    mat.side = side;
+    return mat;
+}
+
+function cloneWalkingBuyerMaterials(model, {
+    bodyTint = null,
+} = {}) {
+    const tint = bodyTint ? new THREE.Color(bodyTint) : null;
+    model.traverse((o) => {
+        if (!o.isMesh || !o.material) return;
+        const cloneMat = (src) => {
+            const mat = src?.clone?.() || makeWalkingBuyerBlackMaterial(src?.side ?? THREE.FrontSide);
+            if (tint && mat.color) mat.color.copy(tint);
+            mat.roughness = 1.0;
+            mat.metalness = 0.0;
+            if (mat.emissiveMap) mat.emissiveMap = null;
+            if (mat.emissive) mat.emissive.set(0x000000);
+            mat.emissiveIntensity = 0;
+            if ('envMapIntensity' in mat) mat.envMapIntensity = 0;
+            mat.side = src?.side ?? THREE.FrontSide;
+            return mat;
+        };
+        o.material = Array.isArray(o.material)
+            ? o.material.map((src) => cloneMat(src))
+            : cloneMat(o.material);
+    });
+}
+
+function addBuyerColorBadge(group, badgeColor) {
+    const mat = makeWalkingBuyerBlackMaterial();
+    const marker = new THREE.Mesh(new THREE.SphereGeometry(0.11, 16, 12), mat);
+    marker.name = 'buyer-shirt-color-marker';
+    marker.position.set(0, 2.1, 1);
+    marker.castShadow = true;
+    marker.receiveShadow = true;
+    group.add(marker);
+}
+
+function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', pantsColor = '#22303c', bodyTint = null, showColorBadge = true, badgeColor = shirtColor } = {}) {
+    const proto = _walkingBuyerPrototype;
+    if (!proto?.root || proto.size.y <= 0) return null;
+
+    const group = new THREE.Group();
+    group.userData.isWalkingFbxBuyer = true;
+    const model = cloneSkeleton(proto.root);
+    model.name = 'walking-fbx-buyer-model';
+    model.position.set(-proto.center.x, -proto.box.min.y, -proto.center.z);
+    cloneWalkingBuyerMaterials(model, { skinColor, shirtColor, pantsColor, bodyTint });
+    model.traverse((o) => {
+        if (!o.isMesh) return;
+        o.castShadow = true;
+        o.receiveShadow = true;
+    });
+
+    const fit = new THREE.Group();
+    fit.name = 'walking-fbx-buyer-fit';
+    fit.scale.setScalar(WALKING_BUYER_HEIGHT / proto.size.y);
+    fit.position.y = WALKING_BUYER_Y_OFFSET;
+    fit.add(model);
+    group.add(fit);
+    if (showColorBadge) addBuyerColorBadge(group, badgeColor);
+
+    if (proto.clips.length) {
+        const mixer = new THREE.AnimationMixer(model);
+        const action = mixer.clipAction(proto.clips[0]);
+        action.play();
+        group.userData.walkingMixer = mixer;
+        group.userData.walkingAction = action;
+    }
+    return group;
+}
+
+function attachWalkingBuyerVisual(group, { skinColor = '#e8b893', shirtColor = '#3da6ff', pantsColor = '#22303c', bodyTint = null, showColorBadge = false, badgeColor = shirtColor } = {}) {
+    if (!group || group.userData?.walkingVisualAttached) return !!group?.userData?.walkingVisualAttached;
+    const visual = makeWalkingBuyerMesh({ skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor });
+    if (!visual) return false;
+    group.add(visual);
+    group.userData.isWalkingFbxBuyer = true;
+    group.userData.walkingVisualAttached = true;
+    group.userData.walkingVisual = visual;
+    group.userData.walkingMixer = visual.userData?.walkingMixer || null;
+    group.userData.walkingAction = visual.userData?.walkingAction || null;
+    setProxyPersonVisible(group, false);
+    return true;
+}
+
+function makeTycoonPersonMesh({
+    skinColor = '#e8b893',
+    shirtColor = '#3da6ff',
+    pantsColor = '#22303c',
+    bodyTint = null,
+    showColorBadge = false,
+    badgeColor = shirtColor,
+    useWalkingVisual = false,
+} = {}) {
+    const group = ragdoll.makePerson({ skinColor, shirtColor, pantsColor });
+    if (!useWalkingVisual) return group;
+    if (!attachWalkingBuyerVisual(group, { skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor })) {
+        loadWalkingBuyerPrototype().then(() => {
+            if (group.userData?.walkingVisualAttached) return;
+            attachWalkingBuyerVisual(group, { skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor });
+        });
+    }
+    return group;
+}
 
 const SELL_RADIUS = 2.6;
 const STATION_RADIUS = 2.4;
@@ -186,7 +428,16 @@ const SEED_TIERS = [
         cost: 300, speed: 2.10, yieldMult: 2.30, qBonus: 0.50, color: '#e6a8ff',
         palette: { leaf: '#3a2050', leafRipe: '#7a3aa6', bud: '#8a3ac8', budRipe: '#c870ff', stem: '#3a1f4a' },
     },
+    {
+        // Coca: NOT weed. Harvest gives COCA LEAVES (s.cocaLeaves), not buds —
+        // the raw input for the coke cauldron. Notoriously slow + low yield.
+        key: 'coca',    t: 'Coca Seeds',    d: 'Coca shrub. Slow grow, few leaves — feeds the coke cauldron.',
+        cost: 200, speed: 0.70, yieldMult: 1.00, qBonus: 0.10, color: '#bfe9ff', crop: 'coca',
+        palette: { leaf: '#2f5a3a', leafRipe: '#5f8a4a', bud: '#3a6a44', budRipe: '#7faa5a', stem: '#2a4a30' },
+    },
 ];
+const COCA_LEAVES_PER_PLANT = 8;   // base leaves a ripe coca shrub yields
+const COCA_LEAVES_PER_BATCH = 4;   // base leaves consumed by one coke cook
 const SEED_PAD_RADIUS = 2.8;       // interaction distance for the outdoor seed shop
 // ---- grow juice (pour-on speed boost, second outdoor shop) --------------
 // Buy a bottle at the juice shop, walk up to a planted plant, [E] to pour it
@@ -331,16 +582,29 @@ const EVENT_DURATION_MS = 45000;
 // has its own price multiplier and heat profile so higher-tier product pays
 // more but burns hotter.
 const PRODUCTS = {
-    // cook: true → made at the outdoor bench. Pills are pressed at the indoor
-    // pill lab instead, so cook:false keeps them off the bench.
-    weed:  { name: 'Weed',  emoji: '🌿', color: '#9dffa0', priceMult: 1.0, heatMult: 1.0,  unlock: null,        cook: false },
-    pills: { name: 'Pills', emoji: '💊', color: '#ff7fd0', priceMult: 1.9, heatMult: 1.35, unlock: 'pillPress', cook: false },
-    coke:  { name: 'Coke',  emoji: '❄️', color: '#cfe8ff', priceMult: 3.4, heatMult: 1.8,  unlock: 'cokeLab',   cook: false },
+    // grown: true  → produced via the plant/pot grow system (weed, shrooms).
+    // labGame      → which indoor minigame makes it (lab key in LAB_THEME).
+    // unlock       → state flag (s[unlock]) gating the line; null = always on.
+    // labPrice     → one-time unlock cost shown in the shop.
+    weed:    { name: 'Weed',    emoji: '🌿', color: '#9dffa0', priceMult: 1.0, heatMult: 1.0,  unlock: null,          grown: true },
+    shrooms: { name: 'Shrooms', emoji: '🍄', color: '#d8a0ff', priceMult: 1.5, heatMult: 1.1,  unlock: 'hasShrooms',  labGame: 'shrooms', labPrice: 900 },
+    pills:   { name: 'Pills',   emoji: '💊', color: '#ff7fd0', priceMult: 1.9, heatMult: 1.35, unlock: 'hasPillPress', labGame: 'pills', labPrice: 1200 },
+    coke:    { name: 'Coke',    emoji: '❄️', color: '#cfe8ff', priceMult: 3.4, heatMult: 1.8,  unlock: 'hasCokeLab',  labGame: 'coke',  labPrice: 3000 },
+    meth:    { name: 'Meth',    emoji: '💎', color: '#bfe9ff', priceMult: 4.2, heatMult: 2.1,  unlock: 'hasMethLab',  labGame: 'meth',  labPrice: 6000 },
+    lsd:     { name: 'LSD',     emoji: '🌈', color: '#ffd24a', priceMult: 5.0, heatMult: 1.5,  unlock: 'hasLsdLab',   labGame: 'lsd',   labPrice: 9000 },
 };
-const PRODUCT_KEYS = ['weed', 'pills', 'coke'];
-const PILL_PRESS_PRICE = 1200;     // one-time unlock for the pill line
-const COKE_LAB_PRICE = 3000;       // one-time unlock for the coke line
-const PROD_STASH_CAP = 30;         // per side-stash carry cap (pills/coke)
+const PRODUCT_KEYS = ['weed', 'shrooms', 'pills', 'coke', 'meth', 'lsd'];
+// Side-stash lines (everything that isn't legacy weed s.stash).
+const SIDE_PRODUCT_KEYS = PRODUCT_KEYS.filter((k) => k !== 'weed');
+const PROD_STASH_CAP = 30;         // per side-stash carry cap
+const SHROOM_SUBSTRATE_PRICE = 120;
+const SHROOM_SPAWN_PRICE = 90;
+const SHROOM_SPRAY_BOTTLE_PRICE = 80;
+const SHROOM_AC_PRICE = 350;
+const SHROOM_RACK_PRICE = 260;
+const SHROOM_GROW_MS = 70000;
+const SHROOM_DRY_MS = 60000;
+const SHROOM_MISTS_REQUIRED = 3;
 // ---- big-order bounties --------------------------------------------------
 // Occasionally the phone surfaces a fat one-shot order: move N units of a
 // specific product to a specific shirt colour before the in-game day ends.
@@ -402,7 +666,7 @@ export function createDrugTycoon(deps) {
             destroyDynamicPhysicsProp,
             getSceneSystem,
             DDGIMeshStandardNodeMaterial,
-            makePerson: (opts) => ragdoll.makePerson(opts),
+            makePerson: (opts) => makeTycoonPersonMesh(opts || {}),
         });
     }
 
@@ -416,10 +680,25 @@ export function createDrugTycoon(deps) {
             loyalty: {},          // per-shirt-colour regulars: { [color]: { deals, tier } }
             stash: 0,             // unsold WEED on hand (legacy field == weed line)
             stashQ: 1,            // running quality of WEED on hand (0..1)
-            // ---- extra product lines (pills/coke) -------------------------
-            prod: { pills: { qty: 0, q: 1 }, coke: { qty: 0, q: 1 } },
-            hasPillPress: false,  // bought the pill press (unlocks pill cook)
-            hasCokeLab: false,    // bought the coke lab (unlocks coke cook)
+            // ---- extra product lines (side-stashes) -----------------------
+            prod: { shrooms: { qty: 0, q: 1 }, pills: { qty: 0, q: 1 }, coke: { qty: 0, q: 1 }, meth: { qty: 0, q: 1 }, lsd: { qty: 0, q: 1 } },
+            hasPillPress: false,  // bought the pill press (unlocks pill line)
+            hasCokeLab: false,    // bought the coke lab (unlocks coke line)
+            hasMethLab: false,    // bought the meth lab (unlocks meth line)
+            hasLsdLab: false,     // bought the LSD lab (unlocks LSD line)
+            hasShrooms: false,    // bought shroom spores (unlocks growing shrooms)
+            shroomQuestStarted: true,
+            mushroomSubstrate: 0,
+            shroomSpawn: 0,
+            sprayBottle: false,
+            sprayBottleFilled: false,
+            shroomAcUnits: 0,
+            shroomAcMode: 'cool',
+            dryingRacks: 0,
+            wetShrooms: 0,
+            wetShroomsQ: 1,
+            shroomRun: null,
+            shroomDrying: null,
             sellProduct: 'weed',  // which line the player deals right now
             cookProduct: 'weed',  // which line the cook bench is brewing
             // ---- big-order bounty -----------------------------------------
@@ -452,6 +731,9 @@ export function createDrugTycoon(deps) {
             upgradePos: new THREE.Vector3(),
             pillLabPos: new THREE.Vector3(),
             cokeLabPos: new THREE.Vector3(),
+            methLabPos: new THREE.Vector3(),
+            lsdLabPos: new THREE.Vector3(),
+            shroomLabPos: new THREE.Vector3(),
             gunPos: new THREE.Vector3(),
             pillGame: null,       // active pill/coke minigame state (see openPillLab)
             npcs: [],             // { actor, mesh, target, wantsBuy }
@@ -485,7 +767,7 @@ export function createDrugTycoon(deps) {
             hasBat: false,        // owns the baseball bat (melee, no ammo)
             nextSwingAt: 0,       // bat swing cooldown
             // ---- seeds (bought outside, consumed when planting) ------------
-            seeds: [2, 0, 0],     // start with 2 cheap Reggie seeds; buy more/better at the shop
+            seeds: [2, 0, 0, 0],  // start with 2 cheap Reggie seeds; buy more/better at the shop
             startingSeedsGranted: true,
             seedTier: 0,          // tier planted next (highest owned auto-selects)
             seedShopOpen: false,  // outdoor seed-shop overlay up
@@ -498,6 +780,8 @@ export function createDrugTycoon(deps) {
             // ---- grow room -------------------------------------------------
             inRoom: false,        // player currently inside the grow room
             buds: 0,              // harvested loose buds (pre-bagging)
+            cocaLeaves: 0,         // raw coca leaves harvested from coca plants
+            cocaLeavesQ: 1,        // running quality of raw coca leaves
             plants: [],           // { mesh, planted, watered, stage, grownAt, pos } per pot
             plantsBuilt: false,   // pots populated once
             baggingOpen: false,   // (legacy) drag-and-drop panel up
@@ -545,6 +829,8 @@ export function createDrugTycoon(deps) {
         s.crew ||= [];
         s.events ||= {};
         if (typeof s.budsQ !== 'number') s.budsQ = 1;
+        if (typeof s.cocaLeaves !== 'number') s.cocaLeaves = 0;
+        if (typeof s.cocaLeavesQ !== 'number') s.cocaLeavesQ = 1;
         if (typeof s.nextEventAt !== 'number') s.nextEventAt = 0;
         if (typeof s.rep !== 'number') s.rep = REP_START;
         // Seed inventory (older saves predate the seed shop).
@@ -572,11 +858,30 @@ export function createDrugTycoon(deps) {
         }
         // Extra product lines (older saves predate pills/coke).
         if (!s.prod || typeof s.prod !== 'object') s.prod = {};
-        if (!s.prod.pills) s.prod.pills = { qty: 0, q: 1 };
-        if (!s.prod.coke) s.prod.coke = { qty: 0, q: 1 };
+        for (const k of SIDE_PRODUCT_KEYS) {
+            if (!s.prod[k]) s.prod[k] = { qty: 0, q: 1 };
+        }
         if (typeof s.hasPillPress !== 'boolean') s.hasPillPress = false;
         if (typeof s.hasCokeLab !== 'boolean') s.hasCokeLab = false;
+        if (typeof s.hasMethLab !== 'boolean') s.hasMethLab = false;
+        if (typeof s.hasLsdLab !== 'boolean') s.hasLsdLab = false;
+        if (typeof s.hasShrooms !== 'boolean') s.hasShrooms = false;
+        s.shroomQuestStarted = true;
+        if (typeof s.mushroomSubstrate !== 'number') s.mushroomSubstrate = 0;
+        if (typeof s.shroomSpawn !== 'number') s.shroomSpawn = 0;
+        if (typeof s.sprayBottle !== 'boolean') s.sprayBottle = false;
+        if (typeof s.sprayBottleFilled !== 'boolean') s.sprayBottleFilled = false;
+        if (typeof s.shroomAcUnits !== 'number') s.shroomAcUnits = 0;
+        if (s.shroomAcMode !== 'heat') s.shroomAcMode = 'cool';
+        if (typeof s.dryingRacks !== 'number') s.dryingRacks = 0;
+        if (typeof s.wetShrooms !== 'number') s.wetShrooms = 0;
+        if (typeof s.wetShroomsQ !== 'number') s.wetShroomsQ = 1;
+        if (s.shroomRun && typeof s.shroomRun !== 'object') s.shroomRun = null;
+        if (s.shroomDrying && typeof s.shroomDrying !== 'object') s.shroomDrying = null;
         if (typeof s.hasCar !== 'boolean') s.hasCar = false;
+        if (!s.methLabPos) s.methLabPos = new THREE.Vector3();
+        if (!s.lsdLabPos) s.lsdLabPos = new THREE.Vector3();
+        if (!s.shroomLabPos) s.shroomLabPos = new THREE.Vector3();
         // Selected lines must always point at an unlocked product.
         if (!PRODUCT_KEYS.includes(s.sellProduct) || !productUnlocked(s, s.sellProduct)) s.sellProduct = 'weed';
         // Bench only brews cookable lines; default to the first unlocked one (or
@@ -601,8 +906,12 @@ export function createDrugTycoon(deps) {
     // on the one-time equipment purchase.
     function productUnlocked(s, key) {
         const u = PRODUCTS[key]?.unlock;
-        if (!u) return true;
-        return u === 'pillPress' ? !!s.hasPillPress : u === 'cokeLab' ? !!s.hasCokeLab : false;
+        if (!u) return true;       // null unlock = always available (weed)
+        return !!s[u];             // data-driven: the flag name IS the state key
+    }
+    // Cached world position of a product's indoor lab bench (for float text).
+    function labPosFor(s, product) {
+        return { pills: s.pillLabPos, coke: s.cokeLabPos, meth: s.methLabPos, lsd: s.lsdLabPos, shrooms: s.shroomLabPos }[product] || null;
     }
     function unlockedProducts(s) { return PRODUCT_KEYS.filter((k) => productUnlocked(s, k)); }
     // Lines you can brew at the bench: unlocked AND flagged cookable (weed is
@@ -612,17 +921,24 @@ export function createDrugTycoon(deps) {
     function prodQty(s, key) { return key === 'weed' ? s.stash : (s.prod?.[key]?.qty || 0); }
     function prodQual(s, key) { return key === 'weed' ? (s.stashQ || 1) : (s.prod?.[key]?.q || 1); }
     function prodCap(s, key) { return key === 'weed' ? stashCap(s) : PROD_STASH_CAP; }
+    // Lazily ensure a side-stash exists (saves from before a drug was added
+    // won't have its s.prod entry until this runs).
+    function prodRec(s, key) {
+        s.prod ||= {};
+        if (!s.prod[key]) s.prod[key] = { qty: 0, q: 1 };
+        return s.prod[key];
+    }
     function addProduct(s, key, qty, q) {
         if (qty <= 0) return;
         if (key === 'weed') { blendStashQuality(s, qty, q); s.stash += qty; return; }
-        const p = s.prod[key];
+        const p = prodRec(s, key);
         const total = p.qty + qty;
         p.q = total > 0 ? (p.qty * p.q + qty * q) / total : q;
         p.qty = total;
     }
     function takeProduct(s, key, qty) {
         if (key === 'weed') { s.stash = Math.max(0, s.stash - qty); if (s.stash <= 0) s.stashQ = 1; return; }
-        const p = s.prod[key];
+        const p = prodRec(s, key);
         p.qty = Math.max(0, p.qty - qty);
         if (p.qty <= 0) p.q = 1;
     }
@@ -633,11 +949,14 @@ export function createDrugTycoon(deps) {
     const SAVE_KEY = 'polyflow.drugTycoon.save.v1';
     const PERSIST_FIELDS = [
         'cash', 'stash', 'stashQ', 'heat', 'busted', 'sales',
-        'hasGun', 'ammo', 'hasBat', 'ordersFilled', 'buds', 'budsQ',
+        'hasGun', 'ammo', 'hasBat', 'ordersFilled', 'buds', 'budsQ', 'cocaLeaves', 'cocaLeavesQ',
         'demand', 'hotColor', 'marketDay', 'startingCashGranted', 'startingCashGrantAmount',
         'seedTier', '_budsHarvested', 'startingSeedsGranted',
         'juiceTier', 'rep', 'dayNum',
-        'prod', 'hasPillPress', 'hasCokeLab', 'hasCar', 'sellProduct', 'cookProduct',
+        'prod', 'hasPillPress', 'hasCokeLab', 'hasMethLab', 'hasLsdLab', 'hasShrooms',
+        'shroomQuestStarted', 'mushroomSubstrate', 'shroomSpawn', 'sprayBottle', 'sprayBottleFilled',
+        'shroomAcUnits', 'shroomAcMode', 'dryingRacks', 'wetShrooms', 'wetShroomsQ', 'shroomRun', 'shroomDrying',
+        'hasCar', 'sellProduct', 'cookProduct',
     ];
     let _lastSaveAt = 0;
     // Plant snapshots strip the THREE mesh (rebuilt on load) and the
@@ -655,7 +974,7 @@ export function createDrugTycoon(deps) {
             planted: !!p.planted, watered: !!p.watered,
             progress: p.progress ?? 0, stage: p.stage ?? 0,
             health: p.health ?? 1, moisture: p.moisture ?? 0,
-            pest: !!p.pest, tier: p.tier ?? 0, juiceMult: p.juiceMult ?? 1,
+            pest: !!p.pest, tier: p.tier ?? 0, crop: p.crop || null, juiceMult: p.juiceMult ?? 1,
             // Remaining dry-out time (ms) for an un-watered seed; re-based on load.
             dryRemain: (p.planted && !p.watered && p.driedAt)
                 ? Math.max(0, p.driedAt - (performance.now?.() || Date.now())) : 0,
@@ -674,7 +993,7 @@ export function createDrugTycoon(deps) {
             // Hired dealers persist with their rank progress; the meshes are
             // re-spawned on load (see ensureCrewMeshes).
             blob.crewColors = (s.crew || []).map((c) => ({ color: c.color, xp: c.xp || 0, earned: c.earned || 0 }));
-            blob.seeds = Array.isArray(s.seeds) ? s.seeds.slice() : [0, 0, 0];
+            blob.seeds = Array.isArray(s.seeds) ? s.seeds.slice() : SEED_TIERS.map(() => 0);
             blob.juices = Array.isArray(s.juices) ? s.juices.slice() : [0, 0, 0];
             // Growing plants persist so a half-grown crop survives a reload.
             blob.plantsData = serializePlants(s);
@@ -754,6 +1073,7 @@ export function createDrugTycoon(deps) {
         try { ragdoll.removeAll(); } catch (e) {}
         closeCook();
         closePillLab();
+        closeShroomPanel();
         closeShop();
         closeBagging();
         if (_summaryEl?.parentNode) _summaryEl.remove();
@@ -765,6 +1085,7 @@ export function createDrugTycoon(deps) {
         _hudEl = null;
         _shopEl = null;
         _cookEl = null;
+        _shroomEl = null;
         _bagEl = null;
         _phoneEl = null;
         _helpBtnEl = null;
@@ -779,6 +1100,7 @@ export function createDrugTycoon(deps) {
 
     // ---- upgrade economics ---------------------------------------------
     function batchYield(s) { return COOK_YIELD + s.up.batch * 4; }
+    function cokeLeavesNeeded(s) { return Math.max(1, Math.ceil(COCA_LEAVES_PER_BATCH * (batchYield(s) / COOK_YIELD))); }
     // Each 'speed' (Clean Lab) level raises the minimum purity floor by 15%,
     // so a botched recipe still yields decent product once you've invested.
     function purityFloor(s) { return Math.min(0.6, s.up.speed * 0.15); }
@@ -974,10 +1296,21 @@ export function createDrugTycoon(deps) {
         if (total <= 0) { s.budsQ = addQ; return; }
         s.budsQ = (s.buds * (s.budsQ || 1) + addQty * addQ) / total;
     }
+    function blendCocaQuality(s, addQty, addQ) {
+        const total = (s.cocaLeaves || 0) + addQty;
+        if (total <= 0) { s.cocaLeavesQ = addQ; return; }
+        s.cocaLeavesQ = ((s.cocaLeaves || 0) * (s.cocaLeavesQ || 1) + addQty * addQ) / total;
+    }
     function consumeBudQuality(s, qty = 1) {
         const q = s.budsQ || 1;
         s.buds = Math.max(0, s.buds - qty);
         if (s.buds <= 0) s.budsQ = 1;
+        return q;
+    }
+    function consumeCocaLeaves(s, qty = 1) {
+        const q = s.cocaLeavesQ || 1;
+        s.cocaLeaves = Math.max(0, (s.cocaLeaves || 0) - qty);
+        if (s.cocaLeaves <= 0) s.cocaLeavesQ = 1;
         return q;
     }
 
@@ -1093,6 +1426,8 @@ export function createDrugTycoon(deps) {
             if (s.today) { s.today.earned += b.payout; s.today.bounties += 1; }
             award('contract');
             changeRep(s, BOUNTY_REP_REWARD, wp);
+            bigPopup(`📋 CONTRACT DONE +$${b.payout.toLocaleString()}`, '#ffe066', 1.3);
+            if (wp) { cashBurst(wp.clone().setY(wp.y + 1.5), 16, '#ffe066'); try { playSfx('win', wp.clone()); } catch (e) {} }
             if (wp) floatText(`📋 CONTRACT DONE +$${b.payout.toLocaleString()}`, wp.clone().setY(wp.y + 3.4), '#ffe066');
             s.bounty = null;
             scheduleNextBounty(s);
@@ -1187,7 +1522,8 @@ export function createDrugTycoon(deps) {
         award('contract');
         const wp = new THREE.Vector3(d.pos[0], (d.pos[1] || 0) + 2, d.pos[2]);
         floatText(`🚚 DELIVERED +$${d.payout.toLocaleString()}`, wp, '#ffe066');
-        try { playSfx('cash', wp.clone()); } catch (e) {}
+        bigPopup(`🚚 DELIVERED +$${d.payout.toLocaleString()}`, '#ffe066', 1.3);
+        try { cashBurst(wp.clone(), 16, '#ffe066'); playSfx('win', wp.clone()); } catch (e) {}
         cancelDelivery(s, null);
     }
 
@@ -1331,12 +1667,15 @@ export function createDrugTycoon(deps) {
     // explaining how to play this game mode. Lives entirely in this module.
     const HELP_TITLE = 'DRUG TYCOON — HOW TO PLAY';
     const HELP_LINES = [
-        '🌱 SEEDS: Plants need seeds! Buy them at the outdoor SEED SHOP [E] (the green kiosk on the street). Three tiers — Reggie (cheap, green), Kush (mid, icy-teal), Exotic (top-shelf, purple). Better seeds grow faster, yield more buds, and grade higher. The tier you last bought is the one you plant.',
+        '🌱 SEEDS: Plants need seeds! Buy them at the outdoor SEED SHOP [E] (the green kiosk on the street). Weed seeds make buds; Coca Seeds grow slow shrubs that harvest into coca leaves for the coke lab. The tier you last bought is the one you plant.',
         '🧪 GROW JUICE: A second outdoor kiosk on the other side of the street. Three tiers of grow juice (Compost Tea / Liquid Bloom / Hydro Elixir). Buy a bottle, then hold Fire near a growing plant to pour it on — that plant grows 2.2×–4.6× faster for the rest of its cycle. One pour per plant; the boost clears at harvest.',
         '🌿 GROW: At home — [E] plant a seed (consumes one from stock), [E] water it. Soil dries out: keep re-watering [E] or growth stalls. 🐛 Pests strike randomly — hold Fire near the plant to spray ($25). Healthy plants yield more buds. [E] harvest when ripe, then drag buds into the bag (hold Fire) to package.',
-        '❄️ COKE LAB: Buy a Coke Lab at the upgrade desk, then use the glassware bench INSIDE your house [E] (NW corner). Coke is cooked in a 4-step craft: ⚗️ measure the base → 🧪 dissolve & wash → 🔥 cook the rock → 🔪 cut & bag. Nail each timing/precision check for high purity.',
+        '❄️ COKE LAB: Buy a Coke Lab at the upgrade desk, grow Coca Seeds for raw coca leaves, then use the glassware bench INSIDE your house [E] (NW corner). Coke is cooked in a 4-step craft: ⚗️ measure the base → 🧪 dissolve & wash → 🔥 cook the rock → 🔪 cut & bag.',
         '💊 PILL LAB: Buy a Pill Press at the upgrade desk, then use the stainless lab bench INSIDE your house [E] (NE corner). Pills are pressed in a 4-step craft: ⚖️ weigh the dose → 🌀 blend → 🛠️ press the tablets → 🔖 stamp. Nail each timing/precision check for high purity.',
-        '💊❄️ PRODUCT LINES: Pills (~1.9×) and coke (~3.4×) pay far more than weed — but burn far more heat. Press [Q] to choose which line you deal.',
+        '💎 METH LAB: Buy a Meth Lab, then cook at the heated bench INSIDE (east wall) [E]. Unique craft: ⚗️ measure precursor → 🔥 HOLD the cook temperature riding the moving green window (mash to add heat; too cold stalls, too hot scorches) → 🧊 crystallise. Pays ~4.2×, runs very hot.',
+        '🌈 LSD LAB: Buy an LSD Lab, then work the blotter station INSIDE (west wall) [E]. Unique craft: ⚗️ dose the solution → 💧 DROP tabs onto the sweeping target (precision taps). Pays ~5×, lower heat.',
+        '🍄 SHROOMS: Buy a Mushroom Bed, substrate, spawn, Spray Bottle, AC Unit(s), and Drying Rack. Keep the bed under 15C (2 cool AC units = 0C), mist blue spray targets, harvest wet shrooms, then dry them on racks. 2 heat AC units = 40C and halves drying time.',
+        '💊❄️💎🌈🍄 PRODUCT LINES: Six lines — 🌿 weed (grown), 🍄 shrooms (~1.5×), 💊 pills (~1.9×), ❄️ coke (~3.4×), 💎 meth (~4.2×), 🌈 LSD (~5×). Higher tiers pay far more but most burn more heat. Press [Q] to choose which line you deal.',
         '📋 CONTRACTS: Your phone occasionally lists a fat one-shot contract — deliver N units of a specific product to a specific shirt colour before the day ends for a big cash bonus + rep. Normal sales to that customer count toward it.',
         '🧪 QUALITY: Plant health, grow lights, and recipe accuracy set grade. Better grade pays more and draws less heat.',
         '📱 ORDERS: Press [P] for your phone. Sell only to the customer whose shirt matches the order colour [E].',
@@ -1435,6 +1774,7 @@ export function createDrugTycoon(deps) {
             if (e.code === 'Escape' && window.drugTycoon?.shopOpen) closeShop();
             if (e.code === 'Escape' && window.drugTycoon?.seedShopOpen) closeSeedShop();
             if (e.code === 'Escape' && window.drugTycoon?.juiceShopOpen) closeJuiceShop();
+            if (e.code === 'Escape' && window.drugTycoon?.shroomPanelOpen) closeShroomPanel();
             if (e.code === 'Escape' && window.drugTycoon?.cooking) closeCook();
             if (e.code === 'Escape' && window.drugTycoon?.baggingOpen) closeBagging();
         };
@@ -1451,6 +1791,7 @@ export function createDrugTycoon(deps) {
         if (s?.shopOpen) { closeShop(); return; }
         if (s?.seedShopOpen) { closeSeedShop(); return; }
         if (s?.juiceShopOpen) { closeJuiceShop(); return; }
+        if (s?.shroomPanelOpen) { closeShroomPanel(); return; }
         if (s?.cooking) { closeCook(); return; }
         if (s?.baggingOpen) { closeBagging(); return; }
         _interactQueued = true;
@@ -1511,6 +1852,10 @@ export function createDrugTycoon(deps) {
                 return lines + hint;
             })()
             + (s.buds > 0 ? `<div style="color:#b6ff6a;">Buds: ${s.buds} · ${Math.round((s.budsQ || 1) * 100)}%</div>` : '')
+            + ((s.cocaLeaves || 0) > 0 ? `<div style="color:#bfe9ff;">Coca leaves: ${s.cocaLeaves} · ${Math.round((s.cocaLeavesQ || 1) * 100)}%</div>` : '')
+            + ((s.inRoom && s.hasShrooms) ? `<div style="color:#d8a0ff;">Shroom bed: ${shroomBedTemp(s)}C · AC ${s.shroomAcMode}${s.shroomRun?.phase === 'growing' ? ` · ${Math.round((s.shroomRun.progress || 0) * 100)}%` : ''}</div>` : '')
+            + ((s.wetShrooms || 0) > 0 ? `<div style="color:#d8a0ff;">Wet shrooms: ${s.wetShrooms} · ${Math.round((s.wetShroomsQ || 1) * 100)}%</div>` : '')
+            + (s.shroomDrying?.qty ? `<div style="color:#d8a0ff;">Drying: ${Math.round((s.shroomDrying.progress || 0) * 100)}% · rack ${shroomRackTemp(s)}C</div>` : '')
             + ((s.inRoom || totalSeeds(s) > 0) ? `<div style="color:${SEED_TIERS[pickPlantTier(s)]?.color || '#8aa0aa'};">🌱 Seeds: ${totalSeeds(s)}${pickPlantTier(s) >= 0 ? ` · ${SEED_TIERS[pickPlantTier(s)].t.replace(' Seeds', '')}` : ' — buy outside'}</div>` : '')
             + ((s.inRoom || totalJuices(s) > 0) ? `<div style="color:${JUICE_TIERS[pickJuiceTier(s)]?.color || '#8aa0aa'};">🧪 Juice: ${totalJuices(s)}${pickJuiceTier(s) >= 0 ? ` · ${JUICE_TIERS[pickJuiceTier(s)].t}` : ''}</div>` : '')
             + (!s.inRoom ? `<div style="opacity:.92;">Market: <b style="color:${mk.c}">${mk.t}</b> <span style="opacity:.6;font-size:12px;">x${(s.demand || 1).toFixed(2)}</span></div>` : '')
@@ -1600,6 +1945,57 @@ export function createDrugTycoon(deps) {
             node.style.opacity = '0';
         });
         setTimeout(() => node.remove(), 820);
+    }
+
+    // ---- juice: center-screen popup + cash particle burst --------------
+    // A big screen-center callout that punches in then fades — for combos and
+    // milestones. Bigger `scale` = beefier hit. Reuses the float layer.
+    function bigPopup(text, color = '#7fd0ff', scale = 1) {
+        if (!_floatLayer?.parentNode) { floatText('', null); }     // ensure layer
+        const layer = _floatLayer;
+        if (!layer) return;
+        const node = document.createElement('div');
+        node.textContent = text;
+        node.style.cssText = 'position:absolute;left:50%;top:38%;transform:translate(-50%,-50%) scale(0.4);'
+            + `color:${color};font:900 ${Math.round(40 * scale)}px/1 "Trebuchet MS",system-ui,sans-serif;`
+            + 'text-shadow:0 3px 14px rgba(0,0,0,0.95),0 0 24px currentColor;'
+            + 'transition:transform .18s cubic-bezier(.2,1.6,.4,1),opacity .5s ease .4s;opacity:1;white-space:nowrap;';
+        layer.appendChild(node);
+        requestAnimationFrame(() => {
+            node.style.transform = 'translate(-50%,-50%) scale(1)';
+            node.style.opacity = '0';
+        });
+        setTimeout(() => node.remove(), 950);
+    }
+    // A burst of little "$" glyphs that pop off a world point and float up — the
+    // cash-money confetti on a sale.
+    function cashBurst(worldPos, count = 6, color = '#9dffa0') {
+        const { camera, renderer } = core;
+        if (!camera || !renderer || !worldPos) return;
+        if (!_floatLayer?.parentNode) { floatText('', null); }
+        const layer = _floatLayer;
+        if (!layer) return;
+        const v = _tmpFloat.copy(worldPos).project(camera);
+        if (v.z > 1) return;
+        const rect = renderer.domElement.getBoundingClientRect();
+        const host = (document.getElementById('canvas-container') || document.body).getBoundingClientRect();
+        const x = rect.left - host.left + (v.x * 0.5 + 0.5) * rect.width;
+        const y = rect.top - host.top + (-v.y * 0.5 + 0.5) * rect.height;
+        for (let i = 0; i < count; i++) {
+            const node = document.createElement('div');
+            node.textContent = '$';
+            const dx = (Math.random() - 0.5) * 90;
+            const dy = -40 - Math.random() * 70;
+            node.style.cssText = `position:absolute;left:${x}px;top:${y}px;transform:translate(-50%,-50%);`
+                + `color:${color};font:900 ${14 + (Math.random() * 10) | 0}px/1 "Trebuchet MS",system-ui,sans-serif;`
+                + 'text-shadow:0 2px 5px rgba(0,0,0,0.9);transition:transform .7s ease,opacity .7s ease;opacity:1;';
+            layer.appendChild(node);
+            requestAnimationFrame(() => {
+                node.style.transform = `translate(-50%,-50%) translate(${dx}px,${dy}px) rotate(${(Math.random() - 0.5) * 60}deg)`;
+                node.style.opacity = '0';
+            });
+            setTimeout(() => node.remove(), 720);
+        }
     }
 
     // ---- achievement toasts --------------------------------------------
@@ -1890,6 +2286,246 @@ export function createDrugTycoon(deps) {
         }
     }
 
+    // ---- shrooms: substrate, climate, misting, drying ------------------
+    let _shroomEl = null;
+    function shroomBedTemp(s) {
+        return s.shroomAcMode === 'cool' ? 20 - Math.min(2, s.shroomAcUnits || 0) * 10 : 20 + Math.min(2, s.shroomAcUnits || 0) * 10;
+    }
+    function shroomRackTemp(s) {
+        return s.shroomAcMode === 'heat' ? 20 + Math.min(2, s.shroomAcUnits || 0) * 10 : 20 - Math.min(2, s.shroomAcUnits || 0) * 10;
+    }
+    function shroomClimateQuality(s) {
+        const t = shroomBedTemp(s);
+        if (t <= 1 && t >= -1) return 1;
+        if (t < 15) return clamp01(0.65 + (15 - Math.abs(t)) * 0.02);
+        return 0.25;
+    }
+    function ensureShroomRun(s) {
+        if (!s.shroomRun) s.shroomRun = { phase: 'empty', progress: 0, q: 0.5, mists: 0, lastTick: performance.now?.() || Date.now() };
+        return s.shroomRun;
+    }
+    function processShrooms(s, dt) {
+        const g = s.shroomRun;
+        if (g?.phase === 'growing') {
+            const temp = shroomBedTemp(s);
+            g.lastTick ||= performance.now?.() || Date.now();
+            if (temp < 15) {
+                const speed = temp <= 1 ? 1.35 : 1.0;
+                g.progress = Math.min(1, (g.progress || 0) + dt * speed / (SHROOM_GROW_MS / 1000));
+                if (g.progress >= 1 && (g.mists || 0) >= SHROOM_MISTS_REQUIRED) {
+                    g.phase = 'ready';
+                    showPrompt('Mushroom flush ready. Harvest at the bed.');
+                }
+            }
+        }
+        const d = s.shroomDrying;
+        if (d?.qty > 0) {
+            const hot = shroomRackTemp(s) >= 40;
+            d.progress = Math.min(1, (d.progress || 0) + dt * (hot ? 2 : 1) / (SHROOM_DRY_MS / 1000));
+            if (d.progress >= 1) {
+                addProduct(s, 'shrooms', d.qty, d.q || 1);
+                if (prodQty(s, s.sellProduct) <= 0) s.sellProduct = 'shrooms';
+                floatText(`🍄 dried +${d.qty}`, labPosFor(s, 'shrooms'), PRODUCTS.shrooms.color);
+                s.shroomDrying = null;
+                saveProgress();
+            }
+        }
+    }
+    function addWetShrooms(s, qty, q) {
+        const total = (s.wetShrooms || 0) + qty;
+        s.wetShroomsQ = total > 0 ? ((s.wetShrooms || 0) * (s.wetShroomsQ || 1) + qty * q) / total : q;
+        s.wetShrooms = total;
+    }
+    function closeShroomPanel() {
+        const s = window.drugTycoon;
+        const wasOpen = !!_shroomEl?.parentNode || !!s?.shroomPanelOpen;
+        if (_shroomEl?.parentNode) _shroomEl.remove();
+        _shroomEl = null;
+        if (s) s.shroomPanelOpen = false;
+        gameplay.roguePaused = false;
+        const { renderer } = core;
+        if (wasOpen && renderer?.domElement && !window.matchMedia?.('(pointer:coarse)')?.matches) {
+            const resume = () => {
+                renderer.domElement.removeEventListener('click', resume);
+                try { renderer.domElement.requestPointerLock?.(); } catch (e) {}
+            };
+            renderer.domElement.addEventListener('click', resume);
+        }
+    }
+    function openShroomOverlay(titleText, bodyBuilder) {
+        const s = ensureState();
+        closeShroomPanel();
+        s.shroomPanelOpen = true;
+        gameplay.roguePaused = true;
+        try { document.exitPointerLock?.(); } catch (e) {}
+        const overlay = document.createElement('div');
+        overlay.className = 'tycoon-overlay';
+        overlay.style.cssText = 'position:absolute;inset:0;z-index:1200;pointer-events:auto;'
+            + 'background:rgba(8,6,12,0.88);backdrop-filter:blur(3px);display:flex;'
+            + 'flex-direction:column;align-items:center;justify-content:center;'
+            + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#f2eaff;';
+        const title = document.createElement('div');
+        title.textContent = titleText;
+        title.style.cssText = 'font:900 28px/1.1 inherit;margin-bottom:14px;color:#d8a0ff;text-shadow:0 0 18px #9a5ad0;';
+        overlay.appendChild(title);
+        bodyBuilder(overlay);
+        const close = document.createElement('button');
+        close.textContent = 'CANCEL (Esc)';
+        close.style.cssText = 'margin-top:16px;padding:9px 22px;cursor:pointer;font:800 14px/1 inherit;color:#fff;'
+            + 'border-radius:10px;background:rgba(80,30,70,0.8);border:2px solid rgba(220,160,255,0.35);';
+        close.onclick = closeShroomPanel;
+        overlay.appendChild(close);
+        (document.getElementById('canvas-container') || document.body)?.appendChild(overlay);
+        _shroomEl = overlay;
+    }
+    function openShroomSpawnGame() {
+        const s = ensureState();
+        if (!s.hasShrooms || (s.shroomSpawn || 0) <= 0) return;
+        openShroomOverlay('🍄 BREAK + STIR SPAWN', (overlay) => {
+            const info = document.createElement('div');
+            info.textContent = 'Break every spawn clump. Keep chunks on the bed.';
+            info.style.cssText = 'font:700 14px/1.3 inherit;opacity:.82;margin-bottom:14px;';
+            overlay.appendChild(info);
+            const bed = document.createElement('div');
+            bed.style.cssText = 'position:relative;width:560px;max-width:88vw;height:260px;border-radius:12px;'
+                + 'background:#3b2a20;border:3px solid #9a7048;box-shadow:0 10px 30px rgba(0,0,0,0.55);overflow:hidden;';
+            overlay.appendChild(bed);
+            let done = 0, fail = false;
+            const chunks = 8;
+            for (let i = 0; i < chunks; i++) {
+                const c = document.createElement('button');
+                c.type = 'button';
+                c.textContent = '●';
+                c.style.cssText = `position:absolute;left:${12 + Math.random() * 76}%;top:${16 + Math.random() * 66}%;`
+                    + 'width:36px;height:36px;border-radius:18px;border:0;cursor:pointer;color:#d8a0ff;'
+                    + 'background:#4a2d5e;font:900 22px/1 inherit;box-shadow:0 2px 8px rgba(0,0,0,0.5);';
+                c.onclick = () => {
+                    if (fail || c.dataset.done) return;
+                    const x = parseFloat(c.style.left) + (Math.random() - 0.5) * 18;
+                    const y = parseFloat(c.style.top) + (Math.random() - 0.5) * 18;
+                    c.style.left = `${x}%`; c.style.top = `${y}%`;
+                    if (x < 4 || x > 92 || y < 5 || y > 86) {
+                        fail = true;
+                        c.style.background = '#7a1f2a';
+                        info.textContent = 'Chunk fell off. Spawn wasted.';
+                        s.shroomSpawn = Math.max(0, (s.shroomSpawn || 0) - 1);
+                        setTimeout(() => { closeShroomPanel(); saveProgress(); updateHud(); }, 800);
+                        return;
+                    }
+                    c.dataset.done = '1';
+                    c.style.transform = 'scale(.55)';
+                    c.style.opacity = '.65';
+                    done++;
+                    if (done >= chunks) {
+                        s.shroomSpawn = Math.max(0, (s.shroomSpawn || 0) - 1);
+                        s.shroomRun = { phase: 'growing', progress: 0, q: 0.68 + shroomClimateQuality(s) * 0.12, mists: 0, lastTick: performance.now?.() || Date.now() };
+                        info.textContent = 'Spawn mixed. Keep bed under 15C and mist targets.';
+                        setTimeout(() => { closeShroomPanel(); saveProgress(); updateHud(); }, 900);
+                    }
+                };
+                bed.appendChild(c);
+            }
+        });
+    }
+    function openShroomMistGame() {
+        const s = ensureState();
+        const g = ensureShroomRun(s);
+        if (!s.sprayBottle || !s.sprayBottleFilled || g.phase !== 'growing') return;
+        openShroomOverlay('💧 SPRAY BOTTLE', (overlay) => {
+            const info = document.createElement('div');
+            info.textContent = 'Mist every blue target icon.';
+            info.style.cssText = 'font:700 14px/1.3 inherit;opacity:.82;margin-bottom:14px;';
+            overlay.appendChild(info);
+            const tray = document.createElement('div');
+            tray.style.cssText = 'position:relative;width:560px;max-width:88vw;height:260px;border-radius:12px;'
+                + 'background:#10202c;border:3px solid #7fd0ff;box-shadow:0 10px 30px rgba(0,0,0,0.55);overflow:hidden;';
+            overlay.appendChild(tray);
+            let hits = 0;
+            for (let i = 0; i < 5; i++) {
+                const t = document.createElement('button');
+                t.type = 'button';
+                t.textContent = '✦';
+                t.style.cssText = `position:absolute;left:${10 + Math.random() * 78}%;top:${12 + Math.random() * 70}%;`
+                    + 'width:44px;height:44px;border-radius:22px;border:2px solid #bfe9ff;cursor:pointer;'
+                    + 'color:#e8fbff;background:#1b6ea0;font:900 22px/1 inherit;box-shadow:0 0 16px #7fd0ff;';
+                t.onclick = () => {
+                    if (t.dataset.hit) return;
+                    t.dataset.hit = '1';
+                    t.style.opacity = '.25';
+                    hits++;
+                    if (hits >= 5) {
+                        s.sprayBottleFilled = false;
+                        g.mists = (g.mists || 0) + 1;
+                        g.q = clamp01((g.q || 0.6) + 0.08);
+                        info.textContent = `Mist locked (${g.mists}/${SHROOM_MISTS_REQUIRED}). Fill bottle at tap.`;
+                        setTimeout(() => { closeShroomPanel(); saveProgress(); updateHud(); }, 800);
+                    }
+                };
+                tray.appendChild(t);
+            }
+        });
+    }
+    function handleShroomBed(s, interact) {
+        if (!s.hasShrooms) return '🍄 Buy Mushroom Bed at upgrade desk';
+        const g = ensureShroomRun(s);
+        if (g.phase === 'empty') {
+            if ((s.mushroomSubstrate || 0) <= 0) return 'Need Mushroom Substrate';
+            if (interact) { s.mushroomSubstrate--; g.phase = 'substrate'; saveProgress(); }
+            return '[E] Pour Mushroom Substrate';
+        }
+        if (g.phase === 'substrate') {
+            if ((s.shroomSpawn || 0) <= 0) return 'Need Shroom Spawn';
+            if (interact) openShroomSpawnGame();
+            return '[E] Add Shroom Spawn';
+        }
+        if (g.phase === 'growing') {
+            const temp = shroomBedTemp(s);
+            if (temp >= 15) return `Too warm (${temp}C). Set AC to cool.`;
+            if ((g.mists || 0) < SHROOM_MISTS_REQUIRED) {
+                if (!s.sprayBottle) return 'Need Spray Bottle';
+                if (!s.sprayBottleFilled) return 'Fill Spray Bottle at tap';
+                if (interact) openShroomMistGame();
+                return `[E] Mist blue targets (${g.mists || 0}/${SHROOM_MISTS_REQUIRED})`;
+            }
+            return `Growing ${Math.round((g.progress || 0) * 100)}% · ${temp}C`;
+        }
+        if (g.phase === 'ready') {
+            if (interact) {
+                const q = clamp01((g.q || 0.65) + shroomClimateQuality(s) * 0.15);
+                const qty = Math.max(4, Math.round((6 + s.up.batch * 2) * (0.75 + q * 0.35)));
+                addWetShrooms(s, qty, q);
+                s.shroomRun = { phase: 'empty', progress: 0, q: 0.5, mists: 0, lastTick: performance.now?.() || Date.now() };
+                floatText(`🍄 wet flush +${qty}`, labPosFor(s, 'shrooms'), PRODUCTS.shrooms.color);
+                saveProgress(); updateHud();
+            }
+            return '[E] Harvest wet shrooms';
+        }
+        return 'Mushroom bed';
+    }
+    function handleSprayTap(s, interact) {
+        if (!s.sprayBottle) return 'Tap: buy Spray Bottle first';
+        if (s.sprayBottleFilled) return 'Spray Bottle full';
+        if (interact) { s.sprayBottleFilled = true; saveProgress(); updateHud(); }
+        return '[E] Fill Spray Bottle';
+    }
+    function handleShroomAc(s, interact) {
+        if ((s.shroomAcUnits || 0) <= 0) return 'Buy AC Unit at upgrade desk';
+        if (interact) { s.shroomAcMode = s.shroomAcMode === 'cool' ? 'heat' : 'cool'; saveProgress(); updateHud(); }
+        return `[E] AC ${s.shroomAcMode.toUpperCase()} · bed ${shroomBedTemp(s)}C · rack ${shroomRackTemp(s)}C`;
+    }
+    function handleShroomRack(s, interact) {
+        const d = s.shroomDrying;
+        if ((s.dryingRacks || 0) <= 0) return 'Need Drying Rack';
+        if (d?.qty > 0) return `Drying ${Math.round((d.progress || 0) * 100)}% · rack ${shroomRackTemp(s)}C${shroomRackTemp(s) >= 40 ? ' · fast' : ''}`;
+        if ((s.wetShrooms || 0) <= 0) return 'No wet shrooms';
+        if (interact) {
+            s.shroomDrying = { qty: s.wetShrooms, q: s.wetShroomsQ || 1, progress: 0 };
+            s.wetShrooms = 0; s.wetShroomsQ = 1;
+            saveProgress(); updateHud();
+        }
+        return `[E] Load Drying Rack (${s.wetShrooms} wet)`;
+    }
+
     // ---- pill lab: realistic multi-stage pill press --------------------
     // A four-stage craft that mirrors real tablet manufacture:
     //   1) WEIGH   — dose the active ingredient: stop a sweeping needle in the
@@ -1902,6 +2538,17 @@ export function createDrugTycoon(deps) {
     // Each stage returns 0..1; their average is the batch purity. Skill, not
     // memorisation — every stage is a live timing/precision check.
     const PILL_STAGES = ['weigh', 'blend', 'press', 'stamp'];
+    // Per-product stage sequences. pills/coke share the classic 4-step craft;
+    // meth + lsd get distinct mechanics (temphold / drop). Falls back to
+    // PILL_STAGES for anything unlisted.
+    const LAB_STAGES = {
+        pills: ['weigh', 'blend', 'press', 'stamp'],
+        coke:  ['weigh', 'blend', 'press', 'stamp'],
+        meth:    ['weigh', 'temphold', 'stamp'],   // measure → hold the cook temp → cut
+        lsd:     ['weigh', 'drop', 'drop'],        // measure → drop tabs twice
+        shrooms: ['weigh', 'mist', 'stamp'],       // inoculate → mist humidity → harvest
+    };
+    function labStages(product) { return LAB_STAGES[product] || PILL_STAGES; }
     // Per-product theming for the shared timing minigame. 'pills' presses
     // tablets; 'coke' cooks/cuts/whips/cuts the rock — same four mechanics,
     // different flavour text + colour so the indoor coke lab feels distinct.
@@ -1928,29 +2575,69 @@ export function createDrugTycoon(deps) {
             },
             btns: { weigh: 'LOCK BASE', blend: 'LOCK WASH', press: 'COOK! (mash)', stamp: 'CUT' },
         },
+        meth: {
+            emoji: '💎', name: 'METH LAB', accent: '#bfe9ff', accent2: '#ff5a3c', bg: 'rgba(6,10,14,0.88)',
+            titles: { weigh: '⚗️ MEASURE THE PRECURSOR', temphold: '🔥 HOLD THE COOK TEMP', stamp: '🧊 CRYSTALLISE & SHARD' },
+            hints: {
+                weigh: 'Stop the needle inside the green band — measure the precursor exactly.',
+                temphold: 'Mash [E]/Space/click to keep the temperature riding the moving green window. Too cold stalls, too hot scorches.',
+                stamp: 'Hit the moving marker in the sweet spot to break clean shards.',
+            },
+            btns: { weigh: 'LOCK DOSE', temphold: 'HEAT! (mash)', stamp: 'SHARD' },
+        },
+        lsd: {
+            emoji: '🌈', name: 'LSD LAB', accent: '#ffd24a', accent2: '#ff7fd0', bg: 'rgba(12,6,16,0.88)',
+            titles: { weigh: '⚗️ DOSE THE SOLUTION', drop: '💧 DROP THE TABS' },
+            hints: {
+                weigh: 'Stop the needle inside the green band — dose the solution just right.',
+                drop: 'The dropper sweeps across the blotter — tap to drop a tab right on the target.',
+            },
+            btns: { weigh: 'LOCK DOSE', drop: 'DROP!' },
+        },
+        shrooms: {
+            emoji: '🍄', name: 'SHROOM LAB', accent: '#d8a0ff', accent2: '#9a5ad0', bg: 'rgba(10,6,14,0.88)',
+            titles: { weigh: '⚗️ INOCULATE THE SUBSTRATE', mist: '💨 MIST THE HUMIDITY', stamp: '🍄 HARVEST THE FLUSH' },
+            hints: {
+                weigh: 'Stop the needle inside the green band — inoculate the substrate evenly.',
+                mist: 'Humidity rises and falls — tap to lock it inside the green band.',
+                stamp: 'Hit the moving marker in the sweet spot to harvest a clean flush.',
+            },
+            btns: { weigh: 'INOCULATE', mist: 'LOCK MIST', stamp: 'HARVEST' },
+        },
     };
     let _pillEl = null;
     let _pillRaf = 0;
 
-    // Open the indoor timing minigame for `product` ('pills' or 'coke').
+    // Open the indoor timing minigame for an unlocked side product.
     function openPillLab(product = 'pills') {
         const s = ensureState();
         if (s.pillGame || s.cooking || s.shopOpen || s.baggingOpen) return;
         const theme = LAB_THEME[product] || LAB_THEME.pills;
         if (!productUnlocked(s, product)) {
-            showPrompt(product === 'coke'
-                ? 'Buy a Coke Lab at the upgrade desk first'
-                : 'Buy a Pill Press at the upgrade desk first');
+            showPrompt(`${theme.emoji} Unlock ${PRODUCTS[product]?.name || 'this lab'} at the upgrade desk first`);
             return;
+        }
+        if (product === 'coke') {
+            const need = cokeLeavesNeeded(s);
+            if ((s.cocaLeaves || 0) < need) {
+                showPrompt(`Need ${need} coca leaves for a coke cook — grow Coca Seeds first`);
+                return;
+            }
         }
         if (prodQty(s, product) >= prodCap(s, product)) {
             showPrompt(`${theme.emoji} ${PRODUCTS[product].name} stash full — go sell`);
             return;
         }
+        const stages = labStages(product);
         s.pillGame = {
             product,
+            stages,                // this product's stage sequence
             stage: 0,
             scores: [],            // per-stage 0..1
+            // meth temphold: temperature drifts; hold it in a moving window.
+            temp: 0.5, tempVel: 0, tempWindow: 0.5, tempWindowDir: 1, tempHeld: 0, tempDeadline: 0, tempStarted: false,
+            // lsd drop: a target sweeps; tap to drop a tab, scored on accuracy.
+            dropX: 0, dropDir: 1, dropSpeed: 1.1 + Math.random() * 0.4, dropTarget: 0.5, dropBand: 0.12,
             // weigh: needle sweeps 0..1; target band centred randomly.
             needle: 0, needleDir: 1, needleSpeed: 0.95 + Math.random() * 0.25,
             weighTarget: 0.45 + Math.random() * 0.25, weighBand: 0.12,
@@ -1975,7 +2662,7 @@ export function createDrugTycoon(deps) {
         const s = window.drugTycoon;
         const g = s?.pillGame;
         if (!g || g.done) return;
-        const stage = PILL_STAGES[g.stage];
+        const stage = g.stages[g.stage];
         const now = performance.now?.() || Date.now();
         if (stage === 'weigh') {
             // Score by closeness of the needle to target (within band = high).
@@ -1999,16 +2686,35 @@ export function createDrugTycoon(deps) {
             const sc = clamp01(1 - off / g.stampBand);
             commitPillStage(g, sc);
             playSfx('shot', null, 0.35);
+        } else if (stage === 'temphold') {
+            // METH: tap injects a heat pulse to ride the moving safe window.
+            if (!g.tempStarted) { g.tempStarted = true; g.tempDeadline = now + 5000; }
+            g.tempVel += 0.9;
+            playSfx('hit', null, 0.3);
+        } else if (stage === 'drop') {
+            // LSD: tap drops a tab when the dropper sits over the target.
+            const off = Math.abs(g.dropX - g.dropTarget);
+            const sc = clamp01(1 - off / g.dropBand);
+            commitPillStage(g, sc);
+            playSfx('shot', null, 0.3);
+        } else if (stage === 'mist') {
+            // SHROOMS: humidity bar rises/falls (reuses blend mechanic) — tap to
+            // lock it inside the green band for the right grow humidity.
+            const off = Math.abs(g.blend - g.blendTarget);
+            commitPillStage(g, clamp01(1 - off / g.blendBand));
+            playSfx('hit', null, 0.4);
         }
     }
     function commitPillStage(g, score) {
         g.scores.push(clamp01(score));
         g.stage += 1;
-        // Reset per-stage transient timers for the next stage.
+        // Reset per-stage transient timers + re-randomise the next target.
         const now = performance.now?.() || Date.now();
         g.lastT = now;
         g.pressStarted = false;
-        if (g.stage >= PILL_STAGES.length) finishPillLab();
+        g.tempStarted = false; g.temp = 0.5; g.tempVel = 0; g.tempHeld = 0;
+        g.dropTarget = 0.2 + Math.random() * 0.6; g.dropX = 0; g.dropDir = 1;
+        if (g.stage >= g.stages.length) finishPillLab();
         else renderPillLab();
     }
 
@@ -2019,7 +2725,7 @@ export function createDrugTycoon(deps) {
         const now = performance.now?.() || Date.now();
         const dt = Math.min(0.05, Math.max(0.001, (now - g.lastT) / 1000));
         g.lastT = now;
-        const stage = PILL_STAGES[g.stage];
+        const stage = g.stages[g.stage];
         if (stage === 'weigh') {
             g.needle += g.needleDir * g.needleSpeed * dt;
             if (g.needle >= 1) { g.needle = 1; g.needleDir = -1; }
@@ -2042,6 +2748,31 @@ export function createDrugTycoon(deps) {
             g.stamp += g.stampDir * g.stampSpeed * dt;
             if (g.stamp >= 1) { g.stamp = 1; g.stampDir = -1; }
             else if (g.stamp <= 0) { g.stamp = 0; g.stampDir = 1; }
+        } else if (stage === 'temphold') {
+            // METH: temp falls under cooling; taps push it up. Keep it inside
+            // the drifting safe window to bank "in-window" time = the score.
+            g.tempVel -= 1.6 * dt;
+            g.temp = clamp01(g.temp + g.tempVel * dt);
+            if (g.temp <= 0) { g.temp = 0; g.tempVel = Math.max(0, g.tempVel); }
+            if (g.temp >= 1) { g.temp = 1; g.tempVel = Math.min(0, g.tempVel); }
+            g.tempWindow += g.tempWindowDir * 0.18 * dt;
+            if (g.tempWindow >= 0.78) { g.tempWindow = 0.78; g.tempWindowDir = -1; }
+            else if (g.tempWindow <= 0.22) { g.tempWindow = 0.22; g.tempWindowDir = 1; }
+            if (g.tempStarted && Math.abs(g.temp - g.tempWindow) <= 0.12) g.tempHeld += dt;
+            if (g.tempStarted && now >= g.tempDeadline) {
+                commitPillStage(g, clamp01(g.tempHeld / 3.2));
+                playSfx('hit', null, 0.5);
+            }
+        } else if (stage === 'drop') {
+            // LSD: dropper sweeps left↔right over the blotter sheet.
+            g.dropX += g.dropDir * g.dropSpeed * dt;
+            if (g.dropX >= 1) { g.dropX = 1; g.dropDir = -1; }
+            else if (g.dropX <= 0) { g.dropX = 0; g.dropDir = 1; }
+        } else if (stage === 'mist') {
+            // SHROOMS humidity bar rises/falls on its own (reuses blend var).
+            g.blend += g.blendDir * 0.8 * dt;
+            if (g.blend >= 1.05) { g.blend = 1.05; g.blendDir = -1; }
+            else if (g.blend <= 0) { g.blend = 0; g.blendDir = 1; }
         }
         renderPillLab(true);
         _pillRaf = requestAnimationFrame(tickPillLab);
@@ -2056,21 +2787,32 @@ export function createDrugTycoon(deps) {
         const s = ensureState();
         const g = s.pillGame;
         if (!g) return;
-        const stage = PILL_STAGES[g.stage];
+        const stage = g.stages[g.stage];
         // Live-update path: only refresh the moving indicators, not the whole
         // DOM, so the loop stays cheap.
         if (liveUpdate && _pillEl) {
             const mk = _pillEl.querySelector('#pill-marker');
             const fill = _pillEl.querySelector('#pill-fill');
+            const win = _pillEl.querySelector('#pill-window');
             if (stage === 'weigh' && mk) mk.style.left = `calc(${g.needle * 100}% - 2px)`;
-            else if (stage === 'blend' && fill) fill.style.width = `${Math.min(100, g.blend * 100)}%`;
+            else if ((stage === 'blend' || stage === 'mist') && fill) fill.style.width = `${Math.min(100, g.blend * 100)}%`;
             else if (stage === 'press' && fill) fill.style.width = `${Math.min(100, g.press * 100)}%`;
             else if (stage === 'stamp' && mk) mk.style.left = `calc(${g.stamp * 100}% - 2px)`;
+            else if (stage === 'drop' && mk) mk.style.left = `calc(${g.dropX * 100}% - 2px)`;
+            else if (stage === 'temphold') {
+                if (fill) fill.style.width = `${Math.min(100, g.temp * 100)}%`;
+                if (win) win.style.left = `calc(${(g.tempWindow - 0.12) * 100}%)`;
+            }
             const timer = _pillEl.querySelector('#pill-timer');
+            const now = performance.now?.() || Date.now();
             if (stage === 'press' && timer) {
-                const now = performance.now?.() || Date.now();
                 const rem = g.pressStarted ? Math.max(0, (g.pressDeadline - now) / 1000) : 3.0;
                 timer.textContent = `${rem.toFixed(1)}s`;
+            } else if (stage === 'temphold' && timer) {
+                const rem = g.tempStarted ? Math.max(0, (g.tempDeadline - now) / 1000) : 5.0;
+                const inWin = Math.abs(g.temp - g.tempWindow) <= 0.12;
+                timer.textContent = `${rem.toFixed(1)}s · ${inWin ? '✅ in range' : '⚠ off-temp'}`;
+                timer.style.color = inWin ? '#9dffa0' : '#ff8a8a';
             }
             return;
         }
@@ -2093,7 +2835,7 @@ export function createDrugTycoon(deps) {
         overlay.appendChild(title);
 
         const step = document.createElement('div');
-        step.textContent = `Step ${g.stage + 1} of ${PILL_STAGES.length}`;
+        step.textContent = `Step ${g.stage + 1} of ${g.stages.length}`;
         step.style.cssText = 'font:700 13px/1 inherit;opacity:.7;margin-bottom:6px;';
         overlay.appendChild(step);
 
@@ -2108,40 +2850,54 @@ export function createDrugTycoon(deps) {
         track.style.cssText = 'position:relative;width:520px;max-width:86vw;height:46px;border-radius:10px;'
             + `background:rgba(255,255,255,0.07);border:2px solid ${theme.accent}59;overflow:hidden;`;
 
-        if (stage === 'weigh' || stage === 'stamp') {
-            const center = stage === 'weigh' ? g.weighTarget : g.stampTarget;
-            const band = stage === 'weigh' ? g.weighBand : g.stampBand;
+        if (stage === 'weigh' || stage === 'stamp' || stage === 'drop') {
+            const center = stage === 'weigh' ? g.weighTarget : stage === 'stamp' ? g.stampTarget : g.dropTarget;
+            const band = stage === 'weigh' ? g.weighBand : stage === 'stamp' ? g.stampBand : g.dropBand;
             const green = document.createElement('div');
             green.style.cssText = `position:absolute;top:0;bottom:0;${bandStyle(center, band)}`
                 + 'background:rgba(120,255,150,0.35);border-left:2px solid #9dffa0;border-right:2px solid #9dffa0;';
             track.appendChild(green);
             const marker = document.createElement('div');
             marker.id = 'pill-marker';
-            const pos = stage === 'weigh' ? g.needle : g.stamp;
+            const pos = stage === 'weigh' ? g.needle : stage === 'stamp' ? g.stamp : g.dropX;
             marker.style.cssText = `position:absolute;top:-3px;bottom:-3px;width:4px;left:calc(${pos * 100}% - 2px);`
                 + 'background:#fff;box-shadow:0 0 10px #fff;';
             track.appendChild(marker);
+        } else if (stage === 'temphold') {
+            // METH: a temperature fill bar + a MOVING green safe window. Keep
+            // the fill's leading edge inside the window as it drifts.
+            const win = document.createElement('div');
+            win.id = 'pill-window';
+            win.style.cssText = `position:absolute;top:0;bottom:0;left:calc(${(g.tempWindow - 0.12) * 100}%);width:24%;`
+                + 'background:rgba(120,255,150,0.30);border-left:2px solid #9dffa0;border-right:2px solid #9dffa0;';
+            track.appendChild(win);
+            const fill = document.createElement('div');
+            fill.id = 'pill-fill';
+            fill.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${Math.min(100, g.temp * 100)}%;`
+                + `background:linear-gradient(90deg,${theme.accent},#ff5a3c);opacity:.75;`;
+            track.appendChild(fill);
         } else {
-            // blend / press: a fill bar + a target window overlay.
-            const center = stage === 'blend' ? g.blendTarget : g.pressTarget;
-            const band = stage === 'blend' ? g.blendBand : 0.18;
+            // blend / mist / press: a fill bar + a target window overlay.
+            const isBlendLike = stage === 'blend' || stage === 'mist';
+            const center = isBlendLike ? g.blendTarget : g.pressTarget;
+            const band = isBlendLike ? g.blendBand : 0.18;
             const green = document.createElement('div');
             green.style.cssText = `position:absolute;top:0;bottom:0;${bandStyle(center, band)}`
                 + 'background:rgba(120,255,150,0.30);border-left:2px solid #9dffa0;border-right:2px solid #9dffa0;';
             track.appendChild(green);
             const fill = document.createElement('div');
             fill.id = 'pill-fill';
-            const v = stage === 'blend' ? g.blend : g.press;
+            const v = isBlendLike ? g.blend : g.press;
             fill.style.cssText = `position:absolute;top:0;bottom:0;left:0;width:${Math.min(100, v * 100)}%;`
                 + `background:linear-gradient(90deg,${theme.accent},${theme.accent2});opacity:.7;`;
             track.appendChild(fill);
         }
         overlay.appendChild(track);
 
-        if (stage === 'press') {
+        if (stage === 'press' || stage === 'temphold') {
             const timer = document.createElement('div');
             timer.id = 'pill-timer';
-            timer.textContent = '3.0s';
+            timer.textContent = stage === 'temphold' ? '5.0s' : '3.0s';
             timer.style.cssText = 'font:800 16px/1 inherit;color:#ffd24a;margin-top:10px;';
             overlay.appendChild(timer);
         }
@@ -2149,7 +2905,7 @@ export function createDrugTycoon(deps) {
         // Completed-stage pips.
         const pips = document.createElement('div');
         pips.style.cssText = 'display:flex;gap:8px;margin-top:18px;';
-        PILL_STAGES.forEach((st, i) => {
+        g.stages.forEach((st, i) => {
             const done = i < g.scores.length;
             const sc = done ? g.scores[i] : 0;
             const c = done ? (sc >= 0.75 ? '#9dffa0' : sc >= 0.4 ? '#ffae00' : '#ff7070') : 'rgba(255,255,255,0.18)';
@@ -2193,14 +2949,25 @@ export function createDrugTycoon(deps) {
         const product = g.product || 'pills';
         const theme = LAB_THEME[product] || LAB_THEME.pills;
         const avg = g.scores.length ? g.scores.reduce((a, b) => a + b, 0) / g.scores.length : 0;
-        const q = Math.max(avg, purityFloor(s));
+        let q = Math.max(avg, purityFloor(s));
+        if (product === 'coke') {
+            const need = cokeLeavesNeeded(s);
+            if ((s.cocaLeaves || 0) < need) {
+                showPrompt(`Need ${need} coca leaves for a coke cook`);
+                closePillLab();
+                updateHud();
+                return;
+            }
+            const leafQ = consumeCocaLeaves(s, need);
+            q = clamp01(q * 0.75 + leafQ * 0.25);
+        }
         const room = prodCap(s, product) - prodQty(s, product);
         const made = Math.max(0, Math.min(room, Math.round(batchYield(s) * (0.5 + 0.5 * q))));
         addProduct(s, product, made, q);
         if (made > 0) award('firstCook');
         s.lastQ = q;
         if (prodQty(s, s.sellProduct) <= 0 && made > 0) s.sellProduct = product;
-        const where = (product === 'coke' ? s.cokeLabPos : s.pillLabPos) || s.cookPos;
+        const where = labPosFor(s, product) || s.cookPos;
         floatText(`${theme.emoji} +${made} @ ${Math.round(q * 100)}%`, where, q >= 0.75 ? '#9dffa0' : '#ffae00');
         playSfx('cash', null, 0.5);
         closePillLab();
@@ -2401,18 +3168,22 @@ export function createDrugTycoon(deps) {
 
         const pRow = document.createElement('div');
         pRow.style.cssText = `display:flex;gap:${gap}px;flex-wrap:wrap;justify-content:center;max-width:96vw;`;
-        const production = [
-            {
-                t: '💊 Pill Press', d: `Press ${PRODUCTS.pills.name} at the indoor lab — pays ${PRODUCTS.pills.priceMult}×, hotter`, cost: PILL_PRESS_PRICE,
-                owned: () => s.hasPillPress, color: PRODUCTS.pills.color,
-                buy: () => { s.hasPillPress = true; award('pillPress'); },
-            },
-            {
-                t: '❄️ Coke Lab', d: `Cook ${PRODUCTS.coke.name} — pays ${PRODUCTS.coke.priceMult}×, very hot`, cost: COKE_LAB_PRICE,
-                owned: () => s.hasCokeLab, color: PRODUCTS.coke.color,
-                buy: () => { s.hasCokeLab = true; award('cokeLab'); },
-            },
-        ];
+        // Data-driven from PRODUCTS: every locked, labPrice'd line is buyable.
+        const PROD_SHOP = {
+            shrooms: { t: '🍄 Mushroom Bed', d: `Grow ${PRODUCTS.shrooms.name} — pays ${PRODUCTS.shrooms.priceMult}×`, award: null },
+            pills:   { t: '💊 Pill Press',    d: `Press ${PRODUCTS.pills.name} at the indoor lab — pays ${PRODUCTS.pills.priceMult}×, hotter`, award: 'pillPress' },
+            coke:    { t: '❄️ Coke Lab',       d: `Cook ${PRODUCTS.coke.name} indoors — pays ${PRODUCTS.coke.priceMult}×, very hot`, award: 'cokeLab' },
+            meth:    { t: '💎 Meth Lab',       d: `Cook ${PRODUCTS.meth.name} indoors — pays ${PRODUCTS.meth.priceMult}×, runs very hot`, award: null },
+            lsd:     { t: '🌈 LSD Lab',        d: `Make ${PRODUCTS.lsd.name} indoors — pays ${PRODUCTS.lsd.priceMult}×, low heat`, award: null },
+        };
+        const production = Object.keys(PROD_SHOP).map((key) => {
+            const def = PRODUCTS[key], meta = PROD_SHOP[key];
+            return {
+                t: meta.t, d: meta.d, cost: def.labPrice, color: def.color,
+                owned: () => !!s[def.unlock],
+                buy: () => { s[def.unlock] = true; if (meta.award) award(meta.award); },
+            };
+        });
         production.forEach((w) => {
             const isOwned = w.owned();
             const afford = !isOwned && s.cash >= w.cost;
@@ -2440,6 +3211,48 @@ export function createDrugTycoon(deps) {
             pRow.appendChild(c);
         });
         overlay.appendChild(pRow);
+
+        if (s.shroomQuestStarted || s.hasShrooms) {
+            const sTitle = document.createElement('div');
+            sTitle.textContent = 'SHROOM SUPPLIES';
+            sTitle.style.cssText = `font:900 ${m ? 14 : 20}px/1 inherit;margin:${m ? 12 : 26}px 0 ${m ? 6 : 12}px;color:#d8a0ff;`
+                + 'text-shadow:0 0 14px rgba(216,160,255,0.4);';
+            overlay.appendChild(sTitle);
+            const sRow = document.createElement('div');
+            sRow.style.cssText = `display:flex;gap:${gap}px;flex-wrap:wrap;justify-content:center;max-width:96vw;`;
+            const supply = [
+                { t: 'Substrate', d: 'Pour into bed.', cost: SHROOM_SUBSTRATE_PRICE, sub: () => `Have: ${s.mushroomSubstrate || 0}`, buy: () => { s.mushroomSubstrate = (s.mushroomSubstrate || 0) + 1; } },
+                { t: 'Shroom Spawn', d: 'Break + stir minigame.', cost: SHROOM_SPAWN_PRICE, sub: () => `Have: ${s.shroomSpawn || 0}`, buy: () => { s.shroomSpawn = (s.shroomSpawn || 0) + 1; } },
+                { t: 'Spray Bottle', d: 'Fill at tap; mist blue targets.', cost: SHROOM_SPRAY_BOTTLE_PRICE, owned: () => s.sprayBottle, sub: () => s.sprayBottle ? (s.sprayBottleFilled ? 'FULL' : 'EMPTY') : 'one-time', buy: () => { s.sprayBottle = true; } },
+                { t: 'AC Unit', d: 'Cool bed or heat racks.', cost: SHROOM_AC_PRICE, sub: () => `${s.shroomAcUnits || 0}/2`, buy: () => { s.shroomAcUnits = Math.min(2, (s.shroomAcUnits || 0) + 1); }, maxed: () => (s.shroomAcUnits || 0) >= 2 },
+                { t: 'Drying Rack', d: 'Dry wet shrooms.', cost: SHROOM_RACK_PRICE, sub: () => `${s.dryingRacks || 0}/1`, buy: () => { s.dryingRacks = Math.min(1, (s.dryingRacks || 0) + 1); }, maxed: () => (s.dryingRacks || 0) >= 1 },
+            ];
+            supply.forEach((w) => {
+                const isOwned = w.owned?.() || w.maxed?.();
+                const afford = !isOwned && s.cash >= w.cost && s.hasShrooms;
+                const c = document.createElement('button');
+                c.style.cssText = `cursor:pointer;color:#f7eaff;text-align:center;width:${wch}px;height:${ch}px;`
+                    + `padding:${pad};border-radius:${m ? 10 : 14}px;box-sizing:border-box;`
+                    + 'background:linear-gradient(160deg,rgba(38,18,52,0.95),rgba(16,8,24,0.95));'
+                    + `border:2px solid ${(afford || isOwned) ? 'rgba(216,160,255,0.65)' : 'rgba(120,120,120,0.4)'};`
+                    + 'box-shadow:0 8px 30px rgba(0,0,0,0.5);transition:transform .12s;'
+                    + ((afford || isOwned) ? '' : 'opacity:.55;');
+                c.innerHTML = `<div style="font:800 ${tTitle}px/1.2 inherit;color:#d8a0ff;margin-bottom:${m ? 4 : 10}px;">${w.t}</div>`
+                    + `<div style="font:600 ${tDesc}px/1.3 inherit;opacity:.92;margin-bottom:${m ? 6 : 12}px;">${w.d}</div>`
+                    + `<div style="font:700 ${tSub}px/1 inherit;opacity:.8;">${w.sub()}</div>`
+                    + `<div style="margin-top:${m ? 6 : 14}px;font:800 ${tCost}px/1 inherit;color:${isOwned ? '#9dffa0' : (afford ? '#d8a0ff' : '#ff8a8a')};">${isOwned ? '✓ Owned' : '$' + w.cost.toLocaleString()}</div>`;
+                c.onmouseenter = () => { c.style.transform = 'translateY(-6px)'; };
+                c.onmouseleave = () => { c.style.transform = 'none'; };
+                c.onclick = () => {
+                    if (isOwned || !s.hasShrooms || s.cash < w.cost) return;
+                    s.cash -= w.cost;
+                    w.buy();
+                    renderShop(); updateHud(); saveProgress();
+                };
+                sRow.appendChild(c);
+            });
+            overlay.appendChild(sRow);
+        }
 
         // ---- vehicle: buy the car (parks it home + unlocks deliveries) ----
         const vTitle = document.createElement('div');
@@ -2755,10 +3568,12 @@ export function createDrugTycoon(deps) {
     }
 
     // ---- NPC buyers + police -------------------------------------------
-    // Humanoid people (box-limb groups from the ragdoll module), walked
-    // kinematically here. On death they convert to a Jolt ragdoll.
+    // Humanoid people use a hidden ragdoll box rig with a visible Man.fbx
+    // shell. They still move kinematically here; on death the hidden rig is
+    // revealed and converted to a Jolt ragdoll.
     const SKIN_TONES = ['#e8b893', '#c68642', '#8d5524', '#f1c27d', '#ffdbac'];
     const SHIRT_TONES = ['#3da6ff', '#2dd4bf', '#f97316', '#a855f7', '#eab308', '#ef4444'];
+    let buyerSpawnSerial = 0;
     function randomFrom(arr) { return arr[(Math.random() * arr.length) | 0]; }
 
     function placePerson(group, x, y, z, faceY = 0) {
@@ -2768,13 +3583,20 @@ export function createDrugTycoon(deps) {
         group.updateMatrixWorld(true);
         scene?.add(group);
     }
-    function spawnBuyer(s, layout) {
-        const shirtColor = randomFrom(SHIRT_TONES);
-        const group = ragdoll.makePerson({
+    function makeBuyerMesh(shirtColor) {
+        const useEmmyVisual = (buyerSpawnSerial++ % 10) === 0;
+        return makeTycoonPersonMesh({
             skinColor: randomFrom(SKIN_TONES),
             shirtColor,
             pantsColor: '#22303c',
+            showColorBadge: false,
+            badgeColor: shirtColor,
+            useWalkingVisual: useEmmyVisual,
         });
+    }
+    function spawnBuyer(s, layout) {
+        const shirtColor = randomFrom(SHIRT_TONES);
+        const group = makeBuyerMesh(shirtColor);
         const radius = layout.streetRadius ?? 16;
         const ang = Math.random() * Math.PI * 2;
         const sp = pushOffRoad(new THREE.Vector3(Math.cos(ang) * radius, 0, Math.sin(ang) * radius));
@@ -2910,10 +3732,12 @@ export function createDrugTycoon(deps) {
     function spawnRivalDealer(s, layout) {
         // Notorious players draw armed rivals: a dark jacket marks the shooters.
         const armed = (s.heat || 0) >= RIVAL_ARM_HEAT && Math.random() < RIVAL_ARM_CHANCE;
-        const group = ragdoll.makePerson({
+        const group = makeTycoonPersonMesh({
             skinColor: randomFrom(SKIN_TONES),
             shirtColor: armed ? '#3a0d0d' : '#7f1d1d',
             pantsColor: '#151515',
+            showColorBadge: true,
+            badgeColor: armed ? '#ff5a5a' : '#ff8a8a',
         });
         const radius = (layout.streetRadius ?? 16) * 1.05;
         const ang = Math.random() * Math.PI * 2;
@@ -2935,10 +3759,12 @@ export function createDrugTycoon(deps) {
         return rival;
     }
     function spawnPolice(s, layout) {
-        const group = ragdoll.makePerson({
+        const group = makeTycoonPersonMesh({
             skinColor: randomFrom(SKIN_TONES),
             shirtColor: '#1d4ed8',   // police blue
             pantsColor: '#0b1b3a',
+            showColorBadge: true,
+            badgeColor: '#4f8cff',
         });
         // Cops spawn ONLY at the map edges (perimeter), then walk inward — a
         // random point on the square boundary just inside the wall.
@@ -3006,10 +3832,12 @@ export function createDrugTycoon(deps) {
     // Spawn the visible body for one hired dealer (shirt = their old buyer
     // colour, with a green armband cue) and register it in s.crew.
     function spawnCrewMember(s, layout, color, xp = 0, earned = 0) {
-        const group = ragdoll.makePerson({
+        const group = makeTycoonPersonMesh({
             skinColor: randomFrom(SKIN_TONES),
             shirtColor: color,
             pantsColor: '#22331f',
+            showColorBadge: true,
+            badgeColor: color,
         });
         const p = randomStreetPoint(layout);
         placePerson(group, p.x, layout.spawnY ?? 0, p.z);
@@ -3018,9 +3846,12 @@ export function createDrugTycoon(deps) {
         let cap = null;
         try {
             const capColor = CREW_RANKS[rank].cap;
+            const capMat = group.userData?.isWalkingFbxBuyer
+                ? makeWalkingBuyerBlackMaterial()
+                : new THREE.MeshStandardMaterial({ color: capColor, emissive: capColor, emissiveIntensity: 0.5 });
             cap = new THREE.Mesh(
                 new THREE.BoxGeometry(0.4, 0.16, 0.4),
-                new THREE.MeshStandardMaterial({ color: capColor, emissive: capColor, emissiveIntensity: 0.5 }),
+                capMat,
             );
             cap.position.set(0, 2.02, 0);
             group.add(cap);
@@ -3040,7 +3871,14 @@ export function createDrugTycoon(deps) {
     function recolorCrewCap(m) {
         if (!m.cap?.material) return;
         const c = CREW_RANKS[m.rank].cap;
-        try { m.cap.material.color.setHex(c); m.cap.material.emissive.setHex(c); } catch (e) {}
+        try {
+            if (m.mesh?.userData?.isWalkingFbxBuyer) {
+                m.cap.material.color.copy(WALKING_BUYER_BASE_TINT);
+            } else {
+                m.cap.material.color.setHex(c);
+                m.cap.material.emissive.setHex(c);
+            }
+        } catch (e) {}
     }
     // Rebuild crew bodies from a save. Newer saves store {color,xp,earned};
     // older ones stored bare colour strings — handle both.
@@ -3212,17 +4050,70 @@ export function createDrugTycoon(deps) {
         return 0;
     }
     let _sunLight = null;
+    let _dayAmbientLight = null;
+    let _dayHemiLight = null;
+    let _skyDome = null;
+    let _outdoorPracticalLights = [];
     const _dayColor = new THREE.Color(0xfff0d0);
     const _nightColor = new THREE.Color(0x2a3a66);
     const _daySky = new THREE.Color(0x9ec4ff);
     const _nightSky = new THREE.Color(0x070b18);
     const _tmpColor = new THREE.Color();
-    function findSun() {
-        if (_sunLight && _sunLight.parent) return _sunLight;
+    function findTycoonOutdoorLighting() {
         const { scene } = core;
         if (!scene) return null;
-        scene.traverse((o) => { if (!_sunLight && o.name === 'tycoon-sun') _sunLight = o; });
-        return _sunLight;
+        const cacheWarm = (!_sunLight || _sunLight.parent)
+            && (!_dayAmbientLight || _dayAmbientLight.parent)
+            && (!_dayHemiLight || _dayHemiLight.parent)
+            && (!_skyDome || _skyDome.parent)
+            && _outdoorPracticalLights.every((light) => light?.parent);
+        if (cacheWarm && (_sunLight || _dayAmbientLight || _dayHemiLight || _skyDome || _outdoorPracticalLights.length)) {
+            return {
+                sun: _sunLight,
+                dayAmbient: _dayAmbientLight,
+                dayHemi: _dayHemiLight,
+                skyDome: _skyDome,
+                practicalLights: _outdoorPracticalLights,
+            };
+        }
+        _sunLight = null;
+        _dayAmbientLight = null;
+        _dayHemiLight = null;
+        _skyDome = null;
+        _outdoorPracticalLights = [];
+        scene.traverse((o) => {
+            if (!_sunLight && o.name === 'tycoon-sun') {
+                _sunLight = o;
+                return;
+            }
+            if (!_dayAmbientLight && o.name === 'tycoon-day-ambient') {
+                _dayAmbientLight = o;
+                return;
+            }
+            if (!_dayHemiLight && o.name === 'tycoon-day-hemi') {
+                _dayHemiLight = o;
+                return;
+            }
+            if (!_skyDome && o.name === 'tycoon-skybox') {
+                _skyDome = o;
+                return;
+            }
+            if (!o.isPointLight || typeof o.name !== 'string') return;
+            const isPractical = o.name === 'weedshop-interior'
+                || o.name === 'weedshop-spill'
+                || o.name.startsWith('weedshop-sign-light-')
+                || o.name.startsWith('tycoon-lamp-');
+            if (!isPractical) return;
+            if (!Number.isFinite(o.userData.tycoonBaseIntensity)) o.userData.tycoonBaseIntensity = o.intensity;
+            _outdoorPracticalLights.push(o);
+        });
+        return {
+            sun: _sunLight,
+            dayAmbient: _dayAmbientLight,
+            dayHemi: _dayHemiLight,
+            skyDome: _skyDome,
+            practicalLights: _outdoorPracticalLights,
+        };
     }
     // Fresh per-day accumulator. repStart anchors the day's net rep change.
     function newDayStats(s) {
@@ -3251,18 +4142,35 @@ export function createDrugTycoon(deps) {
             saveProgress();
         }
         const n = nightFactor(s);
-        const sun = findSun();
+        const outdoorLighting = findTycoonOutdoorLighting();
+        const sun = outdoorLighting?.sun || null;
         if (sun) {
-            sun.intensity = 14 * (1 - n) + 1.5 * n;       // bright day → dim night
+            sun.intensity = 0.22 * (1 - n) + 0.04 * n;
             _tmpColor.copy(_dayColor).lerp(_nightColor, n);
             sun.color.copy(_tmpColor);
         }
         const { scene } = core;
+        if (outdoorLighting?.dayAmbient) {
+            outdoorLighting.dayAmbient.intensity = 0.12 * (1 - n) + 0.035 * n;
+        }
+        if (outdoorLighting?.dayHemi) {
+            outdoorLighting.dayHemi.intensity = 0.08 * (1 - n) + 0.025 * n;
+        }
+        const practicalNight = THREE.MathUtils.smoothstep(n, 0.35, 1.0);
+        for (const light of outdoorLighting?.practicalLights || []) {
+            const baseIntensity = Number.isFinite(light?.userData?.tycoonBaseIntensity)
+                ? light.userData.tycoonBaseIntensity
+                : light.intensity;
+            let dayScale = 0;
+            if (light.name === 'weedshop-interior') dayScale = 0.05;
+            else if (light.name.startsWith('weedshop-sign-light-')) dayScale = 0.03;
+            else if (light.name === 'weedshop-spill') dayScale = 0.0;
+            light.intensity = baseIntensity * THREE.MathUtils.lerp(dayScale, 1.0, practicalNight);
+        }
         // If the level placed a procedural sky dome ("tycoon-skybox"), tint it
         // by the day→night factor and leave scene.background alone. Otherwise
         // fall back to the legacy solid-color background swap.
-        let skyDome = null;
-        if (scene) scene.traverse((o) => { if (!skyDome && o.name === 'tycoon-skybox') skyDome = o; });
+        const skyDome = outdoorLighting?.skyDome || null;
         if (skyDome?.material) {
             _tmpColor.copy(_daySky).lerp(_nightSky, n);
             skyDome.material.color.copy(_tmpColor);
@@ -4227,9 +5135,20 @@ export function createDrugTycoon(deps) {
     // Phase advances proportional to walk speed; legs swing front/back on X axis,
     // arms swing opposite. When stopped (movingSpeed=0) limbs ease back to rest.
     function animateWalk(mesh, movingSpeed, dt) {
+        const ud = mesh.userData || {};
+        if (ud.walkingMixer) {
+            const moving = movingSpeed > 0.05;
+            if (ud.walkingAction) {
+                ud.walkingAction.paused = !moving;
+                ud.walkingAction.timeScale = moving
+                    ? THREE.MathUtils.clamp(movingSpeed / NPC_WANDER_SPEED, 0.65, 1.35)
+                    : 0;
+            }
+            if (moving) ud.walkingMixer.update(dt);
+            return;
+        }
         const parts = mesh.userData?.parts;
         if (!parts || parts.length < 6) return;
-        const ud = mesh.userData;
         ud.walkPhase = (ud.walkPhase || 0) + (movingSpeed > 0 ? movingSpeed * 4.2 * dt : 0);
         const phase = ud.walkPhase;
         const amp = movingSpeed > 0 ? 0.6 : 0;
@@ -4493,6 +5412,7 @@ export function createDrugTycoon(deps) {
                 plant.moisture = typeof d.moisture === 'number' ? d.moisture : (plant.watered ? 1 : 0);
                 plant.pest = !!d.pest;
                 plant.tier = d.tier | 0;
+                plant.crop = d.crop || SEED_TIERS[plant.tier]?.crop || 'weed';
                 plant.juiceMult = d.juiceMult || 1;
                 plant.lastTick = now;   // resume growth clock from load time
                 plant.driedAt = (!plant.watered && d.dryRemain > 0) ? now + d.dryRemain : 0;
@@ -4561,6 +5481,7 @@ export function createDrugTycoon(deps) {
         plant.progress = 0;
         plant.health = 1;
         plant.tier = tier;                  // drives grow speed + harvest yield/quality
+        plant.crop = seed.crop || 'weed';   // coke line uses coca leaves, not buds
         plant.juiceMult = 1;                // grow-juice boost (1 = none); pour at the shop
         plant.lastTick = now;
         plant.driedAt = now + DRY_OUT_MS;   // un-watered seeds wilt eventually
@@ -4595,6 +5516,7 @@ export function createDrugTycoon(deps) {
                 // the pot empties (lost seed) so water promptly.
                 if (p.driedAt && now >= p.driedAt) {
                     p.planted = false; p.progress = 0; p.stage = 0; p.health = 1;
+                    p.crop = null;
                     p._visualDirty = true;
                     if (visual) {
                         applyPlantGrowth(p);
@@ -4697,7 +5619,7 @@ export function createDrugTycoon(deps) {
         }
         if (ripe) {
             if (interactR) harvestPlant(s, plant);
-            return '[E] Harvest plant';
+            return (plant.crop || SEED_TIERS[plant.tier ?? 0]?.crop) === 'coca' ? '[E] Harvest coca leaves' : '[E] Harvest plant';
         }
         // Growing: show progress %, moisture and health as a quick status line.
         const pct = Math.round((plant.progress ?? 0) * 100);
@@ -4719,22 +5641,32 @@ export function createDrugTycoon(deps) {
         const seed = SEED_TIERS[plant.tier ?? 0] ?? SEED_TIERS[0];
         // Yield scales with grow health AND the seed tier's yield multiplier.
         const health = clamp01(plant.health ?? 1);
-        const yield_ = Math.max(2, Math.round(BUDS_PER_PLANT * (0.6 + 0.6 * health) * seed.yieldMult));
+        const isCoca = (plant.crop || seed.crop) === 'coca';
+        const baseYield = isCoca ? COCA_LEAVES_PER_PLANT : BUDS_PER_PLANT;
+        const yield_ = Math.max(2, Math.round(baseYield * (0.6 + 0.6 * health) * seed.yieldMult));
         // Quality: base + health + grow-lights + the seed tier's potency bonus.
         const q = clamp01(0.45 + health * 0.45 + (s.baseUp?.lights || 0) * 0.08 + seed.qBonus);
-        blendBudQuality(s, yield_, q);
-        s.buds += yield_;
-        s._budsHarvested = (s._budsHarvested | 0) + yield_;   // award counter
+        if (isCoca) {
+            blendCocaQuality(s, yield_, q);
+            s.cocaLeaves = (s.cocaLeaves || 0) + yield_;
+        } else {
+            blendBudQuality(s, yield_, q);
+            s.buds += yield_;
+            s._budsHarvested = (s._budsHarvested | 0) + yield_;   // award counter
+        }
         // Back to an empty pot — replant + rewater for the next crop.
         plant.planted = false;
         plant.watered = false;
         plant.stage = 0;
         plant.progress = 0;
         plant.health = 1;
+        plant.crop = null;
         plant.driedAt = 0;
         plant.juiceMult = 1;       // pour-on boost is one-shot per plant
         applyPlantGrowth(plant);
-        floatText(`+${yield_} buds ${Math.round(q * 100)}%`, plant.mesh.position.clone().setY(plant.mesh.position.y + 1.4), '#b6ff6a');
+        floatText(isCoca ? `+${yield_} coca leaves ${Math.round(q * 100)}%` : `+${yield_} buds ${Math.round(q * 100)}%`, plant.mesh.position.clone().setY(plant.mesh.position.y + 1.4), isCoca ? '#bfe9ff' : '#b6ff6a');
+        updateHud();
+        saveProgress();
     }
 
     // ---- physics bagging: drag buds across the bench into the bag -------
@@ -5434,6 +6366,9 @@ export function createDrugTycoon(deps) {
             if (Array.isArray(layout.upgradePad)) s.upgradePos.set(...layout.upgradePad);
             if (Array.isArray(layout.pillLab)) { s.pillLabPos ||= new THREE.Vector3(); s.pillLabPos.set(...layout.pillLab); }
             if (Array.isArray(layout.cokeLab)) { s.cokeLabPos ||= new THREE.Vector3(); s.cokeLabPos.set(...layout.cokeLab); }
+            if (Array.isArray(layout.methLab)) { s.methLabPos ||= new THREE.Vector3(); s.methLabPos.set(...layout.methLab); }
+            if (Array.isArray(layout.lsdLab)) { s.lsdLabPos ||= new THREE.Vector3(); s.lsdLabPos.set(...layout.lsdLab); }
+            if (Array.isArray(layout.shroomLab)) { s.shroomLabPos ||= new THREE.Vector3(); s.shroomLabPos.set(...layout.shroomLab); }
             if (Array.isArray(layout.seedShop)) s.seedPos.set(...layout.seedShop);
             if (Array.isArray(layout.juiceShop)) s.juicePos.set(...layout.juiceShop);
             // The pistol is bought at the upgrade desk now — no free yard pickup.
@@ -5451,8 +6386,9 @@ export function createDrugTycoon(deps) {
         setPlantsVisible(s, s.inRoom);
         updatePlants(s, s.inRoom);
         advanceDayNight(s, dt);   // sun/sky animate even in menus / grow room
+        processShrooms(s, dt);
 
-        if (s.summaryOpen || s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.cooking || s.pillGame || s.baggingOpen || s.helpOpen) { stopSiren(); if (s.phoneOpen) setPhone(false); if (_compassEl) _compassEl.style.display = 'none'; updateHud(); return; } // sim frozen in a menu
+        if (s.summaryOpen || s.shopOpen || s.seedShopOpen || s.juiceShopOpen || s.shroomPanelOpen || s.cooking || s.pillGame || s.baggingOpen || s.helpOpen) { stopSiren(); if (s.phoneOpen) setPhone(false); if (_compassEl) _compassEl.style.display = 'none'; updateHud(); return; } // sim frozen in a menu
         if (!playerPos) return;
         processRandomEvents(s, layout);
         processBounties(s);
@@ -5536,6 +6472,24 @@ export function createDrugTycoon(deps) {
             const coke = layout.cokeLab;
             const dCoke = Array.isArray(coke)
                 ? Math.hypot(coke[0] - playerPos.x, coke[2] - playerPos.z) : Infinity;
+            const methL = layout.methLab;
+            const dMeth = Array.isArray(methL)
+                ? Math.hypot(methL[0] - playerPos.x, methL[2] - playerPos.z) : Infinity;
+            const lsdL = layout.lsdLab;
+            const dLsd = Array.isArray(lsdL)
+                ? Math.hypot(lsdL[0] - playerPos.x, lsdL[2] - playerPos.z) : Infinity;
+            const shroomL = layout.shroomLab;
+            const dShroom = Array.isArray(shroomL)
+                ? Math.hypot(shroomL[0] - playerPos.x, shroomL[2] - playerPos.z) : Infinity;
+            const shroomTap = layout.shroomTap;
+            const dShroomTap = Array.isArray(shroomTap)
+                ? Math.hypot(shroomTap[0] - playerPos.x, shroomTap[2] - playerPos.z) : Infinity;
+            const shroomAc = layout.shroomAc;
+            const dShroomAc = Array.isArray(shroomAc)
+                ? Math.hypot(shroomAc[0] - playerPos.x, shroomAc[2] - playerPos.z) : Infinity;
+            const shroomRack = layout.shroomRack;
+            const dShroomRack = Array.isArray(shroomRack)
+                ? Math.hypot(shroomRack[0] - playerPos.x, shroomRack[2] - playerPos.z) : Infinity;
 
             // Sell to a customer who walked into the shop and queued at the
             // counter. Same rules as the street sell — must match the phone
@@ -5587,11 +6541,43 @@ export function createDrugTycoon(deps) {
             } else if (dCoke < 2.8) {
                 if (!productUnlocked(s, 'coke')) {
                     promptR = '❄️ Coke lab — buy a Coke Lab at the desk to use';
+                } else if ((s.cocaLeaves || 0) < cokeLeavesNeeded(s)) {
+                    promptR = `❄️ Need ${cokeLeavesNeeded(s)} coca leaves — grow Coca Seeds`;
                 } else if (prodQty(s, 'coke') >= prodCap(s, 'coke')) {
                     promptR = 'Coke stash full — go sell';
                 } else {
                     promptR = '❄️ [E] Cook coke';
                     if (interactR) openPillLab('coke');
+                }
+            } else if (dMeth < 2.8) {
+                if (!productUnlocked(s, 'meth')) {
+                    promptR = '💎 Meth lab — buy a Meth Lab at the desk to use';
+                } else if (prodQty(s, 'meth') >= prodCap(s, 'meth')) {
+                    promptR = 'Meth stash full — go sell';
+                } else {
+                    promptR = '💎 [E] Cook meth';
+                    if (interactR) openPillLab('meth');
+                }
+            } else if (dLsd < 2.8) {
+                if (!productUnlocked(s, 'lsd')) {
+                    promptR = '🌈 LSD lab — buy an LSD Lab at the desk to use';
+                } else if (prodQty(s, 'lsd') >= prodCap(s, 'lsd')) {
+                    promptR = 'LSD stash full — go sell';
+                } else {
+                    promptR = '🌈 [E] Make LSD';
+                    if (interactR) openPillLab('lsd');
+                }
+            } else if (dShroomTap < 2.3) {
+                promptR = handleSprayTap(s, interactR);
+            } else if (dShroomAc < 2.3) {
+                promptR = handleShroomAc(s, interactR);
+            } else if (dShroomRack < 2.8) {
+                promptR = handleShroomRack(s, interactR);
+            } else if (dShroom < 2.8) {
+                if (prodQty(s, 'shrooms') >= prodCap(s, 'shrooms')) {
+                    promptR = 'Shroom stash full — go sell';
+                } else {
+                    promptR = handleShroomBed(s, interactR);
                 }
             } else if (dBed < 2.4) {
                 promptR = '[E] Sleep until morning';
@@ -5879,9 +6865,15 @@ export function createDrugTycoon(deps) {
                 floatText(`${loyResult.tier.badge} ${loyResult.tier.name} +${Math.round((loyResult.tier.mult - 1) * 100)}%`, wp.clone().setY(wp.y + 3.0), loyResult.tier.color);
             }
             playSfx('cash', wp.clone());     // cha-ching
+            cashBurst(wp.clone().setY(wp.y + 1.0), Math.min(14, 4 + sellQty * 2 + Math.round(cm * 2)), hot ? '#ffe066' : '#9dffa0');
         }
-        // A satisfying combo kick on the camera.
-        if (cm > 1 && gameplay.hitFeedback) gameplay.hitFeedback.shake = Math.max(gameplay.hitFeedback.shake || 0, 0.12 + cm * 0.05);
+        // Combo callout + a satisfying camera kick that grows with the streak.
+        if (cm > 1) {
+            const tier = cm >= COMBO_MAX ? 'MAX COMBO!' : s.combo >= 4 ? 'BIG COMBO!' : 'COMBO!';
+            bigPopup(`${tier} x${cm.toFixed(2).replace(/0$/, '')}`, cm >= COMBO_MAX ? '#ffe066' : '#7fd0ff', Math.min(1.6, 0.9 + cm * 0.18));
+            playSfx('ding', null, Math.min(0.9, 0.4 + cm * 0.15));
+            if (gameplay.hitFeedback) gameplay.hitFeedback.shake = Math.max(gameplay.hitFeedback.shake || 0, 0.12 + cm * 0.05);
+        }
 
         // ---- big-order bounty progress -----------------------------------
         progressBounty(s, pk, npc.shirtColor, sellQty, wp);
@@ -5904,9 +6896,14 @@ export function createDrugTycoon(deps) {
         // any physics buds out on the bench.
         s.stash = 0;
         s.stashQ = 1;
-        if (s.prod) { s.prod.pills = { qty: 0, q: 1 }; s.prod.coke = { qty: 0, q: 1 }; }
+        if (s.prod) { for (const k of SIDE_PRODUCT_KEYS) s.prod[k] = { qty: 0, q: 1 }; }
         s.buds = 0;
         s.budsQ = 1;
+        s.cocaLeaves = 0;
+        s.cocaLeavesQ = 1;
+        s.wetShrooms = 0;
+        s.wetShroomsQ = 1;
+        s.shroomDrying = null;
         try { clearPhysBuds(s); } catch (e) {}
         s.heat = 0;           // heat resets after a bust
         s.busted += 1;
@@ -5917,6 +6914,9 @@ export function createDrugTycoon(deps) {
         if (cp) {
             floatText(`BUSTED -$${fine} · lost stash`, cp.clone().setY(cp.y + 1.9), '#ff5555');
         }
+        bigPopup('🚨 BUSTED', '#ff4444', 1.5);
+        playSfx('hit', cp ? cp.clone() : null, 0.8);
+        if (gameplay.hitFeedback) gameplay.hitFeedback.shake = Math.max(gameplay.hitFeedback.shake || 0, 0.6);
         // Light health knock so it stings; never lethal.
         try { setPlayerHealth(Math.max(0.35, (gameplay.health ?? 1) - 0.25)); } catch (e) {}
         // Ragdoll every cop on the scene (heat cops + night patrol) — you barge

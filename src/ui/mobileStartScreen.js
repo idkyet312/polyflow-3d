@@ -72,7 +72,8 @@ const pauseState = {
 
 let mobileState, gameplay, physics, worldEnvState, WORLD_ENV_DEFAULTS;
 let setCameraMode, setMobileMenuOpen, loadSample, setPerfModeEnabled,
-    applyWorldEnvState, resetMobileInputState, requestGameplayPointerLock;
+    applyWorldEnvState, resetMobileInputState, requestGameplayPointerLock,
+    applyMobileModeState;
 let highBloomTimer = null;
 
 export function setupMobileStartScreen(deps) {
@@ -89,6 +90,7 @@ export function setupMobileStartScreen(deps) {
         applyWorldEnvState,
         resetMobileInputState,
         requestGameplayPointerLock,
+        applyMobileModeState,
     } = deps);
 
     const startScreen = document.getElementById('mobile-start-screen');
@@ -102,6 +104,8 @@ export function setupMobileStartScreen(deps) {
     const qualityLowBtn = document.getElementById('mobile-quality-low');
     const qualityMedBtn = document.getElementById('mobile-quality-med');
     const qualityHighBtn = document.getElementById('mobile-quality-high');
+    const uiDesktopBtn = document.getElementById('mobile-ui-desktop');
+    const uiMobileBtn = document.getElementById('mobile-ui-mobile');
     if (!startScreen || startScreen.dataset.ready === 'true') return;
     startScreen.dataset.ready = 'true';
 
@@ -207,7 +211,10 @@ export function setupMobileStartScreen(deps) {
     qualityLowBtn?.addEventListener('click', () => applyMobileQualitySetting('low'));
     qualityMedBtn?.addEventListener('click', () => applyMobileQualitySetting('medium'));
     qualityHighBtn?.addEventListener('click', () => applyMobileQualitySetting('high'));
+    uiDesktopBtn?.addEventListener('click', () => setGameUiMode('desktop'));
+    uiMobileBtn?.addEventListener('click', () => setGameUiMode('mobile'));
     syncMobileQualityButtons();
+    syncMobileUiModeButtons();
     wireGraphicsSettings();
 }
 
@@ -367,6 +374,26 @@ function syncMobileQualityButtons() {
     document.getElementById('mobile-quality-high')?.classList.toggle('is-active', mobileState.quality === 'high');
 }
 
+function syncMobileUiModeButtons() {
+    const desktopBtn = document.getElementById('mobile-ui-desktop');
+    const mobileBtn = document.getElementById('mobile-ui-mobile');
+    const mobileOn = !!(mobileState.enabled || mobileState.forced || mobileState.detected);
+    desktopBtn?.classList.toggle('is-active', !mobileOn);
+    mobileBtn?.classList.toggle('is-active', mobileOn);
+    if (desktopBtn) desktopBtn.disabled = !!mobileState.detected;
+}
+
+function setGameUiMode(mode) {
+    if (mode === 'desktop') {
+        if (mobileState.detected) return;
+        mobileState.forced = false;
+    } else {
+        mobileState.forced = true;
+    }
+    applyMobileModeState?.();
+    syncMobileUiModeButtons();
+}
+
 export function applyMobileQualitySetting(quality = 'medium') {
     const mode = ['low', 'medium', 'high'].includes(quality) ? quality : 'medium';
     const s = worldEnvState;
@@ -471,6 +498,7 @@ export function handleMobileExitPlay() {
     resetMobileInputState();
     renderPauseInfo({ open: false });
     syncGraphicsSettings();   // reflect live graphics state in the settings panel
+    syncMobileUiModeButtons();
     document.body.classList.add('mobile-game-paused');
     return true;
 }

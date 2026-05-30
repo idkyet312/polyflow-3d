@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Spot light">
+  <rect width="640" height="480" fill="#11151b"/>
+  <path d="M286 124h68l36 70H250z" fill="#2a3340" stroke="#d9e3ef" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M320 194L146 410h348z" fill="#ffd56a" opacity=".24"/>
+  <ellipse cx="320" cy="410" rx="174" ry="34" fill="#ffdd83" opacity=".42"/>
+  <circle cx="320" cy="194" r="40" fill="#fff0b6"/>
+</svg>

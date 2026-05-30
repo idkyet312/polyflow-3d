@@ -2082,6 +2082,10 @@ body.mobile-game-paused .mobile-pause-menu {
   gap: 0.4rem;
 }
 
+.mobile-pause-ui-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .mobile-pause-quality-btn {
   appearance: none;
   min-width: 0;
@@ -2098,6 +2102,11 @@ body.mobile-game-paused .mobile-pause-menu {
   background: #fff;
   color: #05080d;
   border-color: #fff;
+}
+
+.mobile-pause-quality-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .mobile-pause-exit {

@@ -365,10 +365,11 @@ export function createWorldEnvSystem({
 
         // Sky / Background
         const environmentController = getEnvironmentController();
+        const useLevelManagedLighting = core.currentMesh?.userData?.sampleType === 'drugTycoon';
         if (environmentController) {
-            environmentController.setEnabled?.(s.sky.enabled);
+            environmentController.setEnabled?.(s.sky.enabled && !useLevelManagedLighting);
             environmentController.setBackgroundBlurriness?.(s.sky.blurriness);
-            if (switchSky && environmentController.getCurrentEnvironment?.() !== s.sky.preset) {
+            if (!useLevelManagedLighting && switchSky && environmentController.getCurrentEnvironment?.() !== s.sky.preset) {
                 environmentController.switchEnvironment?.(s.sky.preset);
             }
         }
@@ -378,17 +379,17 @@ export function createWorldEnvSystem({
         const hemiLight = getHemiLight();
         const mainDirectionalLight = getMainDirectionalLight();
         if (ambientLight) {
-            ambientLight.visible = s.ambient.enabled;
-            ambientLight.intensity = s.ambient.intensity;
+            ambientLight.visible = s.ambient.enabled && !useLevelManagedLighting;
+            ambientLight.intensity = useLevelManagedLighting ? 0 : s.ambient.intensity;
         }
         if (hemiLight) {
-            hemiLight.visible = s.hemi.enabled;
-            hemiLight.intensity = s.hemi.intensity;
+            hemiLight.visible = s.hemi.enabled && !useLevelManagedLighting;
+            hemiLight.intensity = useLevelManagedLighting ? 0 : s.hemi.intensity;
         }
         if (mainDirectionalLight) {
-            mainDirectionalLight.visible = s.sun.enabled;
-            mainDirectionalLight.castShadow = s.sun.enabled && s.sun.castShadow;
-            mainDirectionalLight.intensity = s.sun.intensity;
+            mainDirectionalLight.visible = s.sun.enabled && !useLevelManagedLighting;
+            mainDirectionalLight.castShadow = s.sun.enabled && s.sun.castShadow && !useLevelManagedLighting;
+            mainDirectionalLight.intensity = useLevelManagedLighting ? 0 : s.sun.intensity;
         }
 
         // Tonemap exposure — write to renderer immediately AND record as the

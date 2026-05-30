@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Cube">
+  <rect width="640" height="480" fill="#11151b"/>
+  <path d="M214 164l116-64 118 64-118 66z" fill="#7dd3fc"/>
+  <path d="M214 164l116 66v144l-116-66z" fill="#38bdf8"/>
+  <path d="M448 164l-118 66v144l118-66z" fill="#0284c7"/>
+  <path d="M214 164l116-64 118 64v144l-118 66-116-66z" fill="none" stroke="#dff7ff" stroke-width="10" stroke-linejoin="round"/>
+</svg>

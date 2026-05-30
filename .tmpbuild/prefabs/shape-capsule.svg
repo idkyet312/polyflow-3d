@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Capsule">
+  <rect width="640" height="480" fill="#11151b"/>
+  <path d="M320 86c-68 0-124 56-124 124v60c0 68 56 124 124 124s124-56 124-124v-60c0-68-56-124-124-124z" fill="#a78bfa"/>
+  <path d="M218 190c42-52 154-62 204 0" fill="none" stroke="#ede9fe" stroke-width="18" opacity=".45"/>
+  <path d="M196 240h248" stroke="#6d28d9" stroke-width="10" opacity=".35"/>
+</svg>

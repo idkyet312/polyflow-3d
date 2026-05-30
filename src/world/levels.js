@@ -2143,7 +2143,7 @@ export function createLevels(deps) {
         // Houses are built as flat (non-nested) meshes parented straight to
         // root. The engine's sample-collision restore pass reparents every
         // collidable part to currentMesh, dropping any intermediate Group
-        // transform — so we bake the house's rotation into each child's own
+        // transform - so we bake the house's rotation into each child's own
         // position/rotation instead of using a wrapper Group.
         const addHouse = (cx, cz, w, d, h, faceY = 0, { home = false } = {}) => {
             const i = hIdx++;
@@ -2161,7 +2161,7 @@ export function createLevels(deps) {
             const roofMat = flatMat(home ? '#274a2a' : pick(ROOF_TONES, i), { rough: 0.85 });
             const winMat  = flatMat('#bfe6ff', { rough: 0.2, metal: 0.1, emissive: '#9fd0ff', emissiveIntensity: 0.25 });
 
-            // Solid wall box — the only collidable part.
+            // Solid wall box - the only collidable part.
             const body = place(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat), 0, h * 0.5, 0);
             body.name = `tycoon-house-${i}`;
             // Pitched roof (flattened 4-sided cone), centred on top.
@@ -2342,6 +2342,172 @@ export function createLevels(deps) {
             // Glowing icy tray of cut product so the station reads as the coke lab.
             const cokeTrayMat = flatMat('#7fd0ff', { rough: 0.3, emissive: '#4fb8ff', emissiveIntensity: 1.1 });
             addBox('coke-lab-tray', [1.0, 0.06, 0.7], [cokeX - 0.7, oy + 1.12, cokeZ], cokeTrayMat);
+
+            // ---- meth lab: heated cook bench on the EAST wall (north half) --
+            // Stainless worktop: a round-bottom boiling flask on a glowing heat
+            // mantle, a tall condenser column with coiled tubing, and a tray of
+            // glowing blue crystal shards.
+            const methX = ox + W * 0.5 - 1.5, methZ = oz - 3.0;
+            addBox('meth-lab-base', [1.4, 1.0, 2.6], [methX, oy + 0.5, methZ], labMetal, { solid: true });
+            addBox('meth-lab-top',  [1.5, 0.12, 2.7], [methX, oy + 1.06, methZ], labTopMat);
+            // Heat mantle + an amber glow pad under it so the burner reads "on".
+            const mantleMat = flatMat('#1a1010', { rough: 0.5, metal: 0.5 });
+            const heatGlowMat = flatMat('#ff7a1a', { rough: 0.4, emissive: '#ff4a1a', emissiveIntensity: 1.8 });
+            addBox('meth-lab-mantle', [0.56, 0.26, 0.56], [methX, oy + 1.2, methZ - 0.7], mantleMat, { solid: true });
+            addBox('meth-lab-heatglow', [0.46, 0.05, 0.46], [methX, oy + 1.34, methZ - 0.7], heatGlowMat);
+            // Round-bottom boiling flask (sphere) sitting in the mantle, with a
+            // glowing reaction liquid inside.
+            const methFlaskMat = flatMat('#dff4ff', { rough: 0.05, metal: 0.25, emissive: '#bfe9ff', emissiveIntensity: 0.9 });
+            const flask = new THREE.Mesh(new THREE.SphereGeometry(0.26, 16, 12), methFlaskMat);
+            flask.position.set(methX, oy + 1.62, methZ - 0.7);
+            flask.castShadow = true; flask.receiveShadow = true;
+            root.add(flask);
+            const flaskNeck = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.3, 10), methFlaskMat);
+            flaskNeck.position.set(methX, oy + 1.95, methZ - 0.7);
+            root.add(flaskNeck);
+            // Tall condenser column behind the flask + a coiled tube.
+            const glassColMat = flatMat('#cfeeff', { rough: 0.08, metal: 0.2, emissive: '#5fc8ff', emissiveIntensity: 0.5 });
+            const condenser = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 1.0, 12), glassColMat);
+            condenser.position.set(methX - 0.35, oy + 1.95, methZ - 0.7);
+            condenser.rotation.z = 0.18;
+            root.add(condenser);
+            const coilMat = flatMat('#9fd4e8', { rough: 0.2, metal: 0.6 });
+            const coil = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.025, 8, 20), coilMat);
+            coil.position.set(methX - 0.35, oy + 1.95, methZ - 0.7);
+            coil.rotation.x = Math.PI / 2;
+            root.add(coil);
+            // Tray of glowing crystal shards (a few angled icosahedra).
+            const methTrayMat = flatMat('#bfe9ff', { rough: 0.25, emissive: '#7fd0ff', emissiveIntensity: 1.2 });
+            addBox('meth-lab-tray', [0.7, 0.06, 1.0], [methX, oy + 1.12, methZ + 0.7], methTrayMat);
+            const shardMat = flatMat('#eaffff', { rough: 0.1, metal: 0.1, emissive: '#9fe6ff', emissiveIntensity: 1.4 });
+            for (let i = 0; i < 5; i++) {
+                const shard = new THREE.Mesh(new THREE.IcosahedronGeometry(0.06 + Math.random() * 0.04, 0), shardMat);
+                shard.position.set(methX - 0.2 + Math.random() * 0.4, oy + 1.2, methZ + 0.4 + Math.random() * 0.6);
+                shard.rotation.set(Math.random(), Math.random(), Math.random());
+                shard.castShadow = true;
+                root.add(shard);
+            }
+
+            // ---- LSD lab: blotter station on the WEST wall (north half) -----
+            // West wall, up near the NW coke lab — north of the display case
+            // (which starts at z≈oz-1.5), so it has its own clear stretch and
+            // isn't crammed against the meth bench on the east wall.
+            // A worktop with a drying rack of hanging rainbow blotter sheets,
+            // a backlit cutting board, and a row of tincture dropper bottles.
+            const lsdX = ox - W * 0.5 + 1.5, lsdZ = oz - 4.0;
+            addBox('lsd-lab-base', [1.4, 1.0, 2.6], [lsdX, oy + 0.5, lsdZ], labMetal, { solid: true });
+            addBox('lsd-lab-top',  [1.5, 0.12, 2.7], [lsdX, oy + 1.06, lsdZ], labTopMat);
+            // Backlit cutting board the tabs are cut on (soft warm glow).
+            const lsdBoardMat = flatMat('#fff0d8', { rough: 0.3, emissive: '#ffcaa0', emissiveIntensity: 0.8 });
+            addBox('lsd-lab-board', [0.9, 0.05, 1.4], [lsdX + 0.15, oy + 1.14, lsdZ], lsdBoardMat);
+            // Drying rack: two posts + a top bar with hanging blotter sheets.
+            addBox('lsd-lab-rack-col-a', [0.08, 1.0, 0.08], [lsdX + 0.1, oy + 1.6, lsdZ - 0.9], standMat, { solid: true });
+            addBox('lsd-lab-rack-col-b', [0.08, 1.0, 0.08], [lsdX + 0.1, oy + 1.6, lsdZ + 0.9], standMat, { solid: true });
+            addBox('lsd-lab-rack-bar',   [0.08, 0.08, 1.9], [lsdX + 0.1, oy + 2.05, lsdZ], standMat);
+            // Hanging blotter sheets — a rainbow row of perforated tab grids,
+            // each a thin glowing panel clipped to the bar.
+            const blotterTones = [
+                ['#ff5a5a', '#a01818'], ['#ffb24a', '#a06010'], ['#ffe066', '#a09010'],
+                ['#6affa0', '#1a8048'], ['#5ab8ff', '#1858a0'], ['#c87fff', '#6a2ec0'],
+            ];
+            for (let i = 0; i < blotterTones.length; i++) {
+                const [face, glow] = blotterTones[i];
+                const z = lsdZ - 0.75 + i * 0.3;
+                const sheetMat = flatMat(face, { rough: 0.45, emissive: glow, emissiveIntensity: 1.1 });
+                // Thin sheet hanging from the bar.
+                addBox(`lsd-lab-sheet-${i}`, [0.03, 0.62, 0.24], [lsdX + 0.1, oy + 1.7, z], sheetMat);
+                // A tiny clip at the top so it reads as "pinned to the rack".
+                addBox(`lsd-lab-clip-${i}`, [0.06, 0.06, 0.06], [lsdX + 0.1, oy + 2.0, z], standMat);
+            }
+            // Row of three tincture dropper bottles along the front edge.
+            const lsdBottleGlass = flatMat('#caa0ff', { rough: 0.1, metal: 0.2, emissive: '#8a52d4', emissiveIntensity: 0.6 });
+            const lsdBottleCap = flatMat('#161616', { rough: 0.5, metal: 0.4 });
+            for (let i = 0; i < 3; i++) {
+                const z = lsdZ - 0.5 + i * 0.5;
+                const bottle = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.08, 0.26, 12), lsdBottleGlass);
+                bottle.position.set(lsdX + 0.5, oy + 1.25, z);
+                bottle.castShadow = true; bottle.receiveShadow = true;
+                root.add(bottle);
+                const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.12, 10), lsdBottleCap);
+                cap.position.set(lsdX + 0.5, oy + 1.44, z);
+                root.add(cap);
+            }
+
+            // ---- shroom lab: humidity tent on the back wall (centre) --------
+            // A grow tent with glowing translucent side panels, twin substrate
+            // trays sprouting glowing mushroom caps, a misting glow, and a small
+            // humidity readout.
+            const shroomX = ox, shroomZ = oz - D * 0.5 + 1.6;
+            addBox('shroom-lab-base', [2.2, 1.0, 1.2], [shroomX, oy + 0.5, shroomZ], labMetal, { solid: true });
+            addBox('shroom-lab-top',  [2.3, 0.12, 1.3], [shroomX, oy + 1.06, shroomZ], labTopMat);
+            // Tent frame.
+            addBox('shroom-lab-tent-l', [0.1, 1.1, 1.2], [shroomX - 1.0, oy + 1.7, shroomZ], standMat, { solid: true });
+            addBox('shroom-lab-tent-r', [0.1, 1.1, 1.2], [shroomX + 1.0, oy + 1.7, shroomZ], standMat, { solid: true });
+            addBox('shroom-lab-tent-top', [2.1, 0.1, 1.2], [shroomX, oy + 2.2, shroomZ], standMat);
+            // Glowing translucent side + back panels (the lit humidity tent).
+            const tentPanelMat = flatMat('#c8a0ff', { rough: 0.5, emissive: '#7a3ad0', emissiveIntensity: 0.7 });
+            addBox('shroom-lab-panel-back', [2.0, 1.1, 0.05], [shroomX, oy + 1.7, shroomZ + 0.55], tentPanelMat);
+            addBox('shroom-lab-panel-l', [0.05, 1.1, 1.1], [shroomX - 0.98, oy + 1.7, shroomZ], tentPanelMat);
+            addBox('shroom-lab-panel-r', [0.05, 1.1, 1.1], [shroomX + 0.98, oy + 1.7, shroomZ], tentPanelMat);
+            // Substrate trays.
+            const shroomTrayMat = flatMat('#6a4a3a', { rough: 0.8, emissive: '#3a2010', emissiveIntensity: 0.25 });
+            addBox('shroom-lab-tray-a', [0.9, 0.1, 0.8], [shroomX - 0.5, oy + 1.16, shroomZ], shroomTrayMat);
+            addBox('shroom-lab-tray-b', [0.9, 0.1, 0.8], [shroomX + 0.5, oy + 1.16, shroomZ], shroomTrayMat);
+            // Glowing mushroom caps sprouting from the trays (stem + cap each).
+            const capMat = flatMat('#e0b0ff', { rough: 0.5, emissive: '#b070ff', emissiveIntensity: 1.2 });
+            const stemMat = flatMat('#f0e6d8', { rough: 0.7 });
+            for (let i = 0; i < 8; i++) {
+                const tx = shroomX - 0.8 + (i % 4) * 0.5 + (Math.random() - 0.5) * 0.12;
+                const tz = shroomZ - 0.25 + Math.floor(i / 4) * 0.45 + (Math.random() - 0.5) * 0.1;
+                const h = 0.14 + Math.random() * 0.1;
+                const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.03, h, 8), stemMat);
+                stem.position.set(tx, oy + 1.22 + h * 0.5, tz);
+                root.add(stem);
+                const cap = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8, 0, Math.PI * 2, 0, Math.PI / 2), capMat);
+                cap.position.set(tx, oy + 1.22 + h, tz);
+                cap.castShadow = true;
+                root.add(cap);
+            }
+            // Misting nozzle glow under the tent top.
+            const mistMat = flatMat('#cfe8ff', { rough: 0.3, emissive: '#9fd8ff', emissiveIntensity: 1.0 });
+            addBox('shroom-lab-mist', [1.6, 0.04, 0.1], [shroomX, oy + 2.1, shroomZ], mistMat);
+            // Small humidity readout panel on a tent post.
+            const humidMat = flatMat('#0a1a14', { rough: 0.3, emissive: '#3affa0', emissiveIntensity: 1.4 });
+            addBox('shroom-lab-humid', [0.04, 0.22, 0.3], [shroomX + 1.02, oy + 1.6, shroomZ - 0.2], humidMat);
+
+            // Tap + spray-bottle fill point.
+            const tapX = shroomX - 2.2, tapZ = shroomZ + 0.3;
+            const sinkMat = flatMat('#b8c8d8', { rough: 0.22, metal: 0.65 });
+            const waterMat = flatMat('#7fd0ff', { rough: 0.12, emissive: '#4fb8ff', emissiveIntensity: 0.9 });
+            addBox('shroom-sink-base', [1.0, 0.8, 0.7], [tapX, oy + 0.4, tapZ], labMetal, { solid: true });
+            addBox('shroom-sink-basin', [0.8, 0.12, 0.55], [tapX, oy + 0.92, tapZ], sinkMat);
+            addBox('shroom-sink-water', [0.55, 0.03, 0.35], [tapX, oy + 1.0, tapZ], waterMat);
+            addBox('shroom-sink-faucet', [0.08, 0.4, 0.08], [tapX, oy + 1.24, tapZ - 0.18], standMat);
+            addBox('shroom-sink-spout', [0.08, 0.08, 0.32], [tapX, oy + 1.42, tapZ - 0.02], standMat);
+
+            // AC control wall: two visible units pointed at bed/racks.
+            const acX = shroomX + 2.7, acZ = shroomZ + 0.25;
+            const acMat = flatMat('#d8e4ee', { rough: 0.4, metal: 0.25, emissive: '#8fd8ff', emissiveIntensity: 0.25 });
+            const ventMat = flatMat('#102030', { rough: 0.5, metal: 0.4 });
+            addBox('shroom-ac-a', [0.9, 0.38, 0.28], [acX, oy + 2.0, acZ - 0.35], acMat);
+            addBox('shroom-ac-b', [0.9, 0.38, 0.28], [acX, oy + 1.45, acZ - 0.35], acMat);
+            for (let i = 0; i < 3; i++) addBox(`shroom-ac-vent-${i}`, [0.65, 0.025, 0.04], [acX, oy + 1.36 + i * 0.28, acZ - 0.18], ventMat);
+
+            // Separate drying rack: slatted trays away from the humid bed.
+            const rackX = shroomX + 3.2, rackZ = shroomZ + 1.45;
+            const rackWood = flatMat('#5a3a20', { rough: 0.7 });
+            const rackTray = flatMat('#d8a0ff', { rough: 0.55, emissive: '#8a52d4', emissiveIntensity: 0.5 });
+            for (let level = 0; level < 3; level++) {
+                const y = oy + 0.75 + level * 0.38;
+                addBox(`shroom-rack-tray-${level}`, [1.8, 0.06, 0.75], [rackX, y, rackZ], rackTray);
+                for (let slat = 0; slat < 5; slat++) {
+                    addBox(`shroom-rack-slat-${level}-${slat}`, [1.65, 0.035, 0.035], [rackX, y + 0.06, rackZ - 0.28 + slat * 0.14], rackWood);
+                }
+            }
+            addBox('shroom-rack-post-a', [0.08, 1.35, 0.08], [rackX - 0.9, oy + 1.0, rackZ - 0.4], rackWood, { solid: true });
+            addBox('shroom-rack-post-b', [0.08, 1.35, 0.08], [rackX + 0.9, oy + 1.0, rackZ - 0.4], rackWood, { solid: true });
+            addBox('shroom-rack-post-c', [0.08, 1.35, 0.08], [rackX - 0.9, oy + 1.0, rackZ + 0.4], rackWood, { solid: true });
+            addBox('shroom-rack-post-d', [0.08, 1.35, 0.08], [rackX + 0.9, oy + 1.0, rackZ + 0.4], rackWood, { solid: true });
 
             // ---- shop dressing (south half, between entrance and plants) ----
             // Make the interior read as an actual WEED SHOP storefront. Sales
@@ -2736,6 +2902,13 @@ export function createLevels(deps) {
             // Coke lab (NW corner) — indoor coke-cook minigame. Matches the
             // glassware bench built in buildGrowRoom (mirror of the pill lab).
             cokeLab: [ROOM_ORIGIN[0] - ROOM_W * 0.5 + 2.4, 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 2.6],
+            // Meth lab (east wall, mid) + LSD lab (west wall, north) — match buildGrowRoom.
+            methLab: [ROOM_ORIGIN[0] + ROOM_W * 0.5 - 1.5, 1.0, ROOM_ORIGIN[2] - 3.0],
+            lsdLab:  [ROOM_ORIGIN[0] - ROOM_W * 0.5 + 1.5, 1.0, ROOM_ORIGIN[2] - 4.0],
+            shroomLab: [ROOM_ORIGIN[0], 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 1.6],
+            shroomTap: [ROOM_ORIGIN[0] - 2.2, 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 1.9],
+            shroomAc: [ROOM_ORIGIN[0] + 2.7, 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 1.85],
+            shroomRack: [ROOM_ORIGIN[0] + 3.2, 1.0, ROOM_ORIGIN[2] - ROOM_D * 0.5 + 3.05],
         };
 
         // ---- Procedural cloudy skybox (large inverted sphere) -------------
@@ -2796,7 +2969,7 @@ export function createLevels(deps) {
         // Daylight: warm sun high above lighting the whole block.
         // No shadow on the sun — point-light cubemap shadows over a large area
         // strobe with TAA + cost a lot. Day/night cycle still tints it.
-        const sun = new THREE.PointLight(0xfff0d0, 14, 160, 1.2);
+        const sun = new THREE.PointLight(0xfff0d0, 0.0, 160, 1.2);
         sun.position.set(BLOCK * 0.25, WALL_H + 26, BLOCK * 0.2);
         sun.castShadow = false;
         sun.name = 'tycoon-sun';

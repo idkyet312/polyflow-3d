@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Doom Shotgun Sprite">
+  <rect width="640" height="480" fill="#15120f"/>
+  <rect x="72" y="280" width="496" height="44" rx="6" fill="#3a2618"/>
+  <rect x="100" y="236" width="390" height="42" rx="5" fill="#5c4030"/>
+  <rect x="148" y="212" width="330" height="24" rx="4" fill="#c8c2b8"/>
+  <rect x="176" y="196" width="248" height="18" rx="3" fill="#f5efe4"/>
+  <rect x="436" y="220" width="82" height="58" rx="6" fill="#2a211b"/>
+  <rect x="504" y="246" width="64" height="30" rx="4" fill="#d7d1c6"/>
+  <rect x="72" y="306" width="148" height="46" rx="8" fill="#7a4a28"/>
+  <rect x="82" y="314" width="128" height="18" rx="4" fill="#a86b36"/>
+  <rect x="232" y="324" width="138" height="22" rx="5" fill="#221812"/>
+  <rect x="388" y="310" width="64" height="26" rx="4" fill="#9a6a45"/>
+  <rect x="104" y="350" width="90" height="24" rx="5" fill="#2a1a12"/>
+  <path d="M446 278h62l-28 54h-46z" fill="#1c1714"/>
+  <path d="M132 236h280" stroke="#f7f2e8" stroke-width="10" stroke-linecap="round" opacity=".86"/>
+  <path d="M100 324h420" stroke="#120d0a" stroke-width="8" stroke-linecap="round" opacity=".72"/>
+</svg>

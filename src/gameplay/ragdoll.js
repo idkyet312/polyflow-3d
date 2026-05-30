@@ -103,6 +103,9 @@ export function ragdollify(group, impulse = null) {
         const limb = LIMBS[i];
         const mesh = parts[i];
         if (!mesh) continue;
+        mesh.visible = true;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         mesh.getWorldPosition(_p);
         mesh.getWorldQuaternion(_q);
         // Detach part into the scene root so we can drive it from physics.
@@ -288,6 +291,9 @@ function fallbackBurst(group, impulse) {
     group.updateWorldMatrix(true, true);
     for (const mesh of parts) {
         if (!mesh) continue;
+        mesh.visible = true;
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         scene?.attach?.(mesh);
         mesh.userData._vy = 3 + Math.random() * 2;
         mesh.userData._vx = (impulse?.x || 0) * 0.3 + (Math.random() - 0.5) * 3;

@@ -1,0 +1,11 @@
+{
+  "prefabs": [
+    {
+      "id": "car",
+      "name": "Car",
+      "category": "Vehicles",
+      "file": "car.actor",
+      "image": "car.svg"
+    }
+  ]
+}
