@@ -243,6 +243,8 @@ function loadManBuyerPrototype() {
     return _manBuyerPromise;
 }
 loadManBuyerPrototype();
+// Pre-build the FBX buyer pool at module load so spawning is instant.
+prewarmFbxBuyerPool();
 
 function setProxyPersonVisible(group, visible) {
     const parts = group?.userData?.parts;
@@ -335,10 +337,65 @@ function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', p
     return group;
 }
 
-function attachWalkingBuyerVisual(group, { skinColor = '#e8b893', shirtColor = '#3da6ff', pantsColor = '#22303c', bodyTint = null, showColorBadge = false, badgeColor = shirtColor, proto = _walkingBuyerPrototype, extraYOffset = 0 } = {}) {
+// ---- FBX buyer visual pool ------------------------------------------------
+// Cloning a rigged FBX (skeleton + materials + animation mixer) is expensive,
+// so we pre-build a fixed pool of ready visual groups per variant at startup
+// and lend them out to buyers. Borrowed visuals return to the pool on despawn
+// instead of being discarded, so no FBX cloning happens during gameplay.
+const FBX_BUYER_POOL_SIZE = { emmy: 4, man: 4 };
+const _fbxBuyerPool = { emmy: [], man: [] };
+let _fbxBuyerPoolReady = false;
+
+function buildOneFbxBuyerVisual(variant) {
+    const isMan = variant === 'man';
+    const proto = isMan ? _manBuyerPrototype : _walkingBuyerPrototype;
+    const extraYOffset = isMan ? WALKING_BUYER_HEIGHT / 2 : 0;
+    const visual = makeWalkingBuyerMesh({ showColorBadge: false, proto, extraYOffset });
+    if (visual) visual.userData.fbxBuyerVariant = variant;
+    return visual;
+}
+
+function prewarmFbxBuyerPool() {
+    if (_fbxBuyerPoolReady) return Promise.resolve();
+    return Promise.all([loadWalkingBuyerPrototype(), loadManBuyerPrototype()]).then(() => {
+        for (const variant of ['emmy', 'man']) {
+            const count = FBX_BUYER_POOL_SIZE[variant] || 0;
+            for (let i = _fbxBuyerPool[variant].length; i < count; i++) {
+                const visual = buildOneFbxBuyerVisual(variant);
+                if (visual) _fbxBuyerPool[variant].push(visual);
+            }
+        }
+        _fbxBuyerPoolReady = true;
+    });
+}
+
+function acquireFbxBuyerVisual(variant) {
+    const pool = _fbxBuyerPool[variant];
+    if (pool && pool.length) return pool.pop();
+    // Pool exhausted (more concurrent FBX buyers than pre-warmed) — build one
+    // on demand so gameplay still works; it returns to the pool when freed.
+    return buildOneFbxBuyerVisual(variant);
+}
+
+function releaseFbxBuyerVisual(group) {
+    const visual = group?.userData?.walkingVisual;
+    const variant = visual?.userData?.fbxBuyerVariant;
+    if (!visual || !variant || !_fbxBuyerPool[variant]) return;
+    if (visual.parent) visual.parent.remove(visual);
+    visual.userData.walkingAction?.stop?.();
+    group.userData.walkingVisualAttached = false;
+    group.userData.walkingVisual = null;
+    group.userData.walkingMixer = null;
+    group.userData.walkingAction = null;
+    _fbxBuyerPool[variant].push(visual);
+}
+
+function attachWalkingBuyerVisual(group, variant = 'emmy') {
     if (!group || group.userData?.walkingVisualAttached) return !!group?.userData?.walkingVisualAttached;
-    const visual = makeWalkingBuyerMesh({ skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor, proto, extraYOffset });
+    const visual = acquireFbxBuyerVisual(variant);
     if (!visual) return false;
+    // Restart the looping walk so a recycled visual isn't frozen mid-pose.
+    visual.userData.walkingAction?.reset?.().play?.();
     group.add(visual);
     group.userData.isWalkingFbxBuyer = true;
     group.userData.walkingVisualAttached = true;
@@ -361,16 +418,12 @@ function makeTycoonPersonMesh({
 } = {}) {
     const group = ragdoll.makePerson({ skinColor, shirtColor, pantsColor });
     if (!useWalkingVisual) return group;
-    const isMan = visualVariant === 'man';
-    const getProto = () => (isMan ? _manBuyerPrototype : _walkingBuyerPrototype);
-    const loadProto = isMan ? loadManBuyerPrototype : loadWalkingBuyerPrototype;
-    // Man.fbx sits low after fitting — raise it by half its in-game height.
-    const extraYOffset = isMan ? WALKING_BUYER_HEIGHT / 2 : 0;
-    const opts = { skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor, extraYOffset };
-    if (!attachWalkingBuyerVisual(group, { ...opts, proto: getProto() })) {
-        loadProto().then(() => {
+    const variant = visualVariant === 'man' ? 'man' : 'emmy';
+    if (!attachWalkingBuyerVisual(group, variant)) {
+        // Pool not warm yet — build it, then attach from the pool.
+        prewarmFbxBuyerPool().then(() => {
             if (group.userData?.walkingVisualAttached) return;
-            attachWalkingBuyerVisual(group, { ...opts, proto: getProto() });
+            attachWalkingBuyerVisual(group, variant);
         });
     }
     return group;
@@ -3688,6 +3741,9 @@ export function createDrugTycoon(deps) {
             }
             if (worstIdx < 0) break;
             const dropped = s.npcs.splice(worstIdx, 1)[0];
+            // Return any FBX visual to the pool before discarding the rig so
+            // the pre-warmed pool stays full instead of draining over time.
+            if (dropped?.mesh?.userData?.walkingVisualAttached) releaseFbxBuyerVisual(dropped.mesh);
             try { core.scene?.remove(dropped.mesh); } catch (e) {}
         }
 
