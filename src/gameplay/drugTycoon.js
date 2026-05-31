@@ -243,8 +243,6 @@ function loadManBuyerPrototype() {
     return _manBuyerPromise;
 }
 loadManBuyerPrototype();
-// Pre-build the FBX buyer pool at module load so spawning is instant.
-prewarmFbxBuyerPool();
 
 function setProxyPersonVisible(group, visible) {
     const parts = group?.userData?.parts;
@@ -389,6 +387,9 @@ function prewarmFbxBuyerPool() {
         _fbxBuyerPoolReady = true;
     });
 }
+// Pre-build the FBX buyer pool at module load so spawning is instant. Placed
+// after the pool state + helpers are declared to avoid a TDZ on the `let`s.
+prewarmFbxBuyerPool();
 
 function acquireFbxBuyerVisual(variant) {
     const pool = _fbxBuyerPool[variant];
@@ -4452,8 +4453,13 @@ export function createDrugTycoon(deps) {
         overlay.className = 'tycoon-overlay';
         overlay.style.cssText = 'position:absolute;inset:0;z-index:1250;pointer-events:auto;'
             + 'background:rgba(4,10,8,0.86);backdrop-filter:blur(3px);display:flex;'
-            + 'flex-direction:column;align-items:center;justify-content:center;'
-            + `padding:${m ? '10px' : '0'};box-sizing:border-box;`
+            + 'flex-direction:column;align-items:center;'
+            // On mobile the report can be taller than a short landscape viewport,
+            // so let it scroll from the top instead of clipping the title/button
+            // off-screen. Desktop keeps everything vertically centred.
+            + `justify-content:${m ? 'flex-start' : 'center'};`
+            + `overflow-y:${m ? 'auto' : 'visible'};-webkit-overflow-scrolling:touch;`
+            + `padding:${m ? '14px 10px' : '0'};box-sizing:border-box;`
             + 'font-family:"Trebuchet MS",system-ui,sans-serif;color:#eaffea;';
 
         const title = document.createElement('div');

@@ -422,6 +422,11 @@ export function applyMobileQualitySetting(quality = 'medium') {
     if (s.aa) s.aa.enabled = highMode;
     if (s.shadows) s.shadows.enabled = !lowMode;
     if (s.fog) s.fog.enabled = medMode;
+    // Pricey per-frame passes default off on mobile except at high quality:
+    // screen-space reflection probe + volumetric in-scatter both add a full
+    // render-target pass that mobile GPUs struggle with.
+    if (s.reflectionProbe) s.reflectionProbe.enabled = highMode && s.reflectionProbe.enabled;
+    if (s.volumetric) s.volumetric.enabled = highMode && s.volumetric.enabled;
     if (s.adaptive) s.adaptive.enabled = !highMode;
     if (s.lightCull) {
         s.lightCull.enabled = true;

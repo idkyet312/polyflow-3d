@@ -690,6 +690,7 @@ const TEST_SOUND_ID = 'polyflow:test';
 let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
 let grassField = null;
 let water = null;
+let _ddgiTickFrame = 0;   // PERF: frame counter for throttling DDGI tick in game modes
 const samplePresentationState = {
     overridden: false,
     terrainVisible: true,
@@ -3285,7 +3286,7 @@ function spawnLightActor(kind, { userData = null, position = null, scale = 8, in
         light = new THREE.SpotLight(lightColor, intensity, distance, angle, penumbra, decay);
         light.name = 'spot-light-source';
         light.castShadow = castShadow;
-        light.shadow.mapSize.set(1024, 1024);
+        light.shadow.mapSize.set(mobileState.enabled ? 512 : 1024, mobileState.enabled ? 512 : 1024);
         light.shadow.bias = 0.0002;
         if ('normalBias' in light.shadow) light.shadow.normalBias = 0.02;
         const target = new THREE.Object3D();
@@ -5051,8 +5052,13 @@ async function init() {
     mainDirectionalLight.castShadow = true;
     // PERF: 4096² shadow map → 2048². 4x less shadow fragment work; PCF radius
     // 2.0 still hides the resolution drop on a single cascade-less dir light.
-    mainDirectionalLight.shadow.mapSize.width = 2048;
-    mainDirectionalLight.shadow.mapSize.height = 2048;
+    // Mobile halves again to 1024² — the shadow pass is a big fill-rate cost on
+    // phones and the single dir light tolerates the lower resolution.
+    {
+        const sunShadowSize = mobileState.enabled ? 1024 : 2048;
+        mainDirectionalLight.shadow.mapSize.width = sunShadowSize;
+        mainDirectionalLight.shadow.mapSize.height = sunShadowSize;
+    }
     mainDirectionalLight.shadow.camera.near = 0.5;
     mainDirectionalLight.shadow.camera.far = MAIN_SHADOW_FAR;
     mainDirectionalLight.shadow.camera.left = -MAIN_SHADOW_EXTENT;
@@ -5209,6 +5215,25 @@ async function init() {
             grassField?.update(delta);
             water?.update(delta);
         }
+        // The grass field is the editor terrain's decoration; game modes run on
+        // their own levels (e.g. Drug Tycoon's street) where it's just wasted
+        // draw cost (grass is frustumCulled=false, so every blade always draws).
+        // Hide it in game mode, show it again back in the editor.
+        {
+            const grassMesh = grassField?.mesh;
+            if (grassMesh && grassMesh.userData.hiddenForGameMode !== frameInGameMode) {
+                grassMesh.userData.hiddenForGameMode = frameInGameMode;
+                if (grassField?.setVisible) grassField.setVisible(!frameInGameMode);
+                else grassMesh.visible = !frameInGameMode;
+            }
+            // Same reasoning for the editor water plane — game levels (streets,
+            // arenas) don't use it, so don't pay its per-frame reflection cost.
+            const waterMesh = water?.mesh;
+            if (waterMesh && waterMesh.userData.hiddenForGameMode !== frameInGameMode) {
+                waterMesh.userData.hiddenForGameMode = frameInGameMode;
+                waterMesh.visible = !frameInGameMode;
+            }
+        }
         // Performance toggle: skip the per-frame work entirely when on.
         // setPerfModeEnabled has already called setEnabled(false) on each subsystem
         // so visuals stay flat; we just skip the update/tick CPU cost here.
@@ -5220,7 +5245,13 @@ async function init() {
         const ddgiManager = getDDGIManager();
         // fix/ddgi-correctness: tick DDGI regardless of perf mode. The runtime
         // enabled flag (set by applyWorldEnvState) is the single source of truth.
-        ddgiManager.tick(delta);
+        // PERF: in a game mode the world is largely static and the per-frame
+        // tick cost (scene material patching + uniform refresh) buys little —
+        // throttle to every Nth frame. The editor still ticks every frame so
+        // dragging lights/volumes updates GI immediately. (The expensive bake
+        // has its own bakeEveryN throttle inside the manager.)
+        const ddgiEveryN = frameInGameMode ? (mobileState.enabled ? 6 : 3) : 1;
+        if ((_ddgiTickFrame++ % ddgiEveryN) === 0) ddgiManager.tick(delta);
         const _ddgiMs = performance.now() - _ddgiStart;
         if (debugConsoleState?.latest) debugConsoleState.latest.ddgi = _ddgiMs;
         // Cornell ray debug: redraw the rays cast from the chosen probe
