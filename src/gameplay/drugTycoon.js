@@ -31,6 +31,7 @@ import { createMapStreaming, buildTrafficCarMesh } from './mapStreaming.js';
 
 const WEED_GLB_URL = (import.meta.env?.BASE_URL || '/') + 'Weed.glb';
 const WALKING_FBX_URL = (import.meta.env?.BASE_URL || '/') + 'models/Emmy/Walking.fbx';
+const MAN_FBX_URL = (import.meta.env?.BASE_URL || '/') + 'models/Man/Man.fbx';
 const WALKING_TEXTURE_BASE_URL = (import.meta.env?.BASE_URL || '/') + 'models/Emmy/';
 const WEED_GLB_HEIGHT = 0.47;       // raw GLB plant height in metres
 const WEED_TARGET_MAX_HEIGHT = 1.2; // mature in-game plant height in metres
@@ -42,6 +43,8 @@ let _weedPrototype = null;          // first instance, cloned for every plant
 let _weedPromise = null;
 let _walkingBuyerPrototype = null;
 let _walkingBuyerPromise = null;
+let _manBuyerPrototype = null;
+let _manBuyerPromise = null;
 let _walkingTextureSets = null;
 const WALKING_BUYER_FBX_WARNING_PREFIXES = [
     'THREE.FBXLoader: SpecularFactor map is not supported in three.js, skipping texture.',
@@ -149,6 +152,9 @@ function applyWalkingTextureSet(material, textureIndex = 0) {
     }
     material.roughness = 1.0;
     material.metalness = 0.0;
+    // Neutralize any emissive carried in from the source FBX (Man.fbx ships
+    // bright emissive maps that otherwise blow out bloom across the frame).
+    if ('emissiveMap' in material) material.emissiveMap = null;
     if (material.emissive) material.emissive.set(0x000000);
     material.emissiveIntensity = 0;
     if ('envMapIntensity' in material) material.envMapIntensity = 0;
@@ -156,48 +162,87 @@ function applyWalkingTextureSet(material, textureIndex = 0) {
     return material;
 }
 
-function loadWalkingBuyerPrototype() {
-    if (_walkingBuyerPrototype) return Promise.resolve(_walkingBuyerPrototype);
-    if (_walkingBuyerPromise) return _walkingBuyerPromise;
-    _walkingBuyerPromise = new Promise((resolve) => {
+// Load an FBX humanoid as a buyer prototype and apply Emmy's texture/material
+// sets (diffuse + normal packed maps) to every mesh so it joins the same
+// node-material pipeline as the Walking (Emmy) buyer. Used for both Emmy's
+// Walking.fbx and Man.fbx.
+function neutralizeFbxEmissive(material) {
+    // Keep the FBX's own diffuse/normal maps but kill any emissive it shipped
+    // (Man.fbx carries bright emissive maps that otherwise blow out bloom).
+    if (!material) return material;
+    if ('emissiveMap' in material) material.emissiveMap = null;
+    if (material.emissive) material.emissive.set(0x000000);
+    material.emissiveIntensity = 0;
+    if ('envMapIntensity' in material) material.envMapIntensity = 0;
+    material.needsUpdate = true;
+    return material;
+}
+
+function loadFbxBuyerPrototype(url, label, { applyEmmyTextures = true } = {}) {
+    return new Promise((resolve) => {
         const restoreWarn = suppressWalkingBuyerFbxWarnings();
         new FBXLoader().load(
-            WALKING_FBX_URL,
+            url,
             (fbx) => {
                 restoreWarn();
+                // FBX files (Man.fbx in particular) can ship embedded lights and
+                // cameras in the node tree. Cloned into the scene they flood the
+                // frame — strip everything that isn't a mesh/bone/group.
+                const toRemove = [];
+                fbx.traverse((o) => {
+                    if (o.isLight || o.isCamera) toRemove.push(o);
+                });
+                for (const o of toRemove) o.parent?.remove(o);
                 convertLoadedObjectMaterials(fbx);
+                const processMat = applyEmmyTextures
+                    ? (m, index) => applyWalkingTextureSet(m, index)
+                    : (m) => neutralizeFbxEmissive(m);
                 fbx.traverse((o) => {
                     if (!o.isMesh) return;
                     o.castShadow = true;
                     o.receiveShadow = true;
                     o.material = Array.isArray(o.material)
-                        ? o.material.map((m, index) => applyWalkingTextureSet(m, index))
-                        : applyWalkingTextureSet(o.material, 0);
+                        ? o.material.map((m, index) => processMat(m, index))
+                        : processMat(o.material, 0);
                 });
                 const box = new THREE.Box3().setFromObject(fbx);
                 const size = box.getSize(new THREE.Vector3());
                 const center = box.getCenter(new THREE.Vector3());
-                _walkingBuyerPrototype = {
+                resolve({
                     root: fbx,
                     clips: fbx.animations || [],
                     box: box.clone(),
                     size: size.clone(),
                     center,
-                };
-                resolve(_walkingBuyerPrototype);
+                });
             },
             undefined,
             (err) => {
                 restoreWarn();
-                console.warn('[drugTycoon] models/Emmy/Walking.fbx load failed', err);
-                _walkingBuyerPrototype = { root: null, clips: [], box: new THREE.Box3(), size: new THREE.Vector3(), center: new THREE.Vector3() };
-                resolve(_walkingBuyerPrototype);
+                console.warn(`[drugTycoon] ${label} load failed`, err);
+                resolve({ root: null, clips: [], box: new THREE.Box3(), size: new THREE.Vector3(), center: new THREE.Vector3() });
             },
         );
     });
+}
+
+function loadWalkingBuyerPrototype() {
+    if (_walkingBuyerPrototype) return Promise.resolve(_walkingBuyerPrototype);
+    if (_walkingBuyerPromise) return _walkingBuyerPromise;
+    _walkingBuyerPromise = loadFbxBuyerPrototype(WALKING_FBX_URL, 'models/Emmy/Walking.fbx')
+        .then((proto) => { _walkingBuyerPrototype = proto; return proto; });
     return _walkingBuyerPromise;
 }
 loadWalkingBuyerPrototype();
+
+function loadManBuyerPrototype() {
+    if (_manBuyerPrototype) return Promise.resolve(_manBuyerPrototype);
+    if (_manBuyerPromise) return _manBuyerPromise;
+    _manBuyerPromise = loadFbxBuyerPrototype(MAN_FBX_URL, 'models/Man/Man.fbx', { applyEmmyTextures: false })
+        .then((proto) => { _manBuyerPrototype = proto; return proto; });
+    return _manBuyerPromise;
+}
+loadManBuyerPrototype();
 
 function setProxyPersonVisible(group, visible) {
     const parts = group?.userData?.parts;
@@ -257,8 +302,7 @@ function addBuyerColorBadge(group, badgeColor) {
     group.add(marker);
 }
 
-function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', pantsColor = '#22303c', bodyTint = null, showColorBadge = true, badgeColor = shirtColor } = {}) {
-    const proto = _walkingBuyerPrototype;
+function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', pantsColor = '#22303c', bodyTint = null, showColorBadge = true, badgeColor = shirtColor, proto = _walkingBuyerPrototype, extraYOffset = 0 } = {}) {
     if (!proto?.root || proto.size.y <= 0) return null;
 
     const group = new THREE.Group();
@@ -276,7 +320,7 @@ function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', p
     const fit = new THREE.Group();
     fit.name = 'walking-fbx-buyer-fit';
     fit.scale.setScalar(WALKING_BUYER_HEIGHT / proto.size.y);
-    fit.position.y = WALKING_BUYER_Y_OFFSET;
+    fit.position.y = WALKING_BUYER_Y_OFFSET + extraYOffset;
     fit.add(model);
     group.add(fit);
     if (showColorBadge) addBuyerColorBadge(group, badgeColor);
@@ -291,9 +335,9 @@ function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', p
     return group;
 }
 
-function attachWalkingBuyerVisual(group, { skinColor = '#e8b893', shirtColor = '#3da6ff', pantsColor = '#22303c', bodyTint = null, showColorBadge = false, badgeColor = shirtColor } = {}) {
+function attachWalkingBuyerVisual(group, { skinColor = '#e8b893', shirtColor = '#3da6ff', pantsColor = '#22303c', bodyTint = null, showColorBadge = false, badgeColor = shirtColor, proto = _walkingBuyerPrototype, extraYOffset = 0 } = {}) {
     if (!group || group.userData?.walkingVisualAttached) return !!group?.userData?.walkingVisualAttached;
-    const visual = makeWalkingBuyerMesh({ skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor });
+    const visual = makeWalkingBuyerMesh({ skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor, proto, extraYOffset });
     if (!visual) return false;
     group.add(visual);
     group.userData.isWalkingFbxBuyer = true;
@@ -313,13 +357,20 @@ function makeTycoonPersonMesh({
     showColorBadge = false,
     badgeColor = shirtColor,
     useWalkingVisual = false,
+    visualVariant = 'emmy',
 } = {}) {
     const group = ragdoll.makePerson({ skinColor, shirtColor, pantsColor });
     if (!useWalkingVisual) return group;
-    if (!attachWalkingBuyerVisual(group, { skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor })) {
-        loadWalkingBuyerPrototype().then(() => {
+    const isMan = visualVariant === 'man';
+    const getProto = () => (isMan ? _manBuyerPrototype : _walkingBuyerPrototype);
+    const loadProto = isMan ? loadManBuyerPrototype : loadWalkingBuyerPrototype;
+    // Man.fbx sits low after fitting — raise it by half its in-game height.
+    const extraYOffset = isMan ? WALKING_BUYER_HEIGHT / 2 : 0;
+    const opts = { skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor, extraYOffset };
+    if (!attachWalkingBuyerVisual(group, { ...opts, proto: getProto() })) {
+        loadProto().then(() => {
             if (group.userData?.walkingVisualAttached) return;
-            attachWalkingBuyerVisual(group, { skinColor, shirtColor, pantsColor, bodyTint, showColorBadge, badgeColor });
+            attachWalkingBuyerVisual(group, { ...opts, proto: getProto() });
         });
     }
     return group;
@@ -3584,14 +3635,19 @@ export function createDrugTycoon(deps) {
         scene?.add(group);
     }
     function makeBuyerMesh(shirtColor) {
-        const useEmmyVisual = (buyerSpawnSerial++ % 10) === 0;
+        // Per 10 buyers: 2 are Man (Man.fbx), 1 is Emmy (Walking.fbx), rest are
+        // box-rig people. Both FBX visuals wear Emmy's packed diffuse/normal material.
+        const slot = buyerSpawnSerial++ % 10;
+        const useFbxVisual = slot < 3;
+        const visualVariant = slot < 2 ? 'man' : 'emmy';
         return makeTycoonPersonMesh({
             skinColor: randomFrom(SKIN_TONES),
             shirtColor,
             pantsColor: '#22303c',
             showColorBadge: false,
             badgeColor: shirtColor,
-            useWalkingVisual: useEmmyVisual,
+            useWalkingVisual: useFbxVisual,
+            visualVariant,
         });
     }
     function spawnBuyer(s, layout) {
