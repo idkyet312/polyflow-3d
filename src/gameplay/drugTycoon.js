@@ -317,6 +317,14 @@ function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', p
         if (!o.isMesh) return;
         o.castShadow = true;
         o.receiveShadow = true;
+        // Let three.js skip off-screen buyers on the CPU. Skinned meshes cull
+        // against their bind-pose bounds, so pad the bounding sphere a little
+        // so a walking buyer isn't popped at the frustum edge mid-stride.
+        o.frustumCulled = true;
+        if (o.isSkinnedMesh && o.geometry) {
+            if (!o.geometry.boundingSphere) o.geometry.computeBoundingSphere();
+            if (o.geometry.boundingSphere) o.geometry.boundingSphere.radius *= 1.5;
+        }
     });
 
     const fit = new THREE.Group();
@@ -342,7 +350,20 @@ function makeWalkingBuyerMesh({ skinColor = '#e8b893', shirtColor = '#3da6ff', p
 // so we pre-build a fixed pool of ready visual groups per variant at startup
 // and lend them out to buyers. Borrowed visuals return to the pool on despawn
 // instead of being discarded, so no FBX cloning happens during gameplay.
-const FBX_BUYER_POOL_SIZE = { emmy: 4, man: 4 };
+// Mobile GPUs choke on many rigged/skinned draws and the big FBX VRAM
+// footprint, so we run a smaller buyer pool and a tighter distance LOD there.
+const IS_MOBILE_BUYER = (() => {
+    try {
+        if (typeof navigator !== 'undefined'
+            && /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent || '')) return true;
+        if (typeof window !== 'undefined' && window.matchMedia?.('(pointer:coarse)')?.matches) return true;
+    } catch (e) {}
+    return false;
+})();
+// Beyond this distance from the camera the expensive FBX visual is hidden and
+// the cheap box-ragdoll rig underneath shows instead. Tighter on mobile.
+const FBX_BUYER_LOD_DISTANCE = IS_MOBILE_BUYER ? 22 : 45;
+const FBX_BUYER_POOL_SIZE = IS_MOBILE_BUYER ? { emmy: 2, man: 2 } : { emmy: 4, man: 4 };
 const _fbxBuyerPool = { emmy: [], man: [] };
 let _fbxBuyerPoolReady = false;
 
@@ -382,12 +403,32 @@ function releaseFbxBuyerVisual(group) {
     const variant = visual?.userData?.fbxBuyerVariant;
     if (!visual || !variant || !_fbxBuyerPool[variant]) return;
     if (visual.parent) visual.parent.remove(visual);
-    visual.userData.walkingAction?.stop?.();
+    const action = visual.userData.walkingAction;
+    if (action) { action.paused = false; action.stop?.(); }
+    visual.visible = true;
     group.userData.walkingVisualAttached = false;
     group.userData.walkingVisual = null;
     group.userData.walkingMixer = null;
     group.userData.walkingAction = null;
+    group.userData.walkingLodFar = undefined;
     _fbxBuyerPool[variant].push(visual);
+}
+
+// Distance LOD: near the camera show the hi-detail FBX visual; far away hide
+// it and reveal the cheap box-ragdoll rig underneath. Far buyers then cost
+// almost nothing (and their walk mixer can stop) — the big mobile win.
+function setBuyerLodFar(group, far) {
+    if (!group?.userData?.walkingVisualAttached) return;
+    const wantFbx = !far;
+    if (group.userData.walkingLodFar === far) return;
+    group.userData.walkingLodFar = far;
+    const visual = group.userData.walkingVisual;
+    if (visual) visual.visible = wantFbx;
+    setProxyPersonVisible(group, far);
+    // Pause the animation mixer for far buyers so we don't pay skinning cost
+    // for something that's only a box.
+    const action = group.userData.walkingAction;
+    if (action) { if (wantFbx) action.paused = false; else action.paused = true; }
 }
 
 function attachWalkingBuyerVisual(group, variant = 'emmy') {
@@ -402,6 +443,7 @@ function attachWalkingBuyerVisual(group, variant = 'emmy') {
     group.userData.walkingVisual = visual;
     group.userData.walkingMixer = visual.userData?.walkingMixer || null;
     group.userData.walkingAction = visual.userData?.walkingAction || null;
+    group.userData.walkingLodFar = false; // start near; tick re-evaluates by distance
     setProxyPersonVisible(group, false);
     return true;
 }
@@ -3754,6 +3796,13 @@ export function createDrugTycoon(deps) {
             // Visibility follows the player — only render the buyers that
             // share the player's current location (street vs. shop interior).
             n.mesh.visible = insideShop ? !!s.inRoom : !s.inRoom;
+            // Distance LOD for FBX buyers: swap to the cheap box rig when far.
+            if (n.mesh.userData?.walkingVisualAttached) {
+                const cp = core.camera?.position || playerPos;
+                const dx = n.mesh.position.x - cp.x, dz = n.mesh.position.z - cp.z;
+                const far = (dx * dx + dz * dz) > (FBX_BUYER_LOD_DISTANCE * FBX_BUYER_LOD_DISTANCE);
+                setBuyerLodFar(n.mesh, far);
+            }
             if (n.queueing) {
                 // Outside queue + a roll → step into the shop. Chance scales
                 // with rep (0% at Pariah, 60%/sec at Legend) so only the
@@ -5249,6 +5298,9 @@ export function createDrugTycoon(deps) {
     function animateWalk(mesh, movingSpeed, dt) {
         const ud = mesh.userData || {};
         if (ud.walkingMixer) {
+            // LOD-far buyers render as the box rig, not the FBX — skip the
+            // skinning update entirely (the big mobile cost saver).
+            if (ud.walkingLodFar) { if (ud.walkingAction) ud.walkingAction.paused = true; return; }
             const moving = movingSpeed > 0.05;
             if (ud.walkingAction) {
                 ud.walkingAction.paused = !moving;
