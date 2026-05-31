@@ -691,6 +691,7 @@ let pedestalMat, ambientLight, hemiLight, pedestal, worldFloor;
 let grassField = null;
 let water = null;
 let _ddgiTickFrame = 0;   // PERF: frame counter for throttling DDGI tick in game modes
+let _shadowFrame = 0;     // PERF: frame counter for throttling the sun shadow re-render in game modes
 const samplePresentationState = {
     overridden: false,
     terrainVisible: true,
@@ -5180,7 +5181,30 @@ async function init() {
             updateEngineAudioDebugOverlay('idle', null, null);
             updateShowcaseCamera(delta);
         }
-        updateMainDirectionalLightShadowFocus();
+        // PERF: the sun shadow map re-renders every caster each frame. In a game
+        // mode the sun is near-static and the camera moves smoothly, so re-render
+        // (and re-focus) the single PCF shadow only every 2nd frame — a big
+        // shadow-pass saving that's imperceptible at frame rate. CSM (when on)
+        // owns its own cascade updates, so leave it on the every-frame path.
+        const _frameInGameModeForShadow = gameplay.active
+            && GAME_MODE_TYPES.includes(currentMesh?.userData?.sampleType);
+        const _throttleShadow = _frameInGameModeForShadow && !_mainCSM && renderer?.shadowMap;
+        if (renderer?.shadowMap) {
+            if (_throttleShadow) {
+                renderer.shadowMap.autoUpdate = false;
+                const due = (_shadowFrame++ % 2) === 0;
+                if (due) {
+                    updateMainDirectionalLightShadowFocus();
+                    renderer.shadowMap.needsUpdate = true;
+                }
+            } else {
+                // Editor / CSM: keep the engine's per-frame shadow updates.
+                renderer.shadowMap.autoUpdate = true;
+                updateMainDirectionalLightShadowFocus();
+            }
+        } else {
+            updateMainDirectionalLightShadowFocus();
+        }
         updateGameplayDebugRay();
         const updateDuration = performance.now() - updateStart;
 

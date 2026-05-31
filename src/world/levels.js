@@ -1,9 +1,203 @@
 import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
+import { convertLoadedObjectMaterials } from '../io/objectLoader.js';
 import { getProceduralBrickSet } from '../world/materials/proceduralBrickTexture.js';
 import { registerBrickClone } from '../world/materials/brickTextures.js';
 import { core } from '../runtime/appCore.js';
 import { SoccerGoalieComponent } from '../runtime/components/SoccerGoalieComponent.js';
+
+// Procedural seamless grass texture for the Drug Tycoon ground plane. Drawn
+// once to an offscreen canvas (cached) so the flat green block reads as a
+// mottled, blade-flecked lawn instead of a solid colour. Tiled via map.repeat.
+let _tycoonGrassTexture = null;
+export function getTycoonGrassTexture() {
+    if (_tycoonGrassTexture) return _tycoonGrassTexture;
+    const S = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    // Base green fill.
+    g.fillStyle = '#3f7d34';
+    g.fillRect(0, 0, S, S);
+
+    // Draw an element 9× (the cell + its 8 neighbour wraps) so anything
+    // crossing an edge reappears on the opposite side → the tile is seamless
+    // when repeated, with no visible grid lines.
+    const wrapDraw = (x, y, fn) => {
+        for (let oy = -1; oy <= 1; oy++) {
+            for (let ox = -1; ox <= 1; ox++) fn(x + ox * S, y + oy * S);
+        }
+    };
+
+    // Fine speckle only (NO large tonal blobs — those made the repeat obvious).
+    // High-frequency blade flecks read as grass and hide the tiling.
+    const greens = ['#356a2b', '#4a8d3a', '#5ba046', '#2c5a22', '#6fb551', '#3a722f'];
+    for (let i = 0; i < 4200; i++) {
+        const x = Math.random() * S, y = Math.random() * S;
+        const len = 2 + Math.random() * 5;
+        const ang = -Math.PI / 2 + (Math.random() - 0.5) * 1.2;
+        const dx = Math.cos(ang) * len, dy = Math.sin(ang) * len;
+        g.strokeStyle = greens[(Math.random() * greens.length) | 0];
+        g.lineWidth = 0.6 + Math.random() * 0.9;
+        wrapDraw(x, y, (px, py) => {
+            g.beginPath(); g.moveTo(px, py); g.lineTo(px + dx, py + dy); g.stroke();
+        });
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    tex.needsUpdate = true;
+    _tycoonGrassTexture = tex;
+    return tex;
+}
+
+// Seamless speckle texture helper shared by the road (asphalt) and sidewalk
+// (concrete). Draws fine grain wrapped across the tile edges so it repeats with
+// no visible seams. `base` = fill colour, `specks` = array of grain colours.
+function makeSeamlessSpeckleTexture(base, specks, { count = 5000, dotMax = 1.6 } = {}) {
+    const S = 256;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const g = c.getContext('2d');
+    g.fillStyle = base;
+    g.fillRect(0, 0, S, S);
+    const wrapDot = (x, y, r) => {
+        for (let oy = -1; oy <= 1; oy++) {
+            for (let ox = -1; ox <= 1; ox++) {
+                g.beginPath(); g.arc(x + ox * S, y + oy * S, r, 0, Math.PI * 2); g.fill();
+            }
+        }
+    };
+    for (let i = 0; i < count; i++) {
+        g.fillStyle = specks[(Math.random() * specks.length) | 0];
+        wrapDot(Math.random() * S, Math.random() * S, 0.4 + Math.random() * dotMax);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    tex.needsUpdate = true;
+    return tex;
+}
+
+let _tycoonRoadTexture = null;
+export function getTycoonRoadTexture() {
+    if (!_tycoonRoadTexture) {
+        _tycoonRoadTexture = makeSeamlessSpeckleTexture('#2b2e32',
+            ['#202327', '#34383d', '#3c4046', '#1b1d20', '#2f3338'], { count: 6000, dotMax: 1.8 });
+    }
+    return _tycoonRoadTexture;
+}
+
+let _tycoonSidewalkTexture = null;
+export function getTycoonSidewalkTexture() {
+    if (!_tycoonSidewalkTexture) {
+        _tycoonSidewalkTexture = makeSeamlessSpeckleTexture('#7e8388',
+            ['#73787d', '#888d92', '#6b7075', '#90969b', '#7a7f84'], { count: 4500, dotMax: 1.4 });
+    }
+    return _tycoonSidewalkTexture;
+}
+
+// Faint white stucco/plaster grain. Used as a tintable wall texture (the wall's
+// own colour multiplies it) so buildings have surface detail instead of reading
+// as dead-flat solid panels. Subtle on purpose — keeps the clean low-poly look.
+let _tycoonStuccoTexture = null;
+function getTycoonStuccoTexture() {
+    if (!_tycoonStuccoTexture) {
+        _tycoonStuccoTexture = makeSeamlessSpeckleTexture('#ffffff',
+            ['#f0f0f0', '#e6e6e6', '#fafafa', '#ededed'], { count: 3500, dotMax: 1.1 });
+    }
+    return _tycoonStuccoTexture;
+}
+
+// ---- Drug Tycoon tree model (models/tree/tree.fbx) ------------------------
+// The hand-built trunk + icosahedron blob is replaced by this FBX. Loaded once
+// and cloned per tree. The FBX is normalized to a target height + base-at-origin
+// so it drops onto the ground regardless of the source model's units/pivot.
+const TREE_FBX_URL = (import.meta.env?.BASE_URL || '/') + 'models/tree/tree.fbx';
+const TREE_TARGET_HEIGHT = 6.0;   // in-game tree height (metres)
+let _treePrototype = null;        // { root } once ready
+let _treePromise = null;
+function loadTreePrototype() {
+    if (_treePrototype) return Promise.resolve(_treePrototype);
+    if (_treePromise) return _treePromise;
+    _treePromise = new Promise((resolve) => {
+        new FBXLoader().load(TREE_FBX_URL, (fbx) => {
+            // Convert raw FBX Phong materials into the standard/node pipeline the
+            // rest of the level uses (otherwise the tree can render invisible),
+            // and give any mesh that lost its material a green DDGI fallback.
+            convertLoadedObjectMaterials(fbx);
+            fbx.traverse((o) => {
+                if (!o.isMesh) return;
+                o.castShadow = true; o.receiveShadow = true;
+                if (!o.material) {
+                    o.material = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#2f6d2c'), roughness: 0.95 });
+                }
+            });
+            // Normalize: scale to TREE_TARGET_HEIGHT and sit the base at y=0.
+            const box = new THREE.Box3().setFromObject(fbx);
+            const size = box.getSize(new THREE.Vector3());
+            const s = size.y > 1e-4 ? TREE_TARGET_HEIGHT / size.y : 1;
+            fbx.scale.setScalar(s);
+            fbx.updateMatrixWorld(true);
+            const box2 = new THREE.Box3().setFromObject(fbx);
+            fbx.position.y -= box2.min.y;     // base flush to ground
+            const center = box2.getCenter(new THREE.Vector3());
+            fbx.position.x -= center.x; fbx.position.z -= center.z;
+            const wrap = new THREE.Group();
+            wrap.add(fbx);
+            let meshCount = 0; wrap.traverse((o) => { if (o.isMesh) meshCount++; });
+            console.log('[levels] tree.fbx loaded', { meshCount, scale: s, size: size.toArray().map((n) => +n.toFixed(2)) });
+            _treePrototype = { root: wrap };
+            resolve(_treePrototype);
+        }, undefined, (err) => {
+            console.warn('[levels] models/tree/tree.fbx load failed', err);
+            _treePrototype = { root: null };
+            resolve(_treePrototype);
+        });
+    });
+    return _treePromise;
+}
+loadTreePrototype();
+
+// A tree as a Group. If the FBX prototype is ready it's cloned in immediately;
+// otherwise the group is returned empty and populated when the load resolves
+// (with a low-poly fallback if the FBX failed). Shared by the core block and
+// the streamed chunks so all tycoon trees look identical.
+export function makeTycoonTree(rotationY = 0) {
+    const group = new THREE.Group();
+    group.rotation.y = rotationY;
+    const fillFallback = () => {
+        const trunk = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.22, 0.3, 2.2, 6),
+            new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#5b3a21'), roughness: 0.95 }));
+        trunk.position.y = 1.1; trunk.castShadow = true; group.add(trunk);
+        const leaves = new THREE.Mesh(
+            new THREE.IcosahedronGeometry(1.5, 0),
+            new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#2f6d2c'), roughness: 0.95 }));
+        leaves.position.y = 3.0; leaves.castShadow = true; group.add(leaves);
+    };
+    const fill = (proto) => {
+        if (group.userData._treeFilled) return;
+        group.userData._treeFilled = true;
+        if (proto?.root) {
+            const clone = proto.root.clone(true);
+            // Deep-clone geometry per instance: streamed-chunk teardown disposes
+            // mesh geometry, so sharing the prototype's buffers would corrupt
+            // every other tree. Materials stay shared (teardown never disposes
+            // them).
+            clone.traverse((o) => { if (o.isMesh && o.geometry) o.geometry = o.geometry.clone(); });
+            group.add(clone);
+        } else fillFallback();
+    };
+    if (_treePrototype) fill(_treePrototype);
+    else loadTreePrototype().then(fill);
+    return group;
+}
 
 // Built-in level builders (FPS starter, soccer field, brick room, DOOM test
 // & arena) plus DOOM enemy sprite-sheet generation. Extracted verbatim from
@@ -2092,11 +2286,30 @@ export function createLevels(deps) {
         };
 
         // ---- materials -------------------------------------------------
-        const grassMat   = flatMat('#3f7d34', { rough: 0.97 });
-        const roadMat    = flatMat('#2b2e32', { rough: 0.95 });
+        // Grass ground gets a procedural blade-flecked lawn texture (tiled)
+        // instead of a flat fill so the big open plane reads as actual grass.
+        const grassMat   = flatMat('#ffffff', { rough: 0.97 });
+        {
+            const grassTex = getTycoonGrassTexture();
+            grassTex.repeat.set(20, 20);   // ~4m per tile across the 80m block
+            grassMat.map = grassTex;
+            grassMat.color = new THREE.Color('#9fbf86'); // gentle tint over the texture
+            grassMat.needsUpdate = true;
+        }
+        // Road (asphalt) + sidewalk (concrete) get seamless procedural grain so
+        // they're not flat slabs. Tinted white so the texture shows true colour.
+        const roadMat    = flatMat('#ffffff', { rough: 0.95 });
+        {
+            const t = getTycoonRoadTexture(); t.repeat.set(10, 10);
+            roadMat.map = t; roadMat.needsUpdate = true;
+        }
         const lineMat    = flatMat('#d8c45a', { rough: 0.7, emissive: '#d8c45a', emissiveIntensity: 0.15 });
         const curbMat    = flatMat('#9aa0a6', { rough: 0.85 });
-        const sidewalkMat= flatMat('#7e8388', { rough: 0.9 });
+        const sidewalkMat= flatMat('#ffffff', { rough: 0.9 });
+        {
+            const t = getTycoonSidewalkTexture(); t.repeat.set(8, 8);
+            sidewalkMat.map = t; sidewalkMat.needsUpdate = true;
+        }
 
         // ---- ground -----------------------------------------------------
         // ONE collision floor for the whole block (its top sits flush at y=0).
@@ -2128,11 +2341,11 @@ export function createLevels(deps) {
         [-1, 1].forEach((s) => {
             decal(`tycoon-sw-ns-${s}`, [SW, BLOCK], s * (half + SW * 0.5), 0, sidewalkMat, 0.002);
             decal(`tycoon-sw-ew-${s}`, [BLOCK, SW], 0, s * (half + SW * 0.5), sidewalkMat, 0.002);
-            // Curbs: thin raised visual lips at the lot edge (no collision, so
-            // the player crosses roads freely — a 0.2m curb would wall in a
-            // capsule character at every intersection).
-            addBox(`tycoon-curb-ns-${s}`, [0.2, 0.03, BLOCK], [s * (half + SW), 0.015, 0], curbMat);
-            addBox(`tycoon-curb-ew-${s}`, [BLOCK, 0.03, 0.2], [0, 0.015, s * (half + SW)], curbMat);
+            // Curbs: flat ground-level strips at the lot edge (laid as decals so
+            // their top sits at ~0.001 — no raised lip for the player or car to
+            // catch on; purely a visual seam between sidewalk and grass).
+            decal(`tycoon-curb-ns-${s}`, [0.2, BLOCK], s * (half + SW), 0, curbMat, 0.003);
+            decal(`tycoon-curb-ew-${s}`, [BLOCK, 0.2], 0, s * (half + SW), curbMat, 0.003);
         });
 
         // ---- houses around the four corner lots ------------------------
@@ -2160,6 +2373,10 @@ export function createLevels(deps) {
             const wallMat = flatMat(home ? '#4f8f4a' : pick(HOUSE_TONES, i), { rough: 0.92 });
             const roofMat = flatMat(home ? '#274a2a' : pick(ROOF_TONES, i), { rough: 0.85 });
             const winMat  = flatMat('#bfe6ff', { rough: 0.2, metal: 0.1, emissive: '#9fd0ff', emissiveIntensity: 0.25 });
+            // Faint stucco grain on walls + roof (tinted by the material colour)
+            // so buildings have surface detail instead of dead-flat panels.
+            { const t = getTycoonStuccoTexture(); t.repeat.set(3, 3); wallMat.map = t; wallMat.needsUpdate = true; }
+            roofMat.map = getTycoonStuccoTexture(); roofMat.needsUpdate = true;
 
             // Solid wall box - the only collidable part.
             const body = place(new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat), 0, h * 0.5, 0);
@@ -2641,15 +2858,12 @@ export function createLevels(deps) {
             });
         });
 
-        // Trees: a trunk + foliage sphere scattered on the grass.
-        const trunkMat = flatMat('#5b3a21', { rough: 0.95 });
-        const leafMat  = flatMat('#2f6d2c', { rough: 0.95 });
+        // Trees: the models/tree/tree.fbx model scattered on the grass.
         const TREES = [[-LOT + 6, -6], [LOT - 6, 6], [-6, LOT - 6], [6, -LOT + 6], [-LOT + 5, LOT - 5]];
         TREES.forEach(([tx, tz], i) => {
-            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, 2.2, 6), trunkMat);
-            trunk.position.set(tx, 1.1, tz); trunk.castShadow = true; root.add(trunk);
-            const leaves = new THREE.Mesh(new THREE.IcosahedronGeometry(1.5, 0), leafMat);
-            leaves.position.set(tx, 3.0, tz); leaves.castShadow = true; root.add(leaves);
+            const tree = makeTycoonTree(i * 1.3);
+            tree.position.set(tx, 0, tz);
+            root.add(tree);
         });
 
         // Cook station (green lab bench) — in the SW grass lot.
@@ -3034,26 +3248,14 @@ export function createLevels(deps) {
         spillLight.name = 'weedshop-spill';
         root.add(spillLight);
 
-        // ---- Palm trees along sidewalks ----------------------------------
-        const palmTrunkMat = flatMat('#3a2a1a', { rough: 0.95 });
-        const palmFrondMat = flatMat('#2f5a2a', { rough: 0.9, emissive: '#1a3a18', emissiveIntensity: 0.2 });
+        // ---- Trees along sidewalks (models/tree/tree.fbx) ----------------
         const addPalm = (px, pz) => {
-            const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.22, 4.2, 8), palmTrunkMat);
-            trunk.position.set(px, 2.1, pz);
-            trunk.castShadow = true; trunk.receiveShadow = true;
-            trunk.name = `tycoon-palm-trunk-${px}-${pz}`;
-            root.add(trunk);
-            // Fronds: 6 stretched boxes radiating from top.
-            for (let f = 0; f < 6; f++) {
-                const ang = (f / 6) * Math.PI * 2;
-                const frond = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.08, 0.6), palmFrondMat);
-                frond.position.set(px + Math.cos(ang) * 1.1, 4.2, pz + Math.sin(ang) * 1.1);
-                frond.rotation.set(0, -ang, -0.25);
-                frond.castShadow = true;
-                root.add(frond);
-            }
+            const tree = makeTycoonTree((px * 0.7 + pz * 0.3));
+            tree.position.set(px, 0, pz);
+            tree.name = `tycoon-palm-${px}-${pz}`;
+            root.add(tree);
         };
-        // Place palms at sidewalk edges, spaced along the N-S road.
+        // Place trees at sidewalk edges, spaced along the N-S road.
         [-28, -14, 14, 28].forEach((pz) => {
             addPalm(-(ROAD_W * 0.5 + SW + 0.6), pz);
             addPalm(  ROAD_W * 0.5 + SW + 0.6, pz);

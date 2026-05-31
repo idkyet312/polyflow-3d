@@ -32,6 +32,7 @@ import { createMapStreaming, buildTrafficCarMesh } from './mapStreaming.js';
 const WEED_GLB_URL = (import.meta.env?.BASE_URL || '/') + 'Weed.glb';
 const WALKING_FBX_URL = (import.meta.env?.BASE_URL || '/') + 'models/Emmy/Walking.fbx';
 const MAN_FBX_URL = (import.meta.env?.BASE_URL || '/') + 'models/Man/Man.fbx';
+const COP_FBX_URL = (import.meta.env?.BASE_URL || '/') + 'models/Cop/CopWalk.fbx';
 const WALKING_TEXTURE_BASE_URL = (import.meta.env?.BASE_URL || '/') + 'models/Emmy/';
 const WEED_GLB_HEIGHT = 0.47;       // raw GLB plant height in metres
 const WEED_TARGET_MAX_HEIGHT = 1.2; // mature in-game plant height in metres
@@ -45,6 +46,8 @@ let _walkingBuyerPrototype = null;
 let _walkingBuyerPromise = null;
 let _manBuyerPrototype = null;
 let _manBuyerPromise = null;
+let _copBuyerPrototype = null;
+let _copBuyerPromise = null;
 let _walkingTextureSets = null;
 const WALKING_BUYER_FBX_WARNING_PREFIXES = [
     'THREE.FBXLoader: SpecularFactor map is not supported in three.js, skipping texture.',
@@ -244,6 +247,15 @@ function loadManBuyerPrototype() {
 }
 loadManBuyerPrototype();
 
+function loadCopBuyerPrototype() {
+    if (_copBuyerPrototype) return Promise.resolve(_copBuyerPrototype);
+    if (_copBuyerPromise) return _copBuyerPromise;
+    _copBuyerPromise = loadFbxBuyerPrototype(COP_FBX_URL, 'models/Cop/CopWalk.fbx', { applyEmmyTextures: false })
+        .then((proto) => { _copBuyerPrototype = proto; return proto; });
+    return _copBuyerPromise;
+}
+loadCopBuyerPrototype();
+
 function setProxyPersonVisible(group, visible) {
     const parts = group?.userData?.parts;
     if (!parts?.length) return;
@@ -361,14 +373,32 @@ const IS_MOBILE_BUYER = (() => {
 // Beyond this distance from the camera the expensive FBX visual is hidden and
 // the cheap box-ragdoll rig underneath shows instead. Tighter on mobile.
 const FBX_BUYER_LOD_DISTANCE = IS_MOBILE_BUYER ? 22 : 45;
-const FBX_BUYER_POOL_SIZE = IS_MOBILE_BUYER ? { emmy: 2, man: 2 } : { emmy: 4, man: 4 };
-const _fbxBuyerPool = { emmy: [], man: [] };
+const FBX_BUYER_POOL_SIZE = IS_MOBILE_BUYER
+    ? { emmy: 2, man: 2, cop: 2 }
+    : { emmy: 4, man: 4, cop: 4 };
+const _fbxBuyerPool = { emmy: [], man: [], cop: [] };
 let _fbxBuyerPoolReady = false;
 
+// Per-variant config: which prototype + how the loader is invoked. Man and Cop
+// keep their own embedded textures and sit low after fitting (raise half-height).
+const FBX_VARIANTS = ['emmy', 'man', 'cop'];
+function fbxVariantProto(variant) {
+    if (variant === 'man') return _manBuyerPrototype;
+    if (variant === 'cop') return _copBuyerPrototype;
+    return _walkingBuyerPrototype;
+}
+function fbxVariantLoader(variant) {
+    if (variant === 'man') return loadManBuyerPrototype;
+    if (variant === 'cop') return loadCopBuyerPrototype;
+    return loadWalkingBuyerPrototype;
+}
+function fbxVariantYOffset(variant) {
+    return (variant === 'man' || variant === 'cop') ? WALKING_BUYER_HEIGHT / 2 : 0;
+}
+
 function buildOneFbxBuyerVisual(variant) {
-    const isMan = variant === 'man';
-    const proto = isMan ? _manBuyerPrototype : _walkingBuyerPrototype;
-    const extraYOffset = isMan ? WALKING_BUYER_HEIGHT / 2 : 0;
+    const proto = fbxVariantProto(variant);
+    const extraYOffset = fbxVariantYOffset(variant);
     const visual = makeWalkingBuyerMesh({ showColorBadge: false, proto, extraYOffset });
     if (visual) visual.userData.fbxBuyerVariant = variant;
     return visual;
@@ -376,8 +406,8 @@ function buildOneFbxBuyerVisual(variant) {
 
 function prewarmFbxBuyerPool() {
     if (_fbxBuyerPoolReady) return Promise.resolve();
-    return Promise.all([loadWalkingBuyerPrototype(), loadManBuyerPrototype()]).then(() => {
-        for (const variant of ['emmy', 'man']) {
+    return Promise.all(FBX_VARIANTS.map((v) => fbxVariantLoader(v)())).then(() => {
+        for (const variant of FBX_VARIANTS) {
             const count = FBX_BUYER_POOL_SIZE[variant] || 0;
             for (let i = _fbxBuyerPool[variant].length; i < count; i++) {
                 const visual = buildOneFbxBuyerVisual(variant);
@@ -420,16 +450,14 @@ function releaseFbxBuyerVisual(group) {
 // almost nothing (and their walk mixer can stop) — the big mobile win.
 function setBuyerLodFar(group, far) {
     if (!group?.userData?.walkingVisualAttached) return;
-    const wantFbx = !far;
     if (group.userData.walkingLodFar === far) return;
     group.userData.walkingLodFar = far;
     const visual = group.userData.walkingVisual;
-    if (visual) visual.visible = wantFbx;
-    setProxyPersonVisible(group, far);
-    // Pause the animation mixer for far buyers so we don't pay skinning cost
-    // for something that's only a box.
+    if (visual) visual.visible = true;
+    setProxyPersonVisible(group, false);
+    // Far LOD keeps the FBX visible, but freezes animation/skinning work.
     const action = group.userData.walkingAction;
-    if (action) { if (wantFbx) action.paused = false; else action.paused = true; }
+    if (action) action.paused = !!far;
 }
 
 function attachWalkingBuyerVisual(group, variant = 'emmy') {
@@ -461,7 +489,7 @@ function makeTycoonPersonMesh({
 } = {}) {
     const group = ragdoll.makePerson({ skinColor, shirtColor, pantsColor });
     if (!useWalkingVisual) return group;
-    const variant = visualVariant === 'man' ? 'man' : 'emmy';
+    const variant = FBX_VARIANTS.includes(visualVariant) ? visualVariant : 'emmy';
     if (!attachWalkingBuyerVisual(group, variant)) {
         // Pool not warm yet — build it, then attach from the pool.
         prewarmFbxBuyerPool().then(() => {
@@ -518,7 +546,10 @@ const SELL_THANKS = [
 ];
 const GUN_FIRE_COOLDOWN_MS = 280;  // pistol cadence
 const GUN_RANGE = 60;              // max shoot distance
-const GUN_AIM_DOT = 0.985;        // aim cone tightness (cos angle)
+const GUN_RAY_HALF_WIDTH = 0.30;   // tight body raycast, avoids huge FBX bounds
+const GUN_RAY_HALF_DEPTH = 0.22;
+const GUN_RAY_MIN_Y = 0.35;
+const GUN_RAY_MAX_Y = 1.72;
 const GUN_IMPULSE = 9;            // ragdoll shove strength
 const BAT_RANGE = 3.0;            // melee reach
 const BAT_COOLDOWN_MS = 480;      // swing cadence
@@ -778,6 +809,9 @@ const DELIVERY_MIN_DELAY_MS = 25000; // earliest a fresh delivery can be offered
 // The car is bought (not free): owning it parks a drivable car behind the
 // house AND unlocks the long-distance delivery contracts.
 const CAR_PRICE = 2500;
+// Vertical offset for the player car's GLB skin so its wheels sit on the road
+// (the engine chassis origin floats ~ride-height above ground).
+const PLAYER_CAR_SKIN_DROP = -0.45;
 
 export function createDrugTycoon(deps) {
     const {
@@ -3731,18 +3765,15 @@ export function createDrugTycoon(deps) {
         scene?.add(group);
     }
     function makeBuyerMesh(shirtColor) {
-        // Per 10 buyers: 2 are Man (Man.fbx), 1 is Emmy (Walking.fbx), rest are
-        // box-rig people. Both FBX visuals wear Emmy's packed diffuse/normal material.
-        const slot = buyerSpawnSerial++ % 10;
-        const useFbxVisual = slot < 3;
-        const visualVariant = slot < 2 ? 'man' : 'emmy';
+        // Most active buyers use Man.fbx; a few use Emmy/Walking.fbx for variety.
+        const visualVariant = (buyerSpawnSerial++ % 5) === 4 ? 'emmy' : 'man';
         return makeTycoonPersonMesh({
             skinColor: randomFrom(SKIN_TONES),
             shirtColor,
             pantsColor: '#22303c',
             showColorBadge: false,
             badgeColor: shirtColor,
-            useWalkingVisual: useFbxVisual,
+            useWalkingVisual: true,
             visualVariant,
         });
     }
@@ -3766,6 +3797,52 @@ export function createDrugTycoon(deps) {
         s.npcs.push(npc);
         return npc;
     }
+    // ---- car roadkill --------------------------------------------------
+    // If the player's car is moving and runs into a living person, ragdoll them
+    // along the car's travel direction. Reads the car's Jolt body for an exact
+    // world position + velocity each frame.
+    const CAR_HIT_RADIUS = 2.2;        // person within this of the car body centre
+    const CAR_HIT_MIN_SPEED = 3.0;     // m/s — below this it's a gentle nudge, no kill
+    const CAR_HIT_IMPULSE = 1.3;       // velocity → ragdoll shove scale (kept modest so
+                                       // bodies tumble nearby instead of flying off)
+    const _carPos = new THREE.Vector3();
+    const _carVel = new THREE.Vector3();
+    const _carRoadkillTargets = [];
+    function tickCarRoadkill(s) {
+        const car = s._carActor;
+        if (!car || !physics?.Jolt || !physics?.bodyInterface) return;
+        let body;
+        try { body = getActorBody?.(car); } catch (e) { return; }
+        if (!body) return;
+        const p = body.GetPosition();
+        const v = body.GetLinearVelocity();
+        _carPos.set(p.GetX(), p.GetY(), p.GetZ());
+        _carVel.set(v.GetX(), 0, v.GetZ());
+        const speed = _carVel.length();
+        if (speed < CAR_HIT_MIN_SPEED) return;
+        const dirX = _carVel.x / speed, dirZ = _carVel.z / speed;
+
+        _carRoadkillTargets.length = 0;
+        _carRoadkillTargets.push(...s.npcs, ...s.rivals, ...s.police, ...s.patrol);
+        for (const t of _carRoadkillTargets) {
+            const m = t?.mesh;
+            if (!m || m.userData?._roadkilled) continue;
+            const dx = m.position.x - _carPos.x, dz = m.position.z - _carPos.z;
+            if ((dx * dx + dz * dz) > CAR_HIT_RADIUS * CAR_HIT_RADIUS) continue;
+            // Only hit people roughly ahead of / under the moving car.
+            if ((dx * dirX + dz * dirZ) < -0.6) continue;
+            m.userData._roadkilled = true;
+            const shove = Math.min(speed, 10) * CAR_HIT_IMPULSE;
+            ragdoll.ragdollify(m, { x: dirX * shove, y: 1.6 + speed * 0.08, z: dirZ * shove });
+            const wp = m.getWorldPosition(new THREE.Vector3());
+            const kind = removeLivePerson(s, t);
+            if (kind === 'rival' || kind === 'police') s.heat = Math.min(160, s.heat + 16);
+            else s.heat = Math.min(160, s.heat + 8);
+            floatText('SPLAT', wp.setY(wp.y + 1.2), '#ff5050');
+            try { playSfx('hit', wp); } catch (e) {}
+        }
+    }
+
     // Per-frame buyer simulation: top up to rep-driven cap, despawn extras,
     // and tick movement. Runs whether the player is outside on the street or
     // inside the shop so buyers keep flowing to/from the counter either way.
@@ -3900,6 +3977,8 @@ export function createDrugTycoon(deps) {
             pantsColor: '#151515',
             showColorBadge: true,
             badgeColor: armed ? '#ff5a5a' : '#ff8a8a',
+            useWalkingVisual: true,
+            visualVariant: 'man',
         });
         const radius = (layout.streetRadius ?? 16) * 1.05;
         const ang = Math.random() * Math.PI * 2;
@@ -3927,6 +4006,8 @@ export function createDrugTycoon(deps) {
             pantsColor: '#0b1b3a',
             showColorBadge: true,
             badgeColor: '#4f8cff',
+            useWalkingVisual: true,
+            visualVariant: 'cop',
         });
         // Cops spawn ONLY at the map edges (perimeter), then walk inward — a
         // random point on the square boundary just inside the wall.
@@ -4931,7 +5012,11 @@ export function createDrugTycoon(deps) {
                 chassis.traverse((o) => { if (o.isMesh) o.visible = false; });
                 const skin = buildTrafficCarMesh(tone);
                 skin.rotation.y = Math.PI;
-                skin.position.y = -0.35;
+                // Drop the skin so the GLB's wheels sit on the road. The chassis
+                // origin sits ~ride-height above ground, so the ground-based GLB
+                // (base at its local y=0) is lowered to meet it. Tuned to seat the
+                // wheels; nudge PLAYER_CAR_SKIN_DROP if it floats/sinks.
+                skin.position.y = PLAYER_CAR_SKIN_DROP;
                 skin.userData._trafficSkin = true;
                 chassis.add(skin);
             }
@@ -4992,26 +5077,46 @@ export function createDrugTycoon(deps) {
         if (_muzzleFlash) { try { _muzzleFlash.parent?.remove(_muzzleFlash); } catch (e) {} _muzzleFlash = null; }
     }
 
-    // Muzzle tracer: a quick fading line from the gun to the hit point.
-    const _tracers = [];
+    // Muzzle tracer: a quick fading line from the gun to the hit point. Tracers
+    // are POOLED — a fixed set of Line objects is created once and reused by
+    // rewriting their 2 endpoints, so firing allocates no geometry/material and
+    // never touches the scene graph (just toggles visibility + opacity).
+    const _tracers = [];        // active: { line, born }
+    const _tracerPool = [];     // idle, ready to reuse
+    const TRACER_POOL_MAX = 24;
+    function makeTracerLine() {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+        const mat = new THREE.LineBasicMaterial({ color: 0xfff3a0, transparent: true, opacity: 0.9 });
+        const line = new THREE.Line(geo, mat);
+        line.renderOrder = 9;
+        line.frustumCulled = false;
+        line.visible = false;
+        return line;
+    }
     function spawnTracer(from, to, color = 0xfff3a0) {
         const { scene } = core;
         if (!scene) return;
-        const geo = new THREE.BufferGeometry().setFromPoints([from.clone(), to.clone()]);
-        const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 });
-        const line = new THREE.Line(geo, mat);
-        line.renderOrder = 9;
-        scene.add(line);
+        let line = _tracerPool.pop() || makeTracerLine();
+        if (!line.parent) scene.add(line);
+        const pos = line.geometry.attributes.position;
+        pos.array[0] = from.x; pos.array[1] = from.y; pos.array[2] = from.z;
+        pos.array[3] = to.x;   pos.array[4] = to.y;   pos.array[5] = to.z;
+        pos.needsUpdate = true;
+        line.material.color.set(color);
+        line.material.opacity = 0.9;
+        line.visible = true;
         _tracers.push({ line, born: performance.now?.() || Date.now() });
     }
     function updateTracers() {
-        const { scene } = core;
         const now = performance.now?.() || Date.now();
         for (let i = _tracers.length - 1; i >= 0; i--) {
             const t = _tracers[i];
             const age = now - t.born;
             if (age > 90) {
-                try { scene?.remove(t.line); t.line.geometry.dispose(); t.line.material.dispose(); } catch (e) {}
+                // Return to the pool (hidden, kept in scene) instead of disposing.
+                t.line.visible = false;
+                if (_tracerPool.length < TRACER_POOL_MAX) _tracerPool.push(t.line);
                 _tracers.splice(i, 1);
             } else {
                 t.line.material.opacity = 0.9 * (1 - age / 90);
@@ -5036,43 +5141,72 @@ export function createDrugTycoon(deps) {
         return tex;
     }
     let _flashTex = null;
-    function muzzleFlash() {
+    let _muzzleSprite = null;
+    let _muzzleLight = null;
+    // Build the muzzle flash ONCE and parent it to the camera, hidden. Each shot
+    // just shows + repositions it. Adding/removing a PointLight (or any light)
+    // to a WebGPU node-material scene every shot forces a full material/pipeline
+    // RECOMPILE — that was the multi-second freeze on fire. A persistent light
+    // whose intensity we toggle costs nothing.
+    function ensureMuzzleFlash() {
         const { camera } = core;
-        if (!camera) return;
+        if (!camera || _muzzleFlash) return;
         if (!_flashTex) _flashTex = makeFlashTexture();
-        // Remove any lingering flash first.
-        if (_muzzleFlash) { try { _muzzleFlash.parent?.remove(_muzzleFlash); } catch (e) {} _muzzleFlash = null; }
         const grp = new THREE.Group();
-        const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+        _muzzleSprite = new THREE.Sprite(new THREE.SpriteMaterial({
             map: _flashTex, transparent: true, depthTest: false, depthWrite: false,
             blending: THREE.AdditiveBlending, toneMapped: false,
         }));
-        spr.scale.setScalar(0.5 + Math.random() * 0.2);
-        spr.material.rotation = Math.random() * Math.PI;
-        grp.add(spr);
-        const light = new THREE.PointLight(0xffd27a, 6, 7, 2);
-        grp.add(light);
-        // At the held gun's muzzle (bottom-right, slightly forward).
+        _muzzleSprite.scale.setScalar(0.6);
+        grp.add(_muzzleSprite);
+        _muzzleLight = new THREE.PointLight(0xffd27a, 0, 7, 2); // intensity 0 = off until fired
+        grp.add(_muzzleLight);
         grp.position.set(0.3, -0.24, -0.95);
         grp.renderOrder = 11;
+        grp.visible = false;
         camera.add(grp);
         _muzzleFlash = grp;
-        const born = performance.now?.() || Date.now();
-        grp.userData.born = born;
+    }
+    function muzzleFlash() {
+        ensureMuzzleFlash();
+        if (!_muzzleFlash) return;
+        // Randomize look, then just switch it ON (no scene-graph mutation).
+        if (_muzzleSprite) {
+            _muzzleSprite.scale.setScalar(0.5 + Math.random() * 0.2);
+            _muzzleSprite.material.rotation = Math.random() * Math.PI;
+        }
+        if (_muzzleLight) _muzzleLight.intensity = 6;
+        _muzzleFlash.visible = true;
+        _muzzleFlash.userData.born = performance.now?.() || Date.now();
     }
     function updateMuzzleFlash() {
-        if (!_muzzleFlash) return;
+        if (!_muzzleFlash || !_muzzleFlash.visible) return;
         const now = performance.now?.() || Date.now();
         const age = now - (_muzzleFlash.userData.born || 0);
         if (age > 70) {
-            try { _muzzleFlash.parent?.remove(_muzzleFlash); } catch (e) {}
-            _muzzleFlash = null;
+            // Hide + dim the persistent flash (keep it in the graph for reuse).
+            _muzzleFlash.visible = false;
+            if (_muzzleLight) _muzzleLight.intensity = 0;
         }
     }
 
     const _camPos = new THREE.Vector3();
     const _camDir = new THREE.Vector3();
     const _toNpc = new THREE.Vector3();
+    const _shotRay = new THREE.Ray();
+    const _shotBox = new THREE.Box3();
+    const _shotImpact = new THREE.Vector3();
+    const _bestShotImpact = new THREE.Vector3();
+    const _shotTargets = [];   // reused per shot to avoid concat() allocation
+    function setGunHitbox(mesh, box) {
+        const sx = Math.max(0.01, mesh?.scale?.x || 1);
+        const sy = Math.max(0.01, mesh?.scale?.y || 1);
+        const sz = Math.max(0.01, mesh?.scale?.z || 1);
+        const p = mesh.position;
+        box.min.set(p.x - GUN_RAY_HALF_WIDTH * sx, p.y + GUN_RAY_MIN_Y * sy, p.z - GUN_RAY_HALF_DEPTH * sz);
+        box.max.set(p.x + GUN_RAY_HALF_WIDTH * sx, p.y + GUN_RAY_MAX_Y * sy, p.z + GUN_RAY_HALF_DEPTH * sz);
+        return box;
+    }
     function tryShoot(s, layout) {
         const { camera } = core;
         if (!camera) return;
@@ -5089,30 +5223,35 @@ export function createDrugTycoon(deps) {
         }
         s.ammo -= 1;
 
-        // Aim-cone hit test against living people (buyers + police + night
-        // patrol). Pick the closest target inside the cone and within range.
-        const targets = s.npcs.concat(s.rivals, s.police, s.patrol);
+        // Tight raycast against living people (buyers + police + night patrol).
+        // Reuse a scratch array so firing doesn't allocate a fresh concat()
+        // (and the GC churn it causes) on every shot.
+        _shotTargets.length = 0;
+        _shotTargets.push(...s.npcs, ...s.rivals, ...s.police, ...s.patrol);
         let best = null, bestDist = GUN_RANGE;
-        for (const t of targets) {
+        _shotRay.set(_camPos, _camDir);
+        for (const t of _shotTargets) {
             if (!t.mesh) continue;
-            // Aim at chest height (group origin is at feet).
-            _toNpc.copy(t.mesh.position); _toNpc.y += 1.25; _toNpc.sub(_camPos);
-            const dist = _toNpc.length();
-            if (dist < 0.001 || dist > GUN_RANGE) continue;
-            _toNpc.multiplyScalar(1 / dist);
-            const dot = _toNpc.dot(_camDir);
-            if (dot < GUN_AIM_DOT) continue;
-            if (dist < bestDist) { bestDist = dist; best = t; }
+            setGunHitbox(t.mesh, _shotBox);
+            if (!_shotRay.intersectBox(_shotBox, _shotImpact)) continue;
+            const dist = _shotImpact.distanceTo(_camPos);
+            if (dist < 0.001 || dist > bestDist || dist > GUN_RANGE) continue;
+            bestDist = dist;
+            best = t;
+            _bestShotImpact.copy(_shotImpact);
         }
 
         // Tracer to target (or into the distance on a miss).
         const end = best
-            ? _camPos.clone().add(_camDir.clone().multiplyScalar(bestDist))
+            ? _bestShotImpact.clone()
             : _camPos.clone().add(_camDir.clone().multiplyScalar(GUN_RANGE));
         const muzzle = _camPos.clone().add(_camDir.clone().multiplyScalar(0.6)).add(new THREE.Vector3(0, -0.2, 0));
         spawnTracer(muzzle, end);
-        muzzleFlash();
-        playSfx('shot', muzzle);
+        // Muzzle flash disabled — its dynamic light leaked glow + shadow wedges
+        // into the scene and added cost. Tracer + SFX only now.
+        // Player's own gun is at the camera — skip the costly HRTF panner and
+        // play it non-positional (cheaper, and rapid fire won't stack panners).
+        playSfx('shot');
 
         // Tiny camera kick.
         if (gameplay.hitFeedback) gameplay.hitFeedback.shake = Math.max(gameplay.hitFeedback.shake || 0, 0.35);
@@ -5120,7 +5259,12 @@ export function createDrugTycoon(deps) {
         if (best) {
             // Ragdoll it, shoved along the shot direction.
             const dir = _camDir.clone();
-            ragdoll.ragdollify(best.mesh, { x: dir.x * GUN_IMPULSE, y: 3.5, z: dir.z * GUN_IMPULSE });
+            ragdoll.ragdollify(best.mesh, {
+                x: dir.x * GUN_IMPULSE,
+                y: 1.2,
+                z: dir.z * GUN_IMPULSE,
+                point: _bestShotImpact.clone(),
+            });
             playSfx('hit', end);
             floatText('DOWN', end.clone().setY(end.y + 0.4), '#ff7070');
             // Remove from the live list it belonged to.
@@ -5326,24 +5470,37 @@ export function createDrugTycoon(deps) {
         ud.walkAmp = (ud.walkAmp ?? 0) + (amp - (ud.walkAmp ?? 0)) * Math.min(1, dt * 8);
         const a = ud.walkAmp;
         const s = Math.sin(phase);
-        // parts: [torso, head, armL, armR, legL, legR]
-        const armL = parts[2], armR = parts[3], legL = parts[4], legR = parts[5];
-        // Rotate legs from the HIP (top of leg box), not the geometric centre.
-        // BoxGeometry rotates about its center, so offset position by the rotation
-        // around a virtual top-pivot at +halfH. Rest pose: leg center y = 0.45,
-        // legHalf = 0.425, top = 0.875. Same trick for arms (shoulder pivot).
         const applyTopPivot = (limb, restY, halfH, angle) => {
             if (!limb) return;
             limb.rotation.x = angle;
             const c = Math.cos(angle), si = Math.sin(angle);
-            // Move center so the TOP of the box stays at restY + halfH.
             limb.position.y = restY + halfH - c * halfH;
             limb.position.z = -si * halfH;
         };
-        applyTopPivot(legL, 0.45, 0.425,  s * a);
+
+        if (parts.length >= 11) {
+            // 11-part rig: [pelvis,chest,head,upArmL,foreArmL,upArmR,foreArmR,thighL,shinL,thighR,shinR]
+            const swing = s * a;
+            applyTopPivot(parts[7], 0.72, 0.225,  swing);
+            applyTopPivot(parts[8], 0.27, 0.225,  swing * 0.45);
+            applyTopPivot(parts[9], 0.72, 0.225, -swing);
+            applyTopPivot(parts[10], 0.27, 0.225, -swing * 0.45);
+            applyTopPivot(parts[3], 1.52, 0.16, -swing * 0.8);
+            applyTopPivot(parts[4], 1.18, 0.16, -swing * 0.55);
+            applyTopPivot(parts[5], 1.52, 0.16,  swing * 0.8);
+            applyTopPivot(parts[6], 1.18, 0.16,  swing * 0.55);
+            const bob = Math.abs(Math.sin(phase * 2)) * a * 0.015;
+            if (parts[0]) parts[0].position.y = 1.00 + bob;
+            if (parts[1]) parts[1].position.y = 1.45 + bob;
+            if (parts[2]) parts[2].position.y = 1.86 + bob;
+            return;
+        }
+
+        const armL = parts[2], armR = parts[3], legL = parts[4], legR = parts[5];
+        applyTopPivot(legL, 0.45, 0.425, s * a);
         applyTopPivot(legR, 0.45, 0.425, -s * a);
         applyTopPivot(armL, 1.30, 0.31, -s * a * 0.8);
-        applyTopPivot(armR, 1.30, 0.31,  s * a * 0.8);
+        applyTopPivot(armR, 1.30, 0.31, s * a * 0.8);
         // Subtle bob on torso/head.
         const bob = Math.abs(Math.sin(phase * 2)) * a * 0.015;
         const torso = parts[0], head = parts[1];
@@ -6575,6 +6732,9 @@ export function createDrugTycoon(deps) {
         // walking to the counter while you're inside, and street wanderers
         // keep moving when you're outside.
         tickBuyers(s, layout, playerPos, dt);
+
+        // Car roadkill: ragdoll anyone the moving player car drives into.
+        if (!s.inRoom) tickCarRoadkill(s);
 
         // Stream neighbourhood chunks in/out as the player roams the street.
         // The grow room is off-map, so drop all streamed chunks while indoors.

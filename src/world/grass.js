@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { Fn, attribute, uniform, positionLocal, uv, texture as textureNode, vec3, vec4, float, sin, cos, mix, modelViewMatrix, cameraProjectionMatrix } from 'three/tsl';
+import { Fn, attribute, uniform, positionLocal, uv, texture as textureNode, vec2, vec3, vec4, float, sin, cos, mix, fract, dot, clamp, modelViewMatrix, cameraProjectionMatrix } from 'three/tsl';
 import { TERRAIN_SIZE, sampleTerrainHeightAtLocal } from './terrain.js';
 
 // Grass parented under worldFloor (PlaneGeometry rotated -PI/2 X). In terrain
@@ -262,10 +262,33 @@ export function createGrassField({
         );
     })();
 
+    // Cheap 2D value-noise hash → [0,1). Used to break up the flat green sheet
+    // with per-blade and per-patch variation so the field reads as textured.
+    const hash21 = (p) => fract(sin(dot(p, vec2(127.1, 311.7))).mul(43758.5453));
+
     const colorNode = Fn(() => {
         const gradient = mix(uBaseColor, uTipColor, aHeight);
         const ao = float(0.8).add(aHeight.mul(0.2));
-        const procedural = gradient.mul(ao);
+
+        // Per-blade brightness jitter (each blade slightly lighter/darker).
+        const bladeRand = hash21(aOffset.xy);
+        const bladeShade = float(0.82).add(bladeRand.mul(0.36)); // 0.82..1.18
+
+        // Low-frequency patch variation: large soft tonal patches across the
+        // field (drier/lusher areas) from a coarse sample of the offset.
+        const patchRand = hash21(aOffset.xy.mul(0.04));
+        const patchTint = mix(vec3(0.86, 0.92, 0.7), vec3(1.06, 1.08, 0.95), patchRand);
+
+        // Subtle yellow-green hue jitter per blade so it's not monochrome.
+        const hueRand = hash21(aOffset.xy.mul(0.7).add(vec2(5.2, 1.3)));
+        const hueShift = vec3(
+            float(1.0).add(hueRand.sub(0.5).mul(0.10)),
+            float(1.0).add(hueRand.sub(0.5).mul(0.05)),
+            float(1.0).sub(hueRand.sub(0.5).mul(0.14)),
+        );
+
+        const varied = gradient.mul(ao).mul(bladeShade).mul(patchTint).mul(hueShift);
+        const procedural = clamp(varied, vec3(0.0), vec3(1.0));
         // When sprite is active, tint by gradient. Else use pure procedural.
         const tinted = spriteSampler.rgb.mul(mix(vec3(1.0, 1.0, 1.0), gradient, uSpriteTint));
         return mix(procedural, tinted, uUseSprite);

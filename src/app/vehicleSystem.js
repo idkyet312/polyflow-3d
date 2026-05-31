@@ -396,12 +396,16 @@ export function createVehicleSystem(deps) {
             VEHICLE_SETTINGS.length,
         );
         const center = bounds?.center || new THREE.Vector3();
+        // Rounded chassis box: a larger convex radius rounds the lower edges so
+        // the body skates over curbs/bumps instead of catching. We DON'T lift the
+        // box (that made the car float) — only round it; the raycast suspension
+        // still sets the ride height.
         const halfExtent = new Jolt.Vec3(
             Math.max(size.x * 0.5, 0.05),
             Math.max(size.y * 0.5, 0.05),
             Math.max(size.z * 0.5, 0.05),
         );
-        const boxShape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtent, 0.05));
+        const boxShape = createOwnedShape(new Jolt.BoxShapeSettings(halfExtent, 0.15));
         Jolt.destroy(halfExtent);
 
         const compound = new Jolt.MutableCompoundShapeSettings();

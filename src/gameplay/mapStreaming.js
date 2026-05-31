@@ -17,47 +17,183 @@
 // rebuildActorPhysics — so streamed houses block the player exactly like the
 // core ones. Teardown uses destroyDynamicPhysicsProp + sceneSystem.removeActor.
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DDGIMeshStandardNodeMaterial } from '../world/gi/DDGIMeshStandardNodeMaterial.js';
+import { convertLoadedObjectMaterials } from '../io/objectLoader.js';
+import { getTycoonGrassTexture, getTycoonRoadTexture, getTycoonSidewalkTexture, makeTycoonTree } from '../world/levels.js';
+
+// ---- car.glb model (models/car/car.glb) ----------------------------------
+// The traffic + player cars use this GLB. Loaded once, normalized (scaled to a
+// target length, base at y=0, facing +Z), then cloned per car. Replaces the
+// procedural box car (kept as buildBoxCarMesh for the load-failed fallback).
+const CAR_GLB_URL = (import.meta.env?.BASE_URL || '/') + 'models/car/car.glb';
+const CAR_TARGET_LENGTH = 4.4;   // in-game car length (metres, along its long axis)
+let _carPrototype = null;        // { root } once ready
+let _carPromise = null;
+function loadCarPrototype() {
+    if (_carPrototype) return Promise.resolve(_carPrototype);
+    if (_carPromise) return _carPromise;
+    _carPromise = new Promise((resolve) => {
+        new GLTFLoader().load(CAR_GLB_URL, (gltf) => {
+            const src = gltf.scene;
+            convertLoadedObjectMaterials(src);
+            src.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+            // Normalize: scale so the longest horizontal axis == CAR_TARGET_LENGTH,
+            // sit the base at y=0, centre on x/z. Orientation assumed +Z forward;
+            // if the model faces a different way we yaw it to its long axis = Z.
+            let box = new THREE.Box3().setFromObject(src);
+            let size = box.getSize(new THREE.Vector3());
+            if (size.x > size.z) src.rotation.y = Math.PI * 0.5; // make long axis = Z
+            src.updateMatrixWorld(true);
+            box = new THREE.Box3().setFromObject(src);
+            size = box.getSize(new THREE.Vector3());
+            const longest = Math.max(size.x, size.z) || 1;
+            const s = CAR_TARGET_LENGTH / longest;
+            src.scale.setScalar(s);
+            src.updateMatrixWorld(true);
+            box = new THREE.Box3().setFromObject(src);
+            const center = box.getCenter(new THREE.Vector3());
+            src.position.x -= center.x; src.position.z -= center.z;
+            src.position.y -= box.min.y;     // base flush to ground
+            const wrap = new THREE.Group();
+            wrap.add(src);
+            _carPrototype = { root: wrap };
+            console.log('[mapStreaming] car.glb loaded', { scale: +s.toFixed(3), size: size.toArray().map((n) => +n.toFixed(2)) });
+            resolve(_carPrototype);
+        }, undefined, (err) => {
+            console.warn('[mapStreaming] models/car/car.glb load failed', err);
+            _carPrototype = { root: null };
+            resolve(_carPrototype);
+        });
+    });
+    return _carPromise;
+}
+loadCarPrototype();
 
 // Standalone builder for the box-car mesh used by ambient traffic — exported so
 // the drivable player car (spawned via the engine) can be re-skinned to match.
 // Built facing +Z (front at +Z). `colorHex` tints the body. Uses DDGI node
 // materials (NOT plain MeshStandardMaterial) so the car shades correctly in the
 // WebGPU node-material pipeline — plain materials render BLACK in this scene.
+// Traffic + player car mesh. Returns a Group populated with a clone of the
+// car.glb model (deferred until the GLB loads; box-car fallback if it fails).
+// `colorHex` is kept for the fallback's body tint.
 export function buildTrafficCarMesh(colorHex = '#c43b3b') {
+    const group = new THREE.Group();
+    const fill = (proto) => {
+        if (group.userData._carFilled) return;
+        group.userData._carFilled = true;
+        if (proto?.root) {
+            const clone = proto.root.clone(true);
+            // GLB as authored, except the tyres are forced black. Deep-clone
+            // geometry per car so chunk teardown (which disposes mesh geometry)
+            // can't corrupt the shared prototype's buffers.
+            const tyreMat = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color('#0e0f11'), roughness: 0.9, metalness: 0.0 });
+            clone.traverse((o) => {
+                if (!o.isMesh) return;
+                if (o.geometry) o.geometry = o.geometry.clone();
+                // Tyre meshes are named "Car tyre.*" in the GLB; match self+ancestors.
+                let name = '';
+                for (let p = o; p; p = p.parent) name += (p.name || '') + ' ';
+                name = name.toLowerCase();
+                if (name.includes('tyre') || name.includes('tire')) o.material = tyreMat;
+            });
+            group.add(clone);
+        } else {
+            group.add(buildBoxCarMesh(colorHex));
+        }
+    };
+    if (_carPrototype) fill(_carPrototype);
+    else loadCarPrototype().then(fill);
+    return group;
+}
+
+// Procedural low-poly box car — fallback when car.glb can't load.
+function buildBoxCarMesh(colorHex = '#c43b3b') {
     const g = new THREE.Group();
-    const L = 4.2, W = 1.9, H = 0.7;
-    const ddgi = (color, roughness, emissive = null, ei = 0) => {
-        const mat = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color(color), roughness, metalness: 0.0 });
+    const L = 4.2, W = 1.9;
+    const ddgi = (color, roughness, metalness = 0.0, emissive = null, ei = 0) => {
+        const mat = new DDGIMeshStandardNodeMaterial({ color: new THREE.Color(color), roughness, metalness });
         if (emissive) { mat.emissive = new THREE.Color(emissive); mat.emissiveIntensity = ei; }
         return mat;
     };
-    const body = ddgi(colorHex, 0.45);
-    const glass = ddgi('#1a2230', 0.25);
-    const tire = ddgi('#15171a', 0.85);
-    const head = ddgi('#fff4c0', 0.3, '#fff4c0', 1.2);
-    const tail = ddgi('#ff4030', 0.3, '#ff4030', 1.0);
-    const add = (geo, mat, x, y, z) => {
+    const body = ddgi(colorHex, 0.32, 0.15);     // slightly glossy painted body
+    const trim = ddgi('#15171a', 0.6);            // black trim / bumpers / sills
+    const glass = ddgi('#10141c', 0.12, 0.2);     // dark glass
+    const tire = ddgi('#0e0f11', 0.92);
+    const rim = ddgi('#c9ced4', 0.35, 0.6);       // metallic hub cap
+    const head = ddgi('#fff4c0', 0.3, 0.0, '#fff4c0', 1.2);
+    const tail = ddgi('#ff4030', 0.3, 0.0, '#ff4030', 1.0);
+    const add = (geo, mat, x, y, z, rotY = 0) => {
         const mesh = new THREE.Mesh(geo, mat);
         mesh.position.set(x, y, z);
+        if (rotY) mesh.rotation.y = rotY;
         mesh.castShadow = true; mesh.receiveShadow = true;
         g.add(mesh);
         return mesh;
     };
-    add(new THREE.BoxGeometry(W, H, L), body, 0, H * 0.5 + 0.35, 0);
-    add(new THREE.BoxGeometry(W * 0.86, H * 0.7, L * 0.5), body, 0, H + 0.35, -0.1);
-    add(new THREE.BoxGeometry(W * 0.8, H * 0.55, L * 0.46), glass, 0, H + 0.42, -0.1);
-    const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 12);
+
+    const WHEEL_R = 0.34;
+    const RIDE = WHEEL_R + 0.06;            // chassis sits just above wheel centre
+    // Lower main body (sill) — sits low and wide so the car reads as grounded.
+    add(new THREE.BoxGeometry(W, 0.34, L), trim, 0, RIDE - 0.02, 0);
+    // Painted body above the sill, tapered slightly via a second narrower slab.
+    add(new THREE.BoxGeometry(W * 0.98, 0.34, L * 0.98), body, 0, RIDE + 0.28, 0);
+    add(new THREE.BoxGeometry(W * 0.9, 0.18, L * 0.9), body, 0, RIDE + 0.5, 0);
+    // Cabin: a tapered greenhouse (roof narrower + shorter than its base) so the
+    // pillars/windshield rake inward instead of forming a hard cube. Built from
+    // a custom 8-vertex prism whose top face is shrunk and pushed back slightly.
+    const cabY = RIDE + 0.74;
+    const taperedCabin = (bw, bl, h, topScaleW, topScaleL, topZShift) => {
+        const hw = bw * 0.5, hl = bl * 0.5;
+        const tw = hw * topScaleW, tl = hl * topScaleL;
+        // 8 corners: bottom (0-3) then top (4-7), top shifted back by topZShift.
+        const v = new Float32Array([
+            -hw, 0, -hl,  hw, 0, -hl,  hw, 0, hl,  -hw, 0, hl,            // bottom
+            -tw, h, -tl + topZShift,  tw, h, -tl + topZShift,
+             tw, h,  tl + topZShift, -tw, h,  tl + topZShift,            // top
+        ]);
+        const idx = [
+            0,1,2, 0,2,3,        // bottom
+            4,6,5, 4,7,6,        // top
+            0,4,5, 0,5,1,        // front (-Z)
+            1,5,6, 1,6,2,        // right (+X)
+            2,6,7, 2,7,3,        // back (+Z)
+            3,7,4, 3,4,0,        // left (-X)
+        ];
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(v, 3));
+        geo.setIndex(idx);
+        geo.computeVertexNormals();
+        return geo;
+    };
+    // Glass cabin body (tapered) — roof 70% width, 55% length, nudged rearward.
+    // Double-sided so the custom prism shows regardless of face winding.
+    const glassDS = ddgi('#10141c', 0.12, 0.2); glassDS.side = THREE.DoubleSide;
+    add(taperedCabin(W * 0.84, L * 0.46, 0.46, 0.7, 0.55, 0.08), glassDS, 0, cabY - 0.23, -0.15);
+    // Painted roof cap sitting on the tapered top so it doesn't read as glass.
+    add(new THREE.BoxGeometry(W * 0.6, 0.07, L * 0.27), body, 0, cabY + 0.2, -0.19);
+    // Slim painted A/C pillars framing the glass front + rear edges.
+    add(new THREE.BoxGeometry(W * 0.84, 0.06, 0.06), body, 0, cabY - 0.23, -0.15 + L * 0.23);
+    add(new THREE.BoxGeometry(W * 0.7, 0.06, 0.06), body, 0, cabY + 0.18, -0.15 - L * 0.135);
+
+    // Wheels: higher-poly tyre + a metallic hub so they read as wheels, not pegs.
+    const tireGeo = new THREE.CylinderGeometry(WHEEL_R, WHEEL_R, 0.26, 20);
+    const rimGeo = new THREE.CylinderGeometry(WHEEL_R * 0.55, WHEEL_R * 0.55, 0.28, 16);
     for (const wx of [-W * 0.5, W * 0.5]) {
-        for (const wz of [L * 0.32, -L * 0.32]) {
-            const w = add(wheelGeo, tire, wx, 0.4, wz);
-            w.rotation.z = Math.PI * 0.5;
+        for (const wz of [L * 0.3, -L * 0.3]) {
+            const t = add(tireGeo, tire, wx, WHEEL_R, wz); t.rotation.z = Math.PI * 0.5;
+            const r = add(rimGeo, rim, wx + Math.sign(wx) * 0.01, WHEEL_R, wz); r.rotation.z = Math.PI * 0.5;
         }
     }
-    add(new THREE.BoxGeometry(0.3, 0.18, 0.08), head, -W * 0.3, 0.6, L * 0.5);
-    add(new THREE.BoxGeometry(0.3, 0.18, 0.08), head,  W * 0.3, 0.6, L * 0.5);
-    add(new THREE.BoxGeometry(0.3, 0.18, 0.08), tail, -W * 0.3, 0.6, -L * 0.5);
-    add(new THREE.BoxGeometry(0.3, 0.18, 0.08), tail,  W * 0.3, 0.6, -L * 0.5);
+    // Bumpers front + rear.
+    add(new THREE.BoxGeometry(W * 0.96, 0.18, 0.18), trim, 0, RIDE - 0.02, L * 0.5);
+    add(new THREE.BoxGeometry(W * 0.96, 0.18, 0.18), trim, 0, RIDE - 0.02, -L * 0.5);
+    // Lights.
+    add(new THREE.BoxGeometry(0.3, 0.16, 0.06), head, -W * 0.3, RIDE + 0.2, L * 0.5 + 0.02);
+    add(new THREE.BoxGeometry(0.3, 0.16, 0.06), head,  W * 0.3, RIDE + 0.2, L * 0.5 + 0.02);
+    add(new THREE.BoxGeometry(0.3, 0.16, 0.06), tail, -W * 0.3, RIDE + 0.2, -L * 0.5 - 0.02);
+    add(new THREE.BoxGeometry(0.3, 0.16, 0.06), tail,  W * 0.3, RIDE + 0.2, -L * 0.5 - 0.02);
     return g;
 }
 
@@ -127,12 +263,21 @@ export function createMapStreaming(deps) {
         // Same palettes + detail materials the core level (createDrugTycoonLevel)
         // uses for its houses, road markings and curbs, so streamed blocks read
         // identically to the hand-built one.
+        // Textured ground surfaces — same procedural grass/asphalt/concrete the
+        // core block uses, cloned so each gets its own repeat (CHUNK == BLOCK so
+        // the tiling scale matches the hand-built block seamlessly).
+        const grassMat = flat('#ffffff', 0.97);
+        { const t = getTycoonGrassTexture().clone(); t.needsUpdate = true; t.repeat.set(20, 20); grassMat.map = t; grassMat.color = new THREE.Color('#9fbf86'); grassMat.needsUpdate = true; }
+        const roadMat = flat('#ffffff', 0.95);
+        { const t = getTycoonRoadTexture().clone(); t.needsUpdate = true; t.repeat.set(10, 10); roadMat.map = t; roadMat.needsUpdate = true; }
+        const sidewalkMat = flat('#ffffff', 0.9);
+        { const t = getTycoonSidewalkTexture().clone(); t.needsUpdate = true; t.repeat.set(8, 8); sidewalkMat.map = t; sidewalkMat.needsUpdate = true; }
         _mats = {
-            grass: flat('#3f7d34', 0.97),
-            road: flat('#2b2e32', 0.95),
+            grass: grassMat,
+            road: roadMat,
             line: emissive('#d8c45a', 0.7, 0.15),
             curb: flat('#9aa0a6', 0.85),
-            sidewalk: flat('#7e8388', 0.9),
+            sidewalk: sidewalkMat,
             house: ['#b5654d', '#c9a26b', '#7d96a8', '#a8728c', '#6f9e6a', '#c2bba0'].map((c) => flat(c, 0.92)),
             roof: ['#3b2a24', '#4a3b2e', '#2e3a44', '#402a36'].map((c) => flat(c, 0.85)),
             window: emissive('#bfe6ff', 0.2, 0.25),
@@ -151,20 +296,10 @@ export function createMapStreaming(deps) {
         return _mats;
     }
 
-    // A tree, identical in style to the core block's: a stubby trunk topped
-    // with one low-poly Icosahedron foliage blob. Decorative — no collision.
-    // (Matches createDrugTycoonLevel's TREES: CylinderGeometry(0.22,0.3,2.2,6)
-    // trunk at y=1.1 + IcosahedronGeometry(1.5,0) leaves at y=3.0.)
+    // A tree — the same models/tree/tree.fbx model the core block uses, so
+    // streamed blocks match. Decorative, no collision.
     function makeTree(rng) {
-        const m = mats();
-        const g = new THREE.Group();
-        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.3, 2.2, 6), m.trunk);
-        trunk.position.y = 1.1; trunk.castShadow = true;
-        g.add(trunk);
-        const leaves = new THREE.Mesh(new THREE.IcosahedronGeometry(1.5, 0), m.foliage);
-        leaves.position.y = 3.0; leaves.castShadow = true;
-        g.add(leaves);
-        return g;
+        return makeTycoonTree(rng() * Math.PI * 2);
     }
 
     // Ambient traffic car body palette.
@@ -230,9 +365,10 @@ export function createMapStreaming(deps) {
         [-1, 1].forEach((s) => {
             decal(`cs-${cx}-${cz}-sw-ns-${s}`, [SW, CHUNK], ox + s * (half + SW * 0.5), oz, m.sidewalk, 0.002);
             decal(`cs-${cx}-${cz}-sw-ew-${s}`, [CHUNK, SW], ox, oz + s * (half + SW * 0.5), m.sidewalk, 0.002);
-            // Raised curb lips at the lot edge (visual only, no collision).
-            box(`cs-${cx}-${cz}-curb-ns-${s}`, [0.2, 0.03, CHUNK], [ox + s * (half + SW), 0.015, oz], m.curb);
-            box(`cs-${cx}-${cz}-curb-ew-${s}`, [CHUNK, 0.03, 0.2], [ox, 0.015, oz + s * (half + SW)], m.curb);
+            // Flat ground-level curb strips (decals, top at ~0.001) so there's
+            // no raised lip for the player/car to catch on — just a visual seam.
+            decal(`cs-${cx}-${cz}-curb-ns-${s}`, [0.2, CHUNK], ox + s * (half + SW), oz, m.curb, 0.003);
+            decal(`cs-${cx}-${cz}-curb-ew-${s}`, [CHUNK, 0.2], ox, oz + s * (half + SW), m.curb, 0.003);
         });
 
         // Street lamps along the N-S road's sidewalks, like the core block — a
@@ -304,27 +440,10 @@ export function createMapStreaming(deps) {
             meshes.push(tree);                        // disposed/removed with the chunk
         }
 
-        // A few pedestrians wandering this block — same person model as the
-        // street buyers, but purely decorative (no collision, no gameplay).
-        // Each gets a slow random-walk target it re-rolls on arrival.
-        if (makePerson) {
-            const count = 2 + ((rng() * 3) | 0);          // 2..4 per chunk
-            for (let i = 0; i < count; i++) {
-                const spawn = pushOffRoad(new THREE.Vector3(ox + (rng() - 0.5) * (CHUNK - 8), 0, oz + (rng() - 0.5) * (CHUNK - 8)));
-                const grp = makePerson({
-                    skinColor: skinTones[(rng() * skinTones.length) | 0],
-                    shirtColor: shirtTones[(rng() * shirtTones.length) | 0],
-                    pantsColor: '#22303c',
-                });
-                grp.position.set(spawn.x, 0, spawn.z);
-                grp.rotation.y = rng() * Math.PI * 2;
-                grp.updateMatrixWorld(true);
-                people.push({ grp, target: rollWanderTarget(ox, oz, rng), speed: 0.9 + rng() * 0.8 });
-                meshes.push(grp);                         // disposed/removed with the chunk
-            }
-        }
+        // Decorative pedestrians removed from streamed chunks — the only people
+        // on the street now are the gameplay buyers/cops spawned by drugTycoon.
 
-        } // end if (!isCore) — core skips ground/roads/houses/people
+        } // end if (!isCore) — core skips ground/roads/houses
 
         // NOTE: ambient traffic is NOT built per-chunk — it's a world-level
         // system (see the traffic pool below) so cars drive in continuous lines
@@ -505,7 +624,7 @@ export function createMapStreaming(deps) {
     // to the back of its line so the stream keeps moving.
     const LANE = 2.2;                 // lane offset from a road's centreline
     const TRAFFIC_RANGE = CHUNK * 1.8; // cars live within this of the player
-    const TARGET_CARS = 8;            // total ambient cars kept alive near player
+    const TARGET_CARS = 2;            // total ambient cars kept alive near player
     const CONVOY_GAP = 14;            // spacing between cars in a line (metres)
     const traffic = [];               // live car records
     const _carHalf = TRAFFIC_RANGE;
