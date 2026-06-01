@@ -324,8 +324,13 @@ export function updateMobileMovePad(clientX, clientY) {
 
     const rect = mobileMovePad.getBoundingClientRect();
     const radius = Math.max(1, Math.min(rect.width, rect.height) * MOBILE_MOVE_RADIUS_FACTOR);
-    const centerX = rect.left + rect.width * 0.5;
-    const centerY = rect.top + rect.height * 0.5;
+
+    // Floating joystick: the stick anchors wherever the thumb first touched
+    // down (captured in bindMobilePad), then moves relative to that point —
+    // like a typical mobile game. Fall back to the pad center if no anchor.
+    const hasAnchor = mobileState.moveAnchorX != null;
+    const centerX = hasAnchor ? mobileState.moveAnchorX : rect.left + rect.width * 0.5;
+    const centerY = hasAnchor ? mobileState.moveAnchorY : rect.top + rect.height * 0.5;
     const offsetX = clientX - centerX;
     const offsetY = clientY - centerY;
     const length = Math.hypot(offsetX, offsetY);
@@ -333,12 +338,21 @@ export function updateMobileMovePad(clientX, clientY) {
     const clampedX = offsetX * scale;
     const clampedY = offsetY * scale;
 
-    setTouchThumbPosition(mobileMoveThumb, clampedX, clampedY);
+    // Thumb position is relative to the pad center, so re-base the visual
+    // offset onto the anchor point.
+    const padCenterX = rect.left + rect.width * 0.5;
+    const padCenterY = rect.top + rect.height * 0.5;
+    const visualX = (centerX - padCenterX) + clampedX;
+    const visualY = (centerY - padCenterY) + clampedY;
+
+    setTouchThumbPosition(mobileMoveThumb, visualX, visualY);
     applyMobileMoveVector(clampedX / radius, clampedY / radius);
 }
 
 export function resetMobileMovePad() {
     mobileState.movePointerId = null;
+    mobileState.moveAnchorX = null;
+    mobileState.moveAnchorY = null;
     clearMobilePad(mobileMoveThumb);
     applyMobileMoveVector(0, 0);
 }
@@ -467,6 +481,9 @@ export function bindMobilePad(padElement, thumbElement, onMove, onRelease) {
         padElement.setPointerCapture?.(event.pointerId);
         if (padElement === mobileMovePad) {
             mobileState.movePointerId = event.pointerId;
+            // Anchor the floating joystick at the touch-down point.
+            mobileState.moveAnchorX = event.clientX;
+            mobileState.moveAnchorY = event.clientY;
         } else {
             mobileState.lookPointerId = event.pointerId;
         }
