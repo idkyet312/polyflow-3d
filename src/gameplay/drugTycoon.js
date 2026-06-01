@@ -373,9 +373,13 @@ const IS_MOBILE_BUYER = (() => {
 // Beyond this distance from the camera the expensive FBX visual is hidden and
 // the cheap box-ragdoll rig underneath shows instead. Tighter on mobile.
 const FBX_BUYER_LOD_DISTANCE = IS_MOBILE_BUYER ? 22 : 45;
+// Sized to the realistic worst case of how many of each variant can be near
+// the camera (inside the FBX LOD radius) at once, plus a margin — so the pool
+// never runs dry mid-game and no FBX cloning (the hitch) happens during play.
+// Buyers are ~80% Man / ~20% Emmy; cops cap at 6 at max heat.
 const FBX_BUYER_POOL_SIZE = IS_MOBILE_BUYER
-    ? { emmy: 2, man: 2, cop: 2 }
-    : { emmy: 4, man: 4, cop: 4 };
+    ? { emmy: 3, man: 8, cop: 4 }
+    : { emmy: 5, man: 14, cop: 7 };
 const _fbxBuyerPool = { emmy: [], man: [], cop: [] };
 let _fbxBuyerPoolReady = false;
 
@@ -404,9 +408,15 @@ function buildOneFbxBuyerVisual(variant) {
     return visual;
 }
 
+let _prewarmPromise = null;
+// Resolves once every FBX prototype is loaded AND the full visual pool for
+// every variant is built. The Drug Tycoon loading screen awaits this before it
+// spawns the first buyers/cops, so all the heavy FBX cloning happens up-front
+// (behind the overlay) and zero cloning hitches the frame during gameplay.
 function prewarmFbxBuyerPool() {
     if (_fbxBuyerPoolReady) return Promise.resolve();
-    return Promise.all(FBX_VARIANTS.map((v) => fbxVariantLoader(v)())).then(() => {
+    if (_prewarmPromise) return _prewarmPromise;
+    _prewarmPromise = Promise.all(FBX_VARIANTS.map((v) => fbxVariantLoader(v)())).then(() => {
         for (const variant of FBX_VARIANTS) {
             const count = FBX_BUYER_POOL_SIZE[variant] || 0;
             for (let i = _fbxBuyerPool[variant].length; i < count; i++) {
@@ -416,7 +426,10 @@ function prewarmFbxBuyerPool() {
         }
         _fbxBuyerPoolReady = true;
     });
+    return _prewarmPromise;
 }
+// True once the pool is fully built — the loading gate polls this.
+export function isFbxBuyerPoolReady() { return _fbxBuyerPoolReady; }
 // Pre-build the FBX buyer pool at module load so spawning is instant. Placed
 // after the pool state + helpers are declared to avoid a TDZ on the `let`s.
 prewarmFbxBuyerPool();
@@ -1263,6 +1276,7 @@ export function createDrugTycoon(deps) {
         _toastLayer = null;
         try { _mapStreaming?.clear(); } catch (e) {}
         document.querySelectorAll('.tycoon-overlay').forEach((n) => n.remove());
+        _loadingEl = null;   // overlay removed above; drop the stale ref
         _hudEl = null;
         _shopEl = null;
         _cookEl = null;
@@ -6657,6 +6671,40 @@ export function createDrugTycoon(deps) {
         }
     }
 
+    // ---- loading screen ------------------------------------------------
+    // Shown on first entry while the FBX buyer/cop pool warms. Spawning the
+    // first wave of NPCs is gated on the pool being fully built so every
+    // expensive rigged-FBX clone happens here, not as a hitch mid-game.
+    let _loadingEl = null;
+    function showTycoonLoading() {
+        if (_loadingEl) return;
+        const el = document.createElement('div');
+        el.className = 'tycoon-overlay';
+        el.style.cssText = 'position:absolute;inset:0;z-index:1400;pointer-events:auto;'
+            + 'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;'
+            + 'background:radial-gradient(circle at 50% 40%,#142016,#070b08 70%);color:#cdeccd;'
+            + 'font:700 18px/1.3 system-ui,sans-serif;text-align:center;';
+        el.innerHTML =
+            '<div style="font:800 26px/1 inherit;letter-spacing:1px;color:#9dffa0;">DRUG TYCOON</div>'
+            + '<div style="opacity:.85;">Loading neighbourhood…</div>'
+            + '<div style="width:46px;height:46px;border:4px solid rgba(157,255,160,.25);'
+            + 'border-top-color:#9dffa0;border-radius:50%;animation:tycoonSpin 0.8s linear infinite;"></div>';
+        // One-time keyframes inject (id-guarded so re-entry doesn't duplicate).
+        if (!document.getElementById('tycoon-loading-style')) {
+            const st = document.createElement('style');
+            st.id = 'tycoon-loading-style';
+            st.textContent = '@keyframes tycoonSpin{to{transform:rotate(360deg);}}';
+            document.head.appendChild(st);
+        }
+        (document.getElementById('canvas-container') || document.body)?.appendChild(el);
+        _loadingEl = el;
+    }
+    function hideTycoonLoading() {
+        if (!_loadingEl) return;
+        _loadingEl.remove();
+        _loadingEl = null;
+    }
+
     // ---- per-frame driver ----------------------------------------------
     function updateDrugTycoonState(playerPos, delta = 0.016) {
         const { currentMesh } = core;
@@ -6686,8 +6734,21 @@ export function createDrugTycoon(deps) {
         ragdoll.update();
         ragdoll.updateFallback(dt);
 
-        // First-time setup once the player exists.
+        // First-time setup once the player exists. Held behind a loading screen
+        // until the FBX buyer/cop pool is fully built, so the opening wave of
+        // NPCs draws from a warm pool — no FBX cloning hitch on scene entry.
         if (!s.started && playerPos) {
+            if (!isFbxBuyerPoolReady()) {
+                showTycoonLoading();
+                if (!s._poolPrewarmKicked) {
+                    s._poolPrewarmKicked = true;
+                    prewarmFbxBuyerPool();
+                }
+                // World/sim sit idle behind the overlay until the pool is ready.
+                updateHud();
+                return;
+            }
+            hideTycoonLoading();
             s.started = true;
             if (Array.isArray(layout.cookStation)) s.cookPos.set(...layout.cookStation);
             if (Array.isArray(layout.upgradePad)) s.upgradePos.set(...layout.upgradePad);
