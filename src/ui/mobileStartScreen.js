@@ -3,6 +3,7 @@
 
 import { getPlaytimeSeconds, formatPlaytime, resetPlaytime } from '../gameplay/playtime.js';
 import { getAwards, resetAwards } from '../gameplay/awards.js';
+import { settings, applySettings, initSettings } from './settingsMenu.js';
 
 const MOBILE_GAME_LEVEL_IDS = ['doomArena', 'drugTycoon', 'shootingSim', 'doomTest', 'soccerField'];
 
@@ -215,6 +216,7 @@ export function setupMobileStartScreen(deps) {
     uiMobileBtn?.addEventListener('click', () => setGameUiMode('mobile'));
     syncMobileQualityButtons();
     syncMobileUiModeButtons();
+    initSettings();   // load + apply persisted look sensitivity / invert-Y
     wireGraphicsSettings();
 }
 
@@ -243,6 +245,17 @@ function syncGraphicsSettings() {
     const mlv = document.getElementById('gfx-maxlights-val');
     if (ml && s.lightCull) { ml.value = String(s.lightCull.maxActive); }
     if (mlv && s.lightCull) { mlv.textContent = String(s.lightCull.maxActive); }
+
+    // Look/touch sensitivity + invert-Y (persisted via settingsMenu).
+    const msEl = document.getElementById('set-mouse-sens');
+    const msVal = document.getElementById('set-mouse-sens-value');
+    if (msEl) msEl.value = String(settings.mouseSensitivity);
+    if (msVal) msVal.textContent = settings.mouseSensitivity.toFixed(2);
+    const tsEl = document.getElementById('set-touch-sens');
+    const tsVal = document.getElementById('set-touch-sens-value');
+    if (tsEl) tsEl.value = String(settings.touchSensitivity);
+    if (tsVal) tsVal.textContent = settings.touchSensitivity.toFixed(2);
+    setGfxToggle(document.getElementById('set-invy'), settings.invertY);
 }
 function wireGraphicsSettings() {
     const gfxToggleBtn = document.getElementById('mobile-pause-gfx-toggle');
@@ -283,6 +296,29 @@ function wireGraphicsSettings() {
             if (mlv) mlv.textContent = String(v);
             applyWorldEnvState({ persist: true, switchSky: false });
         }
+    });
+
+    // Look sensitivity sliders → settingsMenu (persists + updates live `look`,
+    // read by inputHandlers/mobileControls every frame).
+    const wireSens = (id, key, valId) => {
+        const el = document.getElementById(id);
+        el?.addEventListener('input', () => {
+            const v = parseFloat(el.value);
+            if (!Number.isFinite(v)) return;
+            settings[key] = v;
+            applySettings();   // persists + pushes into live look config
+            const val = document.getElementById(valId);
+            if (val) val.textContent = v.toFixed(2);
+        });
+    };
+    wireSens('set-mouse-sens', 'mouseSensitivity', 'set-mouse-sens-value');
+    wireSens('set-touch-sens', 'touchSensitivity', 'set-touch-sens-value');
+
+    const invy = document.getElementById('set-invy');
+    invy?.addEventListener('click', () => {
+        settings.invertY = !settings.invertY;
+        applySettings();
+        setGfxToggle(invy, settings.invertY);
     });
 }
 

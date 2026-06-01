@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { core } from '../runtime/appCore.js';
+import { look } from './settingsMenu.js';
 
 function inDrugTycoon() {
     return core.currentMesh?.userData?.sampleType === 'drugTycoon';
@@ -362,8 +363,12 @@ export function resetMobileMovePad() {
 export function applyMobileLookDelta(deltaX, deltaY) {
     const lookTarget = gameplay.active ? gameplay : showcase;
 
-    lookTarget.yaw -= deltaX * MOBILE_LOOK_SENSITIVITY;
-    lookTarget.pitch -= deltaY * MOBILE_LOOK_SENSITIVITY;
+    // Live touch sensitivity from the settings menu (persisted). Falls back to
+    // the runtime default if the settings module hasn't applied yet.
+    const sens = Number.isFinite(look?.touch) ? look.touch : MOBILE_LOOK_SENSITIVITY;
+    const pitchDir = look?.invertY ? -1 : 1;
+    lookTarget.yaw -= deltaX * sens;
+    lookTarget.pitch -= deltaY * sens * pitchDir;
     lookTarget.pitch = THREE.MathUtils.clamp(
         lookTarget.pitch,
         -PLAYER_SETTINGS.maxLookPitch,

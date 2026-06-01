@@ -10,6 +10,7 @@
 //   - handlePointerLockChange: gameplay enter/exit on lock state
 
 import { core } from '../runtime/appCore.js';
+import { look } from '../ui/settingsMenu.js';
 
 export function createInputHandlers(deps) {
     const {
@@ -68,8 +69,10 @@ export function createInputHandlers(deps) {
             }
             if (!showcase.looking || gameplay.active) return;
 
-            showcase.yaw -= event.movementX * 0.0022;
-            showcase.pitch -= event.movementY * 0.0018;
+            // Live sensitivity from the settings menu (persisted to storage).
+            const pitchDir = look.invertY ? -1 : 1;
+            showcase.yaw -= event.movementX * look.mouseYaw;
+            showcase.pitch -= event.movementY * look.mousePitch * pitchDir;
             showcase.pitch = THREE.MathUtils.clamp(
                 showcase.pitch,
                 -PLAYER_SETTINGS.maxLookPitch,
@@ -80,8 +83,9 @@ export function createInputHandlers(deps) {
             return;
         }
 
-        gameplay.yaw -= event.movementX * 0.0022;
-        gameplay.pitch -= event.movementY * 0.0018;
+        const pitchDir = look.invertY ? -1 : 1;
+        gameplay.yaw -= event.movementX * look.mouseYaw;
+        gameplay.pitch -= event.movementY * look.mousePitch * pitchDir;
         gameplay.pitch = THREE.MathUtils.clamp(
             gameplay.pitch,
             -PLAYER_SETTINGS.maxLookPitch,

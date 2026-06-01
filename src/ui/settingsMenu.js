@@ -111,6 +111,17 @@ export function isSettingsOpen() {
     return document.body.classList.contains('settings-open');
 }
 
+// Load persisted settings and push them into the engine — no DOM required.
+// Call once at startup so look sensitivity / invert-Y apply even before any
+// settings UI is opened. Idempotent.
+let _initialized = false;
+export function initSettings() {
+    if (_initialized) return;
+    _initialized = true;
+    loadFromStorage();
+    applySettings({ persist: false });
+}
+
 export function setupSettingsMenu(deps) {
     _deps = deps;
     loadFromStorage();
