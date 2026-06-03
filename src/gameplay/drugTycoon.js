@@ -466,9 +466,13 @@ function setBuyerLodFar(group, far) {
     if (group.userData.walkingLodFar === far) return;
     group.userData.walkingLodFar = far;
     const visual = group.userData.walkingVisual;
-    if (visual) visual.visible = true;
-    setProxyPersonVisible(group, false);
-    // Far LOD keeps the FBX visible, but freezes animation/skinning work.
+    // FAR: hide the expensive skinned FBX entirely and draw the cheap box-person
+    // rig in its place — no skeleton skinning + far fewer GPU verts/draws (the
+    // real mobile win). NEAR: show the FBX, hide the box rig.
+    if (visual) visual.visible = !far;
+    setProxyPersonVisible(group, far);
+    // Freeze the walk mixer while far so we don't burn CPU advancing animation
+    // on a hidden skeleton.
     const action = group.userData.walkingAction;
     if (action) action.paused = !!far;
 }
@@ -490,6 +494,14 @@ function attachWalkingBuyerVisual(group, variant = 'emmy') {
     return true;
 }
 
+// Box-rig colour. The blocky stand-in shown when the skinned FBX is LOD'd out
+// is rendered as a single fair skin tone across the whole body so it reads as
+// the same person, just simplified — no shirt/pants colour pop.
+const BOX_PERSON_SKIN = '#f1c8a6';
+function fbxVariantBoxColors() {
+    return { skinColor: BOX_PERSON_SKIN, shirtColor: BOX_PERSON_SKIN, pantsColor: BOX_PERSON_SKIN };
+}
+
 function makeTycoonPersonMesh({
     skinColor = '#e8b893',
     shirtColor = '#3da6ff',
@@ -500,9 +512,15 @@ function makeTycoonPersonMesh({
     useWalkingVisual = false,
     visualVariant = 'emmy',
 } = {}) {
-    const group = ragdoll.makePerson({ skinColor, shirtColor, pantsColor });
-    if (!useWalkingVisual) return group;
     const variant = FBX_VARIANTS.includes(visualVariant) ? visualVariant : 'emmy';
+    // When this person wears an FBX visual, build the box rig in the variant's
+    // matching colours (it shows when the FBX is LOD'd out) rather than the
+    // caller's random shirt colour, which the FBX texture ignores anyway.
+    const boxColors = useWalkingVisual
+        ? fbxVariantBoxColors(variant)
+        : { skinColor, shirtColor, pantsColor };
+    const group = ragdoll.makePerson(boxColors);
+    if (!useWalkingVisual) return group;
     if (!attachWalkingBuyerVisual(group, variant)) {
         // Pool not warm yet — build it, then attach from the pool.
         prewarmFbxBuyerPool().then(() => {
@@ -1412,7 +1430,10 @@ export function createDrugTycoon(deps) {
     // Reputation is the dominant lever (1 buyer at Pariah, 8 at Legend).
     function maxBuyers(s) {
         const base = repTier(s).target;
-        return base + s.up.buyers * 2 + (eventActive(s, 'buyerRush') ? 2 : 0);
+        const n = base + s.up.buyers * 2 + (eventActive(s, 'buyerRush') ? 2 : 0);
+        // Mobile GPUs choke on many rigged/skinned NPCs — hard-cap the live
+        // buyer count so the street never floods past what the phone can draw.
+        return IS_MOBILE_BUYER ? Math.min(n, 6) : n;
     }
     function maxRivals(s) {
         const base = s.sales >= 4 ? 1 : 0;
@@ -3857,6 +3878,36 @@ export function createDrugTycoon(deps) {
         }
     }
 
+    // Unified skinned-FBX LOD budget across EVERY person type (buyers, cops,
+    // patrol, rivals, crew). Only the N nearest keep their hi-detail skinned
+    // visual; everyone else drops to the cheap box rig. This caps total
+    // per-frame skinning + draw cost regardless of how many NPCs are on screen
+    // — the dominant mobile cost in Drug Tycoon. Tight budget on mobile.
+    const _lodRanked = [];
+    const FBX_NEAR_BUDGET = IS_MOBILE_BUYER ? 3 : 10;
+    function tickFbxPeopleLod(s, playerPos) {
+        const cp = core.camera?.position || playerPos;
+        if (!cp) return;
+        _lodRanked.length = 0;
+        const consider = (arr) => {
+            if (!arr) return;
+            for (const t of arr) {
+                const m = t?.mesh;
+                if (!m?.userData?.walkingVisualAttached || !m.visible) continue;
+                const dx = m.position.x - cp.x, dz = m.position.z - cp.z;
+                _lodRanked.push({ m, d2: dx * dx + dz * dz });
+            }
+        };
+        consider(s.npcs); consider(s.police); consider(s.patrol);
+        consider(s.rivals); consider(s.crew);
+        _lodRanked.sort((a, b) => a.d2 - b.d2);
+        const lodR2 = FBX_BUYER_LOD_DISTANCE * FBX_BUYER_LOD_DISTANCE;
+        for (let i = 0; i < _lodRanked.length; i++) {
+            const far = _lodRanked[i].d2 > lodR2 || i >= FBX_NEAR_BUDGET;
+            setBuyerLodFar(_lodRanked[i].m, far);
+        }
+    }
+
     // Per-frame buyer simulation: top up to rep-driven cap, despawn extras,
     // and tick movement. Runs whether the player is outside on the street or
     // inside the shop so buyers keep flowing to/from the counter either way.
@@ -3888,13 +3939,6 @@ export function createDrugTycoon(deps) {
             // Visibility follows the player — only render the buyers that
             // share the player's current location (street vs. shop interior).
             n.mesh.visible = insideShop ? !!s.inRoom : !s.inRoom;
-            // Distance LOD for FBX buyers: swap to the cheap box rig when far.
-            if (n.mesh.userData?.walkingVisualAttached) {
-                const cp = core.camera?.position || playerPos;
-                const dx = n.mesh.position.x - cp.x, dz = n.mesh.position.z - cp.z;
-                const far = (dx * dx + dz * dz) > (FBX_BUYER_LOD_DISTANCE * FBX_BUYER_LOD_DISTANCE);
-                setBuyerLodFar(n.mesh, far);
-            }
             if (n.queueing) {
                 // Outside queue + a roll → step into the shop. Chance scales
                 // with rep (0% at Pariah, 60%/sec at Legend) so only the
@@ -7048,6 +7092,10 @@ export function createDrugTycoon(deps) {
 
         // Police siren swells as the nearest cop closes in.
         updateSiren(s, playerPos);
+
+        // After all people have moved this frame, rebudget the skinned-FBX LOD
+        // across every person type so only the nearest few pay the full cost.
+        tickFbxPeopleLod(s, playerPos);
 
         // Keep the open phone's order in sync with the live buyers.
         if (s.phoneOpen) { ensureOrder(s); renderPhone(); }
