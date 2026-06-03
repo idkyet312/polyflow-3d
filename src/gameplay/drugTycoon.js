@@ -4004,6 +4004,12 @@ export function createDrugTycoon(deps) {
                 n.queueing = false;   // walk to the new (forward) slot
             });
         }
+
+        // Rebudget skinned-FBX LOD across all people every frame — runs in BOTH
+        // the street and the shop interior, so buyers who were box-rig'd while
+        // you were outside restore their FBX visual once you're indoors near
+        // them (and vice-versa).
+        tickFbxPeopleLod(s, playerPos);
     }
 
     // Pick a point right in front of the WEED SHOP door, with a small lateral
@@ -7093,9 +7099,7 @@ export function createDrugTycoon(deps) {
         // Police siren swells as the nearest cop closes in.
         updateSiren(s, playerPos);
 
-        // After all people have moved this frame, rebudget the skinned-FBX LOD
-        // across every person type so only the nearest few pay the full cost.
-        tickFbxPeopleLod(s, playerPos);
+        // (skinned-FBX LOD rebudget runs inside tickBuyers, both contexts)
 
         // Keep the open phone's order in sync with the live buyers.
         if (s.phoneOpen) { ensureOrder(s); renderPhone(); }
